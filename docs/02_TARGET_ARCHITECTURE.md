@@ -116,11 +116,11 @@ project/
 
 온라인 MCP는 HTTPS endpoint URL과 OAuth access token으로 접속한다. token은 `Authorization: Bearer` header에서만 받고 URL query·path와 일반 log에는 기록하지 않는다. client별로 `search`와 `source_pdf` scope를 분리한다. 최초 승인 이후 client는 access token을 자동 갱신하고 refresh token을 회전한다. 90일은 고정 연결 만료가 아니라 비활성 만료 기준이며, 정상적으로 계속 사용하는 동안 수동 token 재입력을 요구하지 않는다. refresh token 폐기·분실, 보안사고 또는 client의 refresh 미지원 시에는 재인증한다.
 
-온라인 서비스는 사용자가 명시적으로 요청한 경우에 한해 게시 대상 문서와 연결된 보존 원본 PDF 전체를 인증 후 streaming file로 제공할 수 있다. `search` scope는 페이지 OCR text, `source_pdf` scope는 전체 PDF와 선택적 렌더 PNG를 허용한다. 분할 PDF는 생성하지 않는다. 이는 카드사 사이트에서 새 PDF를 내려받는 권한과 다르며, 임의 URL·임의 host path는 받지 않는다.
+온라인 서비스는 승인 사용자가 명시적으로 요청한 경우에 한해 게시 대상 문서와 연결된 보존 원본 PDF 전체를 인증 후 streaming file로 제공할 수 있다. `search` scope는 페이지 OCR text, `source_pdf` scope는 전체 PDF와 선택적 렌더 PNG를 허용한다. PDF는 파일당 100 MB로 제한하고 HTTP Range를 지원하며 다운로드 감사 metadata를 90일 보존한다. 분할 PDF는 생성하지 않는다. 이는 카드사 사이트에서 새 PDF를 내려받는 권한과 다르며, 임의 URL·임의 host path는 받지 않는다.
 
 ### 3.3 운영 제어 영역
 
-스케줄, 작업 제출, 재시도 승인, generation 전환과 rollback은 일반 카드 조회 요청과 분리한다. 구현 형태는 운영 CLI, 전용 job API 또는 scheduler가 될 수 있으며 `결정 필요`다.
+스케줄, 작업 제출, 재시도 승인, generation 전환과 rollback은 일반 카드 조회 요청과 분리한다. 1차는 운영 CLI와 scheduled job만 제공하고 공개 관리자 API·웹 UI는 만들지 않는다.
 
 어떤 형태를 선택해도 다음 원칙은 유지한다.
 
@@ -318,8 +318,9 @@ scheduler, 발행기, 관측 agent는 초기에는 worker의 제한 entrypoint �
 - 공개 Docker Hub image에는 corpus·PDF·OCR·secret·인증 상태를 포함하지 않는다. GitHub가 private여도 image에 패키징된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능함을 전제로 한다.
 - readiness는 프로세스 생존뿐 아니라 generation open, schema, FTS/vector 사용 가능성을 확인한다.
 - graceful shutdown 시 새 작업 claim을 중단하고 현재 checkpoint 또는 질의를 안전하게 마친다.
+- MCP application은 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host `127.0.0.1:8000`에만 publish한다. TLS·외부 hostname·certificate는 별도 Nginx Proxy Manager가 담당하며 stack에 reverse proxy를 포함하지 않는다.
 
-Docker Hub repository는 public으로 운영하고 image tag에 version과 Git SHA를 포함하며 배포·rollback은 digest를 기준으로 한다. base image, container 수, orchestration 도구, CPU·memory 한도, Docker Hub namespace·repository slug와 signing 방식은 구현 단계에서 `결정 필요`다.
+Docker Hub repository는 public으로 운영하고 slug는 `mcp-card-prd-detail`을 사용한다. image tag에 version과 Git SHA를 포함하고 Cosign으로 서명하며 배포·rollback은 digest를 기준으로 한다. base image, CPU·memory 한도, Docker Hub namespace와 Cosign identity·key 관리 방식은 구현 단계에서 `결정 필요`다.
 
 ## 12. 외부 의존성 경계
 
@@ -343,10 +344,10 @@ OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질
 | hybrid 엔진과 ranking | 결정 필요 | 공통 evidence key 결합은 확정, query embedding·후보 수·가중치 품질 평가 |
 | vector/lexical 검색 엔진 | BULK 후 결정 | 외부 file volume·PostgreSQL은 확정, generation 포맷·memory·backup·rollback benchmark 필요 |
 | 구조 분석 엔진 | 결정 필요 | worker 의존성, 비용, 재현성, 품질 관문 |
-| job queue·scheduler 구현 | 결정 필요 | lease, retry, 수평 확장, 운영 복잡도 |
+| scheduled job 세부 구현 | 결정 필요 | CLI+scheduled job은 확정, host scheduler·Compose job 연결, lease·retry 필요 |
 | file layout·PostgreSQL 운영 방식 | 결정 필요 | high-level 저장 제품은 확정, schema·backup·migration·disaster recovery 필요 |
 | generation 전환 방식 | 결정 필요 | replica 일관성, rollback과 zero-downtime |
-| 원본 PDF 이용·제공 세부정책 | 결정 필요 | 기술적 제공은 확정, 저작권·재배포 조건, 최대 크기, 감사·보존 정책 |
+| 원본 PDF 이용조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 저작권·재배포 조건은 별도 확인 |
 | 부분 실패 허용 기준 | 결정 필요 | generation coverage, freshness와 발행 정책 |
 | 신한카드 운영 지원 편입 기준 | 결정 필요 | 개인 신용·체크 현재본·과거 이력 BULK 범위는 확정, 정식 일일 운영 gate 필요 |
 

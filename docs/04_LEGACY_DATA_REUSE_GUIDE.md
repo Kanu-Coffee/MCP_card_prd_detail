@@ -339,7 +339,7 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 - OCR hash 불일치 1건의 canonical 채택 여부
 - 신규 구조 분석 방식과 taxonomy version
 - OpenRouter embedding model과 index engine
-- 기술적으로는 `source_pdf` scope를 가진 명시적 사용자 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 페이지 OCR text는 `search`, 선택적 렌더 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다. 최대 파일 크기·range와 감사 보존기간은 결정 필요다.
+- 기술적으로는 승인된 `source_pdf` scope 사용자의 명시적 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 다운로드 감사 metadata를 90일 보존한다. 페이지 OCR text는 `search`, 선택적 렌더 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다.
 - 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위
 - 검색 generation은 최소 3개 보존한다. 이를 초과한 보존 기간과 backup 기간은 결정 필요다.
 

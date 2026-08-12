@@ -368,7 +368,7 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 관련 section과 질문에 충분한 원문 근거
 - 페이지·원문 범위, 출처 URL 또는 보존 경로, 내용 해시
 - 안정적인 evidence ID와 검색 generation
-- 원본 PDF 요청 시 exact document version, SHA-256, MIME type, 파일 크기와 인증된 streaming file 응답
+- 원본 PDF 요청 시 exact document version, SHA-256, MIME type, 파일 크기와 인증된 streaming file 응답; 승인 사용자, 100 MB 상한과 HTTP Range 적용
 - 페이지 요청 시 OCR text와 요청한 경우에만 렌더 PNG resource; 분할 PDF는 제공하지 않음
 - retrieval 방식과 결과 해석에 필요한 점수 또는 품질 상태
 - 최신·과거 버전 충돌, 정보 부족, 부분 검색 또는 degraded 상태의 명시적 표시
@@ -410,6 +410,7 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - [ ] 활성 generation 손상, schema 불일치 또는 vector dimension 불일치 시 readiness가 실패한다.
 - [ ] query 입력·결과 수·timeout·동시성 제한과 취소가 통합 시험에서 확인된다.
 - [ ] 원본 PDF 응답이 요청한 version·SHA-256과 일치하고 권한·크기·streaming·감사 정책을 통과한다.
+- [ ] 100 MB 초과 PDF가 거부되고 HTTP Range, 취소와 90일 감사 metadata가 검증된다.
 - [ ] 페이지 조회 결과가 동일 문서 version의 PDF page와 OCR source span으로 역추적된다.
 - [ ] 페이지 PNG는 명시적 요청에서만 제공되고 분할 PDF가 생성되지 않는다.
 - [ ] access token 만료 전 자동 refresh, refresh token rotation, 90일 비활성 만료와 revoke·재인증 흐름이 통합 시험에서 확인된다.

@@ -25,7 +25,7 @@
 | generation publisher | candidate 검증 후 | current pointer 변경 권한 | generations와 publish metadata write | 실패 시 이전 generation 유지 |
 | backup/restore job | 정책에 따른 주기 | backup target 접근 | snapshot read, backup write | 실행 중 일관성 확보 필요 |
 
-온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 `source_pdf` scope를 가진 사용자가 명시적으로 요청하면 게시 대상 document ID에 연결된 보존 원본 PDF 전체를 streaming file로 전달한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 사용하고 분할 PDF는 만들지 않는다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
+온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 승인된 사용자 중 `source_pdf` scope를 가진 사용자가 명시적으로 요청하면 게시 대상 document ID에 연결된 보존 원본 PDF 전체를 streaming file로 전달한다. 단일 응답의 원본 PDF 상한은 100 MB이며 HTTP Range 요청을 지원한다. PDF 접근 감사 metadata는 90일간 보존한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 사용하고 분할 PDF는 만들지 않는다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
 
 ### 2.2 최소 장애 격리 원칙
 
@@ -81,6 +81,8 @@ preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로
 초기 대량 OCR은 Codex exec만 사용한다. OpenRouter를 OCR 자동 fallback으로 사용해 실패를 성공으로 바꾸지 않으며, 실패 문서는 retry 또는 dead-letter 상태로 남긴다. OpenRouter key는 이 초기 run에서도 문서·query embedding에 필요할 수 있으므로 OCR 인증과 별개로 preflight한다.
 
 우리카드와 KB국민카드를 우선 처리한다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 BULK 시험 대상으로 포함하고 법인·선불카드는 1차 범위에서 제외한다. 신한카드 adapter는 레거시 재사용이 아니라 신규 구현이며, 카드사별 rate limit과 오류 격리가 확인되기 전에는 운영 주기 편입으로 간주하지 않는다.
+
+일일 증분 run의 기준 시작시각은 매일 03:00 KST다. 카드사 job은 동시에 몰아 호출하지 않고 issuer별로 순차 실행하며 사이에 rate-limit 여유를 둔다. 한 카드사의 실패는 다른 카드사 실행을 막지 않고 독립적으로 retry/dead-letter와 경보를 남긴다. 정확한 issuer 순서와 간격은 구현 전 확정한다.
 
 ## 4. Durable 작업상태
 
@@ -260,7 +262,7 @@ application log는 JSON 등 machine-readable 형식을 사용하고 최소 다�
 - provider/model ID, duration, 입력 page 수와 출력 문자 수
 - 결과 상태, 안정적인 error code, retry/dead-letter 여부
 
-API key, OAuth access/refresh token, Authorization header, 전체 이메일·OCR 본문, query 원문과 signed URL은 기록하지 않는다. 문서 식별자도 개인정보 가능성을 검토하고 필요한 경우 hash 또는 제한된 형태로 남긴다.
+API key, OAuth access/refresh token, Authorization header, 전체 이메일·OCR 본문, query 원문과 signed URL은 기록하지 않는다. 접근·인증·원본 PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존한다. 문서 식별자도 개인정보 가능성을 검토하고 필요한 경우 hash 또는 제한된 형태로 남긴다.
 
 로그에는 stdout/stderr를 무분별하게 합치지 않는다. 외부 CLI output은 secret redaction 후 구조화 event로 감싼다. stack trace와 provider response는 접근 제한된 오류 저장소에 보관하고 일반 로그에는 요약 code만 남긴다.
 
@@ -310,9 +312,9 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 |---|---|---|
 | cardrag-mcp | MCP transport, read-only 검색, health/readiness | 수집기, Codex OAuth/login, OCR, publisher write 권한 |
 | cardrag-worker | 카드사 adapter, PDF 검증, OCR, 구조화, embedding | 외부 공개 MCP endpoint |
-| cardrag-admin 또는 동일 worker의 제한 entrypoint | migration, generation 검증·게시, backup 보조 | 상시 공개 service |
+| cardrag-admin 또는 동일 worker의 제한 entrypoint | 운영 CLI, scheduled job, migration, generation 검증·게시, backup 보조 | 상시 공개 service, public admin API와 web UI |
 
-하나의 source repository에서 multi-stage target으로 만들 수 있지만 runtime package와 Linux capability, user, egress, volume mount는 역할별로 다르게 한다. scheduler는 worker container 안의 무한 loop보다 host scheduler나 명시적 scheduled job으로 분리하는 방향을 우선 검토한다.
+하나의 source repository에서 multi-stage target으로 만들 수 있지만 runtime package와 Linux capability, user, egress, volume mount는 역할별로 다르게 한다. v1 운영 관리면은 운영 CLI와 명시적 scheduled job으로 한정하며 public admin API와 web UI는 만들지 않는다. scheduler는 worker container 안의 무한 loop보다 host scheduler나 명시적 scheduled job으로 분리한다.
 
 ### 9.2 External volume
 
@@ -344,9 +346,12 @@ PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·cata
 
 레거시 OCR의 **danger-full-access** 설정은 그대로 계승하지 않는다. Codex CLI가 필요로 하는 최소 filesystem·network 권한을 exact version으로 검증하고 worker 격리 경계를 정의해야 한다.
 
-### 9.4 Network 경계
+### 9.4 Network 경계와 외부 reverse proxy 인계
 
-- MCP service의 inbound는 HTTPS 기반 HTTP MCP endpoint와 health endpoint만 연다.
+- MCP application은 container 내부에서 `0.0.0.0:8000`을 listen하고 Compose는 host의 `127.0.0.1:8000`에만 publish한다.
+- public hostname, TLS 인증서와 443 진입점은 별도 운영되는 Nginx Proxy Manager가 담당한다. 이 project의 Compose에는 reverse proxy container를 포함하지 않는다.
+- Nginx Proxy Manager가 container로 실행되는 경우 그 container의 `localhost`는 MCP host가 아니므로, host network/host-gateway 또는 별도 external Docker network를 통해 `cardrag-mcp:8000`에 도달할 수 있는지 배포 전에 검증한다.
+- MCP service의 inbound는 HTTP MCP endpoint와 health endpoint만 열고, 외부 공개 HTTPS는 Nginx Proxy Manager에서 종료한다.
 - MCP가 query embedding에 OpenRouter를 사용한다면 해당 egress만 허용하고 timeout/circuit breaker를 둔다.
 - worker는 승인된 카드사 domain, Codex 인증·실행 endpoint, OpenRouter만 egress allowlist 후보로 둔다.
 - discovery가 돌려준 URL은 host·redirect·size·PDF 검증을 거친다.
@@ -354,12 +359,19 @@ PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·cata
 - container network와 log 접근 권한을 운영자 role로 제한한다.
 - token은 `Authorization` header에서만 받고 URL query·path, access log와 error log에 남기지 않는다.
 - 원본 PDF 전달은 게시 catalog의 document ID를 통해서만 허용하고 임의 URL·host path·object key를 외부 입력으로 사용하지 않는다.
+- 승인된 `source_pdf` 사용자의 원본 PDF 응답은 100 MB로 제한하고 HTTP Range와 전송 취소를 지원하며 접근 감사 metadata를 90일 보존한다.
 
-HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`source_pdf` scope, 자동 access token 갱신, refresh token rotation과 90일 비활성 만료를 적용한다. TLS termination 위치, authorization server 제품·배포, 사용자/tenant와 운영자 권한은 **결정 필요**다.
+HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`source_pdf` scope, 자동 access token 갱신, refresh token rotation과 90일 비활성 만료를 적용한다. TLS termination은 외부 Nginx Proxy Manager가 담당한다. authorization server 제품·배포, 사용자/tenant와 운영자 권한은 **결정 필요**다.
 
 ## 10. 인증과 secret
 
-### 10.1 Codex CLI OAuth
+### 10.1 MCP OAuth authorization server의 역할
+
+authorization server는 사용자를 로그인시키거나 client를 식별하고, access token과 refresh token을 발급·갱신·회전·폐기하는 별도 보안 구성요소다. MCP server는 이 token을 직접 만들어 장기 보관하는 대신 서명, 발급자, 대상, 만료와 `search`·`source_pdf` scope를 검증한다. 따라서 한번 승인한 뒤 별도 조작 없이 계속 사용하는 자동 갱신과 refresh token rotation을 적용하려면 이를 지원하도록 설정된 authorization server와 호환 MCP client가 필요하다. refresh token 폐기·분실, 90일 비활성, 보안사고 또는 client 미지원 때만 재인증한다.
+
+사용자/tenant 모델은 “누가 접속할 수 있고 사용자·조직별로 corpus와 권한을 분리할 것인가”를 뜻한다. v1은 모든 승인 사용자가 같은 카드 공시 corpus를 조회하는 단일 tenant로 시작하고 `search`·`source_pdf` scope만 분리하는 방식을 권장한다. 운영 권한은 외부 MCP token에 싣지 않고 local CLI 실행 권한으로 분리한다. 기존 조직의 OAuth/OIDC provider를 연동할지, 없다면 Keycloak 등 별도 authorization server를 운영할지는 **결정 필요**다.
+
+### 10.2 Codex CLI OAuth
 
 목표는 OCR worker image에 Codex CLI를 설치하고 OAuth 상태를 외부 제한 volume에 보존하여 container 재생성 후에도 인증을 재사용하는 것이다. 그러나 현재 문서 작성 단계에서는 CLI 설치·로그인을 실행하지 않았다.
 
@@ -383,7 +395,7 @@ device login을 Docker 로그로 제공해야 한다면 전용 1회성 auth job�
 
 CLI가 요구한 headless/device-code 동작을 제공하지 않는다면 log scraping이나 token 복사로 우회한다고 확정하지 않는다. 공식 지원 방식 또는 별도 안전한 bootstrap 절차를 선택해야 한다.
 
-### 10.2 OpenRouter
+### 10.3 OpenRouter
 
 - **OPENROUTER_API_KEY**는 environment 또는 orchestrator secret file로 주입한다.
 - repository의 env 파일, image layer, Compose 평문, job DB와 로그에 key를 넣지 않는다.
@@ -393,7 +405,7 @@ CLI가 요구한 headless/device-code 동작을 제공하지 않는다면 log sc
 - 실제 사용 model/config hash를 OCR 또는 embedding provenance와 generation manifest에 기록한다.
 - 외부 전송 데이터 범위와 provider 보존정책을 보안·법무 관점에서 승인받는다.
 
-### 10.3 MCP OAuth token
+### 10.4 MCP OAuth token
 
 HTTP MCP 인증은 [MCP 2026-07-28 Authorization specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)의 OAuth 2.1 discovery, Bearer token, audience와 refresh 지침을 따른다.
 
@@ -407,7 +419,7 @@ HTTP MCP 인증은 [MCP 2026-07-28 Authorization specification](https://modelcon
 - authorization server는 token audience를 MCP resource에 고정하고 즉시 revoke, refresh 재사용 탐지와 secure token storage를 제공해야 한다.
 - 원본 PDF·페이지 조회를 포함한 모든 요청에 호출자, 허용 scope, document ID, 결과 상태와 비민감 request ID를 감사 event로 남긴다.
 
-### 10.4 그 밖의 secret
+### 10.5 그 밖의 secret
 
 Docker Hub credential은 build/push host 또는 CI secret store에만 둔다. runtime container에 mount하지 않는다. TLS private key, remote storage credential과 monitoring token도 용도별로 분리하고 secret scan을 release gate에 포함한다.
 
@@ -427,15 +439,16 @@ MCP readiness는 current generation ID, schema, embedding model/dimension, docum
 아래는 최종 구현 단계의 계획이며 이번 작업에서 build, login, push 또는 promotion을 수행하지 않았다.
 
 1. 현재 로그인된 Docker 계정과 namespace를 실제로 확인한다.
-2. 대상 public repository의 namespace와 lowercase slug를 확인하거나 승인 후 생성한다. 후보 slug는 **mcp_card_prd_detail**이다.
+2. 대상 public repository의 namespace를 확인하고 lowercase repository slug **mcp-card-prd-detail**로 생성한다.
 3. test, license/secret scan, SBOM, vulnerability scan을 통과한 image를 재현 가능하게 build한다.
 4. release version과 Git SHA를 포함한 immutable tag를 붙이고 image digest를 기록한다.
-5. candidate tag를 public repository에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
-6. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
-7. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
-8. 실패 시 이전 digest로 rollback한다.
+5. Cosign으로 image digest를 서명하고 release manifest에 서명 identity 또는 key reference를 기록한다.
+6. candidate tag를 public repository에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
+7. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
+8. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
+9. 실패 시 이전 digest로 rollback한다.
 
-**latest** tag만으로 배포 상태를 식별하지 않는다. repository 가시성은 public으로 확정됐으며 GitHub repository는 private로 유지한다. Docker Hub 로그인 상태, namespace·lowercase repository 이름, multi-architecture 필요성, image signing·provenance 방식은 구현 시 확인한다. 확인·push하지 않은 결과를 완료로 보고하지 않는다.
+**latest** tag만으로 배포 상태를 식별하지 않는다. repository 가시성은 public, slug는 **mcp-card-prd-detail**, 서명은 Cosign으로 확정됐으며 GitHub repository는 private로 유지한다. Docker Hub 로그인 상태와 namespace, multi-architecture 필요성, Cosign identity/key 관리 방식은 구현 시 확인한다. 확인·push하지 않은 결과를 완료로 보고하지 않는다.
 
 ## 13. Backup과 restore
 
@@ -456,12 +469,12 @@ PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는�
 
 ### 13.2 RPO·RTO와 보존
 
-다음은 운영 요구에 따라 **결정 필요**다.
+복구 목표는 RPO 24시간, RTO 4시간으로 확정한다. 이를 위해 PostgreSQL consistent backup과 새로 생성된 PDF/OCR/generation file 증분 backup을 매일 수행하고, 주 1회 별도 failure domain에 복제한다. 분기 1회 빈 host 또는 격리 환경에서 전체 restore drill을 수행해 실제 RPO/RTO와 checksum·검색 smoke test 결과를 기록한다.
 
-- 일일 discovery/job state가 허용하는 RPO
-- 마지막 정상 generation으로 복구하는 RTO
+다음은 구현 전 세부 **결정 필요**다.
+
 - raw PDF/OCR과 과거 generation 보존기간
-- off-site와 다른 failure domain의 backup 개수
+- 일일·주간 backup의 실제 target과 별도 failure domain 구성
 - 암호화 key 관리, 개인정보·원문 삭제 요청 처리
 
 최소한 current와 직전 검증 generation, 해당 source catalog, job state의 최근 consistent backup을 함께 복구할 수 있어야 한다.
@@ -508,8 +521,8 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 | Docker | non-root, read-only root, resource limit, health probe |
 | auth | MCP OAuth 자동 refresh·revoke·비활성 만료, Codex headless login, OpenRouter secret 비노출 |
 | logs | token·본문 redaction, correlation ID, retention/RBAC |
-| backup | consistent snapshot과 격리 경로 restore drill |
-| registry | public repository, version+Git SHA tag, digest pull/run, data·secret 미포함, 공개 code 검토 |
+| backup | RPO 24시간/RTO 4시간, 일일 DB·신규 file backup, 주간 별도 저장소 복제, 분기별 격리 restore drill |
+| registry | public `mcp-card-prd-detail`, version+Git SHA tag, Cosign 서명, digest pull/run, data·secret 미포함, 공개 code 검토 |
 
 ## 16. 결정 필요 항목
 
@@ -517,13 +530,13 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 - PostgreSQL schema·migration·backup과 scheduler 세부 방식
 - offline BULK worker concurrency, provider quota와 비용한도
 - worker별 lease·timeout·retry budget
-- 일일 실행시각과 issuer별 rate limit
-- generation ID 형식, 최소 3개 초과 보존기간, RPO·RTO와 backup target
+- 매일 03:00 KST 순차 실행의 issuer 순서·간격과 issuer별 rate limit
+- generation ID 형식, 최소 3개 초과 보존기간, 일일·주간 backup target과 암호화 방식
 - BULK pilot 이후 SLO와 단일 host를 넘어설 autoscaling 기준
 - vector/lexical engine과 degraded mode의 정량 품질 합격선
 - Codex CLI exact version과 공식 headless/device-code 지원 여부
 - OAuth state 저장·갱신·회수와 device-code log 보안정책
-- Docker Hub namespace·lowercase repository slug, image signing·promotion 승인 정책
+- Docker Hub namespace, Cosign identity/key 관리와 promotion 승인 정책
 
 ## 17. 이 문서 작성 시점의 완료 상태
 

@@ -54,14 +54,19 @@
 - 우리카드·KB국민카드를 우선 지원하고 신한카드 개인 신용·체크카드 상품안내장의 현재본·과거 이력을 신규 BULK 시험 대상으로 추가한다. 신한 법인·선불카드는 1차에서 제외한다.
 - 기본 검색은 latest이며 과거 PDF/OCR version은 모두 보존하고 명시적 version/as-of 요청에서만 조회한다.
 - 운영 MCP는 HTTPS 기반 HTTP endpoint와 OAuth token으로 접속한다. client별 `search`·`source_pdf` scope, 자동 access token refresh, refresh token rotation과 90일 비활성 만료를 적용한다.
-- 명시적 요청에는 저장된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 선택적 PNG를 제공하고 분할 PDF는 만들지 않는다.
+- 승인된 `source_pdf` 사용자 요청에는 저장된 전체 원본 PDF를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 접근 감사 metadata를 90일 보존한다. 페이지 조회는 OCR text와 선택적 PNG를 제공하고 분할 PDF는 만들지 않는다.
 - 검색은 공통 stable evidence key 기반 lexical/vector hybrid로 한다.
-- GitHub는 private, Docker Hub repository는 public으로 하며 version+Git SHA tag와 digest 배포를 사용한다.
+- GitHub는 private, Docker Hub repository는 public **mcp-card-prd-detail**로 하며 version+Git SHA tag, Cosign 서명과 digest 배포를 사용한다. Docker Hub namespace와 Cosign identity/key 관리는 구현 전 정한다.
 - 원본 PDF·OCR 전 버전과 검색 generation 최소 3개를 보존하고 Gmail·이메일 Agent는 제외한다.
 - 온라인은 초기 동시 요청 5개로 시작하며 수치 latency SLO보다 결과 품질을 우선한다.
 - 최초 배포는 단일 Linux host의 Docker Compose로 하고 online MCP와 offline worker를 분리한다.
+- reverse proxy와 TLS는 별도 Nginx Proxy Manager가 담당하며 이 Compose에는 proxy를 포함하지 않는다. application은 container `0.0.0.0:8000`, host `127.0.0.1:8000`으로 노출한다.
 - PDF·OCR·generation은 외부 불변 file volume, durable state·catalog는 PostgreSQL을 사용한다. vector/lexical engine은 신한 BULK benchmark 후 정한다.
 - vector 경로 장애 시 `allow_degraded=true` 요청만 lexical-only 결과를 `degraded`로 반환한다.
+- 일일 증분은 매일 03:00 KST에 issuer별 순차·장애 격리 방식으로 실행한다.
+- v1 운영 관리면은 CLI와 scheduled job만 사용하며 public admin API와 web UI는 만들지 않는다.
+- RPO 24시간/RTO 4시간을 목표로 DB·신규 file 일일 backup, 주간 별도 저장소 복제, 분기별 restore drill을 수행한다.
+- query 원문은 저장하지 않고 접근·인증·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존한다.
 
 계속 결정해야 할 사항은 다음과 같다.
 
@@ -72,6 +77,9 @@
 - OCR·구조 분석·임베딩 모델 선정 절차와 비용 한도
 - OCR 문자·표·숫자·섹션 관계의 합격 기준
 - 공시자료의 이용 조건과 개인정보·보안 정책
+- Docker Hub namespace와 Cosign identity/key 관리 방식
+- Nginx Proxy Manager container에서 MCP endpoint로 연결할 network 방식
+- 일일 issuer 실행 순서·간격과 backup target·암호화 방식
 
 산출물:
 
@@ -247,7 +255,7 @@
 - 혜택 조건, 전월실적, 제외조건과 유의사항 조회
 - stable evidence 원문과 출처 조회
 - 페이지 단위 OCR text·선택적 렌더 PNG 조회
-- exact version·hash의 보존 원본 PDF 전체 streaming file 제공; 분할 PDF 미생성
+- 승인된 `source_pdf` 사용자에게 exact version·hash의 보존 원본 PDF 전체 streaming file 제공; 100 MB 상한, HTTP Range, 감사 metadata 90일, 분할 PDF 미생성
 - index generation과 readiness 조회
 
 산출물:
@@ -263,6 +271,7 @@
 - 임의 URL·경로·배치 실행을 조회 tool로 유발할 수 없다.
 - 과도한 결과는 손실 없이 pagination/resource로 이어진다.
 - 원본 PDF와 페이지 응답이 요청한 document version·hash·source span과 일치한다.
+- 100 MB 초과 PDF 거부, Range 전송·취소와 PDF 접근 감사 metadata 보존이 검증된다.
 - vector 장애 시 `allow_degraded` flag에 따라 명시적 lexical-only 또는 실패로 동작한다.
 
 ### 단계 9. Docker 운영·인증·관측·복구
@@ -271,14 +280,17 @@
 
 - online MCP와 offline worker의 별도 image/process
 - 단일 Linux host Docker Compose와 PostgreSQL service
+- MCP container `0.0.0.0:8000` listen과 host `127.0.0.1:8000` publish, 외부 Nginx Proxy Manager 인계
 - read-only snapshot, writable work/state/output, secret volume 분리
 - Codex CLI 설치와 OAuth credential 지속성
 - headless device-code 로그인 흐름의 실제 지원 여부 검증
 - OpenRouter key secret 주입
-- HTTPS MCP endpoint, OAuth discovery·Bearer header·자동 refresh/rotation·revoke
-- public Docker Hub image와 private GitHub 경계, version+Git SHA tag, digest 배포
+- HTTP MCP endpoint, 외부 Nginx Proxy Manager TLS, OAuth discovery·Bearer header·자동 refresh/rotation·revoke
+- 운영 CLI·scheduled job과 매일 03:00 KST issuer별 순차·격리 실행
+- public Docker Hub **mcp-card-prd-detail** image와 private GitHub 경계, version+Git SHA tag, Cosign 서명, digest 배포
 - health/readiness, structured logs, metrics, alerting
-- backup/restore와 generation rollback rehearsal
+- 접근·인증·PDF audit metadata 90일과 비식별 metric 1년 보존
+- RPO 24시간/RTO 4시간의 일일·주간 backup, 분기 restore와 generation rollback rehearsal
 
 산출물:
 
@@ -291,6 +303,7 @@
 - container 재생성 후 데이터와 durable 상태가 보존된다.
 - secret과 대용량 artifact가 image layer·Git·일반 log에 없다.
 - public image에 포함된 code·dependency metadata가 공개됨을 점검하고 비공개 corpus·secret이 없는지 검증한다.
+- 외부 Nginx Proxy Manager를 Compose에 포함하지 않고 선택한 network 경로로 MCP에 연결되는지 검증한다.
 - OAuth device-code가 지원된다면 Docker log에서 필요한 정보만 안전하게 확인된다.
 - 지원되지 않는다면 승인된 대체 bootstrap 절차가 문서화된다.
 - 이전 generation으로 rollback하고 조회 정상화를 입증한다.
@@ -303,7 +316,7 @@
 - 장기 OCR 중단·재개, worker crash, 외부 API 장애 시험
 - rebuild/publish 중 온라인 무중단 조회 시험
 - load, 보안, prompt injection, SSRF, 권한 시험
-- public Docker Hub에 version+Git SHA candidate tag 게시 후 digest 기반 promotion
+- public Docker Hub **mcp-card-prd-detail**에 version+Git SHA candidate tag와 Cosign 서명을 게시 후 digest 기반 promotion
 
 산출물:
 
