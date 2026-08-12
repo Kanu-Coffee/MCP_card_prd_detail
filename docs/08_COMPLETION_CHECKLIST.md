@@ -268,7 +268,8 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
   wheel·license payload·third-party notice의 exact fail-closed 검사는 CI와 image build에서 수행한다.
   증거: `.github/workflows/ci.yml`, `.github/workflows/release.yml`
 - [x] [검증 완료] 개발환경의 세 이미지 취약점 검사 결과 HIGH/CRITICAL 0이고 local MCP
-  100/100 동시 smoke가 통과했다. public registry push는 하지 않았다.
+  100/100 동시 smoke가 통과했다. `0.1.0` public image는 signature 결속 전 중단된 부분
+  release로 운영에서 제외하며, 완료 판정은 `0.1.1`의 OCI signature와 통합 manifest까지 요구한다.
   증거: `reports/deployment/pdfium-release-candidate-verification.json`
 - [ ] [실환경 검증 대기] 실제 Codex 계정/device authorization과 장기 token 갱신을 검증한다.
   인계: `docs/REAL_ENV_HANDOFF.md` 2절

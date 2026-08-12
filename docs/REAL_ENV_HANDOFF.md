@@ -126,9 +126,13 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   fail-closed한다. Cosign digest signature/attestation tag는 재서명을 위해 regex 밖에 둔다.
 
   ```bash
+  export RELEASE_VERSION=0.1.1
+  export RELEASE_GIT_SHA=REPLACE_WITH_RELEASE_GIT_SHA
   cosign verify \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    --certificate-identity-regexp '^https://github.com/Kanu-Coffee/MCP_card_prd_detail/.github/workflows/release.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+    --certificate-identity "https://github.com/Kanu-Coffee/MCP_card_prd_detail/.github/workflows/release.yml@refs/tags/v${RELEASE_VERSION}" \
+    --certificate-github-workflow-sha "$RELEASE_GIT_SHA" \
+    --check-claims=true \
     ymtop59/mcp-card-prd-detail@sha256:REPLACE_WITH_ROLE_DIGEST
   ```
 
@@ -137,8 +141,8 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   그 결과가 image 내부 manifest와 최종 release artifact의 SHA-256에 결속됐으며,
   공개 tag는 `${version}-{mcp|worker|admin}`과 역할별 Git SHA tag를 제공한다.
   통합 manifest는 세 역할의 서로 다른 digest와 `linux/amd64` platform을 기록하고,
-  deployment는 digest를 사용하며 각 `cosign-{role}.bundle.json`의 transparency-log
-  material이 검증된다. `latest`만으로 식별하지 않는다.
+  deployment는 digest를 사용하며 각 `cosign-{role}.verification.json`의 SHA-256과
+  registry OCI signature의 transparency-log material이 검증된다. `latest`만으로 식별하지 않는다.
 - **실패 진단:** environment approval, dependency-license policy/version/wheel·notice hash, tag pattern, Docker Hub permission,
   workflow OIDC subject, pushed digest와 Cosign certificate identity를 확인한다.
 
