@@ -61,7 +61,7 @@
 - 기존 provider가 없으므로 같은 Compose의 별도 Keycloak service와 PostgreSQL 별도 database·user를 사용한다. `cardrag` 단일 realm에서 self-registration·dynamic client registration을 끄고 승인 client만 수동 등록한다. 사람용은 Authorization Code+PKCE, service용은 Client Credentials를 사용하며 초기 admin은 Docker secret으로 1회 bootstrap 후 회전·제거한다.
 - 승인된 `source_pdf` 사용자 요청에는 저장된 전체 원본 PDF를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 접근 감사 metadata를 90일 보존한다. 페이지 PNG는 요청 시 생성해 7일 cache하고 분할 PDF는 만들지 않는다.
 - 검색은 공통 stable evidence key 기반 lexical/vector hybrid로 한다.
-- GitHub는 private, Docker Hub repository는 public **ymtop59/mcp-card-prd-detail**로 한다. v1 `linux/amd64` image는 일반 `main`·tag push가 아니라 `vX.Y.Z` tag 대상 수동 workflow와 exact confirmation 때만 공개 push하며 version+Git SHA tag, GitHub Actions OIDC keyless Cosign 서명과 digest 배포를 사용한다. 최초 `0.1.0` image는 signature 결속 전에 중단된 부분 release이므로 운영에서 제외하고 `0.1.1`부터 완결된 release manifest를 요구한다.
+- GitHub는 private, Docker Hub repository는 public **ymtop59/mcp-card-prd-detail**로 한다. v1 `linux/amd64` image는 일반 `main`·tag push가 아니라 `vX.Y.Z` tag 대상 수동 workflow와 exact confirmation 때만 공개 push하며 version+Git SHA tag, GitHub Actions OIDC keyless Cosign 서명과 digest 배포를 사용한다. `0.1.0`과 `0.1.1`은 통합 release manifest 전에 중단된 부분 release이므로 운영에서 제외하고 `0.1.2`부터 완결된 release manifest를 요구한다.
 - 원본 PDF·OCR 전 버전을 보존한다. 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin은 unpin 전까지 보존하고 Gmail·이메일 Agent는 제외한다.
 - 온라인은 초기 동시 요청 5개로 시작하며 수치 latency SLO보다 결과 품질을 우선한다.
 - 최초 배포는 단일 Linux host의 Docker Compose로 하고 online MCP와 offline worker를 분리한다.

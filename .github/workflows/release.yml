@@ -482,6 +482,7 @@ jobs:
         run: |
           set -euo pipefail
           reference="${IMAGE_NAME}@${DIGEST}"
+          verified_subject="index.docker.io/${IMAGE_NAME}@${DIGEST}"
           evidence="cosign-${TARGET}.verification.json"
           expected_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
           test "$(cosign version --json | jq -er '.gitVersion')" = "$COSIGN_VERSION"
@@ -497,7 +498,9 @@ jobs:
           }
           if ! verify_signature > /tmp/cosign-verification.json \
               2>/tmp/cosign-verification-error; then
-            cosign sign --yes "$reference"
+            if ! cosign sign --yes --timeout 30s "$reference"; then
+              echo "cosign sign returned nonzero; checking the registry for a completed signature" >&2
+            fi
           fi
           verified=false
           for _attempt in $(seq 1 12); do
@@ -512,7 +515,7 @@ jobs:
             cat /tmp/cosign-verification-error >&2 || true
             exit 1
           fi
-          jq -e --arg digest "$DIGEST" --arg subject "$reference" '
+          jq -e --arg digest "$DIGEST" --arg subject "$verified_subject" '
             type == "array"
             and length > 0
             and all(.[];
@@ -556,7 +559,7 @@ jobs:
               "signature_evidence": {
                   "path": f'cosign-{os.environ["TARGET"]}.verification.json',
                   "sha256": os.environ["SIGNATURE_EVIDENCE_SHA256"],
-                  "subject": f'{os.environ["IMAGE_NAME"]}@{os.environ["DIGEST"]}',
+                  "subject": f'index.docker.io/{os.environ["IMAGE_NAME"]}@{os.environ["DIGEST"]}',
                   "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
                   "certificate_identity": f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}',
                   "github_workflow_sha": os.environ["GITHUB_SHA"],
@@ -633,7 +636,7 @@ jobs:
                   f'{os.environ["VERSION"]}-{role}',
                   f'{os.environ["VERSION"]}-{role}-sha-{os.environ["GIT_SHA"][:12]}',
               ], role
-              expected_subject = f'{os.environ["IMAGE_NAME"]}@{part["digest"]}'
+              expected_subject = f'index.docker.io/{os.environ["IMAGE_NAME"]}@{part["digest"]}'
               expected_identity = f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}'
               assert part["signature_evidence"]["subject"] == expected_subject, role
               assert part["signature_evidence"]["certificate_oidc_issuer"] == (

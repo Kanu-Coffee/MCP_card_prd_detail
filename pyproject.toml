@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cardrag-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "Evidence-first CardRAG ingestion pipeline and read-only HTTP MCP server"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
