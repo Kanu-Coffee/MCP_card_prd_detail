@@ -70,7 +70,7 @@ PDF 수집기는 각 카드사의 상품공시실에서 상품과 상품안내�
 
 카드사마다 목록·상세 페이지, 다운로드 절차, 이력 노출 방식이 다르므로 카드사별 adapter를 둔다. 공통 orchestration은 식별, 버전 판정, 저장, 재시도, 상태 기록과 검증을 담당하고, adapter는 해당 카드사 사이트 해석과 다운로드에만 책임을 제한한다.
 
-우리카드와 KB국민카드를 우선 지원하며, 신한카드는 신규 adapter로 도입해 BULK 처리의 수집·재개·처리량 시험에 포함한다. 신한카드는 레거시 adapter나 corpus가 존재하지 않으므로 신규 구현과 별도 fixture·live 검증이 필요하다.
+우리카드와 KB국민카드를 우선 지원한다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 adapter로 수집해 BULK 처리의 수집·재개·처리량 시험에 포함한다. 법인·선불카드는 신한 1차 범위에서 제외한다. 신한카드는 레거시 adapter나 corpus가 존재하지 않으므로 신규 구현과 별도 fixture·live 검증이 필요하다.
 
 수집기는 OCR, 구조 분석, 임베딩을 직접 실행하지 않는다. 외부에서 임의로 전달된 URL을 범용 다운로드하는 기능도 온라인 MCP에 노출하지 않는다.
 
@@ -349,14 +349,15 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 페이지 단위 OCR·원문 근거 조회
 - 사용자가 명시적으로 요청한 정확한 문서 버전의 보존 원본 PDF 파일 제공
 
-구체적인 tool/resource 이름, 인자와 응답 schema는 구현 단계에서 결정한다. MCP 서비스는 카드사 사이트 PDF 수집, OCR, 임베딩 build, DB 재구축, 임의 URL 다운로드, Codex privileged 실행 또는 이메일 발송을 동기식 요청으로 수행하지 않는다. 원본 PDF 제공은 이미 보존되어 게시 승인된 파일의 읽기 전용 전달이며 신규 수집 기능이 아니다.
+구체적인 tool/resource 이름, 인자와 응답 schema는 구현 단계에서 결정한다. MCP 서비스는 카드사 사이트 PDF 수집, OCR, 임베딩 build, DB 재구축, 임의 URL 다운로드, Codex privileged 실행 또는 이메일 발송을 동기식 요청으로 수행하지 않는다. 원본 PDF 제공은 이미 보존되어 게시 승인된 전체 파일의 읽기 전용 streaming이며 신규 수집 기능이 아니다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 사용하고 분할 PDF는 생성하지 않는다.
 
 ### 7.2 입력
 
 - 자연어 검색 질의
 - 선택적인 카드사, 상품코드, section, 기준일·문서 버전과 결과 범위
 - 안정적인 evidence 또는 문서 식별자를 이용한 상세조회 요청
-- 선택적인 페이지 범위와 원본 PDF 파일 제공을 명시하는 요청
+- 선택적인 페이지 범위, 페이지 PNG 포함 여부와 원본 PDF 전체 파일 제공을 명시하는 요청
+- vector 장애 시 lexical-only 결과를 허용하는 명시적 `allow_degraded` flag
 - 호출자 권한과 요청 제한 정보
 
 입력 enum, 문자열 길이, 결과 수와 timeout에 경계를 둔다. 외부 입력을 파일 경로나 SQL 조각, 다운로드 URL 또는 subprocess 인자로 직접 사용하지 않는다.
@@ -367,7 +368,8 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 관련 section과 질문에 충분한 원문 근거
 - 페이지·원문 범위, 출처 URL 또는 보존 경로, 내용 해시
 - 안정적인 evidence ID와 검색 generation
-- 원본 PDF 요청 시 exact document version, SHA-256, MIME type, 파일 크기와 인증된 file/resource 응답
+- 원본 PDF 요청 시 exact document version, SHA-256, MIME type, 파일 크기와 인증된 streaming file 응답
+- 페이지 요청 시 OCR text와 요청한 경우에만 렌더 PNG resource; 분할 PDF는 제공하지 않음
 - retrieval 방식과 결과 해석에 필요한 점수 또는 품질 상태
 - 최신·과거 버전 충돌, 정보 부족, 부분 검색 또는 degraded 상태의 명시적 표시
 
@@ -383,14 +385,16 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 근거가 없거나 검색 범위를 벗어난 질문은 추측하지 않고 부족함을 알린다.
 - 최신 조회에는 현재 generation의 기준 시점을 함께 제공한다.
 - 원본 PDF는 사용자가 명시적으로 요청하고 권한을 통과한 경우에만 exact version과 content hash로 해석한다. host path나 임의 URL을 응답하지 않는다.
-- 페이지 조회는 PDF page와 OCR source span을 함께 식별해 재검증할 수 있어야 한다.
+- 페이지 조회는 PDF page와 OCR source span을 함께 식별해 재검증할 수 있어야 하며, PNG는 명시적으로 요청된 경우에만 제공한다.
+- 일반 검색과 페이지 OCR text에는 `search`, 원본 PDF 전체 파일과 페이지 PNG에는 `source_pdf` scope를 요구한다.
 
 ### 7.5 상태와 장애 처리
 
 - liveness와 readiness를 구분한다. 프로세스가 살아 있어도 활성 generation 무결성, schema, 모델·차원 및 필수 index가 맞지 않으면 ready가 아니다.
 - 요청 하나가 읽는 동안 generation이 바뀌어도 서로 다른 세대의 metadata와 vector를 섞지 않는다.
 - 새 generation 게시 실패는 현재 읽기 서비스에 영향을 주지 않는다.
-- query embedding 제공자 장애 시 lexical-only 결과를 제공할지 요청을 실패시킬지는 품질 영향과 함께 `결정 필요`다. degraded 응답을 정상 hybrid 결과처럼 표시해서는 안 된다.
+- query embedding 또는 vector 검색 장애 시 `allow_degraded=true`인 요청만 lexical-only 결과를 반환한다. 응답에 `degraded` 상태와 실패한 검색 branch를 명시하며, flag가 없거나 false이면 요청을 실패시킨다.
+- 최초 OAuth 승인 후 access token은 client가 자동 갱신하고 refresh token은 매 사용 시 회전한다. 90일 비활성 전에는 정상적인 지속 사용에서 수동 token 재입력을 요구하지 않는다. refresh 폐기·분실·보안사고·client 미지원은 재인증 사유다.
 - timeout, 과도한 결과 요청과 동시성 초과에 대해 bounded 실패를 반환한다.
 - 감사 로그에는 원문·질의·개인정보를 무제한 저장하지 않고 요청 ID, generation, 처리 상태와 제한된 운영 metadata를 남긴다.
 
@@ -407,6 +411,9 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - [ ] query 입력·결과 수·timeout·동시성 제한과 취소가 통합 시험에서 확인된다.
 - [ ] 원본 PDF 응답이 요청한 version·SHA-256과 일치하고 권한·크기·streaming·감사 정책을 통과한다.
 - [ ] 페이지 조회 결과가 동일 문서 version의 PDF page와 OCR source span으로 역추적된다.
+- [ ] 페이지 PNG는 명시적 요청에서만 제공되고 분할 PDF가 생성되지 않는다.
+- [ ] access token 만료 전 자동 refresh, refresh token rotation, 90일 비활성 만료와 revoke·재인증 흐름이 통합 시험에서 확인된다.
+- [ ] vector 장애 시 `allow_degraded` 유무에 따른 lexical-only 또는 실패 동작과 상태 표시가 검증된다.
 - [ ] 초기 동시 요청 5개에서 품질 손실 없이 bounded 응답한다. 목표 latency, 처리량과 가용성 수치는 BULK pilot 후 결정한다.
 
 ## 8. 구성요소 인계 기준
@@ -425,13 +432,12 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 
 | 항목 | 상태 |
 |---|---|
-| 신한카드 BULK 시험의 상품·문서·기간 범위와 운영 편입 gate | `결정 필요` |
+| 신한카드 정식 일일 운영 편입 gate | `결정 필요` — 개인 신용·체크 현재본·과거 이력 BULK 범위는 확정 |
 | 단계별 retry 예산, timeout과 backoff | `결정 필요` |
 | 렌더 이미지 보존 기간과 최소 3개를 초과한 generation 보존 기간 | `결정 필요` |
 | 구조 taxonomy와 schema의 최초 승인 버전 | `결정 필요` |
 | 구조 분석에 LLM을 적용할 문서·필드 범위 | `결정 필요` |
 | chunk 크기, overlap과 표·각주 연결 정책 | `결정 필요` |
 | vector index 기술과 hybrid ranking 값 | `결정 필요` — hybrid와 공통 evidence key 결합은 확정 |
-| HTTP token 발급·만료·회전·폐기, 권한과 tenant 경계 | `결정 필요` — HTTP URL+token 접속은 확정 |
-| query 실패 시 lexical-only degraded 응답 허용 여부 | `결정 필요` |
+| OAuth authorization server, 사용자·tenant와 운영자 권한 | `결정 필요` — 자동 refresh·rotation과 `search`·`source_pdf` scope는 확정 |
 | BULK pilot 이후 목표 latency, QPS, 가용성과 갱신 완료 시각 | `결정 필요` — 품질 우선·초기 동시 요청 5개는 확정 |

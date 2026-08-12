@@ -51,21 +51,24 @@
 
 다음 제품 방향은 2026-08-12에 사전 확정됐다.
 
-- 우리카드·KB국민카드를 우선 지원하고 신한카드를 신규 BULK 시험 대상으로 추가한다.
+- 우리카드·KB국민카드를 우선 지원하고 신한카드 개인 신용·체크카드 상품안내장의 현재본·과거 이력을 신규 BULK 시험 대상으로 추가한다. 신한 법인·선불카드는 1차에서 제외한다.
 - 기본 검색은 latest이며 과거 PDF/OCR version은 모두 보존하고 명시적 version/as-of 요청에서만 조회한다.
-- 운영 MCP는 HTTPS 기반 HTTP endpoint와 token으로 접속한다.
-- 명시적 요청에는 저장된 원본 PDF 파일을 제공하고 원문은 페이지 단위 조회를 허용한다.
+- 운영 MCP는 HTTPS 기반 HTTP endpoint와 OAuth token으로 접속한다. client별 `search`·`source_pdf` scope, 자동 access token refresh, refresh token rotation과 90일 비활성 만료를 적용한다.
+- 명시적 요청에는 저장된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 선택적 PNG를 제공하고 분할 PDF는 만들지 않는다.
 - 검색은 공통 stable evidence key 기반 lexical/vector hybrid로 한다.
 - GitHub는 private, Docker Hub repository는 public으로 하며 version+Git SHA tag와 digest 배포를 사용한다.
 - 원본 PDF·OCR 전 버전과 검색 generation 최소 3개를 보존하고 Gmail·이메일 Agent는 제외한다.
 - 온라인은 초기 동시 요청 5개로 시작하며 수치 latency SLO보다 결과 품질을 우선한다.
+- 최초 배포는 단일 Linux host의 Docker Compose로 하고 online MCP와 offline worker를 분리한다.
+- PDF·OCR·generation은 외부 불변 file volume, durable state·catalog는 PostgreSQL을 사용한다. vector/lexical engine은 신한 BULK benchmark 후 정한다.
+- vector 경로 장애 시 `allow_degraded=true` 요청만 lexical-only 결과를 `degraded`로 반환한다.
 
 계속 결정해야 할 사항은 다음과 같다.
 
-- 신한카드 BULK 시험의 상품·문서·기간 범위와 운영 편입 gate
-- token 발급·만료·회전·폐기, 사용자/tenant와 tool별 권한
+- 신한카드 정식 일일 운영 편입 gate
+- OAuth authorization server, 사용자/tenant와 운영자 권한
 - BULK pilot 이후 목표 응답시간·QPS·가용성과 resource 한도
-- 상태 DB, 원본 저장소, lexical/vector 검색 엔진
+- PostgreSQL schema·backup, 외부 file layout과 lexical/vector 검색 엔진
 - OCR·구조 분석·임베딩 모델 선정 절차와 비용 한도
 - OCR 문자·표·숫자·섹션 관계의 합격 기준
 - 공시자료의 이용 조건과 개인정보·보안 정책
@@ -95,6 +98,7 @@
 - durable job, attempt, lease, retry, terminal/dead-letter 상태
 - generation build·verify·publish·rollback 계약
 - typed configuration, secret reference, storage root
+- PostgreSQL durable state·catalog와 외부 불변 file volume 계약
 
 산출물:
 
@@ -136,7 +140,7 @@
 
 ### 단계 4. 카드사별 PDF 수집기
 
-우리카드와 KB 레거시 adapter는 동작 이해와 fixture의 출발점으로만 사용하고, 신규 adapter 계약에 맞게 재구현한다. 신한카드는 레거시가 없는 신규 adapter로 구현하고 BULK 시험 corpus를 만든다.
+우리카드와 KB 레거시 adapter는 동작 이해와 fixture의 출발점으로만 사용하고, 신규 adapter 계약에 맞게 재구현한다. 신한카드는 레거시가 없는 신규 adapter로 구현해 개인 신용·체크카드 현재본과 과거 이력 BULK corpus를 만들며 법인·선불카드는 제외한다.
 
 개발 범위:
 
@@ -216,6 +220,7 @@
 - configurable OpenRouter embedding provider/model
 - current text hash 기반 증분 임베딩과 stale row 격리
 - lexical+vector 검색 및 공통 evidence key fusion
+- vector 장애 시 `allow_degraded` opt-in lexical-only 정책
 - generation 단위 build, 검증, immutable publish와 rollback
 
 산출물:
@@ -241,14 +246,14 @@
 - issuer+상품코드 기반 상세·버전 조회
 - 혜택 조건, 전월실적, 제외조건과 유의사항 조회
 - stable evidence 원문과 출처 조회
-- 페이지 단위 OCR·원문 근거 조회
-- exact version·hash의 보존 원본 PDF 파일 제공
+- 페이지 단위 OCR text·선택적 렌더 PNG 조회
+- exact version·hash의 보존 원본 PDF 전체 streaming file 제공; 분할 PDF 미생성
 - index generation과 readiness 조회
 
 산출물:
 
 - HTTP MCP server와 역할별 tool/resource·file 전달 계약
-- 인증·인가, 오류, limit와 timeout 정책
+- OAuth 자동 refresh·rotation, `search`·`source_pdf` scope, 오류·limit·timeout 정책
 - contract/integration/security test
 
 인수 기준:
@@ -258,17 +263,19 @@
 - 임의 URL·경로·배치 실행을 조회 tool로 유발할 수 없다.
 - 과도한 결과는 손실 없이 pagination/resource로 이어진다.
 - 원본 PDF와 페이지 응답이 요청한 document version·hash·source span과 일치한다.
+- vector 장애 시 `allow_degraded` flag에 따라 명시적 lexical-only 또는 실패로 동작한다.
 
 ### 단계 9. Docker 운영·인증·관측·복구
 
 개발 범위:
 
 - online MCP와 offline worker의 별도 image/process
+- 단일 Linux host Docker Compose와 PostgreSQL service
 - read-only snapshot, writable work/state/output, secret volume 분리
 - Codex CLI 설치와 OAuth credential 지속성
 - headless device-code 로그인 흐름의 실제 지원 여부 검증
 - OpenRouter key secret 주입
-- HTTPS MCP endpoint, token header 인증과 수명주기·인가
+- HTTPS MCP endpoint, OAuth discovery·Bearer header·자동 refresh/rotation·revoke
 - public Docker Hub image와 private GitHub 경계, version+Git SHA tag, digest 배포
 - health/readiness, structured logs, metrics, alerting
 - backup/restore와 generation rollback rehearsal
@@ -330,7 +337,7 @@ P0:
 - document/evidence/generation identity
 - 품질 기준과 gold set
 - durable 상태와 atomic generation publish
-- HTTP token 수명주기·인가·사용자/tenant 범위 결정
+- OAuth authorization server·사용자/tenant·운영자 권한 결정
 - vector full scan과 레거시 hybrid 결함을 계승하지 않는 검색 방식
 
 P1:

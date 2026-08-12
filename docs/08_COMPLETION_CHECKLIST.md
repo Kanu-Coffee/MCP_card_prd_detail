@@ -23,20 +23,28 @@
   증거: `LEGACY_PROJECT_ANALYSIS.md`
 - [x] [검증 완료] 요구된 개발 문서 9개를 작성하고 상호 링크·Markdown 구조·완료 상태 표현을 검토했다.
   증거: `docs/README.md`, `docs/01_PROJECT_OVERVIEW.md`부터 `docs/08_COMPLETION_CHECKLIST.md`
-- [x] [결정 완료] 우리카드·KB국민카드를 우선 지원하고 신한카드를 BULK 시험 대상으로 추가한다.
+- [x] [결정 완료] 우리카드·KB국민카드를 우선 지원하고 신한카드 개인 신용·체크 현재본·과거 이력을 BULK 시험 대상으로 추가하며 법인·선불은 제외한다.
   증거: 사용자 결정 2026-08-12, `docs/01_PROJECT_OVERVIEW.md`
 - [x] [결정 완료] 기본 latest 조회, 전 버전 보존, 명시적 version/as-of 과거 조회를 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/01_PROJECT_OVERVIEW.md`
 - [x] [결정 완료] 운영 MCP의 HTTP 접속과 URL+token 방식을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/02_TARGET_ARCHITECTURE.md`
-- [ ] [결정 필요] token 발급·만료·회전·폐기, 사용자/tenant와 tool별 권한을 승인한다.
+- [x] [결정 완료] client별 OAuth token, `search`·`source_pdf` scope, 자동 access refresh·refresh rotation과 90일 비활성 만료를 승인한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [ ] [결정 필요] OAuth authorization server, 사용자/tenant와 운영자 권한을 승인한다.
 - [x] [결정 완료] 초기 동시 요청 5개와 품질 우선 원칙을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [ ] [결정 필요] BULK pilot 후 목표 QPS, latency, 가용성과 resource 한도를 승인한다.
-- [x] [결정 완료] 명시적 요청 시 저장 원본 PDF 파일 제공과 페이지 단위 원문 조회를 승인한다.
+- [x] [결정 완료] 명시적 요청 시 전체 원본 PDF streaming, 페이지 OCR text·선택적 PNG, 분할 PDF 미생성을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/03_COMPONENT_DEVELOPMENT_GUIDE.md`
 - [x] [결정 완료] 공통 evidence key 기반 lexical/vector hybrid 검색을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/05_LLM_AND_DATA_QUALITY_POLICY.md`
+- [x] [결정 완료] vector 장애 시 `allow_degraded=true` 요청에만 명시적 lexical-only 결과를 허용한다.
+  증거: 사용자 결정 2026-08-12, `docs/05_LLM_AND_DATA_QUALITY_POLICY.md`
+- [x] [결정 완료] 최초 단일 Linux host Docker Compose와 online/offline 컨테이너 분리를 승인한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] PDF·OCR·generation은 외부 불변 file volume, durable state·catalog는 PostgreSQL을 사용한다.
+  증거: 사용자 결정 2026-08-12, `docs/02_TARGET_ARCHITECTURE.md`
 - [ ] [결정 필요] 공시자료 수집·재배포·상업적 이용 조건을 확인한다.
 - [ ] [미착수] 대표 PDF·질문·정답 근거로 gold evaluation set을 만든다.
 - [ ] [미착수] OCR·구조·검색별 정량 합격선을 승인한다.
@@ -62,7 +70,7 @@
 |---|---|---|---|---|
 | 우리카드 | 확인 완료 | 미착수 | 미착수 | 미착수 |
 | KB국민카드 | 확인 완료 | 미착수 | 미착수 | 미착수 |
-| 신한카드 | adapter·corpus 없음 | BULK 시험 대상으로 결정, 구현 미착수 | 미착수 | 미착수 |
+| 신한카드 | adapter·corpus 없음 | 개인 신용·체크 전 이력 BULK로 결정, 구현 미착수 | 미착수 | 미착수 |
 | 삼성카드 | adapter·corpus 없음 | 대상 아님 | 미착수 | 미착수 |
 | 그 외 카드사 | 확인하지 않음 | 결정 필요 | 미착수 | 미착수 |
 
@@ -125,19 +133,22 @@
 - [ ] [미착수] 검색 세대를 별도 경로에서 build하고 checksum·schema·coverage를 검증한다.
 - [ ] [미착수] 검증된 세대만 atomic publish하며 이전 세대로 rollback한다.
 - [ ] [미착수] card-domain recall, 근거 정확성, latency와 resource 사용량을 측정한다.
+- [ ] [미착수] vector 장애 시 `allow_degraded` flag에 따른 lexical-only·실패 동작과 상태 표시를 시험한다.
 
 ## 8. MCP 서비스
 
 - [x] [결정 완료] 운영 transport를 HTTP로 하고 HTTPS URL과 token으로 접속한다.
   증거: 사용자 결정 2026-08-12, `docs/02_TARGET_ARCHITECTURE.md`
-- [ ] [결정 필요] token 수명주기, 인증정보 저장, tenant와 tool별 권한을 정한다.
+- [x] [결정 완료] client별 `search`·`source_pdf` scope와 90일 비활성 전 자동 refresh/rotation을 정한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [ ] [결정 필요] OAuth authorization server, 사용자/tenant와 운영자 권한을 정한다.
 - [ ] [미착수] MCP SDK dependency와 server entrypoint를 추가한다.
 - [ ] [미착수] 카드상품 검색 역할을 구현·시험한다.
 - [ ] [미착수] issuer+상품코드 상세 및 version 목록 조회 역할을 구현·시험한다.
 - [ ] [미착수] 혜택 조건·전월실적·제외조건·유의사항 조회 역할을 구현·시험한다.
 - [ ] [미착수] stable evidence와 full source pagination/resource를 제공한다.
-- [ ] [미착수] 페이지 단위 OCR·원문 조회를 exact document version과 source span으로 제공한다.
-- [ ] [미착수] 명시적 사용자 요청에 exact version·SHA-256의 보존 원본 PDF 파일을 인증 후 제공한다.
+- [ ] [미착수] 페이지 단위 OCR text와 선택적 렌더 PNG를 exact document version과 source span으로 제공하고 분할 PDF를 생성하지 않는다.
+- [ ] [미착수] `source_pdf` scope의 명시적 사용자 요청에 exact version·SHA-256의 보존 원본 PDF 전체를 streaming한다.
 - [ ] [미착수] 모든 근거에 issuer, 상품코드, 문서 version·기준일, generation과 source span을 포함한다.
 - [ ] [미착수] 정보 부족, 상충 version과 낮은 confidence를 숨기지 않는다.
 - [ ] [미착수] online process가 published generation을 read-only로 연다.
@@ -145,6 +156,7 @@
 - [ ] [미착수] limit, pagination, timeout, cancellation과 concurrency 제한을 시험한다.
 - [ ] [미착수] health/readiness가 schema, generation, model/dimension, coverage와 FTS 기능을 확인한다.
 - [ ] [미착수] contract, integration, load와 authorization test를 통과한다.
+- [ ] [미착수] access token 자동 refresh, refresh token rotation, 90일 비활성 만료, revoke와 재인증을 호환 client로 시험한다.
 
 ## 9. 레거시 데이터 재사용
 
@@ -165,6 +177,10 @@
 
 ## 10. 운영, Docker와 인증
 
+- [x] [결정 완료] 최초 topology를 단일 Linux host Docker Compose로 정한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] durable state·catalog는 PostgreSQL, PDF·OCR·generation은 외부 불변 file volume으로 정한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [ ] [미착수] offline worker와 online MCP를 별도 container/process로 구성한다.
 - [ ] [미착수] raw/OCR/build/state/index/output volume을 목적과 권한별로 분리한다.
 - [ ] [미착수] 대용량 PDF·OCR·index가 Git과 image layer에 없음을 검사한다.
@@ -204,9 +220,9 @@
 
 현재 신규 구현을 시작하기 전의 주요 차단사항은 다음과 같다.
 
-- HTTP transport와 token 접속은 확정됐지만 token 수명주기·인가·사용자/tenant 범위가 남아 있다.
-- 저장·검색 engine, BULK pilot 이후 수치 SLO와 세부 데이터 보존정책이 결정되지 않았다.
-- 신한카드 BULK 시험의 상품·문서·기간 범위와 운영 편입 gate가 남아 있다.
+- HTTP OAuth 자동 refresh·scope는 확정됐지만 authorization server, 사용자/tenant와 운영자 권한이 남아 있다.
+- PostgreSQL·file volume은 확정됐지만 vector/lexical engine, BULK pilot 이후 수치 SLO와 세부 데이터 보존정책이 남아 있다.
+- 신한카드 개인 신용·체크 전 이력 BULK 범위는 확정됐지만 정식 일일 운영 편입 gate가 남아 있다.
 - 원본 PDF 기술 제공은 확정됐지만 카드사 자료의 재배포·서비스 이용 조건과 파일 한도가 남아 있다.
 - OCR·구조·검색 품질 gold set과 합격선이 없다.
 - 카드사 공시자료 이용 조건 확인이 남아 있다.

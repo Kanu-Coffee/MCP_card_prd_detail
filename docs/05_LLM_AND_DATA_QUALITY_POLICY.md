@@ -259,7 +259,7 @@ hybrid 검색은 lexical chunk ID와 structured ID를 그대로 섞지 않고 �
 - OpenRouter가 일시적으로 불가하면 문서 임베딩 작업을 재시도 대기로 두고 현재 게시 generation을 유지한다.
 - 다른 임베딩 모델을 즉시 대신 사용해 부분 coverage를 채우지 않는다.
 - 모델 변경은 전체 새 generation과 query embedding 설정을 함께 교체한다.
-- 온라인 query embedding 실패 시 lexical-only degraded 검색을 허용할지는 `결정 필요`다. 허용할 경우 응답에 degraded 상태를 명시하고 별도 품질·latency 기준을 적용한다.
+- 온라인 query embedding 또는 vector 검색 실패 시 caller가 `allow_degraded=true`를 명시한 요청만 lexical-only 결과를 반환한다. 응답에 degraded 상태와 실패 branch를 표시하고 별도 품질·latency 기준을 적용한다. flag가 없거나 false이면 요청을 실패시킨다.
 - 부분 build나 검증 실패 generation은 게시하지 않는다.
 
 ## 8. 환각 및 데이터 손실 방지
@@ -273,7 +273,8 @@ hybrid 검색은 lexical chunk ID와 structured ID를 그대로 섞지 않고 �
 | chunking | 조건·제외와 본문 분리 | 관계 metadata, 의미 경계, 인접 context와 gold query 검증 |
 | 임베딩 | stale·혼합 모델 vector | content hash coverage, 모델·차원 generation 고정 |
 | 검색 | issuer 충돌, filter 후처리로 관련 결과 손실 | issuer-scoped ID, 후보 단계 filter, 공통 evidence ID |
-| 원본 PDF 제공 | 잘못된 버전·변조 파일·과도한 파일 전달 | 명시적 요청, 권한 확인, exact document ID·SHA-256·MIME·크기 검증 |
+| 원본 PDF 제공 | 잘못된 버전·변조 파일·과도한 파일 전달 | 명시적 요청, `source_pdf` scope, exact document ID·SHA-256·MIME·크기 검증, 전체 파일 streaming |
+| 페이지 제공 | 잘못된 page·파생물 혼동 | OCR text는 `search`, 선택적 PNG는 `source_pdf`, source span 연결, 분할 PDF 생성 금지 |
 | MCP 반환 | 짧은 인용으로 핵심 조건 손실 | 충분한 원문과 후속 전체 근거 조회, version·generation 표시 |
 | 외부 LLM 답변 | 근거 밖 결론, 버전 혼합 | evidence-only 계약, 인용 검증, 불충분·충돌 명시 |
 
@@ -424,7 +425,8 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 - 근거 부족과 버전 충돌 시 abstention 또는 충돌 표시가 검증된다.
 - 정상, lexical-only 등 retrieval mode와 degraded 상태가 정확히 구분된다.
 - 페이지 조회가 동일 version의 PDF page와 OCR source span으로 역추적된다.
-- 명시적으로 요청한 원본 PDF 파일이 exact document version·SHA-256과 일치하며, 모델이 만든 대체 문서나 요약본으로 바뀌지 않는다.
+- 페이지 PNG는 명시적으로 요청한 경우에만 제공되고 분할 PDF를 만들지 않는다.
+- `source_pdf` scope로 명시적으로 요청한 원본 PDF 전체 파일이 exact document version·SHA-256과 일치하며, 모델이 만든 대체 문서나 요약본으로 바뀌지 않는다.
 
 ### 11.6 gate 판정
 
@@ -471,7 +473,7 @@ Codex와 OpenRouter 호출은 카드상품 원문, 페이지 이미지, OCR text
 | 구조 taxonomy, confidence와 검토 threshold | `결정 필요` | 도메인 검수 결과 |
 | 임베딩 모델, 차원과 입력 prefix | `결정 필요` | 프로젝트 gold retrieval benchmark |
 | Recall@K, MRR, nDCG@K와 filter 합격선 | `결정 필요` | 실제 사용 질의와 기대 서비스 수준 |
-| lexical-only degraded 검색 허용 여부 | `결정 필요` | 품질 손실과 가용성 요구 비교 |
+| lexical-only degraded 품질·latency 합격선 | `결정 필요` | opt-in 정책은 확정, gold query로 허용 가능한 결과 범위 측정 |
 | 조건부 gate 승인 범위와 승인자 | `결정 필요` | 운영·품질 책임 분리 |
 | 최소 3개를 초과한 generation·렌더 이미지·품질 보고서 보존 기간 | `결정 필요` | 감사, 저장비용과 법적 요건 |
 | 외부 제공자 데이터 취급·보존 정책 | `결정 필요` | 약관·보안·법무 검토 |
