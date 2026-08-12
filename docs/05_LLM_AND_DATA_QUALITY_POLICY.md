@@ -274,7 +274,7 @@ hybrid 검색은 lexical chunk ID와 structured ID를 그대로 섞지 않고 �
 | 임베딩 | stale·혼합 모델 vector | content hash coverage, 모델·차원 generation 고정 |
 | 검색 | issuer 충돌, filter 후처리로 관련 결과 손실 | issuer-scoped ID, 후보 단계 filter, 공통 evidence ID |
 | 원본 PDF 제공 | 잘못된 버전·변조 파일·과도한 파일 전달 | 승인 사용자, `source_pdf` scope, exact ID·SHA-256·MIME 검증, 100 MB·Range, 전체 파일 streaming |
-| 페이지 제공 | 잘못된 page·파생물 혼동 | OCR text는 `search`, 선택적 PNG는 `source_pdf`, source span 연결, 분할 PDF 생성 금지 |
+| 페이지 제공 | 잘못된 page·파생물 혼동 | OCR text는 `search`, 원본 PDF에서 요청 시 생성한 PNG는 `source_pdf`, 7일 cache, source span 연결, 분할 PDF 생성 금지 |
 | MCP 반환 | 짧은 인용으로 핵심 조건 손실 | 충분한 원문과 후속 전체 근거 조회, version·generation 표시 |
 | 외부 LLM 답변 | 근거 밖 결론, 버전 혼합 | evidence-only 계약, 인용 검증, 불충분·충돌 명시 |
 
@@ -411,7 +411,7 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 
 ### 11.4 Gate D: 임베딩·색인
 
-- 게시 대상 content hash의 임베딩 coverage가 승인 기준을 충족한다. 기준은 `결정 필요`다.
+- 최신 문서 content hash의 임베딩·색인 coverage가 100%다. 과거 이력 실패는 quarantine·품질 보고서에 명시하며 stale row로 coverage를 채우지 않는다.
 - 모델·차원·입력 정책이 generation 안에서 일관되고 stale vector가 없다.
 - gold query의 Recall@K, MRR, nDCG@K와 filter 정확도가 승인 threshold를 충족한다. 각 K와 threshold는 `결정 필요`다.
 - 목표 corpus 규모와 초기 동시 요청 5개에서 검색 품질을 유지하고 bounded timeout·cancellation이 동작한다. 수치 latency, 메모리와 I/O 기준은 BULK pilot 후 결정한다.
@@ -425,7 +425,7 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 - 근거 부족과 버전 충돌 시 abstention 또는 충돌 표시가 검증된다.
 - 정상, lexical-only 등 retrieval mode와 degraded 상태가 정확히 구분된다.
 - 페이지 조회가 동일 version의 PDF page와 OCR source span으로 역추적된다.
-- 페이지 PNG는 명시적으로 요청한 경우에만 제공되고 분할 PDF를 만들지 않는다.
+- 페이지 PNG는 명시적으로 요청한 경우에만 원본 PDF에서 생성하고 7일 cache 후 제거하며 분할 PDF를 만들지 않는다.
 - `source_pdf` scope로 명시적으로 요청한 원본 PDF 전체 파일이 exact document version·SHA-256과 일치하며, 모델이 만든 대체 문서나 요약본으로 바뀌지 않는다.
 
 ### 11.6 gate 판정
@@ -438,6 +438,7 @@ gate 결과는 `통과`, `조건부 통과`, `실패`로 기록할 수 있다. �
 - 서로 다른 모델·차원의 vector 혼합
 - 문서·index 세대가 섞인 온라인 결과
 - 검증하지 않은 generation의 운영 게시
+- 최신 문서의 OCR·구조·임베딩·색인 누락 또는 실패
 
 ## 12. 운영 중 품질 감시와 회귀 관리
 
@@ -475,5 +476,5 @@ Codex와 OpenRouter 호출은 카드상품 원문, 페이지 이미지, OCR text
 | Recall@K, MRR, nDCG@K와 filter 합격선 | `결정 필요` | 실제 사용 질의와 기대 서비스 수준 |
 | lexical-only degraded 품질·latency 합격선 | `결정 필요` | opt-in 정책은 확정, gold query로 허용 가능한 결과 범위 측정 |
 | 조건부 gate 승인 범위와 승인자 | `결정 필요` | 운영·품질 책임 분리 |
-| 최소 3개를 초과한 generation·렌더 이미지·품질 보고서 보존 기간 | `결정 필요` | 감사, 저장비용과 법적 요건 |
+| 최소 3개를 초과한 generation·품질 보고서 보존 기간 | `결정 필요` | 페이지 PNG는 7일 cache로 확정; generation·보고서는 감사, 저장비용과 법적 요건 검토 |
 | 외부 제공자 데이터 취급·보존 정책 | `결정 필요` | 약관·보안·법무 검토 |

@@ -116,7 +116,9 @@ project/
 
 온라인 MCP는 HTTPS endpoint URL과 OAuth access token으로 접속한다. token은 `Authorization: Bearer` header에서만 받고 URL query·path와 일반 log에는 기록하지 않는다. client별로 `search`와 `source_pdf` scope를 분리한다. 최초 승인 이후 client는 access token을 자동 갱신하고 refresh token을 회전한다. 90일은 고정 연결 만료가 아니라 비활성 만료 기준이며, 정상적으로 계속 사용하는 동안 수동 token 재입력을 요구하지 않는다. refresh token 폐기·분실, 보안사고 또는 client의 refresh 미지원 시에는 재인증한다.
 
-온라인 서비스는 승인 사용자가 명시적으로 요청한 경우에 한해 게시 대상 문서와 연결된 보존 원본 PDF 전체를 인증 후 streaming file로 제공할 수 있다. `search` scope는 페이지 OCR text, `source_pdf` scope는 전체 PDF와 선택적 렌더 PNG를 허용한다. PDF는 파일당 100 MB로 제한하고 HTTP Range를 지원하며 다운로드 감사 metadata를 90일 보존한다. 분할 PDF는 생성하지 않는다. 이는 카드사 사이트에서 새 PDF를 내려받는 권한과 다르며, 임의 URL·임의 host path는 받지 않는다.
+기존 조직 OAuth/OIDC provider는 사용하지 않고 self-hosted Keycloak을 authorization server로 채택한다. v1은 하나의 카드 공시 corpus를 공유하는 단일 tenant이며 승인 사용자와 client만 등록한다. Keycloak의 애플리케이션 scope는 `search`·`source_pdf`로 제한하고 운영 명령 권한은 local CLI로 분리한다.
+
+온라인 서비스는 승인 사용자가 명시적으로 요청한 경우에 한해 게시 대상 문서와 연결된 보존 원본 PDF 전체를 인증 후 streaming file로 제공할 수 있다. `search` scope는 페이지 OCR text, `source_pdf` scope는 전체 PDF와 요청 시 생성하는 렌더 PNG를 허용한다. 렌더 PNG는 7일 cache 후 제거하고 영구 artifact나 generation 구성요소로 보존하지 않는다. PDF는 파일당 100 MB로 제한하고 HTTP Range를 지원하며 다운로드 감사 metadata를 90일 보존한다. 분할 PDF는 생성하지 않는다. 이는 카드사 사이트에서 새 PDF를 내려받는 권한과 다르며, 임의 URL·임의 host path는 받지 않는다.
 
 ### 3.3 운영 제어 영역
 
@@ -162,7 +164,7 @@ project/
 | snapshot manager | active generation 확인, read-only open, 안전한 세대 교체 | published generation | staging·원본 영역 접근 |
 | 상태·관측 adapter | build ID, generation, readiness, latency와 오류 집계 | 비민감 상태 metadata | 비밀정보·질의 원문 무제한 노출 |
 
-구체적인 MCP tool 이름, 인자와 응답 schema는 이 단계에서 정의하지 않는다. 역할 수준에서 최소한 상품 탐색, 상품 상세·버전, 조건별 근거 검색, 페이지 단위 OCR text·선택적 PNG 조회, 명시적 원본 PDF 전체 파일 요청과 index 상태 확인이 필요하다. PDF 응답은 exact document version, content hash, MIME type과 크기를 포함하고 인증된 streaming을 사용한다. 별도 분할 PDF는 생성하지 않는다.
+구체적인 MCP tool 이름, 인자와 응답 schema는 이 단계에서 정의하지 않는다. 역할 수준에서 최소한 상품 탐색, 상품 상세·버전, 조건별 근거 검색, 페이지 단위 OCR text·요청 시 생성하는 PNG 조회, 명시적 원본 PDF 전체 파일 요청과 index 상태 확인이 필요하다. 페이지 PNG는 7일 cache 후 제거한다. PDF 응답은 exact document version, content hash, MIME type과 크기를 포함하고 인증된 streaming을 사용한다. 별도 분할 PDF는 생성하지 않는다.
 
 ### 4.3 공통 기반 구성요소
 
@@ -192,12 +194,14 @@ project/
 
 ### 5.2 일일 증분 처리
 
+scheduled run은 매일 03:00 KST에 우리카드, KB국민카드, 신한카드 순으로 실행하고 각 issuer job 종료 후 10분 대기한다. issuer별 job과 실패 상태를 격리해 앞선 카드사 실패가 다음 카드사 시작을 막지 않게 한다.
+
 1. 카드사별 discovery snapshot을 이전 snapshot과 비교한다.
 2. 신규·변경 후보만 원본 확인과 OCR 대상으로 선정한다.
 3. 변경된 document version과 그 downstream 구조·임베딩만 새로 만든다.
 4. 변경되지 않은 artifact는 hash와 처리 설정이 같을 때 새 generation에서 참조하거나 검증된 방식으로 재사용한다.
 5. 삭제·비공개로 보이는 문서는 즉시 물리 삭제하지 않고 상태 변경 후보로 기록한다. 공개 정책과 보존 기간은 `결정 필요`다.
-6. 증분 결과도 완전한 generation 단위로 검증·발행한다. active generation에 행 단위로 직접 반영하지 않는다.
+6. 증분 결과도 완전한 generation 단위로 검증·발행한다. 최신 문서에 OCR·구조·색인 누락 또는 실패가 있으면 게시를 차단한다. 과거 이력 실패는 quarantine과 보고서에 남기되 최신 문서 coverage가 100%인 경우에만 게시를 허용한다. active generation에 행 단위로 직접 반영하지 않는다.
 
 ### 5.3 온라인 조회
 
@@ -206,7 +210,7 @@ project/
 3. issuer, 문서 기준일, section 등 filter를 검색 전에 적용한다.
 4. text/vector 후보를 검색하고 공통 stable evidence key로 결합한다.
 5. stable evidence ID를 통해 원문 구간과 문서 metadata를 다시 읽어 결과를 검증한다.
-6. 상품·문서 버전·관련 섹션·원문 근거·출처·generation을 함께 반환한다. 페이지 요청은 OCR text와 선택적 렌더 PNG로 제공하고, 명시적 PDF 요청은 정확한 version과 hash를 확인한 전체 streaming file로 분리한다.
+6. 상품·문서 버전·관련 섹션·원문 근거·출처·generation을 함께 반환한다. 페이지 요청은 OCR text와 원본 PDF에서 요청 시 생성해 7일 cache하는 PNG로 제공하고, 명시적 PDF 요청은 정확한 version과 hash를 확인한 전체 streaming file로 분리한다.
 7. 최신본과 과거본이 충돌하거나 충분한 근거가 없으면 그 상태를 명시한다.
 
 lexical/vector hybrid와 공통 stable evidence key 결합은 채택한다. 검색 엔진, ANN 구현, 후보 수와 ranking 값은 실제 카드 도메인 benchmark 후 `결정 필요`다. 레거시의 Python exact full scan과 서로 다른 ID 공간을 사용한 hybrid는 그대로 채택하지 않는다.
@@ -243,7 +247,7 @@ lexical/vector hybrid와 공통 stable evidence key 결합은 채택한다. 검�
 
 원본 PDF·OCR·published generation은 단일 Linux host의 외부 불변 file volume에 둔다. durable 작업 상태와 catalog는 PostgreSQL에 저장한다. 하나의 공유 쓰기 볼륨을 모든 컨테이너에 마운트하지 않고 온라인 서비스에는 게시된 generation과 승인된 source artifact view만 read-only로 제공한다.
 
-초기 저장 경계는 확정됐지만 file layout, PostgreSQL schema·backup과 vector/lexical engine은 아직 구현 결정이 필요하다. 검색 엔진은 신한카드 BULK corpus benchmark 뒤 선정한다.
+초기 저장 경계는 확정됐지만 file layout, PostgreSQL schema·migration과 vector/lexical engine은 아직 구현 결정이 필요하다. 검색 엔진은 신한카드 BULK corpus benchmark 뒤 선정한다. backup·restore 구현은 v1 범위에서 제외하고 추후 개선 과제로 둔다.
 
 ## 8. generation build와 발행 경계
 
@@ -287,9 +291,9 @@ generation 발행은 데이터 처리와 서비스 운영을 분리하는 핵심
 | active 전환 실패 | generation pointer | 제한적 또는 없음 | 이전 참조 유지·rollback, readiness 실패 표시 |
 | 온라인 query embedding·vector 장애 | 개별 요청 | opt-in degraded | caller가 `allow_degraded=true`인 경우에만 lexical-only와 `degraded` 상태를 반환하고, 그 외에는 요청 실패 |
 | MCP replica 장애 | replica | 가용성 정책에 따름 | 재시작·traffic 제외; replica 수와 목표 가용성 결정 필요 |
-| published snapshot 손상 | generation | 영향 가능 | checksum 감지, 이전 generation rollback, 백업 복구 |
+| published snapshot 손상 | generation | 영향 가능 | checksum 감지와 이전 generation rollback; 별도 backup 복구는 v1 후속 과제 |
 
-오프라인 실패가 현재 온라인 generation을 손상시키지 않는 것이 최우선이다. 일부 문서 실패를 숨기고 발행할지, 전체 발행을 막을지는 오류 유형과 coverage 기준별로 정책화하며 `결정 필요`다.
+오프라인 실패가 현재 온라인 generation을 손상시키지 않는 것이 최우선이다. 최신 문서의 OCR·구조·색인 누락 또는 실패는 generation 게시를 차단하고 이전 generation을 계속 서비스한다. 과거 이력 실패는 quarantine·보고서에 명시하며 최신 문서 coverage가 100%인 경우에만 게시할 수 있다.
 
 ## 10. 일관성과 동시성 원칙
 
@@ -318,9 +322,9 @@ scheduler, 발행기, 관측 agent는 초기에는 worker의 제한 entrypoint �
 - 공개 Docker Hub image에는 corpus·PDF·OCR·secret·인증 상태를 포함하지 않는다. GitHub가 private여도 image에 패키징된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능함을 전제로 한다.
 - readiness는 프로세스 생존뿐 아니라 generation open, schema, FTS/vector 사용 가능성을 확인한다.
 - graceful shutdown 시 새 작업 claim을 중단하고 현재 checkpoint 또는 질의를 안전하게 마친다.
-- MCP application은 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host `127.0.0.1:8000`에만 publish한다. TLS·외부 hostname·certificate는 별도 Nginx Proxy Manager가 담당하며 stack에 reverse proxy를 포함하지 않는다.
+- MCP application은 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host `127.0.0.1:8000`에만 publish한다. TLS·외부 hostname·Nginx Proxy Manager 연결은 개발 완료 후 별도 hosting 과제이며 stack에 reverse proxy를 포함하지 않는다.
 
-Docker Hub repository는 public으로 운영하고 slug는 `mcp-card-prd-detail`을 사용한다. image tag에 version과 Git SHA를 포함하고 Cosign으로 서명하며 배포·rollback은 digest를 기준으로 한다. base image, CPU·memory 한도, Docker Hub namespace와 Cosign identity·key 관리 방식은 구현 단계에서 `결정 필요`다.
+Docker Hub public repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. image tag에 version과 Git SHA를 포함하고 Cosign으로 서명하며 배포·rollback은 digest를 기준으로 한다. base image, CPU·memory 한도와 Cosign identity·key 관리 방식은 구현 단계에서 `결정 필요`다.
 
 ## 12. 외부 의존성 경계
 
@@ -330,7 +334,7 @@ Docker Hub repository는 public으로 운영하고 slug는 `mcp-card-prd-detail`
 | Codex CLI | OCR 처리기 | 고품질 OCR, 선택적 구조 분석 | 실제 모델·설정 provenance, 격리 권한, 인증정보 보호 |
 | OpenRouter | 임베딩 생성기 | 문서 임베딩 | model·dimension 검증, retry, 비용·rate 관측 |
 | OpenRouter | 온라인 질의 서비스 후보 | query embedding | cache·circuit breaker, opt-in lexical-only degraded 표시 |
-| OAuth authorization server | MCP client·resource server | client 등록, access/refresh token 발급·회전·폐기 | OAuth 2.1 discovery, audience, scope, secure token storage |
+| self-hosted Keycloak | MCP client·resource server | 단일 tenant client 등록, access/refresh token 발급·회전·폐기 | OAuth 2.1/OIDC discovery, audience, `search`·`source_pdf`, secure token storage |
 | MCP client | HTTP MCP protocol adapter | 검색·상세·페이지·원본 PDF 조회 | HTTPS, Bearer token, `search`·`source_pdf` scope, 요청·파일 크기 제한 |
 
 OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질 동등성 검증을 통과하기 전에는 활성화하지 않는다. 초기 대량 OCR은 Codex exec만 사용한다. 구조 분석에서 LLM을 사용하기로 결정하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다.
@@ -339,17 +343,16 @@ OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질
 
 | 항목 | 상태 | 결정이 영향을 주는 영역 |
 |---|---|---|
-| OAuth authorization server와 사용자·tenant 모델 | 결정 필요 | 자동 refresh 정책은 확정, provider·client 등록·운영자 권한·tenant는 결정 필요 |
+| Keycloak 세부 설정 | 일부 결정 | self-hosted·단일 tenant·scope 분리는 확정, client 등록·초기 관리자 bootstrap 결정 필요 |
 | 목표 latency, QPS, 가용성 | pilot 후 결정 | 초기 동시 요청 5개·품질 우선 원칙 아래 BULK/load 측정 후 확정 |
 | hybrid 엔진과 ranking | 결정 필요 | 공통 evidence key 결합은 확정, query embedding·후보 수·가중치 품질 평가 |
-| vector/lexical 검색 엔진 | BULK 후 결정 | 외부 file volume·PostgreSQL은 확정, generation 포맷·memory·backup·rollback benchmark 필요 |
+| vector/lexical 검색 엔진 | BULK 후 결정 | 외부 file volume·PostgreSQL은 확정, generation 포맷·memory·rollback benchmark 필요 |
 | 구조 분석 엔진 | 결정 필요 | worker 의존성, 비용, 재현성, 품질 관문 |
 | scheduled job 세부 구현 | 결정 필요 | CLI+scheduled job은 확정, host scheduler·Compose job 연결, lease·retry 필요 |
-| file layout·PostgreSQL 운영 방식 | 결정 필요 | high-level 저장 제품은 확정, schema·backup·migration·disaster recovery 필요 |
+| file layout·PostgreSQL 운영 방식 | 결정 필요 | high-level 저장 제품은 확정, schema·migration 필요; backup은 v1 후속 과제 |
 | generation 전환 방식 | 결정 필요 | replica 일관성, rollback과 zero-downtime |
 | 원본 PDF 이용조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 저작권·재배포 조건은 별도 확인 |
-| 부분 실패 허용 기준 | 결정 필요 | generation coverage, freshness와 발행 정책 |
-| 신한카드 운영 지원 편입 기준 | 결정 필요 | 개인 신용·체크 현재본·과거 이력 BULK 범위는 확정, 정식 일일 운영 gate 필요 |
+| generation 부분 실패 | 결정 완료 | 최신 문서 실패는 게시 차단, 과거 실패는 격리·보고하고 최신 coverage 100%일 때만 게시 |
 
 위 항목이 확정되기 전에도 구성요소 간 계약, issuer-scoped 식별, provenance, read/write 분리와 불변 generation 원칙은 유지할 수 있다.
 

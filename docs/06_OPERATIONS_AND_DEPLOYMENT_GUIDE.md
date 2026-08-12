@@ -7,7 +7,8 @@
 - 작성일: 2026-08-12
 - 현재 상태: 운영·배포 계획 문서
 - 구현 상태: 미착수
-- 수행하지 않은 작업: OCR·임베딩 실행, Codex/OpenRouter 인증, Docker build·login·push, container 기동, Docker Hub repository 생성·배포
+- 수행하지 않은 작업: OCR·임베딩 실행, Codex/OpenRouter 인증, Docker build·image push, container 기동, 애플리케이션 배포
+- 외부 상태: Docker CLI의 `ymtop59` 인증을 확인하고 public `ymtop59/mcp-card-prd-detail` repository를 생성했다. image는 아직 없다.
 
 문서에 나오는 container, image, volume, metric과 상태 필드는 목표 계약이다. 존재하거나 검증된 것처럼 해석하지 않는다. 레거시에는 Dockerfile, Compose, MCP server, health check, durable queue 또는 immutable generation 게시 기능이 없다.
 
@@ -23,9 +24,8 @@
 | ingestion worker | 초기 대량·일일 증분 | 카드사 endpoint, Codex CLI, OpenRouter 접근 | raw/OCR/build/state read-write | 온라인은 이전 generation으로 계속 서비스 |
 | scheduler/controller | 일일 또는 운영자 실행 | job 제출 권한만 | durable state read-write | 새 작업 지연, 현재 MCP 조회는 유지 |
 | generation publisher | candidate 검증 후 | current pointer 변경 권한 | generations와 publish metadata write | 실패 시 이전 generation 유지 |
-| backup/restore job | 정책에 따른 주기 | backup target 접근 | snapshot read, backup write | 실행 중 일관성 확보 필요 |
 
-온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 승인된 사용자 중 `source_pdf` scope를 가진 사용자가 명시적으로 요청하면 게시 대상 document ID에 연결된 보존 원본 PDF 전체를 streaming file로 전달한다. 단일 응답의 원본 PDF 상한은 100 MB이며 HTTP Range 요청을 지원한다. PDF 접근 감사 metadata는 90일간 보존한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 사용하고 분할 PDF는 만들지 않는다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
+온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 승인된 사용자 중 `source_pdf` scope를 가진 사용자가 명시적으로 요청하면 게시 대상 document ID에 연결된 보존 원본 PDF 전체를 streaming file로 전달한다. 단일 응답의 원본 PDF 상한은 100 MB이며 HTTP Range 요청을 지원한다. PDF 접근 감사 metadata는 90일간 보존한다. 페이지 PNG는 원본 PDF에서 요청 시 생성하고 7일 cache 후 제거하며 분할 PDF는 만들지 않는다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
 
 ### 2.2 최소 장애 격리 원칙
 
@@ -56,13 +56,13 @@
 초기 작업은 다음 조건이 모두 확인된 후 시작한다.
 
 1. 레거시 또는 신규 discovery snapshot이 read-only 입력으로 고정되어 있다.
-2. PDF·OCR·build·state·backup volume 용량과 inode 여유가 측정되어 있다.
+2. PDF·OCR·build·state volume 용량과 inode 여유가 측정되어 있다.
 3. source 이용조건, 보존기간과 외부 provider 전송 범위가 승인되어 있다.
 4. Codex CLI exact version, 인증상태, OCR model/prompt, timeout이 기록되어 있다.
 5. OpenRouter key, model ID, dimension과 retry/rate limit 설정이 주입되어 있다.
 6. durable state store와 lease 회수가 실제 restart test를 통과했다.
 7. 소수 PDF의 pilot이 원문 충실도와 artifact checksum gate를 통과했다.
-8. 게시 중인 generation이 있다면 backup과 rollback pointer가 확인되어 있다.
+8. 게시 중인 generation이 있다면 rollback pointer와 이전 READY generation이 확인되어 있다.
 
 preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로 기록한다.
 
@@ -80,9 +80,9 @@ preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로
 
 초기 대량 OCR은 Codex exec만 사용한다. OpenRouter를 OCR 자동 fallback으로 사용해 실패를 성공으로 바꾸지 않으며, 실패 문서는 retry 또는 dead-letter 상태로 남긴다. OpenRouter key는 이 초기 run에서도 문서·query embedding에 필요할 수 있으므로 OCR 인증과 별개로 preflight한다.
 
-우리카드와 KB국민카드를 우선 처리한다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 BULK 시험 대상으로 포함하고 법인·선불카드는 1차 범위에서 제외한다. 신한카드 adapter는 레거시 재사용이 아니라 신규 구현이며, 카드사별 rate limit과 오류 격리가 확인되기 전에는 운영 주기 편입으로 간주하지 않는다.
+우리카드와 KB국민카드를 우선 처리한다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 BULK 시험 대상으로 포함하고 법인·선불카드는 1차 범위에서 제외한다. 신한카드 adapter는 레거시 재사용이 아니라 신규 구현이며 fixture/live 제한·품질 gate를 통과한 뒤 동일한 일일 schedule에 포함한다.
 
-일일 증분 run의 기준 시작시각은 매일 03:00 KST다. 카드사 job은 동시에 몰아 호출하지 않고 issuer별로 순차 실행하며 사이에 rate-limit 여유를 둔다. 한 카드사의 실패는 다른 카드사 실행을 막지 않고 독립적으로 retry/dead-letter와 경보를 남긴다. 정확한 issuer 순서와 간격은 구현 전 확정한다.
+일일 증분 run은 매일 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행한다. 각 issuer job 종료 후 10분 대기하고, 한 카드사의 실패는 다음 카드사 실행을 막지 않으며 독립적인 retry/dead-letter와 경보를 남긴다.
 
 ## 4. Durable 작업상태
 
@@ -219,14 +219,14 @@ publisher는 다음을 순서대로 검증한다.
 1. manifest와 실제 파일의 checksum·size 일치
 2. schema migration/version과 application compatibility
 3. DB/index integrity와 Docker runtime의 SQLite FTS5 지원
-4. current text hash+model+dimension embedding coverage
+4. 최신 문서의 current text hash+model+dimension embedding·색인 coverage 100%
 5. issuer/document/version count reconciliation
 6. stable evidence ID와 source span 역추적
 7. retrieval benchmark, no-result와 원문 citation 표본
 8. candidate를 read-only mount한 MCP smoke test
 9. READY marker와 이전 rollback generation 존재
 
-하나라도 실패하면 current pointer를 바꾸지 않는다.
+하나라도 실패하면 current pointer를 바꾸지 않는다. 최신 문서의 OCR·구조·색인 누락 또는 실패는 예외 없이 게시를 차단한다. 과거 이력 실패는 quarantine과 보고서에 남기고 최신 문서 coverage가 100%일 때만 게시를 허용한다.
 
 ### 7.3 Atomic publish
 
@@ -278,7 +278,7 @@ API key, OAuth access/refresh token, Authorization header, 전체 이메일·OCR
 | embedding | request/error/rate-limit, latency, item 수, dimension, 예상 비용 |
 | generation | build duration, coverage, publish/rollback, replica 적용상태 |
 | MCP | request 수, latency, error, timeout, no-result, active generation |
-| storage | volume 사용량·inode, generation 수, backup age |
+| storage | volume 사용량·inode, generation 수, page PNG cache age·size |
 | 인증 | Codex/OpenRouter auth failure, token 만료 임박 여부(비밀값 제외) |
 
 provider 비용과 token/page 사용량은 provider 정책이 허용하는 범위에서 집계하되 요청 원문과 결합하지 않는다.
@@ -294,10 +294,10 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 - 동일 issuer discovery가 연속 실패
 - lease 회수 반복 또는 running job 정체
 - OCR page 누락·hash mismatch 발생
-- embedding coverage가 100% 미만인 generation 게시 시도
+- 최신 문서 embedding·색인 coverage가 100% 미만인 generation 게시 시도
 - current generation 로드 실패 또는 replica 간 generation 불일치
 - OpenRouter/Codex 인증 실패와 quota 고갈
-- volume 임계치 초과, backup 지연, restore 검증 실패
+- volume 임계치 초과와 page PNG cache 정리 실패
 - MCP error/latency/no-result 비율 급증
 
 구체 threshold와 paging 대상은 운영 SLO와 pilot 수치를 기준으로 **결정 필요**다.
@@ -312,7 +312,8 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 |---|---|---|
 | cardrag-mcp | MCP transport, read-only 검색, health/readiness | 수집기, Codex OAuth/login, OCR, publisher write 권한 |
 | cardrag-worker | 카드사 adapter, PDF 검증, OCR, 구조화, embedding | 외부 공개 MCP endpoint |
-| cardrag-admin 또는 동일 worker의 제한 entrypoint | 운영 CLI, scheduled job, migration, generation 검증·게시, backup 보조 | 상시 공개 service, public admin API와 web UI |
+| cardrag-admin 또는 동일 worker의 제한 entrypoint | 운영 CLI, scheduled job, migration, generation 검증·게시 | 상시 공개 service, public admin API와 web UI |
+| keycloak | 단일 tenant OAuth/OIDC authorization server | 애플리케이션 운영 명령과 corpus 접근 |
 
 하나의 source repository에서 multi-stage target으로 만들 수 있지만 runtime package와 Linux capability, user, egress, volume mount는 역할별로 다르게 한다. v1 운영 관리면은 운영 CLI와 명시적 scheduled job으로 한정하며 public admin API와 web UI는 만들지 않는다. scheduler는 worker container 안의 무한 loop보다 host scheduler나 명시적 scheduled job으로 분리한다.
 
@@ -326,10 +327,10 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 | PostgreSQL data | catalog 조회에 필요한 최소 권한 | scheduler/worker read-write | durable catalog, queue, lease, run event |
 | quarantine | 미마운트 | 제한 read-write | 실패 artifact와 조사자료 |
 | Codex auth state | 미마운트 | OCR worker만 제한 read-write | container 재생성 후 OAuth 상태 유지 |
-| backup staging | 미마운트 | backup job만 | 일관된 snapshot 준비 |
 | temporary scratch | 미마운트 | ephemeral | render·CLI 임시 파일, 재생성 가능 |
+| page PNG cache | read-write | 미마운트 | 원본 PDF 요청 렌더 결과, TTL 7일 후 제거 |
 
-PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·catalog는 PostgreSQL에 둔다. index, PostgreSQL data와 OAuth state에는 서로 다른 접근정책을 적용하며 하나의 data root를 모든 container에 read-write로 mount하지 않는다. container 삭제 후에도 필요한 volume은 유지하되 auth volume과 일반 backup의 정책은 분리한다.
+PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·catalog는 PostgreSQL에 둔다. index, PostgreSQL data와 OAuth state에는 서로 다른 접근정책을 적용하며 하나의 data root를 모든 container에 read-write로 mount하지 않는다. page PNG cache는 불변 원본과 분리하고 7일 TTL 정리를 적용한다. backup volume은 v1에 만들지 않는다.
 
 ### 9.3 Image와 runtime hardening
 
@@ -346,22 +347,21 @@ PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·cata
 
 레거시 OCR의 **danger-full-access** 설정은 그대로 계승하지 않는다. Codex CLI가 필요로 하는 최소 filesystem·network 권한을 exact version으로 검증하고 worker 격리 경계를 정의해야 한다.
 
-### 9.4 Network 경계와 외부 reverse proxy 인계
+### 9.4 Network 경계와 hosting 인계
 
 - MCP application은 container 내부에서 `0.0.0.0:8000`을 listen하고 Compose는 host의 `127.0.0.1:8000`에만 publish한다.
-- public hostname, TLS 인증서와 443 진입점은 별도 운영되는 Nginx Proxy Manager가 담당한다. 이 project의 Compose에는 reverse proxy container를 포함하지 않는다.
-- Nginx Proxy Manager가 container로 실행되는 경우 그 container의 `localhost`는 MCP host가 아니므로, host network/host-gateway 또는 별도 external Docker network를 통해 `cardrag-mcp:8000`에 도달할 수 있는지 배포 전에 검증한다.
-- MCP service의 inbound는 HTTP MCP endpoint와 health endpoint만 열고, 외부 공개 HTTPS는 Nginx Proxy Manager에서 종료한다.
+- public hostname, TLS 인증서, 443 진입점과 Nginx Proxy Manager 연결은 개발 완료 후 운영자가 처리하는 별도 hosting 과제다. 이 project의 Compose에는 reverse proxy container나 Nginx Proxy Manager network 설정을 포함하지 않는다.
+- MCP service의 개발 인계점은 host `127.0.0.1:8000`의 HTTP MCP endpoint와 health endpoint다.
 - MCP가 query embedding에 OpenRouter를 사용한다면 해당 egress만 허용하고 timeout/circuit breaker를 둔다.
 - worker는 승인된 카드사 domain, Codex 인증·실행 endpoint, OpenRouter만 egress allowlist 후보로 둔다.
 - discovery가 돌려준 URL은 host·redirect·size·PDF 검증을 거친다.
-- publisher와 backup job은 외부 공개 port를 갖지 않는다.
+- publisher는 외부 공개 port를 갖지 않는다.
 - container network와 log 접근 권한을 운영자 role로 제한한다.
 - token은 `Authorization` header에서만 받고 URL query·path, access log와 error log에 남기지 않는다.
 - 원본 PDF 전달은 게시 catalog의 document ID를 통해서만 허용하고 임의 URL·host path·object key를 외부 입력으로 사용하지 않는다.
 - 승인된 `source_pdf` 사용자의 원본 PDF 응답은 100 MB로 제한하고 HTTP Range와 전송 취소를 지원하며 접근 감사 metadata를 90일 보존한다.
 
-HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`source_pdf` scope, 자동 access token 갱신, refresh token rotation과 90일 비활성 만료를 적용한다. TLS termination은 외부 Nginx Proxy Manager가 담당한다. authorization server 제품·배포, 사용자/tenant와 운영자 권한은 **결정 필요**다.
+HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`source_pdf` scope, 자동 access token 갱신, refresh token rotation과 90일 비활성 만료를 적용한다. authorization server는 self-hosted Keycloak 단일 tenant로 확정한다. TLS termination과 Nginx Proxy Manager 연결은 별도 hosting 과제다.
 
 ## 10. 인증과 secret
 
@@ -369,7 +369,7 @@ HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`sourc
 
 authorization server는 사용자를 로그인시키거나 client를 식별하고, access token과 refresh token을 발급·갱신·회전·폐기하는 별도 보안 구성요소다. MCP server는 이 token을 직접 만들어 장기 보관하는 대신 서명, 발급자, 대상, 만료와 `search`·`source_pdf` scope를 검증한다. 따라서 한번 승인한 뒤 별도 조작 없이 계속 사용하는 자동 갱신과 refresh token rotation을 적용하려면 이를 지원하도록 설정된 authorization server와 호환 MCP client가 필요하다. refresh token 폐기·분실, 90일 비활성, 보안사고 또는 client 미지원 때만 재인증한다.
 
-사용자/tenant 모델은 “누가 접속할 수 있고 사용자·조직별로 corpus와 권한을 분리할 것인가”를 뜻한다. v1은 모든 승인 사용자가 같은 카드 공시 corpus를 조회하는 단일 tenant로 시작하고 `search`·`source_pdf` scope만 분리하는 방식을 권장한다. 운영 권한은 외부 MCP token에 싣지 않고 local CLI 실행 권한으로 분리한다. 기존 조직의 OAuth/OIDC provider를 연동할지, 없다면 Keycloak 등 별도 authorization server를 운영할지는 **결정 필요**다.
+기존 OAuth/OIDC provider가 없으므로 v1 authorization server는 self-hosted Keycloak으로 확정한다. 모든 승인 사용자가 같은 카드 공시 corpus를 조회하는 단일 tenant로 구성하고 `search`·`source_pdf` scope만 분리한다. 운영 권한은 외부 MCP token에 싣지 않고 local CLI 실행 권한으로 유지한다. Keycloak admin credential은 runtime 환경변수 평문이나 image에 넣지 않으며 admin console을 공개 MCP endpoint와 함께 노출하지 않는다. client 수동 사전등록 여부와 초기 관리자 bootstrap 방식은 구현 전 확정한다.
 
 ### 10.2 Codex CLI OAuth
 
@@ -436,21 +436,21 @@ MCP readiness는 current generation ID, schema, embedding model/dimension, docum
 
 ## 12. Docker Hub 배포 계획
 
-아래는 최종 구현 단계의 계획이며 이번 작업에서 build, login, push 또는 promotion을 수행하지 않았다.
+public repository [`ymtop59/mcp-card-prd-detail`](https://hub.docker.com/r/ymtop59/mcp-card-prd-detail)은 2026-08-12 생성·공개 조회를 확인했다. 아래는 최종 구현 단계의 계획이며 이번 작업에서 image build, push 또는 promotion은 수행하지 않았다.
 
-1. 현재 로그인된 Docker 계정과 namespace를 실제로 확인한다.
-2. 대상 public repository의 namespace를 확인하고 lowercase repository slug **mcp-card-prd-detail**로 생성한다.
-3. test, license/secret scan, SBOM, vulnerability scan을 통과한 image를 재현 가능하게 build한다.
-4. release version과 Git SHA를 포함한 immutable tag를 붙이고 image digest를 기록한다.
-5. Cosign으로 image digest를 서명하고 release manifest에 서명 identity 또는 key reference를 기록한다.
-6. candidate tag를 public repository에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
-7. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
-8. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
-9. 실패 시 이전 digest로 rollback한다.
+1. test, license/secret scan, SBOM, vulnerability scan을 통과한 image를 재현 가능하게 build한다.
+2. release version과 Git SHA를 포함한 immutable tag를 붙이고 image digest를 기록한다.
+3. Cosign으로 image digest를 서명하고 release manifest에 서명 identity 또는 key reference를 기록한다.
+4. candidate tag를 `ymtop59/mcp-card-prd-detail`에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
+5. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
+6. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
+7. 실패 시 이전 digest로 rollback한다.
 
-**latest** tag만으로 배포 상태를 식별하지 않는다. repository 가시성은 public, slug는 **mcp-card-prd-detail**, 서명은 Cosign으로 확정됐으며 GitHub repository는 private로 유지한다. Docker Hub 로그인 상태와 namespace, multi-architecture 필요성, Cosign identity/key 관리 방식은 구현 시 확인한다. 확인·push하지 않은 결과를 완료로 보고하지 않는다.
+**latest** tag만으로 배포 상태를 식별하지 않는다. repository는 public **ymtop59/mcp-card-prd-detail**, 서명은 Cosign으로 확정됐으며 GitHub repository는 private로 유지한다. multi-architecture 필요성과 Cosign identity/key 관리 방식은 구현 시 확인한다. build·push하지 않은 결과를 완료로 보고하지 않는다.
 
-## 13. Backup과 restore
+## 13. 후속 개선 과제: Backup과 restore
+
+backup·restore는 현재 v1 개발·인수 범위에 포함하지 않는다. 아래 내용은 후속 개선 과제의 설계 참고이며 현재 release 차단조건, 구현 완료조건 또는 운영 보장으로 사용하지 않는다. RPO·RTO, 대상 저장소, 주기와 암호화 방식은 후속 과제를 시작할 때 다시 결정한다.
 
 ### 13.1 Backup 대상
 
@@ -469,15 +469,14 @@ PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는�
 
 ### 13.2 RPO·RTO와 보존
 
-복구 목표는 RPO 24시간, RTO 4시간으로 확정한다. 이를 위해 PostgreSQL consistent backup과 새로 생성된 PDF/OCR/generation file 증분 backup을 매일 수행하고, 주 1회 별도 failure domain에 복제한다. 분기 1회 빈 host 또는 격리 환경에서 전체 restore drill을 수행해 실제 RPO/RTO와 checksum·검색 smoke test 결과를 기록한다.
+후속 구현 전 다음 사항을 새로 결정한다.
 
-다음은 구현 전 세부 **결정 필요**다.
-
+- RPO·RTO와 backup·restore 시험 주기
 - raw PDF/OCR과 과거 generation 보존기간
 - 일일·주간 backup의 실제 target과 별도 failure domain 구성
 - 암호화 key 관리, 개인정보·원문 삭제 요청 처리
 
-최소한 current와 직전 검증 generation, 해당 source catalog, job state의 최근 consistent backup을 함께 복구할 수 있어야 한다.
+후속 backup을 도입할 때는 최소한 current와 직전 검증 generation, 해당 source catalog, job state의 같은 시점 snapshot을 함께 복구할 수 있어야 한다.
 
 ### 13.3 Restore 절차
 
@@ -489,7 +488,7 @@ PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는�
 6. 승인 후 current pointer 또는 deployment를 교체한다.
 7. 복구시각, RPO/RTO 실제값, 손실·재처리 범위와 후속조치를 기록한다.
 
-backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기 restore drill과 다른 host에서의 검증이 인수 기준이다.
+후속 과제에서도 backup 성공 로그만으로 복구 가능성을 인정하지 않고 정기 restore drill과 다른 host 검증을 인수 기준으로 삼는다.
 
 ## 14. 운영 runbook 최소 목록
 
@@ -502,7 +501,6 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 - volume 부족과 artifact cleanup
 - candidate generation 검증·publish·rollback
 - MCP instance의 generation reload 실패
-- backup 실행·restore drill
 - Docker Hub candidate push·검증·promotion·rollback
 - secret 또는 원문 로그 노출 사고 대응
 
@@ -521,22 +519,20 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 | Docker | non-root, read-only root, resource limit, health probe |
 | auth | MCP OAuth 자동 refresh·revoke·비활성 만료, Codex headless login, OpenRouter secret 비노출 |
 | logs | token·본문 redaction, correlation ID, retention/RBAC |
-| backup | RPO 24시간/RTO 4시간, 일일 DB·신규 file backup, 주간 별도 저장소 복제, 분기별 격리 restore drill |
-| registry | public `mcp-card-prd-detail`, version+Git SHA tag, Cosign 서명, digest pull/run, data·secret 미포함, 공개 code 검토 |
+| registry | public `ymtop59/mcp-card-prd-detail`, version+Git SHA tag, Cosign 서명, digest pull/run, data·secret 미포함, 공개 code 검토 |
 
 ## 16. 결정 필요 항목
 
-- OAuth authorization server, 사용자/tenant 모델과 운영자 권한
-- PostgreSQL schema·migration·backup과 scheduler 세부 방식
+- Keycloak client 등록 정책과 초기 관리자 bootstrap 방식
+- PostgreSQL schema·migration과 scheduler 세부 방식
 - offline BULK worker concurrency, provider quota와 비용한도
 - worker별 lease·timeout·retry budget
-- 매일 03:00 KST 순차 실행의 issuer 순서·간격과 issuer별 rate limit
-- generation ID 형식, 최소 3개 초과 보존기간, 일일·주간 backup target과 암호화 방식
+- generation ID 형식과 최소 3개 초과 보존기간
 - BULK pilot 이후 SLO와 단일 host를 넘어설 autoscaling 기준
 - vector/lexical engine과 degraded mode의 정량 품질 합격선
 - Codex CLI exact version과 공식 headless/device-code 지원 여부
 - OAuth state 저장·갱신·회수와 device-code log 보안정책
-- Docker Hub namespace, Cosign identity/key 관리와 promotion 승인 정책
+- Cosign identity/key 관리와 promotion 승인 정책
 
 ## 17. 이 문서 작성 시점의 완료 상태
 
@@ -545,14 +541,15 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 | 초기·증분 운영 원칙 문서화 | 문서화 완료 |
 | durable state·lease·retry·dead-letter 계약 문서화 | 문서화 완료 |
 | immutable generation publish·rollback 방향 문서화 | 문서화 완료 |
-| Docker volume·secret·backup 방향 문서화 | 문서화 완료 |
+| Docker volume·secret 방향 문서화 | 문서화 완료 |
+| backup·restore | v1 범위 밖, 후속 개선 과제 |
 | 신규 scheduler/worker/MCP 구현 | 미착수 |
 | 초기 3~4일 대량 처리 실행 | 미수행 |
 | 일일 증분 run 실행 | 미수행 |
 | Codex CLI 설치·OAuth/device login 검증 | 미수행, 검토 필요 |
 | OpenRouter key 주입·호출 | 미수행 |
 | Dockerfile/Compose 작성·image build | 미수행 |
-| Docker Hub login 확인·repository 생성·push | 미수행 |
-| backup·restore drill | 미수행 |
+| Docker Hub `ymtop59/mcp-card-prd-detail` 생성 | 완료, image 없음 |
+| Docker Hub image build·push | 미수행 |
 
 향후 체크리스트 상태는 실제 code, test report, generation ID, image digest와 운영 로그로 증명된 경우에만 “검증 완료”로 바꾼다.
