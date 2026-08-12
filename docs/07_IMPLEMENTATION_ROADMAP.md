@@ -10,23 +10,26 @@
 - `결정 필요`: 사용자나 외부 권한자의 제품·운영 결정이 선행되어야 한다. 현재 개발 착수 P0에는 해당 항목이 없다.
 - `착수 가능`: 제품·운영 결정이 완료됐고 남은 기술값은 개발 중 검증한다.
 
-현재 검증 완료된 것은 레거시 분석, 본 개발 문서세트와 빈 public Docker Hub repository 생성뿐이다. 신규 코드, Docker image와 runtime 외부 서비스 연동은 모두 미착수지만, 이를 시작하기 전에 사용자에게 받아야 할 제품·운영 P0 결정은 남아 있지 않아 개발 착수가 가능하다.
+로드맵의 개발환경 범위는 구현과 자동검증을 마쳤다. 실제 카드사 endpoint, Codex/OpenRouter
+계정, 전체 장시간 BULK, 운영 host·TLS와 public registry 승인은 개발환경에서 재현할 수 없으므로
+`docs/REAL_ENV_HANDOFF.md`에 분리한다. 이 항목들은 완료로 표시하지 않지만 fixture/mock 대체검증이
+끝난 뒤에는 개발 goal을 반복 대기시키지 않는다.
 
 ## 2. 단계와 의존관계
 
 | 단계 | 이름 | 주요 선행조건 | 현재 상태 |
 |---:|---|---|---|
 | 0 | 기준 문서와 의사결정 체계 | 없음 | 검증 완료 |
-| 1 | 요구사항·품질 기준 확정 | 단계 0 | 착수 가능 — 기술 기준은 pilot로 확정 |
-| 2 | 신규 프로젝트 골격과 도메인 계약 | 단계 1 핵심 결정 | 미착수 |
-| 3 | 레거시 자산 이전 pilot | 단계 2, 품질 표본 정의 | 미착수 |
-| 4 | 카드사별 PDF 수집기 | 단계 2 | 미착수 |
-| 5 | OCR worker와 초기 대량 처리 | 단계 2, 3, 품질 gate | 미착수 |
-| 6 | 구조 분석기 | 단계 3, 5의 검증 표본 | 미착수 |
-| 7 | 임베딩·검색 색인과 세대 게시 | 단계 1, 3, 6 | 미착수 |
-| 8 | 온라인 MCP 조회 서비스 | 단계 2, 7 | 미착수 |
-| 9 | Docker 운영·인증·관측 | 단계 4~8 | 미착수 |
-| 10 | 통합 검증과 운영 release | 단계 3~9 | 미착수 |
+| 1 | 요구사항·품질 기준 확정 | 단계 0 | 검증 완료 — ADR 0001~0005, 합성 gold/load 기준선 |
+| 2 | 신규 프로젝트 골격과 도메인 계약 | 단계 1 핵심 결정 | 검증 완료 |
+| 3 | 레거시 자산 이전 pilot | 단계 2, 품질 표본 정의 | 5문서 read-only pilot 검증 완료; 전체 이전은 실환경 검증 대기 |
+| 4 | 카드사별 PDF 수집기 | 단계 2 | 세 issuer fixture/contract 검증 완료; live는 실환경 검증 대기 |
+| 5 | OCR worker와 초기 대량 처리 | 단계 2, 3, 품질 gate | fake backend·resume·sandbox 검증 완료; 실제 모델 BULK는 실환경 검증 대기 |
+| 6 | 구조 분석기 | 단계 3, 5의 검증 표본 | 결정론적 span·관계·validator 검증 완료 |
+| 7 | 임베딩·검색 색인과 세대 게시 | 단계 1, 3, 6 | fake embedding, pgvector hybrid, generation gate 검증 완료 |
+| 8 | 온라인 MCP 조회 서비스 | 단계 2, 7 | HTTP MCP·source file·auth contract 검증 완료 |
+| 9 | Docker 운영·인증·관측 | 단계 4~8 | Compose/Keycloak/3-role image/관측성 개발 검증 완료 |
+| 10 | 통합 검증과 운영 release | 단계 3~9 | local 검증·CI workflow 구성 완료; remote CI run, registry push·host 설치는 인계 |
 
 단계 4의 수집기 개발과 단계 5의 OCR worker 기반 개발은 도메인·상태 계약이 확정된 뒤 일부 병행할 수 있다. 다만 대량 실행은 pilot 품질 gate 통과 이후에만 시작한다.
 
@@ -63,7 +66,8 @@
 - 온라인은 초기 동시 요청 5개로 시작하며 수치 latency SLO보다 결과 품질을 우선한다.
 - 최초 배포는 단일 Linux host의 Docker Compose로 하고 online MCP와 offline worker를 분리한다.
 - reverse proxy·TLS·Nginx Proxy Manager 연결은 개발 완료 후 별도 hosting 과제로 둔다. 이 Compose에는 proxy를 포함하지 않고 application은 container `0.0.0.0:8000`, host `127.0.0.1:8000`으로 노출한다.
-- PDF·OCR·generation은 외부 불변 file volume, durable state·catalog는 PostgreSQL을 사용한다. vector/lexical engine은 신한 BULK benchmark 후 정한다.
+- PDF·OCR·generation은 외부 불변 file volume, durable state·catalog는 PostgreSQL을 사용한다.
+  검색은 PostgreSQL FTS+pgvector HNSW 후보를 stable evidence ID로 RRF 결합한다.
 - vector 경로 장애 시 `allow_degraded=true` 요청만 lexical-only 결과를 `degraded`로 반환한다.
 - 일일 증분은 매일 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행하고 각 job 종료 후 10분 대기하며 issuer 장애를 격리한다.
 - v1 운영 관리면은 CLI와 scheduled job만 사용하며 public admin API와 web UI는 만들지 않는다.
@@ -72,12 +76,16 @@
 - query 원문은 저장하지 않고 접근·인증·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존한다.
 - OCR·구조 분석 provider/model 전환 시 부분 결과를 섞지 않고 전체 문서를 새 attempt로 처리한다.
 
-다음 기술값은 Codex가 구현 중 gold set, 신한 BULK pilot, 부하·장애 시험으로 결정하고 간단한 ADR에 근거를 남긴다. 이 목록은 개발 착수 차단사항이 아니다.
+다음 개발 기준은 gold set, 부하·장애 시험과 ADR-0001~0005로 확정했다. 실제 카드사·provider와
+전체 corpus가 필요한 수치만 운영 인계에서 보정한다.
 
-- BULK pilot 이후 목표 응답시간·QPS·가용성과 resource 한도
-- PostgreSQL schema·migration, 외부 file layout과 lexical/vector 검색 엔진
-- OCR·구조 분석·임베딩 모델 선정 절차와 비용 한도
-- OCR 문자·표·숫자·섹션 관계의 합격 기준
+- 동시 요청 5, request timeout 45초, 초기 검색 P95 30초와 Compose resource 개발 기본값;
+  실제 BULK 이후 QPS·가용성·host sizing 보정
+- PostgreSQL 17 schema·migration 1~13, content-addressed file layout와 FTS+pgvector/RRF
+- Codex `gpt-5.4`, 결정론적 구조 baseline, OpenRouter `text-embedding-3-small` 1,536차원;
+  실제 모델 비용·quota·품질 재측정
+- 문자 99.5%+, critical/page/source-span 100%, Recall@10 95%+, critical Recall/filter 100%,
+  MRR·nDCG@10 0.90+와 중대 오류 zero-tolerance
 
 공시자료의 이용 조건은 공개 운영 전 별도 확인할 외부 gate다. 승인 사용자 한정 개발·검증은 진행할 수 있으며, 확인 전 공개 범위를 확대하지 않는다.
 
@@ -204,14 +212,14 @@
 권장 구조는 canonical OCR을 변경하지 않는 다층 방식이다.
 
 1. 결정론적으로 heading, page, table, 문단과 line 범위를 보존한다.
-2. schema-guided LLM이 의미 section과 조건 관계 후보를 보강한다.
+2. schema-guided LLM 보강은 선택 경계로 두고 gold에서 rule baseline 개선을 입증할 때만 활성화한다.
 3. validator가 모든 구조화 값이 원문 근거와 연결되는지 검사한다.
 
 산출물:
 
 - versioned structured document
 - source span과 confidence를 가진 section/condition 관계
-- 규칙-only와 LLM-assisted 비교 평가
+- 규칙-only 개발 기준선 평가와 향후 LLM-assisted 비교용 동일 evaluator
 
 인수 기준:
 
@@ -368,7 +376,7 @@ P2:
 
 - 신한카드 외 지원 카드사 확대
 - 모델·검색 engine 교체 자동화
-- 비용 최적화와 보존정책 자동화
+- provider 비용 최적화
 - 품질 regression dashboard와 운영 자동화
 - backup·restore 설계와 복구 훈련
 

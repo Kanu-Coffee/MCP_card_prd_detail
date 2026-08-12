@@ -1,0 +1,90 @@
+groups:
+  - name: cardrag-worker
+    rules:
+      - alert: CardRAGQueueOlderThanDailyCycle
+        expr: max by (issuer, stage) (cardrag_job_queue_oldest_age_seconds{state=~"queued|retry_wait"}) > 90000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CardRAG queue work is older than one daily collection cycle"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragqueueolderthandailycycle"
+
+      - alert: CardRAGDeadLetterCreated
+        expr: sum by (issuer, stage) (increase(cardrag_jobs_total{outcome="dead_letter"}[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A CardRAG job entered the dead-letter state"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragdeadlettercreated"
+
+      - alert: CardRAGRetryBurst
+        expr: sum by (issuer, stage) (increase(cardrag_jobs_total{outcome="retry_wait"}[15m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CardRAG retry volume rose above the initial diagnostic threshold"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragretryburst"
+
+      - alert: CardRAGLeaseReclaimBurst
+        expr: increase(cardrag_jobs_total{outcome="lease_reclaimed"}[15m]) > 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CardRAG repeatedly reclaimed expired worker leases"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragleasereclaimburst"
+
+      - alert: CardRAGQueueEtaExceedsOneDay
+        expr: max by (issuer, stage) (cardrag_job_stage_eta_seconds) > 86400
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Observed CardRAG stage throughput predicts more than one day of queued work"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragqueueetaexceedsoneday"
+
+  - name: cardrag-mcp
+    rules:
+      - alert: CardRAGMCPServerErrorRatio
+        expr: |
+          sum(rate(cardrag_http_requests_total{route="/mcp",status_class="5xx"}[10m]))
+          /
+          clamp_min(sum(rate(cardrag_http_requests_total{route="/mcp"}[10m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than five percent of MCP HTTP requests are returning server errors"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragmcpservererrorratio"
+
+      - alert: CardRAGMCPDiagnosticLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(cardrag_http_request_duration_seconds_bucket{route="/mcp"}[15m]))
+          ) > 30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Observed MCP P95 latency exceeds the 30-second diagnostic threshold"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragmcpdiagnosticlatencyhigh"
+
+      - alert: CardRAGMCPNoResultRatioHigh
+        expr: |
+          sum(rate(cardrag_mcp_operations_total{operation="search_evidence",outcome="no_result"}[30m]))
+          /
+          clamp_min(sum(rate(cardrag_mcp_operations_total{operation="search_evidence"}[30m])), 0.001)
+          > 0.80
+          and
+          sum(increase(cardrag_mcp_operations_total{operation="search_evidence"}[30m])) >= 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 80 percent of a meaningful sample of MCP searches returned no evidence"
+          runbook: "deploy/monitoring/RUNBOOK.md#cardragmcpnoresultratiohigh"

@@ -1,0 +1,46 @@
+.git
+.github
+.codex
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# The legacy hatch, card documents, indexes, credentials, and mutable runtime
+# data must never become image layers.
+cardrag-conveyor-hatch-*
+artifacts
+backups
+build
+corpus
+data
+logs
+outputs
+quarantine
+state
+storage
+volumes
+secrets
+deploy/secrets
+*.pdf
+*.png
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.faiss
+*.index
+*.pem
+*.key
+credentials*.json
+oauth*.json
+
+# Development-only files are not needed by any runtime target.
+tests
+docs
+LEGACY_PROJECT_ANALYSIS.md

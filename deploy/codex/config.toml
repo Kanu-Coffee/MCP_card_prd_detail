@@ -1,0 +1,15 @@
+# Machine-owned policy for OCR subprocesses. The application selects this
+# profile explicitly; user state in CODEX_HOME supplies authentication only.
+default_permissions = "ocr"
+
+[permissions.ocr]
+description = "Read rendered OCR pages only; deny writes and all network access."
+
+[permissions.ocr.filesystem]
+":minimal" = "read"
+
+[permissions.ocr.filesystem.":workspace_roots"]
+"." = "read"
+
+[permissions.ocr.network]
+enabled = false

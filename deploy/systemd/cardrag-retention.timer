@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CardRAG owner-only retention daily at 04:00 Asia/Seoul
+Documentation=file:/opt/cardrag/deploy/systemd/README.md
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=5min
+RandomizedDelaySec=0
+Unit=cardrag-retention.service
+
+[Install]
+WantedBy=timers.target

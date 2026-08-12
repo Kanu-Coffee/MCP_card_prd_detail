@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CardRAG daily at 03:00 Asia/Seoul
+Documentation=file:/opt/cardrag/deploy/systemd/README.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=cardrag-daily.service
+
+[Install]
+WantedBy=timers.target

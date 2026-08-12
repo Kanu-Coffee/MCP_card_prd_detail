@@ -2,7 +2,13 @@
 
 ## 1. 문서 목적
 
-이 문서는 신규 CardRAG MCP 시스템을 구현할 때 각 구성요소가 책임져야 할 범위와 구성요소 사이의 인계 조건을 정의한다. 구체적인 API 스키마, 클래스 설계, 데이터베이스 DDL 및 구현 코드는 다루지 않는다.
+이 문서는 CardRAG MCP 각 구성요소가 책임지는 범위와 인계 조건을 정의한다. 구체 API·DDL은
+`src/cardrag/`와 migration을 권위로 두고, 구현 상태와 증거는
+[완료 체크리스트](08_COMPLETION_CHECKLIST.md)를 권위로 둔다.
+
+이 문서의 빈 체크박스는 설계 당시 작성한 **반복 가능한 인수 검토 양식**이며 현재 미완료
+표시가 아니다. 개발환경 완료, 실환경 대기와 범위 제외의 실제 판정은 완료 체크리스트에서만
+관리한다.
 
 기준은 다음과 같다.
 
@@ -38,7 +44,8 @@
 
 ### 2.3 공통 작업 상태
 
-각 단계는 최소한 다음 의미를 구분해야 한다. 실제 상태명과 저장 형식은 구현 시 결정하되 의미를 축소해서는 안 된다.
+각 단계는 최소한 다음 의미를 구분한다. v1의 실제 상태명과 저장 형식은 `src/cardrag/jobs.py`와
+PostgreSQL migration을 권위로 두며 아래 의미를 축소해서는 안 된다.
 
 | 상태 | 의미 | 다음 처리 |
 |---|---|---|
@@ -57,7 +64,9 @@
 
 - 네트워크 timeout, 일시적인 외부 서비스 제한, 호스트 자원 부족은 재시도 가능 실패로 분류한다.
 - HTML 오인식, PDF가 아닌 응답, 암호화·손상 PDF, 페이지 누락, 스키마 위반은 원인별로 구분한다.
-- 재시도 예산과 backoff는 구성요소 및 오류 분류별로 설정한다. 구체 횟수와 시간은 Codex가 오류 주입·장기 실행 시험으로 결정한다.
+- 재시도 예산과 backoff는 구성요소 및 오류 분류별로 설정한다. v1은 job 최대 5회,
+  exponential backoff+jitter, worker lease 120초, issuer HTTP timeout 30초, OCR timeout 600초의
+  구성 가능한 개발 기본값을 사용하며 실제 provider·장기 실행 결과로 보정한다.
 - 입력 내용 해시와 처리 정책 버전이 같으면 검증 완료 산출물을 재사용한다.
 - 처리 정책, 구조 스키마 또는 임베딩 모델이 바뀌면 영향받는 파생 단계부터 다시 처리한다. 원본 PDF를 다시 수집하거나 OCR을 불필요하게 반복하지 않는다.
 - 실패 산출물과 진단 로그는 성공 산출물과 구분하고, 디렉터리 존재만으로 성공 처리하지 않는다.
@@ -294,7 +303,8 @@ LLM 출력은 원문 대체물이 아니다. LLM이 제시한 정규화 문구�
 - 너무 긴 단위는 의미 경계를 따라 나누고, 인접 맥락과 원문 위치를 보존한다.
 - 안정적인 evidence 식별자는 카드사, 문서 버전과 원문 범위에 기반하며 검색 순위에 의존하지 않는다.
 - 모든 단위에 카드사, 상품코드, 상품명, 문서 버전, 기준일, section, 페이지·원문 범위와 내용 해시를 연결한다.
-- 기본 검색은 최신본만 대상으로 하고 과거 version·기준일 조회는 명시적 요청으로 분리한다. 이를 단일 색인의 filter로 구현할지 별도 색인으로 구현할지는 benchmark 후 결정한다.
+- 기본 검색은 최신본만 대상으로 하고 과거 version·기준일 조회는 명시적 요청으로 분리한다.
+  v1은 같은 generation의 두 후보 SQL에 latest/version/as-of filter를 적용해 이력을 보존한다.
 
 ### 6.4 출력
 
@@ -306,7 +316,10 @@ LLM 출력은 원문 대체물이 아니다. LLM이 제시한 정규화 문구�
 - 온라인 서비스가 읽을 수 있는 immutable 검색 generation
 - 현재 generation을 가리키는 원자적 게시 정보와 이전 generation rollback 정보
 
-검색 구현 방식과 저장 기술은 Codex가 신한 BULK benchmark로 결정한다. 레거시처럼 모든 4,096차원 BLOB을 요청마다 Python에서 전수 순회하는 방식은 온라인 기본 경로로 채택하지 않는다. ANN 또는 동등한 bounded 검색 방식의 정확도와 운영 복잡도를 비교해야 한다.
+v1 검색은 PostgreSQL FTS+pgvector HNSW 후보를 stable evidence ID로 RRF 결합하며 1,536차원
+embedding과 bounded 후보 수를 사용한다. 레거시처럼 모든 4,096차원 BLOB을 요청마다 Python에서
+전수 순회하지 않는다. 실제 신한·전체 corpus에서는 같은 구현의 품질·지연·resource를 재측정해
+후보 한도와 운영 자원만 보정한다.
 
 ### 6.5 상태, 실패와 재처리
 
@@ -350,7 +363,12 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 페이지 단위 OCR·원문 근거 조회
 - 사용자가 명시적으로 요청한 정확한 문서 버전의 보존 원본 PDF 파일 제공
 
-구체적인 tool/resource 이름, 인자와 응답 schema는 구현 단계에서 결정한다. MCP 서비스는 카드사 사이트 PDF 수집, OCR, 임베딩 build, DB 재구축, 임의 URL 다운로드, Codex privileged 실행 또는 이메일 발송을 동기식 요청으로 수행하지 않는다. 원본 PDF 제공은 이미 보존되어 게시 승인된 전체 파일의 읽기 전용 streaming이며 신규 수집 기능이 아니다. 페이지 조회 PNG는 원본 PDF에서 요청 시 렌더링해 7일 cache하고 분할 PDF는 생성하지 않는다.
+v1은 `search_evidence`, `get_evidence`, `get_product_versions`, `get_source_page`,
+`get_source_pdf` tool과 catalog/document/evidence/OCR resource를 versioned schema로 제공한다. MCP
+서비스는 카드사 사이트 PDF 수집, OCR, 임베딩 build, DB 재구축, 임의 URL 다운로드, Codex
+privileged 실행 또는 이메일 발송을 동기식 요청으로 수행하지 않는다. 원본 PDF 제공은 이미
+보존되어 게시 승인된 전체 파일의 읽기 전용 streaming이며 신규 수집 기능이 아니다. 페이지 조회
+PNG는 원본 PDF에서 요청 시 렌더링해 7일 cache하고 분할 PDF는 생성하지 않는다.
 
 ### 7.2 입력
 
@@ -417,7 +435,8 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - [ ] 페이지 PNG가 원본 PDF exact version에서 생성되고 7일 후 cache에서 제거되며 generation에는 영구 저장되지 않는다.
 - [ ] access token 만료 전 자동 refresh, refresh token rotation, 90일 비활성 만료와 revoke·재인증 흐름이 통합 시험에서 확인된다.
 - [ ] vector 장애 시 `allow_degraded` 유무에 따른 lexical-only 또는 실패 동작과 상태 표시가 검증된다.
-- [ ] 초기 동시 요청 5개에서 품질 손실 없이 bounded 응답한다. 목표 latency, 처리량과 가용성 수치는 BULK pilot 후 결정한다.
+- [ ] 초기 동시 요청 5개에서 품질 손실 없이 45초 안에 bounded 응답한다. 개발 검색 P95
+  30초 기준은 실제 corpus·provider pilot 뒤 재조정한다.
 
 ## 8. 구성요소 인계 기준
 
@@ -431,18 +450,19 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 
 선행 단계가 `검증 완료`가 아니면 후행 단계의 정상 corpus에 포함하지 않는다. 예외적으로 검토용 환경에서 불완전 데이터를 사용할 경우 운영 generation과 물리·논리적으로 분리하고 결과에 그 상태를 표시한다.
 
-## 9. 구현 중 Codex가 결정·검증할 항목
+## 9. 개발 중 결정·검증한 항목
 
-아래 기술값은 개발 시작 차단사항이 아니다. Codex가 gold set, 신한 BULK pilot과 부하·장애 시험에 따라 선택하고 ADR과 체크리스트에 증거를 남긴다.
+기술 선택은 `docs/adr/`와 자동 검증 보고서로 확정했다. 실제 provider·전체 corpus에서만 측정할
+수치는 운영 인계 후 보정한다.
 
 | 항목 | 상태 |
 |---|---|
 | 일일 issuer 순서 | `결정 완료` — 03:00 KST, 우리카드 → KB국민카드 → 신한카드, 각 job 종료 후 10분 대기와 장애 격리 |
-| 단계별 retry 예산, timeout과 backoff | `구현 중 Codex 결정` |
+| 단계별 retry 예산, timeout과 backoff | `결정 완료` — stage별 유한 budget, exponential+jitter, 45초 온라인 timeout |
 | 렌더 이미지와 generation 보존 | `결정 완료` — PNG cache 7일, 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin은 unpin 전까지 |
-| 구조 taxonomy와 schema의 최초 승인 버전 | `구현 중 Codex 결정` |
-| 구조 분석에 LLM을 적용할 문서·필드 범위 | `구현 중 Codex 결정` |
-| chunk 크기, overlap과 표·각주 연결 정책 | `구현 중 Codex 결정` |
-| vector index 기술과 hybrid ranking 값 | `구현 중 Codex 결정` — hybrid와 공통 evidence key 결합은 확정 |
+| 구조 taxonomy와 schema의 최초 승인 버전 | `결정 완료` — versioned deterministic taxonomy와 exact source spans |
+| 구조 분석에 LLM을 적용할 문서·필드 범위 | `결정 완료` — v1 기본 off, gold에서 rule baseline 개선 시에만 활성화 |
+| chunk 크기, overlap과 표·각주 연결 정책 | `결정 완료` — token bound, 관계 문맥, ordered multi-span citation |
+| vector index 기술과 hybrid ranking 값 | `결정 완료` — PostgreSQL FTS+pgvector HNSW, stable evidence RRF |
 | OAuth authorization server | `결정 완료` — 같은 Compose의 Keycloak `cardrag` realm, 별도 DB/user, 수동 client 등록, PKCE/Client Credentials, Docker secret admin bootstrap |
-| BULK pilot 이후 목표 latency, QPS, 가용성과 갱신 완료 시각 | `pilot 후 Codex 결정` — 품질 우선·초기 동시 요청 5개는 확정 |
+| 목표 latency, QPS, 가용성과 갱신 완료 시각 | `개발 기준선 완료` — 동시 5, timeout 45초, 검색 P95 30초; 실 corpus 후 보정 |

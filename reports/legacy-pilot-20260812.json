@@ -1,0 +1,22 @@
+{
+  "schema_version": "cardrag-legacy-pilot-evidence.v1",
+  "executed_at": "2026-08-12T03:31:00Z",
+  "source": "cardrag-conveyor-hatch-20260712T091451_KST/data-kit/cardrag-conveyor-data",
+  "manifest": "artifacts/manifests/cardrag_master_manifest.json",
+  "mode": "read-only source with disposable target copy",
+  "selection": "first 5 manifest entries",
+  "inventory_sha256": "86fbcb3fc123bd8e267b01b70cc9410e1e5e26ac1464c9101e72f0b57197d5dc",
+  "selected_documents": 5,
+  "migrated_documents": 5,
+  "unique_pdf_objects": 5,
+  "unique_ocr_objects": 5,
+  "raw_path_missing_resolved_by_hash": 5,
+  "metadata_ocr_hash_verified": 5,
+  "master_ocr_chars_drift": 0,
+  "quarantined": 0,
+  "source_writes": 0,
+  "historical_embeddings_imported": 0,
+  "result": "passed",
+  "reproduce": "cardrag legacy pilot --source <read-only-legacy-data-root> --manifest <read-only-legacy-data-root>/artifacts/manifests/cardrag_master_manifest.json --limit 5 --no-dry-run",
+  "rollback": "cardrag legacy rollback --pilot-root <reported-pilot-root>"
+}

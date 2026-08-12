@@ -4,7 +4,10 @@
 
 이 문서는 PDF 수집 이후 OCR, 구조 분석, 임베딩·검색과 MCP 근거 제공 과정에서 정보 손실과 환각을 방지하기 위한 정책을 정의한다. 모델의 편의나 처리 완료율보다 카드상품 조건을 원문 그대로 보존하고 검증 가능하게 만드는 것을 우선한다.
 
-이 문서에서 정한 것은 구현 완료 상태가 아니다. 모델명, 수치 threshold와 평가 표본 크기처럼 실측이 필요한 기술값은 Codex가 개발 중 gold set과 benchmark로 결정하고 ADR에 근거를 남긴다.
+개발환경 모델 정책과 수치 gate는 [ADR-0003](adr/0003-models-structure-and-quality-gates.md),
+합성 gold set과 `reports/quality/fixture-gate.json`으로 확정했다. 이 결과는 외부 모델이나 실제
+카드사 layout의 품질을 주장하지 않으며, 실제 provider·전체 corpus 측정은
+[운영 인계](REAL_ENV_HANDOFF.md) 후 같은 evaluator로 다시 수행한다.
 
 ## 2. 품질 목표와 신뢰 원칙
 
@@ -50,7 +53,9 @@
 4. 게시 예정 generation의 문서 임베딩
 5. 회귀 평가, 후보 모델 비교와 비운영 실험
 
-온라인 MCP query embedding은 사용자 요청 지연에 직접 영향을 주므로 오프라인 큐와 별도의 quota·동시성 경계를 가져야 한다. 온라인과 오프라인의 구체 quota 및 우선순위 수치는 Codex가 BULK·부하 시험으로 결정한다.
+온라인 MCP query embedding은 사용자 요청 지연에 직접 영향을 주므로 오프라인 큐와 별도의
+동시성·timeout 경계를 사용한다. 개발 기준은 전체 MCP 동시 5와 request timeout 45초이며,
+온라인/오프라인 provider quota·비용·우선순위는 실제 계정과 BULK pilot에서 보정한다.
 
 ### 3.3 페일오버 원칙
 
@@ -59,8 +64,10 @@
 - 이미 일부 페이지가 Codex로 성공했더라도 OpenRouter 또는 다른 model로 전환해야 하면 전체 문서를 새 attempt로 다시 처리한다. 서로 다른 provider·model의 결과를 한 문서에 혼합하지 않는다.
 - 페일오버 결과는 primary와 동일한 OCR·구조 schema 및 품질 검사를 통과해야 한다. 제공자 전환 자체를 성공으로 간주하지 않는다.
 - OpenRouter 임베딩에서 현재 모델을 사용할 수 없다고 다른 모델로 자동 변경하지 않는다. 작업을 보류하거나 승인된 새 generation을 전체 재임베딩한다.
-- 동일 모델을 여러 OpenRouter provider가 제공할 때 provider pinning과 호환 provider 간 전환 정책은 Codex가 실제 가용성 시험으로 정한다. 전환 시에도 출력 차원과 회귀 품질을 검증한다.
-- circuit breaker, 재시도 횟수, timeout 및 backoff 수치는 Codex가 오류 주입·부하 시험으로 정한다.
+- OpenRouter model ID는 generation에 고정하고 자동 모델 혼합을 금지한다. provider route가 바뀌어도
+  출력 차원과 회귀 품질을 검증하며 실제 route pinning 필요성은 운영 가용성 시험에서 보정한다.
+- embedding은 timeout 60초, 최대 4회 재시도 뒤 30초 circuit-open의 구성 가능한 개발 기본값을
+  사용한다. OCR/job 예산은 별도 stage 설정을 따르고 실제 quota·장기 실행에서 보정한다.
 
 ### 3.4 호출 provenance
 
@@ -85,11 +92,11 @@
 
 | 역할 | 모델 | 상태 |
 |---|---|---|
-| Codex OCR primary | `구현 중 Codex 결정` | 한글 문서·표·이미지 충실도 평가 후 선정 |
-| OpenRouter OCR fallback | `구현 중 Codex 결정` | 일일 증분 fallback 전용 후보 평가 |
-| Codex 구조 분석 primary | `구현 중 Codex 결정` | schema 준수와 근거 범위 연결 평가 |
-| OpenRouter 구조 분석 fallback | `구현 중 Codex 결정` | primary와의 회귀·편차 평가 |
-| OpenRouter embedding | `구현 중 Codex 결정` | 검색 benchmark와 운영 안정성 평가 |
+| Codex OCR primary | `gpt-5.4` | Codex 0.147, high reasoning, BULK 단일 backend |
+| OpenRouter OCR fallback | `google/gemini-2.5-pro` | daily 문서 단위 fallback 후보; 실제 품질은 실환경 gate |
+| 구조 분석 baseline | 결정론적 rule v1 | 기본 게시 경로, exact source-span validator 적용 |
+| schema-guided LLM 보강 | 기본 off | gold에서 baseline 개선을 입증한 필드만 향후 활성화 |
+| OpenRouter embedding | `openai/text-embedding-3-small` | 1,536차원, versioned query/document input policy |
 
 레거시의 `qwen/qwen3-embedding-8b`, 4,096차원 데이터는 재사용 가능성을 평가할 기존 자산이지 신규 기본 모델 확정 근거가 아니다.
 
@@ -144,7 +151,9 @@ OCR은 다음 요소를 정보 단위로 보존한다.
 - 혜택 조건과 제외조건의 순서를 바꾸거나 긍정문으로 변환하기
 - 단위를 임의 환산하거나 금액·비율 형식을 정규화하기
 
-불명확한 문자는 불확실 상태와 페이지 위치를 표시한다. 후속 구조 분석기가 추측으로 확정하지 못하도록 machine-readable한 품질 상태를 함께 전달해야 한다. 구체 표기법은 Codex가 schema와 round-trip 시험으로 결정한다.
+불명확한 문자는 불확실 상태와 페이지 위치를 표시한다. 후속 구조 분석기가 추측으로 확정하지
+못하도록 warning·validation status와 source span으로 machine-readable 상태를 전달한다. 새로운
+실문서 판독불가 유형은 schema version과 round-trip 회귀를 함께 추가한다.
 
 ### 5.3 표 보존
 
@@ -201,7 +210,9 @@ LLM은 제한된 schema 안에서 다음만 보강한다.
 - 동일 사실에 대한 모순된 분류
 - 핵심 section과 제외조건 후보의 비정상적 급감
 
-taxonomy와 schema, 자동 confidence threshold는 Codex가 gold set 회귀 결과로 결정한다.
+v1 taxonomy와 `structured-document.v1` schema, source-span validator는 합성 gold 회귀로 확정했다.
+confidence만으로 게시하지 않으며 live layout에서 새 유형이 발견되면 schema와 threshold를 새
+version으로 보정한다.
 
 ## 7. 임베딩 및 검색 품질 정책
 
@@ -216,7 +227,9 @@ taxonomy와 schema, 자동 confidence threshold는 Codex가 gold set 회귀 결�
 - batch 처리량과 online query latency
 - 버전 고정, 사용 중단 통보와 재현 가능성
 
-모델 선정은 공개 benchmark가 아니라 이 프로젝트의 gold query로 수행한다. 후보 모델, 최종 모델, 차원 및 입력 prefix 정책은 Codex가 프로젝트 benchmark로 결정한다.
+모델 선정은 공개 benchmark가 아니라 이 프로젝트의 gold query로 수행한다. v1은 OpenRouter
+`openai/text-embedding-3-small`, 1,536차원과 `embedding-input.v1`의 versioned document/query
+prefix로 확정했으며 실제 provider 품질·비용은 같은 evaluator로 재측정한다.
 
 ### 7.2 임베딩 입력 품질
 
@@ -250,7 +263,9 @@ taxonomy와 schema, 자동 confidence threshold는 Codex가 gold set 회귀 결�
 - 이전 generation 대비 회귀율
 - lexical-only, vector-only와 hybrid의 실제 비교
 
-사용할 지표에는 Recall@K, MRR, nDCG@K 및 filter 정확도를 포함한다. K 값, 합격 threshold와 지표별 가중치는 Codex가 실제 사용 질의와 baseline으로 결정한다.
+사용 지표는 Recall@10, critical Recall@10, MRR, nDCG@10과 filter 정확도다. 개발 합격선은 각각
+95%, 100%, 0.90, 0.90, 100%이며 중대 issuer collision은 0건이어야 한다. live 질의와 전체
+corpus에서도 같은 evaluator로 재측정하고 threshold 변경은 새 ADR로 남긴다.
 
 hybrid 검색은 lexical chunk ID와 structured ID를 그대로 섞지 않고 공통 evidence ID로 결합한다. 가중치는 실제 gold query 평가로 정하며 레거시 값을 승계하지 않는다.
 
@@ -299,7 +314,9 @@ generation별로 다음 수치를 이전 세대와 비교한다.
 - 색인 가능한 evidence 수
 - 검색 gold query 통과율
 
-급격한 감소나 비정상 증가는 자동 성공으로 간주하지 않고 원인 확인 대상으로 둔다. 경보 기준은 Codex가 corpus baseline 분석 후 결정한다.
+급격한 감소나 비정상 증가는 자동 성공으로 간주하지 않고 이전 성공 snapshot 대비 ratio와
+설정된 절대 한도를 함께 적용해 검토 대상으로 둔다. 개발 기본값은 자동시험으로 고정하고 실제
+issuer별 정상 변동폭은 live corpus baseline으로 보정한다.
 
 ## 9. Gold sample과 평가 데이터
 
@@ -318,7 +335,9 @@ gold sample은 단순 무작위 문서만으로 만들지 않고 다음을 층�
 - 같은 상품코드 또는 유사 상품명이 충돌할 수 있는 사례
 - OCR 또는 구조 분석이 과거에 실패했던 문서
 
-초기 문서 수, 카드사별 최소 수, 페이지 수와 운영 중 추가 표본 비율은 Codex가 레이아웃·위험조건 coverage 분석으로 결정한다.
+개발 합성 gold는 세 issuer의 4개 문서와 6개 retrieval query로 current/history, 표·각주·제외·숫자
+위험조건을 검증한다. 이는 live layout 대표성을 주장하지 않으며 운영 pilot에서 issuer·레이아웃별
+표본과 회귀 질의를 확대한다.
 
 ### 9.2 gold 정답 범위
 
@@ -380,7 +399,10 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 - 버전 간 변경된 숫자와 조건의 diff 검토
 - 고위험 문서와 자동 검사 실패 항목의 사람 검토
 
-문자 정확도, 숫자 token 정확도, critical condition recall과 수동 검토 비율의 threshold는 Codex가 baseline으로 결정한다. 다만 발견된 중대한 숫자 변경, 부정 표현 반전 또는 제외조건 누락은 평균 점수로 상쇄하지 않고 해당 generation의 차단 사유로 취급한다.
+개발 threshold는 문자 정확도 99.5% 이상, page coverage/order와 숫자·단위·경계·부정·제외 critical
+token recall 100%, 중대 오류 0건이다. 실제 모델·layout에서도 같은 gate를 적용하고 수동 검토
+표본 비율만 위험도에 맞춰 보정한다. 발견된 중대한 숫자 변경, 부정 표현 반전 또는 제외조건 누락은
+평균 점수로 상쇄하지 않고 해당 generation의 차단 사유로 취급한다.
 
 ## 11. Acceptance gate
 
@@ -398,7 +420,8 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 
 - PDF 모든 페이지가 OCR 페이지 또는 명시적 실패 상태와 대사된다.
 - OCR 내용 해시·문자 수와 provenance가 실제 파일과 일치한다.
-- gold sample의 전체 문자, 숫자 token, 표 관계와 critical condition 지표가 Codex가 baseline으로 정한 threshold를 충족한다.
+- gold sample의 전체 문자, 숫자 token, 표 관계와 critical condition 지표가 이 문서의 v1
+  threshold를 충족한다.
 - 탐지된 제외조건 누락, 숫자 변경 또는 부정 표현 반전이 해결되었다.
 - 초기 대량 OCR은 Codex-only 정책 준수 여부가 확인된다.
 
@@ -407,14 +430,15 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 - 모든 사실·관계와 인용이 유효한 OCR 범위를 참조한다.
 - 원문에 없는 LLM 사실과 schema 위반이 없다.
 - 규칙과 LLM 충돌이 해결되거나 운영 corpus에서 격리되었다.
-- 표·각주·혜택·실적·제외 관계의 gold 지표가 Codex가 baseline으로 정한 threshold를 충족한다.
+- 표·각주·혜택·실적·제외 관계의 gold 지표가 이 문서의 v1 threshold를 충족한다.
 
 ### 11.4 Gate D: 임베딩·색인
 
 - 최신 문서 content hash의 임베딩·색인 coverage가 100%다. 과거 이력 실패는 quarantine·품질 보고서에 명시하며 stale row로 coverage를 채우지 않는다.
 - 모델·차원·입력 정책이 generation 안에서 일관되고 stale vector가 없다.
-- gold query의 Recall@K, MRR, nDCG@K와 filter 정확도가 Codex가 baseline으로 정한 threshold를 충족한다.
-- 목표 corpus 규모와 초기 동시 요청 5개에서 검색 품질을 유지하고 bounded timeout·cancellation이 동작한다. 수치 latency, 메모리와 I/O 기준은 BULK pilot 후 결정한다.
+- gold query의 Recall@10, MRR, nDCG@10과 filter 정확도가 이 문서의 v1 threshold를 충족한다.
+- 초기 동시 요청 5개에서 검색 품질을 유지하고 45초 bounded timeout·cancellation이 동작한다.
+  개발 검색 P95 경고 기준은 30초이며 실제 corpus의 메모리·I/O 결과로 후속 ADR에서 보정한다.
 - 새 generation 검증 실패 시 기존 generation 유지 및 rollback이 확인된다.
 
 ### 11.5 Gate E: MCP 근거 제공
@@ -430,7 +454,8 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 
 ### 11.6 gate 판정
 
-gate 결과는 `통과`, `조건부 통과`, `실패`로 기록할 수 있다. 조건부 통과의 허용 범위는 Codex가 위험도와 회귀 영향으로 정하고 근거를 남긴다. 다음 항목은 조건부 통과로 숨기지 않는다.
+v1 자동 gate 결과는 `통과` 또는 `실패`로만 기록하고 fail closed한다. 아래 항목은 수동 승인으로
+자동 실패를 우회할 수 없으며 수정·재처리 또는 명시적 quarantine이 필요하다.
 
 - 원본과 다른 중대한 숫자
 - 제외조건 또는 부정 표현 누락
@@ -451,7 +476,8 @@ gate 결과는 `통과`, `조건부 통과`, `실패`로 기록할 수 있다. �
 
 ## 13. 외부 제공자와 데이터 취급
 
-Codex와 OpenRouter 호출은 카드상품 원문, 페이지 이미지, OCR text 또는 검색 질의를 외부 서비스에 전달할 수 있다. 구현 전에 다음을 확인한다.
+Codex와 OpenRouter 호출은 카드상품 원문, 페이지 이미지, OCR text 또는 검색 질의를 외부 서비스에
+전달할 수 있다. 실제 provider 호출과 공개 운영 전에 다음을 확인한다.
 
 - 카드사 공시 자료의 수집·처리·재전송 허용 범위
 - 제공자별 데이터 보존, 학습 사용과 지역 정책
@@ -462,21 +488,22 @@ Codex와 OpenRouter 호출은 카드상품 원문, 페이지 이미지, OCR text
 
 법적 사용 범위와 외부 공개 승인 담당자는 공개 운영 전 확인하는 외부 gate다. generation 보존은 성공 최근 3개·실패 candidate 7일·수동 pin은 unpin 전까지로 확정했고, redaction 세부 규칙은 Codex가 보안 시험으로 정한다. 비밀정보는 prompt, metadata, Git, Docker 이미지 또는 corpus volume에 포함하지 않는다.
 
-## 14. 구현 중 Codex 결정과 외부 gate
+## 14. 개발 중 결정 결과와 외부 gate
 
-아래 기술값은 개발 착수 차단사항이 아니다. Codex가 gold set·신한 BULK pilot·부하 및 장애 시험으로 최적안을 선택하고 ADR, test report와 체크리스트에 근거를 남긴다.
+합성 gold와 자동 장애 시험으로 개발 기준을 확정했다. 실제 모델 품질·비용·quota 및 live layout은
+동일 evaluator를 사용하는 실환경 gate다.
 
 | 항목 | 상태 | 필요한 근거 |
 |---|---|---|
-| 역할별 실제 모델명과 고정 방식 | `구현 중 Codex 결정` | gold sample 비교, 가용성 및 provenance 확인 |
+| 역할별 실제 모델명과 고정 방식 | `결정 완료` | Codex `gpt-5.4`, OpenRouter fallback 후보 `google/gemini-2.5-pro`, 실제 argv provenance |
 | OCR·구조 분석 retry와 fallback 단위 | `결정 완료` | provider/model 전환 시 전체 문서를 새 attempt로 실행하고 혼합 금지 |
-| OpenRouter provider pinning·failover | `구현 중 Codex 결정` | 동일 모델 출력 호환성과 운영 안정성 |
-| gold sample 문서·페이지·질의 규모 | `구현 중 Codex 결정` | 카드사·레이아웃·고위험 조건 coverage |
-| OCR 문자·숫자·표·critical condition threshold | `구현 중 Codex 결정` | baseline 측정과 중대 오류 zero-tolerance 원칙 |
-| 구조 taxonomy, confidence와 검토 threshold | `구현 중 Codex 결정` | 도메인 검수 결과 |
-| 임베딩 모델, 차원과 입력 prefix | `구현 중 Codex 결정` | 프로젝트 gold retrieval benchmark |
-| Recall@K, MRR, nDCG@K와 filter 합격선 | `구현 중 Codex 결정` | 실제 사용 질의와 품질 우선 원칙 |
-| lexical-only degraded 품질·latency 합격선 | `구현 중 Codex 결정` | opt-in 정책은 확정, gold query로 허용 가능한 결과 범위 측정 |
-| 조건부 gate 승인 범위와 승인자 | `구현 중 Codex 결정` | 운영·품질 책임 분리; 중대 오류는 조건부 통과 금지 |
+| OpenRouter provider pinning·failover | `결정 완료` | model 자동 혼합 금지, retry/circuit, 문서 단위 전체 재처리 |
+| gold sample 문서·페이지·질의 규모 | `개발 기준 완료` | 세 issuer 4개 gold OCR 문서·6개 retrieval query; live 대표성은 외부 gate |
+| OCR 문자·숫자·표·critical condition threshold | `결정 완료` | 문자 99.5%+, page/critical 100%, 중대 오류 0 |
+| 구조 taxonomy, confidence와 검토 threshold | `결정 완료` | source span 100%, taxonomy 95%+, 중대 오류 0 |
+| 임베딩 모델, 차원과 입력 prefix | `결정 완료` | `text-embedding-3-small`, 1,536차원, versioned prefix |
+| Recall@K, MRR, nDCG@K와 filter 합격선 | `결정 완료` | Recall@10 95%+, critical 100%, MRR/nDCG 0.90+, filter 100% |
+| lexical-only degraded 품질·latency 합격선 | `결정 완료` | caller opt-in과 명시 상태; 정상 hybrid로 가장 금지 |
+| 조건부 gate 승인 범위와 승인자 | `결정 완료` | 중대 오류·latest coverage 미달은 조건부 통과 금지 |
 | generation·품질 보고서 보존 | `결정 완료` | 성공 최근 3개, 실패 candidate 7일, 수동 pin은 unpin 전까지 |
 | 외부 제공자 데이터 취급·보존 정책 | `외부 gate` | 약관·보안·법무 검토; 공개 운영 전 확인 |

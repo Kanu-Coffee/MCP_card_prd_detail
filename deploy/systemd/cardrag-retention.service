@@ -1,0 +1,16 @@
+[Unit]
+Description=Prune CardRAG generation, audit and metric retention with the owner role
+Documentation=file:/opt/cardrag/deploy/systemd/README.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=cardrag
+Group=docker
+WorkingDirectory=/opt/cardrag
+EnvironmentFile=-/etc/cardrag/cardrag.env
+ExecStart=/usr/bin/docker compose --profile ops run --rm --no-deps admin cardrag retention prune
+TimeoutStartSec=30min
+TimeoutStopSec=180
+UMask=0077
