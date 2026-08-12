@@ -37,3 +37,10 @@ hand-off with `docker compose up -d mcp`; it is published only at
 `127.0.0.1:8000`.  Do not put credentials or corpus files in the image or Git.
 The remaining real-account and host checks are in
 [`docs/REAL_ENV_HANDOFF.md`](docs/REAL_ENV_HANDOFF.md).
+
+## Docker Hub operational test
+
+Published role images are consumed through
+[`deploy/dockerhub.compose.yaml`](deploy/dockerhub.compose.yaml). The pull,
+digest-pinning, bootstrap, MCP, and worker commands are documented in
+[`docs/DOCKERHUB_OPERATIONAL_TEST.md`](docs/DOCKERHUB_OPERATIONAL_TEST.md).

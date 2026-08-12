@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import fitz
 import httpx
 import pytest
 
@@ -17,18 +16,18 @@ from cardrag.acquisition.download import (
 )
 from cardrag.domain import Issuer
 from cardrag.issuers.base import SourceRecord
+from tests.support_pdf import synthetic_text_pdf_bytes, write_encrypted_pdf
 
 
 @pytest.fixture
 def tiny_pdf_bytes() -> bytes:
     """Create a one-page, project-authored PDF without external fixture content."""
 
-    document = fitz.open()
-    page = document.new_page(width=240, height=160)
-    page.insert_text((24, 48), "CardRAG synthetic fixture 2026")
-    payload = document.tobytes(deflate=True, garbage=4)
-    document.close()
-    return payload
+    return synthetic_text_pdf_bytes(
+        ["CardRAG synthetic fixture 2026"],
+        width=240,
+        height=160,
+    )
 
 
 def _source(url: str = "https://issuer.test/fixture.pdf") -> SourceRecord:
@@ -220,10 +219,7 @@ async def test_existing_different_immutable_destination_is_not_replaced(
     tmp_path: Path,
     tiny_pdf_bytes: bytes,
 ) -> None:
-    existing_document = fitz.open()
-    existing_document.new_page()
-    existing = existing_document.tobytes()
-    existing_document.close()
+    existing = synthetic_text_pdf_bytes(["different immutable fixture"])
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=tiny_pdf_bytes)
@@ -319,15 +315,7 @@ def test_encrypted_pdf_is_rejected(tmp_path: Path) -> None:
     from cardrag.acquisition.download import validate_pdf
 
     path = tmp_path / "encrypted.pdf"
-    document = fitz.open()
-    document.new_page()
-    document.save(
-        path,
-        encryption=fitz.PDF_ENCRYPT_AES_256,
-        owner_pw="synthetic-owner",
-        user_pw="synthetic-user",
-    )
-    document.close()
+    write_encrypted_pdf(path)
 
     with pytest.raises(PDFValidationError, match="encrypted"):
         validate_pdf(path)

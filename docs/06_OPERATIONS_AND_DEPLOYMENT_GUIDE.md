@@ -8,7 +8,7 @@
 - 현재 상태: 구현·검증된 v1 운영 계약과 실환경 인계 기준
 - 구현 상태: scheduler/worker/MCP, PostgreSQL·Keycloak, 관측성, Docker Compose와 `linux/amd64` 3-role image를 개발 환경에서 구현·검증했다.
 - 수행하지 않은 작업: 실제 카드사·Codex/OpenRouter 계정 호출, 전체 9.51 GiB 장시간 BULK, 운영 host 설치, public image push와 Nginx Proxy Manager 연결
-- 외부 상태: public `ymtop59/mcp-card-prd-detail` repository는 생성했지만, 정책대로 `vX.Y.Z` tag와 manual approval 전에는 image를 push하지 않았다.
+- 외부 상태: public `ymtop59/mcp-card-prd-detail` repository는 생성했지만, 정책대로 `vX.Y.Z` tag 대상 수동 workflow와 exact confirmation 전에는 image를 push하지 않았다.
 
 문서의 container, image, volume, metric과 상태 필드는 신규 `src/cardrag`, `compose.yaml`, `Dockerfile`, `deploy/`와 자동시험의 구현 계약이다. 레거시에는 해당 기능이 없으며 계속 read-only로 유지한다. 실계정·운영 host가 필요한 검증 결과를 개발 검증과 혼동하지 않는다.
 
@@ -366,11 +366,12 @@ PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·cata
 - init/reaping, health check, timezone과 clock sync를 명시한다.
 - Git, source PDF/OCR, build cache, local env, OAuth/token 파일은 build context에서 제외한다.
 - image 취약점 scan과 dependency license 검토를 release gate에 포함한다. locked runtime
-  inventory는 CI에서 생성하고, Proprietary project/image와 PyMuPDF의
-  AGPL-3.0/commercial dual-license 조합은 자동 승인하지 않는다. 현재 Proprietary 공개 image의
-  release gate는 Artifex commercial license 증빙을 확인한 뒤에만 protected environment secret의
-  exact attestation을 통과한다. AGPL을 선택하려면 먼저 project/image license, notice와
-  corresponding-source 공개 경로를 별도 구현·검증한 reviewed commit에서 policy와 gate를 바꾼다.
+  inventory는 CI에서 생성한다. PDF 렌더러는 permissive license의 `pypdfium2 5.12.1`과
+  PDFium으로 고정하며, 선택한 Linux x86-64 wheel에 포함된 license payload 전체를
+  `/usr/share/licenses/cardrag/pypdfium2`에 보존한다. policy가 고정한 wheel hash, license
+  metadata, 고지 파일 목록·내용 hash 또는 `THIRD_PARTY_NOTICES.md` 필수 문구가 달라지면
+  build와 release를 fail closed한다. 이 검사는 법률 자문을 대신하지 않으며 dependency
+  갱신 때 실제 binary와 의무를 다시 검토한다.
 - Docker Hub public image는 누구나 layer와 패키징된 애플리케이션 코드·dependency metadata를 검사할 수 있음을 전제로 한다. private GitHub의 비공개성만으로 image 내부 코드를 숨길 수 있다고 가정하지 않는다.
 
 레거시 OCR의 **danger-full-access** 설정은 그대로 계승하지 않는다. Codex CLI가 필요로 하는 최소 filesystem·network 권한을 exact version으로 검증하고 worker 격리 경계를 정의해야 한다.
@@ -471,14 +472,19 @@ local image build, SBOM, content·sandbox·HIGH/CRITICAL 취약점 gate는 개�
 registry push와 promotion은 의도적으로 수행하지 않았으며 아래 release 절차를 운영 인계한다.
 
 1. test, dependency license inventory, secret scan, SBOM, vulnerability scan을 통과한 image를
-   재현 가능하게 build한다. 현재 정책에서는 PyMuPDF 1.28.2의 Artifex commercial license 증빙이
-   없으면 release attestation을 설정하지 않고 공개 push를 fail closed한다. psycopg 계열 LGPL
-   및 certifi의 MPL-2.0 의무도 inventory의 exact version/metadata와 함께 검토하고 notice·
-   재링크 가능성 등 적용 의무를
-   release 기록에 남긴다.
+   재현 가능하게 build한다. `pypdfium2 5.12.1` Linux x86-64 wheel의 PDFium 및 제3자
+   `BUILD_LICENSES` 전체와 프로젝트 `THIRD_PARTY_NOTICES.md`가 image에 포함되는지 exact
+   hash로 검사한다. psycopg 계열 LGPL 및 certifi의 MPL-2.0 의무도 inventory의 exact
+   version/metadata와 함께 검토하고 notice·재링크 가능성 등 적용 의무를 release 기록에
+   남긴다.
 2. MCP/worker/admin 역할별 release version과 Git SHA를 포함한 immutable tag를 붙이고 각 image digest를 기록한다.
 3. GitHub Actions OIDC 기반 keyless Cosign으로 image digest를 서명하고 release manifest에 서명 identity와 transparency-log reference를 기록한다. long-lived signing key는 두지 않는다. private GitHub repository·workflow URI가 공개 log에 나타날 수 있음을 전제로 한다.
-4. 일반 `main` push에서는 build·test만 하고 공개 registry에는 push하지 않는다. `vX.Y.Z` release tag와 manual approval을 모두 통과한 candidate만 `ymtop59/mcp-card-prd-detail`에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
+4. 일반 `main` push와 tag push는 build·test 또는 ref 생성만 하며 공개 registry에는 push하지 않는다. `vX.Y.Z` tag를 대상으로 `PUBLISH-vX.Y.Z` 확인 문자열을 입력한 수동 release workflow를 통과한 candidate만 `ymtop59/mcp-card-prd-detail`에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
+   일부 역할 push 뒤 실행이 중단되면 동일 Git SHA·동일 digest로 확인된 기존 tag만 재사용하고
+   누락 alias를 복구한다. 다른 revision의 기존 tag는 절대 덮어쓰지 않는다. dependency-license
+   release report는 image manifest와 최종 release manifest artifact에 hash로 결속한다. Docker
+   Hub의 SemVer 역할 tag와 SHA alias는 immutable regex로 설정하고 workflow가 이 외부 설정을
+   push 전에 검증한다. Cosign digest signature/attestation tag는 서명 재시도를 위해 제외한다.
 5. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
 6. 승인된 역할별 digest만 운영에 사용하고 deployment 기록에 세 image digest와 호환 generation을 남긴다.
 7. 실패 시 이전 digest로 rollback한다.

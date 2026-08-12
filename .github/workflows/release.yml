@@ -1,9 +1,17 @@
 name: Public image release
+run-name: Publish v${{ inputs.version }} role images
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing SemVer tag without the leading v"
+        required: true
+        type: string
+      confirmation:
+        description: "Enter PUBLISH-vX.Y.Z to authorize the public push"
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -15,6 +23,7 @@ concurrency:
 
 env:
   IMAGE_NAME: ymtop59/mcp-card-prd-detail
+  IMMUTABLE_TAG_RULE: '^[0-9]+\.[0-9]+\.[0-9]+-(mcp|worker|admin)(-sha-[0-9a-f]{12})?$'
 
 jobs:
   validate:
@@ -29,12 +38,29 @@ jobs:
 
       - name: Validate immutable SemVer release tag
         id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
         shell: bash
         run: |
           set -euo pipefail
-          version=${GITHUB_REF_NAME#v}
+          version=$REQUESTED_VERSION
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "release tag must be exactly vX.Y.Z" >&2
+            echo "version input must be exactly X.Y.Z" >&2
+            exit 1
+          fi
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "$RELEASE_CONFIRMATION" = "PUBLISH-v$version"
+          project_version=$(python3 - <<'PY'
+          import tomllib
+
+          with open("pyproject.toml", "rb") as stream:
+              print(tomllib.load(stream)["project"]["version"])
+          PY
+          )
+          if [[ "$project_version" != "$version" ]]; then
+            echo "pyproject.toml version $project_version does not match release $version" >&2
             exit 1
           fi
           git fetch --no-tags origin main
@@ -83,7 +109,7 @@ jobs:
             prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
             check rules /monitoring/cardrag-alerts.yml
 
-  license-approval:
+  release-approval:
     runs-on: ubuntu-24.04
     needs: validate
     environment: dockerhub-public
@@ -94,20 +120,96 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Require exact protected dependency-license approval
-        env:
-          CARDRAG_DEPENDENCY_LICENSE_ATTESTATION: ${{ secrets.CARDRAG_DEPENDENCY_LICENSE_ATTESTATION }}
+      - name: Revalidate exact dependency licenses after manual release authorization
         run: |
           python -m pip install --disable-pip-version-check uv==0.8.17
           uv sync --frozen --extra dev
           uv run --no-sync python scripts/check_dependency_licenses.py \
             --release \
-            --attestation "$CARDRAG_DEPENDENCY_LICENSE_ATTESTATION" \
-            --output /tmp/cardrag-release-dependency-licenses.json
+            --output release-dependency-licenses.json
+          jq -e \
+            '.status == "passed"
+             and .manual_review_required == []
+             and ([.manual_review_resolved[].name] | sort)
+                 == (["certifi", "psycopg", "psycopg-binary", "psycopg-pool", "pypdfium2"] | sort)' \
+            release-dependency-licenses.json >/dev/null
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-license-${{ needs.validate.outputs.version }}
+          path: release-dependency-licenses.json
+          if-no-files-found: error
+
+  registry-preflight:
+    runs-on: ubuntu-24.04
+    needs: [validate, release-approval]
+    environment: dockerhub-public
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Authenticate for an all-role immutable-tag preflight
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Reject any existing role tag from another source revision
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
+            "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
+          if ! jq -e \
+            --arg rule "$IMMUTABLE_TAG_RULE" \
+            '.immutable_tags_settings.enabled == true
+             and .immutable_tags_settings.rules == [$rule]' \
+            <<<"$repository" >/dev/null; then
+            echo "Docker Hub SemVer role-tag immutability does not match policy" >&2
+            exit 1
+          fi
+          for role in mcp worker admin; do
+            digest=""
+            for tag in "$VERSION-$role" "$VERSION-$role-sha-$SHORT_SHA"; do
+              reference="${IMAGE_NAME}:${tag}"
+              status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+                --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+                "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+              case "$status" in
+                404) continue ;;
+                200) ;;
+                *)
+                  echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
+                  exit 1
+                  ;;
+              esac
+              docker manifest inspect "$reference" >/dev/null
+              docker pull --platform linux/amd64 "$reference" >/dev/null
+              revision=$(docker image inspect "$reference" \
+                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+              if [[ "$revision" != "$GITHUB_SHA" ]]; then
+                echo "refusing to overwrite ${reference}; it belongs to ${revision:-unknown}" >&2
+                exit 1
+              fi
+              observed=$(docker buildx imagetools inspect "$reference" \
+                | awk '$1 == "Digest:" {print $2; exit}')
+              if [[ ! "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "could not resolve immutable digest for ${reference}" >&2
+                exit 1
+              fi
+              if [[ -n "$digest" && "$digest" != "$observed" ]]; then
+                echo "role tags disagree for ${role}: ${digest} != ${observed}" >&2
+                exit 1
+              fi
+              digest=$observed
+            done
+          done
 
   publish:
     runs-on: ubuntu-24.04
-    needs: [validate, license-approval]
+    needs: [validate, release-approval, registry-preflight]
     environment: dockerhub-public
     strategy:
       fail-fast: false
@@ -129,8 +231,59 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Reuse only an immutable partial release from this exact commit
+        id: existing
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest=""
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+            case "$status" in
+              404) continue ;;
+              200) ;;
+              *)
+                echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
+                exit 1
+                ;;
+            esac
+            docker manifest inspect "$reference" >/dev/null
+            docker pull --platform linux/amd64 "$reference" >/dev/null
+            revision=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            if [[ "$revision" != "$GITHUB_SHA" ]]; then
+              echo "refusing to overwrite ${reference}; it belongs to ${revision:-unknown}" >&2
+              exit 1
+            fi
+            observed=$(docker buildx imagetools inspect "$reference" \
+              | awk '$1 == "Digest:" {print $2; exit}')
+            if [[ ! "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "could not resolve immutable digest for ${reference}" >&2
+              exit 1
+            fi
+            if [[ -n "$digest" && "$digest" != "$observed" ]]; then
+              echo "role tags disagree: ${digest} != ${observed}" >&2
+              exit 1
+            fi
+            digest=$observed
+          done
+          if [[ -n "$digest" ]]; then
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push public linux/amd64 role image
         id: build
+        if: steps.existing.outputs.reuse != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -150,15 +303,113 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Restore a missing alias after an interrupted matching release
+        if: steps.existing.outputs.reuse == 'true'
+        env:
+          DIGEST: ${{ steps.existing.outputs.digest }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+            case "$status" in
+              404)
+              docker buildx imagetools create \
+                --tag "$reference" \
+                "${IMAGE_NAME}@${DIGEST}"
+                ;;
+              200) docker manifest inspect "$reference" >/dev/null ;;
+              *)
+                echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Resolve the immutable role digest
+        id: resolved
+        env:
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          REUSED: ${{ steps.existing.outputs.reuse }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REUSED" = true ]]; then
+            digest=$EXISTING_DIGEST
+          else
+            digest=$BUILT_DIGEST
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify both immutable role aliases resolve to the selected digest
+        env:
+          DIGEST: ${{ steps.resolved.outputs.digest }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+            test "$status" = 200
+            observed=$(docker buildx imagetools inspect "$reference" \
+              | awk '$1 == "Digest:" {print $2; exit}')
+            if [[ "$observed" != "$DIGEST" ]]; then
+              echo "immutable alias mismatch for ${reference}: ${observed:-missing}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Validate the dependency-license record embedded in the role image
+        id: image_license
+        env:
+          DIGEST: ${{ steps.resolved.outputs.digest }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference="${IMAGE_NAME}@${DIGEST}"
+          docker pull --platform linux/amd64 "$reference" >/dev/null
+          revision=$(docker image inspect "$reference" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$GITHUB_SHA"
+          container=$(docker create --platform linux/amd64 "$reference")
+          trap 'docker rm "$container" >/dev/null 2>&1 || true' EXIT
+          docker cp \
+            "$container:/usr/share/licenses/cardrag/dependency-license-manifest.json" \
+            "image-license-${TARGET}.json"
+          jq -e \
+            '.status == "passed"
+             and .mode == "release-notices-only"
+             and .manual_review_required == []
+             and ([.manual_review_resolved[].name] | sort)
+                 == (["certifi", "psycopg", "psycopg-binary", "psycopg-pool", "pypdfium2"] | sort)
+             and ([.license_payloads[] | select(.name == "pypdfium2") | .files | length] == [19])' \
+            "image-license-${TARGET}.json" >/dev/null
+          echo "sha256=$(sha256sum "image-license-${TARGET}.json" | cut -d' ' -f1)" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Keyless-sign pushed digest with GitHub Actions OIDC
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
         run: cosign sign --yes --bundle "cosign-${TARGET}.bundle.json" "${IMAGE_NAME}@${DIGEST}"
 
       - name: Verify keyless signature identity
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.resolved.outputs.digest }}
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -167,10 +418,11 @@ jobs:
 
       - name: Record immutable release manifest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          IMAGE_LICENSE_SHA256: ${{ steps.image_license.outputs.sha256 }}
         run: |
           python - <<'PY'
           import json
@@ -191,6 +443,10 @@ jobs:
               ],
               "signature": "github-actions-oidc-keyless-cosign",
               "signature_bundle": f'cosign-{os.environ["TARGET"]}.bundle.json',
+              "embedded_dependency_license_manifest": {
+                  "path": f'image-license-{os.environ["TARGET"]}.json',
+                  "sha256": os.environ["IMAGE_LICENSE_SHA256"],
+              },
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
           }
           Path(f'release-manifest-{os.environ["TARGET"]}.json').write_text(
@@ -205,6 +461,7 @@ jobs:
           path: |
             release-manifest-${{ matrix.target }}.json
             cosign-${{ matrix.target }}.bundle.json
+            image-license-${{ matrix.target }}.json
           if-no-files-found: error
 
   publish-manifest:
@@ -219,11 +476,17 @@ jobs:
           path: release-parts
           merge-multiple: true
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-license-${{ needs.validate.outputs.version }}
+          path: release-license
+
       - name: Assemble all role digests and signature bundles
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           python - <<'PY'
+          import hashlib
           import json
           import os
           from pathlib import Path
@@ -241,6 +504,33 @@ jobs:
           for role, part in roles.items():
               assert part["platforms"] == ["linux/amd64"]
               assert (root / part["signature_bundle"]).is_file(), role
+              image_license = root / part["embedded_dependency_license_manifest"]["path"]
+              assert image_license.is_file(), role
+              assert hashlib.sha256(image_license.read_bytes()).hexdigest() == (
+                  part["embedded_dependency_license_manifest"]["sha256"]
+              ), role
+              embedded = json.loads(image_license.read_text(encoding="utf-8"))
+              assert embedded["status"] == "passed", role
+              assert embedded["manual_review_required"] == [], role
+              assert {item["name"] for item in embedded["manual_review_resolved"]} == {
+                  "certifi",
+                  "psycopg",
+                  "psycopg-binary",
+                  "psycopg-pool",
+                  "pypdfium2",
+              }, role
+
+          license_path = Path("release-license/release-dependency-licenses.json")
+          license_report = json.loads(license_path.read_text(encoding="utf-8"))
+          assert license_report["status"] == "passed"
+          assert license_report["manual_review_required"] == []
+          assert {item["name"] for item in license_report["manual_review_resolved"]} == {
+              "certifi",
+              "psycopg",
+              "psycopg-binary",
+              "psycopg-pool",
+              "pypdfium2",
+          }
 
           manifest = {
               "schema": "cardrag.container-release.v2",
@@ -248,6 +538,14 @@ jobs:
               "version": os.environ["VERSION"],
               "git_sha": parts[0]["git_sha"],
               "workflow": parts[0]["workflow"],
+              "dependency_license_report": {
+                  "path": "release-dependency-licenses.json",
+                  "sha256": hashlib.sha256(license_path.read_bytes()).hexdigest(),
+                  "resolved_reviews": sorted(
+                      item["name"]
+                      for item in license_report["manual_review_resolved"]
+                  ),
+              },
               "roles": {role: roles[role] for role in ("mcp", "worker", "admin")},
           }
           Path("release-manifest.json").write_text(
@@ -262,4 +560,6 @@ jobs:
           path: |
             release-manifest.json
             release-parts/cosign-*.bundle.json
+            release-parts/image-license-*.json
+            release-license/release-dependency-licenses.json
           if-no-files-found: error

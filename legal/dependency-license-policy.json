@@ -1,6 +1,27 @@
 {
-  "schema": "cardrag.dependency-license-policy.v1",
+  "schema": "cardrag.dependency-license-policy.v3",
   "project_license": "Proprietary",
+  "third_party_notices": {
+    "path": "THIRD_PARTY_NOTICES.md",
+    "required_fragments": [
+      "pypdfium2 5.12.1",
+      "PDFium",
+      "Independent JPEG Group",
+      "FreeType Project",
+      "/usr/share/licenses/cardrag/pypdfium2",
+      "certifi 2026.7.22",
+      "psycopg packages",
+      "not legal advice or legal-license approvals"
+    ]
+  },
+  "release_review_policy": {
+    "semantics": "Records the notice and compliance obligations accepted for packaging; it is not legal advice or a legal-license approval.",
+    "allowed_decisions": [
+      "include-with-recorded-notice-and-compliance-obligations"
+    ],
+    "required_payload_source": "installed-dist-info/licenses",
+    "notice_reference_path": "THIRD_PARTY_NOTICES.md"
+  },
   "review_triggers": [
     "AGPL",
     "GPL-",
@@ -22,30 +43,97 @@
     "certifi": {
       "locked_version": "2026.7.22",
       "expected_license_contains": ["MPL-2.0"],
-      "release_attestation": null
+      "release_review": {
+        "decision": "include-with-recorded-notice-and-compliance-obligations",
+        "reference": "THIRD_PARTY_NOTICES.md#certifi-2026722",
+        "required_license_payload": {
+          "source": "installed-dist-info/licenses",
+          "files_sha256": {
+            "LICENSE": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+          }
+        }
+      }
     },
     "psycopg": {
       "locked_version": "3.3.4",
       "expected_license_contains": ["LGPL-3.0-only"],
-      "release_attestation": null
+      "release_review": {
+        "decision": "include-with-recorded-notice-and-compliance-obligations",
+        "reference": "THIRD_PARTY_NOTICES.md#psycopg-packages",
+        "required_license_payload": {
+          "source": "installed-dist-info/licenses",
+          "files_sha256": {
+            "LICENSE.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118"
+          }
+        }
+      }
     },
     "psycopg-binary": {
       "locked_version": "3.3.4",
       "expected_license_contains": ["LGPL-3.0-only"],
-      "release_attestation": null
+      "release_review": {
+        "decision": "include-with-recorded-notice-and-compliance-obligations",
+        "reference": "THIRD_PARTY_NOTICES.md#psycopg-packages",
+        "required_license_payload": {
+          "source": "installed-dist-info/licenses",
+          "files_sha256": {
+            "LICENSE.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118"
+          }
+        }
+      }
     },
     "psycopg-pool": {
       "locked_version": "3.3.1",
       "expected_license_contains": ["LGPL-3.0-only"],
-      "release_attestation": null
+      "release_review": {
+        "decision": "include-with-recorded-notice-and-compliance-obligations",
+        "reference": "THIRD_PARTY_NOTICES.md#psycopg-packages",
+        "required_license_payload": {
+          "source": "installed-dist-info/licenses",
+          "files_sha256": {
+            "LICENSE.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118"
+          }
+        }
+      }
     },
-    "pymupdf": {
-      "locked_version": "1.28.2",
+    "pypdfium2": {
+      "locked_version": "5.12.1",
       "expected_license_contains": [
-        "GNU AFFERO GPL 3.0",
-        "Artifex Commercial License"
+        "BSD-3-Clause",
+        "Apache-2.0",
+        "dependency licenses"
       ],
-      "release_attestation": "CARDRAG-PYMUPDF-1.28.2-COMMERCIAL-LICENSE-APPROVED"
+      "expected_lock_hashes": [
+        "sha256:e10cbf41b21233ec5e20adfc170cf60edd77abead86a97dc708fff55a8a886c7"
+      ],
+      "release_review": {
+        "decision": "include-with-recorded-notice-and-compliance-obligations",
+        "reference": "THIRD_PARTY_NOTICES.md#pypdfium2-5121-and-pdfium",
+        "required_license_payload": {
+          "source": "installed-dist-info/licenses",
+          "files_sha256": {
+        "LICENSES/Apache-2.0.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "LICENSES/BSD-3-Clause.txt": "a6d11f0694c0137e9b02924b9d33a159f6c72f220fa4655bb2e1ea3654377d39",
+        "LICENSES/CC-BY-4.0.txt": "419896aea50c15d6e40c5b4baf4bd346f78223b9a354c7357ad00262afdc08ec",
+        "data/linux_x64/BUILD_LICENSES/abseil.txt": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747",
+        "data/linux_x64/BUILD_LICENSES/agg23.txt": "c110d3ea2ad77467ce0dcff7d3337e6c8be8049a5103f4b9bd5fd911a77972e5",
+        "data/linux_x64/BUILD_LICENSES/fast_float.txt": "e562f3f974ced7e69dd1db77b820b36bcf8f30377f1aa105723fba449c53c4e6",
+        "data/linux_x64/BUILD_LICENSES/freetype.txt": "f4b133e25df1f86ad3ffea453aa0e613f0474f34778dbbb3e437e7b2724937d8",
+        "data/linux_x64/BUILD_LICENSES/icu.txt": "e55522d81edc687a341a4411e0776e54ca654e90147f354a90458aaced4116af",
+        "data/linux_x64/BUILD_LICENSES/lcms.txt": "7312b68c5b25e9bf2b828706fb4e29588f22705112f411fd42e1f7d84c3d139a",
+        "data/linux_x64/BUILD_LICENSES/libjpeg_turbo.ijg": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6",
+        "data/linux_x64/BUILD_LICENSES/libjpeg_turbo.md": "96f5b328adbb78eeaaec6980d73fd558cb1e4d62560ed615646bc3cf5e532430",
+        "data/linux_x64/BUILD_LICENSES/libopenjpeg.txt": "c5ab0890a737c2dfa7ba675036554f6d17741d98629b0c2a145354d00617e6b2",
+        "data/linux_x64/BUILD_LICENSES/libpng.txt": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526",
+        "data/linux_x64/BUILD_LICENSES/libtiff.txt": "92b72ba97e6c2749c2a94bc0ef646b47080217f1e772a482b33cf5a5f98a6506",
+        "data/linux_x64/BUILD_LICENSES/llvm-libc.txt": "ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47",
+        "data/linux_x64/BUILD_LICENSES/pdfium-binaries.txt": "ba26c1263131696b86c10496b5066b918a20b7161822a80c274d0080105f6c93",
+        "data/linux_x64/BUILD_LICENSES/pdfium.txt": "961eacd9633fff6d051db7208b755e9210e30efac7adec3e6a6d52798f0ccf0e",
+        "data/linux_x64/BUILD_LICENSES/simdutf.txt": "fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f",
+            "data/linux_x64/BUILD_LICENSES/zlib.txt": "33fd641c9f3b0e0be64bc78fea9e94807674cdd70c48477599226cb8956565fe"
+          }
+        }
+      }
     }
   }
 }

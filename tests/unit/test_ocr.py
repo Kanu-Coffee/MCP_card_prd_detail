@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
+from cardrag.pdf import PDF_RENDERER_ID
 from cardrag.pipeline.ocr import (
     DEFAULT_PROMPT,
     OCR_PROMPT_VERSION,
@@ -198,12 +200,18 @@ async def test_fallback_restarts_whole_document_without_mixing_and_records_prove
     assert manifest.attempt.model == "fallback-model"
     assert manifest.attempt.durable_attempt == 1
     assert manifest.attempt.prompt_version == OCR_PROMPT_VERSION
+    assert manifest.attempt.renderer == PDF_RENDERER_ID
     assert manifest.attempt.input_pdf_sha256 == rendered.pdf_sha256
     assert manifest.attempt.page_count == 3
     assert manifest.ocr_sha256 == hashlib.sha256(canonical.encode()).hexdigest()
     assert manifest.ocr_chars == len(canonical)
     assert len(manifest.page_output_hashes) == 3
     assert (output_dir / "attempts/001-primary-fixture/attempt.json").is_file()
+    fallback_input = json.loads(
+        (output_dir / "attempts/002-fallback-fixture/input.json").read_text(encoding="utf-8")
+    )
+    assert fallback_input["schema_version"] == "cardrag-ocr-attempt-input.v2"
+    assert fallback_input["renderer"] == PDF_RENDERER_ID
 
 
 async def test_final_durable_attempt_keeps_provider_attempt_distinct(tmp_path: Path) -> None:

@@ -24,6 +24,16 @@ COPY src ./src
 
 RUN uv sync --frozen --no-dev --no-editable --active
 
+COPY legal ./legal
+COPY scripts/check_dependency_licenses.py ./scripts/check_dependency_licenses.py
+COPY THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
+
+RUN /opt/cardrag/bin/python scripts/check_dependency_licenses.py \
+      --notices-only \
+      --release \
+      --notice-output-root /tmp/cardrag-license-notices \
+      --output /tmp/cardrag-license-report.json
+
 
 FROM ${PYTHON_IMAGE} AS runtime
 
@@ -51,6 +61,7 @@ RUN groupadd --gid 10001 cardrag && \
     install --directory --owner=10001 --group=10001 --mode=0700 /var/lib/cardrag-home
 
 COPY --from=build /opt/cardrag /opt/cardrag
+COPY --from=build /tmp/cardrag-license-notices /usr/share/licenses/cardrag
 COPY --chmod=755 scripts/entrypoint.sh /usr/local/bin/cardrag-entrypoint
 COPY --chmod=755 scripts/init-volumes.sh /usr/local/bin/cardrag-volume-init
 

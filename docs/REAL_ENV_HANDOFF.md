@@ -18,7 +18,7 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
 - mock 카드사와 provider로 scheduler 순서, 10분 대기, issuer 실패 격리,
   BULK 재시작과 secret redaction을 검증한다.
 - release workflow가 일반 `main` event에서는 실행되지 않고 정확한 `vX.Y.Z`
-  tag, protected environment, dependency-license attestation, OIDC와 digest 서명을 요구하는지
+  tag 대상 수동 실행, `PUBLISH-vX.Y.Z` 확인 문자열, exact dependency-license gate, OIDC와 digest 서명을 요구하는지
   정적 검사한다.
 
 ## 운영 인계 항목
@@ -95,30 +95,35 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
 ### 5. Docker Hub 공개 release와 Cosign transparency log
 
 - **상태:** `운영 인계`
-- **현재 환경에서 검증할 수 없는 이유:** Docker Hub secret, private GitHub
-  environment의 수동 승인과 외부 registry 변경이 필요하다. 또한 Proprietary project/image에
-  포함된 PyMuPDF 1.28.2는 AGPL-3.0 또는 Artifex commercial license의 dual license이므로
-  적용 license와 의무를 법무가 확정해야 한다.
+- **현재 환경에서 검증할 수 없는 이유:** Docker Hub secret과 외부 registry 변경이 필요하다.
 - **개발 단계 대체 검증:** 로컬 Docker에서 세 target을 `linux/amd64`로 no-push build하고
   MCP/worker/admin의 SBOM·vulnerability·image content를 검사했다. GitHub CI/release workflow는
-  동일 gate, 역할별 tag·semver·protected environment·OIDC·digest-signing 계약을 코드로
+  동일 gate, 역할별 tag·semver·수동 dispatch confirmation·environment secret·OIDC·digest-signing 계약을 코드로
   검증하며 최초 원격 성공 run은 source push 뒤 별도 확인한다.
-- **실환경 절차:** GitHub `dockerhub-public` environment에 required reviewer와
-  `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`을 설정한다. 현재 Proprietary image에는 PyMuPDF
-  Artifex commercial license 증빙을 확인한 경우에만 protected environment secret
-  `CARDRAG_DEPENDENCY_LICENSE_ATTESTATION`을 policy 파일의 exact attestation 값으로 설정한다.
-  AGPL 선택 시 이 secret으로 우회하지 않는다. 먼저 project/image license, notice,
-  corresponding-source 공개 경로와 policy/gate를 별도 reviewed commit에서 구현·검증한다.
+- **실환경 절차:** GitHub `dockerhub-public` environment에
+  `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`을 설정한다. 이 private repository의 현재 plan에서는
+  required reviewer를 release gate로 가정하지 않는다. tag push는 release를 자동 실행하지 않으며,
+  승인된 운영자가 해당 tag를 대상으로 `version=X.Y.Z`, `confirmation=PUBLISH-vX.Y.Z`를 입력해
+  workflow를 수동 실행하는 것을 공개 push 승인으로 사용한다. 별도의 commercial-license attestation
+  secret은 필요하지 않다. `pypdfium2 5.12.1`·PDFium의 고정 wheel metadata/hash와 wheel에
+  포함된 build-specific license payload 전체가 `/usr/share/licenses/cardrag/pypdfium2`에,
+  프로젝트 고지가 `/usr/share/licenses/cardrag/THIRD_PARTY_NOTICES.md`에 들어갔는지 image
+  gate 결과를 확인한다. dependency를 갱신할 때는 새 wheel의 build별 license와 binary linkage를
+  다시 검토하고 policy hash를 reviewed commit으로만 변경한다.
   psycopg·psycopg-binary·psycopg-pool의 LGPL-3.0-only 적용 의무와 notice도 release 기록에서
   확인하고 certifi의 MPL-2.0 notice·배포 의무도 기록한다. 증빙 자체·계약번호는 Git, image,
   log에 넣지 않는다. 승인된 commit에 정확한
   `vX.Y.Z` tag를 만들고 workflow를 승인한다. 생성 manifest에 기록된 세 역할의
   digest로 각각 pull한 후 아래와 같이 서명을 확인한다.
 
-  `environment: dockerhub-public` 선언만으로 reviewer가 자동 설정되지는 않는다.
-  private repository에서 required reviewer를 사용할 수 있는지 현재 GitHub plan과
-  repository 설정에서 확인한다. reviewer 보호가 실제로 설정되지 않았거나 해당
-  plan에서 지원되지 않으면 tag를 만들지 말고 release를 차단한다.
+  `environment: dockerhub-public`은 Docker Hub secret의 범위를 제한하지만 현재 plan에서 별도
+  reviewer gate를 제공한다고 가정하지 않는다. 정확한 tag ref, main ancestry, 성공한 동일 SHA CI,
+  수동 confirmation이 하나라도 맞지 않으면 workflow가 공개 push 전에 실패해야 한다.
+  workflow 재실행 시 기존 역할 tag는 OCI revision label이 동일 Git SHA이고 두 alias가 동일
+  digest인 경우에만 재사용한다. 다른 SHA의 tag는 덮어쓰지 않으며, 이전 실행이 일부 역할에서
+  중단된 경우 누락 alias만 동일 digest로 복구한다. Docker Hub 저장소의 SemVer 역할-tag
+  immutable 설정(`enabled=true`, release workflow의 exact regex)이 시작 전에 확인되지 않으면
+  fail-closed한다. Cosign digest signature/attestation tag는 재서명을 위해 regex 밖에 둔다.
 
   ```bash
   cosign verify \
@@ -127,13 +132,14 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
     ymtop59/mcp-card-prd-detail@sha256:REPLACE_WITH_ROLE_DIGEST
   ```
 
-- **성공 조건:** tag push 뒤 publish job이 실제 reviewer 승인 전 `Waiting`이고,
-  license-approval job이 exact attestation을 검증했으며,
+- **성공 조건:** tag push만으로 release run이 생성되지 않고, 해당 tag 대상 수동 run의 confirmation이
+  일치하며 release-approval job이 exact dependency metadata·wheel hash·license payload를 검증했고,
+  그 결과가 image 내부 manifest와 최종 release artifact의 SHA-256에 결속됐으며,
   공개 tag는 `${version}-{mcp|worker|admin}`과 역할별 Git SHA tag를 제공한다.
   통합 manifest는 세 역할의 서로 다른 digest와 `linux/amd64` platform을 기록하고,
   deployment는 digest를 사용하며 각 `cosign-{role}.bundle.json`의 transparency-log
   material이 검증된다. `latest`만으로 식별하지 않는다.
-- **실패 진단:** environment approval, dependency-license policy/version/attestation, tag pattern, Docker Hub permission,
+- **실패 진단:** environment approval, dependency-license policy/version/wheel·notice hash, tag pattern, Docker Hub permission,
   workflow OIDC subject, pushed digest와 Cosign certificate identity를 확인한다.
 
 ### 6. 운영 client refresh 호환성과 hosting

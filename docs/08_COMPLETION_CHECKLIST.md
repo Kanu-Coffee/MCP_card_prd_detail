@@ -17,7 +17,8 @@
 **현재 개발 환경에서 구현·자동 검증할 수 있는 v1 항목은 완료됐다.** 실제 카드사와
 provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus 실행만 남았으며 이를
 완료로 가장하지 않는다. 최종 회귀 결과와 source revision은 이 문서와
-`reports/deployment/dev-environment-verification.json`에 함께 기록한다.
+`reports/deployment/pdfium-release-candidate-verification.json`에 함께 기록한다. 이전
+`dev-environment-verification.json`은 PyMuPDF 교체 전의 historical evidence로만 보존한다.
 
 ## 2. 기준 문서와 기술 결정
 
@@ -93,7 +94,7 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
   구분하며, 새 generation에서 동일 document는 안전하게 materialize한다.
   증거: `tests/unit/test_download.py`, `tests/integration/test_offline_pipeline_e2e.py`
 - [x] [검증 완료] scheme/issuer host/redirect allowlist, SSRF 주소, timeout, streaming 상한,
-  MIME·`%PDF`·PyMuPDF page 검증과 partial cleanup을 시험했다.
+  MIME·`%PDF`·PDFium page 검증과 partial cleanup을 시험했다.
   증거: `src/cardrag/acquisition/download.py`, `tests/unit/test_download.py`
 - [x] [검증 완료] issuer별 rate/backoff·retry와 markup 급감/0건 anomaly를 정상 성공으로
   숨기지 않으며 한 issuer 실패가 다음 issuer를 막지 않는다.
@@ -235,7 +236,7 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
   `tests/integration/test_database_roles.py`
 - [x] [검증 완료] MCP는 container `0.0.0.0:8000`, host `127.0.0.1:8000`에만 publish되고
   Keycloak도 loopback hand-off만 제공한다. Compose에 reverse proxy는 포함하지 않는다.
-  증거: `compose.yaml`, `reports/deployment/dev-environment-verification.json`
+  증거: `compose.yaml`, `reports/deployment/pdfium-release-candidate-verification.json`
 - [x] [검증 완료] corpus·secret·Codex auth를 image/Git에서 제외하고 role별 read-only/RW
   volume과 Docker secret을 사용한다. Keycloak bootstrap secret은 1회 overlay 뒤 base
   Compose에서 제거된다.
@@ -248,7 +249,7 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
 - [x] [검증 완료] Codex CLI 0.147.0은 system-owned OCR profile과 tool-less argv를 사용한다.
   bubblewrap canary가 rendered input만 읽고 secret/outside/write/socket을 거부한다.
   증거: `Dockerfile`, `deploy/codex/config.toml`, CI worker sandbox checks,
-  `reports/deployment/dev-environment-verification.json`
+  `reports/deployment/pdfium-release-candidate-verification.json`
 - [x] [검증 완료] 매일 03:00 KST 우리→KB→신한, issuer 사이 10분 대기·실패 격리와 04:00
   retention one-shot을 CLI/systemd로 제공하고 scheduler lease heartbeat로 중복 실행을 막는다.
   증거: `src/cardrag/scheduler.py`, `deploy/systemd/`, `tests/unit/test_scheduler.py`
@@ -263,25 +264,25 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
   `tests/integration/test_observability_postgres.py`, `tests/integration/test_generation_retention.py`
 - [x] [검증 완료] CI는 unit/integration/fixture/load, dependency license inventory, secret scan,
   3 image build, SBOM, Trivy와 Codex sandbox canary를 수행한다. release는 exact SHA의 성공 CI,
-  semver tag, protected environment의 exact dependency-license attestation과 수동 승인 뒤
-  역할별 digest를 push/sign한다. PyMuPDF legal 승인은 운영 인계이며 개발 Goal을 막지 않는다.
+  semver tag와 tag 대상 수동 workflow의 exact 확인 문자열 뒤 역할별 digest를 push/sign한다. PDFium
+  wheel·license payload·third-party notice의 exact fail-closed 검사는 CI와 image build에서 수행한다.
   증거: `.github/workflows/ci.yml`, `.github/workflows/release.yml`
 - [x] [검증 완료] 개발환경의 세 이미지 취약점 검사 결과 HIGH/CRITICAL 0이고 local MCP
   100/100 동시 smoke가 통과했다. public registry push는 하지 않았다.
-  증거: `reports/deployment/dev-environment-verification.json`
+  증거: `reports/deployment/pdfium-release-candidate-verification.json`
 - [ ] [실환경 검증 대기] 실제 Codex 계정/device authorization과 장기 token 갱신을 검증한다.
   인계: `docs/REAL_ENV_HANDOFF.md` 2절
 - [ ] [운영 인계] 운영 Keycloak/TLS client, systemd timer, generation rollback rehearsal을
   최종 host에서 수행한다.
   인계: `docs/REAL_ENV_HANDOFF.md` 6~8절
-- [ ] [운영 인계] `vX.Y.Z` tag와 GitHub protected environment 수동 승인 뒤에만
+- [ ] [운영 인계] `vX.Y.Z` tag를 대상으로 `PUBLISH-vX.Y.Z` 확인 문자열을 입력한 수동
+  release workflow 뒤에만
   `ymtop59/mcp-card-prd-detail`에 역할별 digest를 push하고 Cosign을 검증한다.
   인계: `docs/REAL_ENV_HANDOFF.md` 5절
-- [ ] [운영 인계] Proprietary 공개 image에 포함되는 PyMuPDF 1.28.2의 Artifex commercial
-  license 증빙을 확인한 뒤에만 protected `CARDRAG_DEPENDENCY_LICENSE_ATTESTATION` secret을
-  설정한다. AGPL 선택은 현재 attestation으로 승인할 수 없고 project/image license·notice·
-  corresponding-source 경로와 policy를 별도 reviewed commit에서 먼저 바꿔야 한다. psycopg 계열
-  LGPL 및 certifi MPL-2.0 의무도 release notice/compliance 기록으로 확인한다.
+- [x] [검증 완료] PyMuPDF를 runtime에서 제거하고 `pypdfium2 5.12.1`·Pillow로 교체했다.
+  PDFium과 wheel 제3자 license payload 전체를 public image에 보존하고, exact wheel hash,
+  metadata, 고지 파일 목록·내용 hash와 `THIRD_PARTY_NOTICES.md`를 fail-closed gate로 검증한다.
+  psycopg 계열 LGPL 및 certifi MPL-2.0 의무는 release notice/compliance 기록으로 계속 확인한다.
   인계: `docs/REAL_ENV_HANDOFF.md` 5절
 
 ## 10. 자동 검증과 완료 판정

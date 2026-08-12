@@ -1,0 +1,25 @@
+services:
+  volume-init:
+    image: ${CARDRAG_ADMIN_IMAGE:-ymtop59/mcp-card-prd-detail:0.1.0-admin}
+    build: !reset null
+    pull_policy: always
+
+  admin:
+    image: ${CARDRAG_ADMIN_IMAGE:-ymtop59/mcp-card-prd-detail:0.1.0-admin}
+    build: !reset null
+    pull_policy: always
+
+  migrate:
+    image: ${CARDRAG_ADMIN_IMAGE:-ymtop59/mcp-card-prd-detail:0.1.0-admin}
+    build: !reset null
+    pull_policy: always
+
+  worker:
+    image: ${CARDRAG_WORKER_IMAGE:-ymtop59/mcp-card-prd-detail:0.1.0-worker}
+    build: !reset null
+    pull_policy: always
+
+  mcp:
+    image: ${CARDRAG_MCP_IMAGE:-ymtop59/mcp-card-prd-detail:0.1.0-mcp}
+    build: !reset null
+    pull_policy: always
