@@ -1,0 +1,17 @@
+{
+  "elHeader": {"resSuc": true},
+  "rows": [
+    {
+      "filePath": "/obj/card/download/W_FIXTURE_20260801.pdf",
+      "fileNm": "W_FIXTURE_20260801.pdf",
+      "beginDt": "20260801",
+      "gdccVer": "v10"
+    },
+    {
+      "filePath": "/obj/card/download/W_FIXTURE_20250701.pdf",
+      "fileNm": "W_FIXTURE_20250701.pdf",
+      "beginDt": "20250701",
+      "gdccVer": "v9"
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 # 프로젝트 개요
 
-> 문서 상태: 설계 가이드 초안
+> 문서 상태: 구현 기준 및 검증된 v1 기준선
 > 기준일: 2026-08-12
-> 구현 상태: 문서화 단계이며, 이 문서에 설명된 신규 시스템은 아직 구현되지 않았다.
+> 구현 상태: 개발 환경에서 구현·fixture 통합검증 완료 단계. 실제 카드사·모델 계정과 운영 host가 필요한 검증은 `docs/REAL_ENV_HANDOFF.md`로 분리했다.
 
 ## 1. 문서 목적
 
@@ -88,29 +88,33 @@
 - 카드상품 검색, 상품 상세, 혜택 조건, 전월실적, 제외조건과 원문 근거를 제공하는 읽기 전용 MCP 역할
 - 명시적 사용자 요청에 대한 보존 원본 PDF 파일 제공과 페이지 단위 OCR·근거 조회
 - 독립적인 오프라인 작업과 상시 실행 온라인 서비스
-- Docker 기반 실행, 외부 볼륨, 비밀정보 주입, 상태 점검, 백업·복구
+- Docker 기반 실행, 외부 볼륨, 비밀정보 주입과 상태 점검. backup·restore 구현은 v1 이후 과제다.
 
-### 5.2 이번 문서화 작업의 범위
+### 5.2 이번 개발의 범위
 
-- 목표 구조와 구성요소 경계 정의
-- 레거시 자산의 재사용·변환·제외 분류
-- LLM 호출과 데이터 품질 원칙 정의
-- 초기 대량 처리와 일일 증분 처리 운영 방향 정의
-- 단계별 구현 로드맵, 검증 기준과 완료 체크리스트 작성
+- 목표 구조와 구성요소 경계, 도메인·lineage·durable job 계약 구현
+- 레거시 자산의 재사용·변환·제외 분류와 read-only pilot
+- 세 카드사 fixture adapter, 재시작 가능한 OCR·구조·임베딩·검색 pipeline
+- immutable generation 검증·게시·rollback과 read-only HTTP MCP
+- Docker Compose, Keycloak, 역할별 image, CI/release와 운영 인계
+- 품질·부하·복구·권한·sandbox 자동 검증 및 완료 체크리스트
 
-이번 산출물은 향후 구현을 위한 개발 하네스다. 설계 문서가 존재한다는 사실만으로 어느 구성요소도 완료된 것으로 보지 않는다.
+완료 여부는 설계 문서가 아니라 [완료 체크리스트](08_COMPLETION_CHECKLIST.md)의 코드·시험·보고서
+증거로 판단한다.
 
 ## 6. 비범위
 
-### 6.1 이번 단계에서 수행하지 않는 작업
+### 6.1 개발 환경 밖의 항목
 
-- MCP 서버, 수집기, OCR worker, 색인기 또는 검색 코드 구현
-- OCR·구조 분석·임베딩 실행과 카드사·Codex·OpenRouter 등 외부 호출
-- Python 또는 시스템 의존성 설치
-- Docker 이미지 빌드·실행·레지스트리 배포
-- 대용량 레거시 데이터 복사·이동·변환
-- API key, OAuth token, Codex 인증정보 생성·변경
-- 성능·정확도·복구 테스트 실행
+- 실제 카드사 endpoint와 공시 이용조건 검토
+- 실제 Codex device 계정과 OpenRouter 운영 key·quota를 사용하는 장시간 검증
+- 전체 9.51 GiB 레거시 이관과 수일짜리 운영 BULK
+- 운영 host의 Nginx Proxy Manager·TLS·systemd 설치
+- `vX.Y.Z` 수동 승인 후 public Docker Hub push·Cosign 검증
+- backup·restore, RPO/RTO, ARM64, public admin API·웹 UI
+
+앞의 다섯 항목은 [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)에 절차를 남겼고, 마지막 항목은
+사용자 결정에 따른 v1 범위 밖이다.
 
 ### 6.2 신규 공개 MCP 서비스에서 제외할 영역
 
@@ -167,7 +171,7 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 
 “구현함”이 아니라 실제 artifact, 테스트 결과와 운영 증거로 완료를 판단한다. 데이터 품질, 검색 품질, 지연시간, 복구와 보안 기준을 사전에 정의하고 체크리스트에 증거 위치를 남긴다.
 
-## 8. 현재 확정된 방향과 구현 중 기술 결정
+## 8. 현재 확정된 방향과 개발 중 기술 결정 결과
 
 ### 8.1 이 문서세트에서 채택한 방향
 
@@ -177,8 +181,12 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - PDF, OCR, 검색 데이터와 작업 상태는 Docker 이미지 밖에 둔다.
 - 초기 수집은 상품별 최신 PDF를 우선하고 이후 신규·변경본을 증분 처리한다.
 - OCR은 Codex exec 우선이며 초기 대량 처리는 Codex exec만 사용한다. 일반 실행의 OpenRouter 페일오버는 별도 품질 동등성 검증 후 허용한다.
-- 구조 분석에 LLM을 사용하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다. 구체 엔진은 Codex가 gold set의 규칙-only·LLM 보강 비교로 구현 중 결정한다.
-- 임베딩은 OpenRouter의 임베딩 전용 모델을 사용하되 모델은 설정으로 교체 가능해야 한다.
+- 구조 분석 v1은 canonical OCR을 변경하지 않는 결정론적 rule baseline과 exact source-span
+  validator를 기본으로 한다. schema-guided LLM 보강은 같은 gold set에서 baseline 개선을
+  입증할 때만 활성화한다.
+- 임베딩은 설정 가능한 OpenRouter client 경계와 v1 기본
+  `openai/text-embedding-3-small` 1,536차원을 사용한다. 모델 변경은 새 generation과 품질
+  재검증을 요구한다.
 - 모든 조회 결과는 문서 버전과 근거로 역추적 가능해야 한다.
 - 1차 지원 대상은 우리카드와 KB국민카드이며, 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 adapter로 수집해 BULK 처리 시험에 포함한다. 법인·선불카드는 신한 1차 범위에서 제외한다.
 - 기본 검색은 최신본으로 제한하고 과거본은 모두 보존한다. 과거본은 명시적 version 또는 as-of 요청에서만 조회한다.
@@ -188,10 +196,12 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - 명시적으로 요청된 보존 원본 PDF 전체를 인증 후 streaming file로 제공한다. 페이지 조회용 PNG는 요청 시 렌더링하고 7일 cache 후 제거하며 영구 저장하지 않는다. 분할 PDF는 만들지 않고 임의 URL 다운로드는 계속 금지한다.
 - GitHub는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus와 secret을 포함하지 않는다.
 - 원본 PDF와 OCR 버전은 모두 보존한다. 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin generation은 해제 시까지 보존한다. Gmail·이메일 Agent는 신규 범위에서 제외한다.
-- 초기 동시 요청 기준은 5개이며 응답 품질을 지연시간보다 우선한다. 수치 latency 목표는 BULK pilot 후 정하되 유한 timeout과 cancellation은 항상 둔다.
-- image tag는 version과 Git SHA를 포함하고 배포·rollback은 digest 기준으로 수행한다.
+- 초기 동시 요청 기준은 5개이며 응답 품질을 지연시간보다 우선한다. 개발 기준은 request
+  timeout 45초와 검색 P95 30초이며, 실제 corpus·provider 측정 후 조정한다.
+- MCP/worker/admin 역할별 image tag는 version과 Git SHA를 포함하고 배포·rollback은 역할별 digest 기준으로 수행한다.
 - 최초 운영 topology는 단일 Linux host의 Docker Compose이며 online MCP와 offline worker를 별도 컨테이너로 둔다.
-- PDF·OCR·generation은 외부 불변 file volume, durable 작업 상태와 catalog는 PostgreSQL을 사용한다. vector/lexical engine은 신한 BULK benchmark 후 정한다.
+- PDF·OCR·generation은 외부 불변 file volume, durable 작업 상태와 catalog는 PostgreSQL을
+  사용한다. 검색은 PostgreSQL FTS와 pgvector HNSW를 같은 stable evidence ID로 결합한다.
 - vector 경로 장애 시 caller가 `allow_degraded=true`를 명시한 요청만 lexical-only 결과를 `degraded`로 반환하고, 나머지는 실패시킨다.
 - reverse proxy·TLS와 Nginx Proxy Manager 연결은 개발 완료 후 운영자가 수행하는 hosting 과제다. stack은 proxy를 포함하지 않고 현재 개발은 container `0.0.0.0:8000`을 host `127.0.0.1:8000`에만 publish한다.
 - 원본 PDF는 승인 사용자에게만 제공하고 100 MB 상한, HTTP Range와 90일 감사 metadata 보존을 적용한다.
@@ -203,22 +213,24 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성했다. v1은 `linux/amd64`만 build한다. 일반 `main` push에는 공개 image를 push하지 않고 `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 공개한다. GitHub Actions OIDC keyless Cosign으로 서명하며 transparency log에 private repository·workflow identity가 드러날 수 있음을 승인한다.
 - OCR·구조 분석 provider 또는 model 전환 시 한 문서 안의 결과를 혼합하지 않는다. 부분 성공분이 있어도 전체 문서를 새 attempt로 재실행한다.
 
-### 8.2 구현 중 Codex 결정과 외부 gate
+### 8.2 개발 중 확정한 기술값과 외부 gate
 
-다음 기술 항목은 개발 시작을 막지 않는다. Codex가 pilot·benchmark·시험 결과로 선택하고 ADR과 체크리스트에 근거를 남긴다.
+개발 가능한 기술 선택은 합성 gold·부하·장애 시험과 ADR로 확정했다. 실제 운영 입력이 필요한
+항목만 외부 gate로 남긴다.
 
 | 주제 | 상태 | 결정 시 필요한 기준 |
 |---|---|---|
-| 목표 지연시간·QPS·가용성 | pilot 후 Codex 결정 | 품질 우선 원칙과 초기 동시 요청 5개를 기준으로 BULK·부하 시험에서 측정 |
-| vector/lexical 검색 엔진 | BULK 후 Codex 결정 | PostgreSQL 상태·catalog와 외부 file volume은 확정, 검색 엔진은 corpus benchmark로 선정 |
-| hybrid 구현·ranking | 구현 중 Codex 결정 | 공통 evidence key 결합은 확정, 엔진·가중치·후보 수는 카드 도메인 benchmark로 결정 |
-| 구조 분석 엔진 | 구현 중 Codex 결정 | 규칙 기반, LLM 보조, 혼합 방식의 정확도·재현성·비용 평가 |
-| 온라인 query embedding | 구현 중 Codex 결정 | 장애 시 opt-in lexical-only 정책은 확정, OpenRouter 호출·cache·회로 차단 상세를 시험으로 결정 |
+| 목표 지연시간·QPS·가용성 | 개발 기준선 확정 | 동시 5, timeout 45초, 검색 P95 30초; 전체 corpus에서 보정 |
+| vector/lexical 검색 엔진 | 결정 완료 | PostgreSQL FTS+pgvector HNSW, 1,536차원, 후보 prefilter |
+| hybrid 구현·ranking | 결정 완료 | 공통 evidence ID RRF, query embedding 1회, gold gate 통과 |
+| 구조 분석 엔진 | 결정 완료 | 결정론적 rule baseline+exact span validator, LLM 보강 기본 off |
+| 온라인 query embedding | 결정 완료 | configurable OpenRouter, cache·retry·circuit, opt-in lexical-only |
 | 원문·PDF 이용 조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 재배포·상업적 이용 조건은 별도 확인 |
 | 보존·삭제·감사 정책 | 결정 완료 | PDF/OCR 전 버전, 성공 generation 최근 3개, 실패 candidate 7일, pin은 해제 시까지, 감사 90일·metric 1년, PNG cache 7일 |
 | backup·restore | v1 범위 밖 | 추후 개선 과제로 별도 설계·구현 |
 
-개발 착수에 필요한 제품·운영 P0 결정은 완료됐다. 공시자료 이용조건은 공개 운영 범위를 넓히기 전 확인하는 외부 gate이며, 승인 사용자 한정 개발과 품질 검증의 시작을 막지 않는다.
+공시자료 이용조건과 실제 provider·전체 corpus 성능은 공개 운영 범위를 넓히기 전 확인하는 외부
+gate다. 나머지 개발환경 항목은 ADR과 자동 검증 증거로 완료했다.
 
 ## 9. 성공 상태
 
@@ -234,4 +246,6 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - 비밀정보와 대용량 corpus가 Git 및 Docker 이미지에 포함되지 않는다.
 - 모든 완료 항목에 자동 테스트, 검증 보고서 또는 운영 기록이 연결된다.
 
-현재는 위 조건을 위한 문서가 작성되는 단계이며, 어느 조건도 구현 완료로 표시하지 않는다.
+개발 환경에서 자동화할 수 있는 조건은 구현·검증 완료했다. 실제 계정·endpoint·운영 host·장시간
+corpus·수동 public release만 운영 인계로 남으며, 상세 판정은
+[완료 체크리스트](08_COMPLETION_CHECKLIST.md)를 따른다.

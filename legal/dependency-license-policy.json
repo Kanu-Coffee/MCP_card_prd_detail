@@ -1,0 +1,51 @@
+{
+  "schema": "cardrag.dependency-license-policy.v1",
+  "project_license": "Proprietary",
+  "review_triggers": [
+    "AGPL",
+    "GPL-",
+    "GPLV",
+    "GNU GENERAL PUBLIC LICENSE",
+    "GNU AFFERO GENERAL PUBLIC LICENSE",
+    "GNU LESSER GENERAL PUBLIC LICENSE",
+    "LGPL",
+    "MPL-",
+    "MOZILLA PUBLIC LICENSE",
+    "EUPL",
+    "SSPL",
+    "COMMONS CLAUSE",
+    "COMMERCIAL",
+    "PROPRIETARY",
+    "UNKNOWN"
+  ],
+  "review_required": {
+    "certifi": {
+      "locked_version": "2026.7.22",
+      "expected_license_contains": ["MPL-2.0"],
+      "release_attestation": null
+    },
+    "psycopg": {
+      "locked_version": "3.3.4",
+      "expected_license_contains": ["LGPL-3.0-only"],
+      "release_attestation": null
+    },
+    "psycopg-binary": {
+      "locked_version": "3.3.4",
+      "expected_license_contains": ["LGPL-3.0-only"],
+      "release_attestation": null
+    },
+    "psycopg-pool": {
+      "locked_version": "3.3.1",
+      "expected_license_contains": ["LGPL-3.0-only"],
+      "release_attestation": null
+    },
+    "pymupdf": {
+      "locked_version": "1.28.2",
+      "expected_license_contains": [
+        "GNU AFFERO GPL 3.0",
+        "Artifex Commercial License"
+      ],
+      "release_attestation": "CARDRAG-PYMUPDF-1.28.2-COMMERCIAL-LICENSE-APPROVED"
+    }
+  }
+}

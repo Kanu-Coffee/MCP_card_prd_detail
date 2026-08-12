@@ -1,0 +1,12 @@
+{
+  "elHeader": {"resSuc": true},
+  "mainDataList": {
+    "cct11PrdntcAgrmMainVo": [
+      {
+        "goodsDescAt": "Y",
+        "code": "W-FIXTURE-001",
+        "codeName": "우리 픽스처 카드"
+      }
+    ]
+  }
+}

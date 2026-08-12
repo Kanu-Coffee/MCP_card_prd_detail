@@ -1,0 +1,517 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.8.17
+          uv lock --check
+          uv sync --frozen --extra dev
+
+      - name: Static checks and unit tests
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync mypy src/cardrag
+          uv run --no-sync python scripts/check_dependency_licenses.py \
+            --output /tmp/cardrag-dependency-licenses.json
+          uv run --no-sync pytest -m "not integration and not live and not load" \
+            --cov=cardrag --cov-report=term-missing
+
+      - name: Reproduce fixture quality and bounded local load gates
+        run: |
+          uv run --no-sync python scripts/run_fixture_quality.py \
+            --output /tmp/cardrag-fixture-quality.json
+          uv run --no-sync pytest -m load
+          uv run --no-sync python scripts/run_local_load.py \
+            --output /tmp/cardrag-local-load.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for report in (
+              Path("/tmp/cardrag-fixture-quality.json"),
+              Path("/tmp/cardrag-local-load.json"),
+          ):
+              assert json.loads(report.read_text())["status"] == "passed", report
+          PY
+
+      - name: Validate deployment source contracts
+        run: |
+          set -euo pipefail
+          sh -n scripts/entrypoint.sh scripts/init-volumes.sh \
+            deploy/postgres/init-databases.sh deploy/keycloak/entrypoint.sh
+          systemd-analyze verify \
+            deploy/systemd/cardrag-daily.service \
+            deploy/systemd/cardrag-daily.timer \
+            deploy/systemd/cardrag-retention.service \
+            deploy/systemd/cardrag-retention.timer
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/deploy/monitoring:/monitoring:ro" \
+            prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
+            check rules /monitoring/cardrag-alerts.yml
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          realm = json.loads(Path("deploy/keycloak/cardrag-realm.json").read_text())
+          assert realm["realm"] == "cardrag"
+          assert realm["registrationAllowed"] is False
+          assert realm["revokeRefreshToken"] is True
+          assert realm["refreshTokenMaxReuse"] == 0
+          assert realm["ssoSessionIdleTimeout"] == 90 * 24 * 60 * 60
+          assert realm["offlineSessionIdleTimeout"] == 90 * 24 * 60 * 60
+          assert realm["offlineSessionMaxLifespanEnabled"] is False
+          assert realm["clients"][0]["clientId"] == "cardrag-mcp"
+          for scope in realm["clientScopes"]:
+              mapper = scope["protocolMappers"][0]
+              assert mapper["config"]["included.client.audience"] == "cardrag-mcp"
+          PY
+
+      - name: Validate Compose rendering
+        run: |
+          set -euo pipefail
+          secret_dir=$(mktemp -d)
+          trap 'rm -rf "$secret_dir"' EXIT
+          for name in postgres_admin_password cardrag_db_password cardrag_worker_db_password cardrag_mcp_db_password keycloak_db_password keycloak_admin_password openrouter_api_key; do
+            printf '%s\n' fixture-only > "$secret_dir/${name}.txt"
+          done
+          printf '%s\n' 'postgresql://cardrag:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_database_url.txt"
+          printf '%s\n' 'postgresql://cardrag_worker:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_worker_database_url.txt"
+          printf '%s\n' 'postgresql://cardrag_mcp:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_mcp_database_url.txt"
+          chmod 0444 "$secret_dir"/*.txt
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose --profile '*' config --quiet
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f compose.yaml \
+            -f deploy/keycloak/bootstrap.compose.yaml \
+            --profile '*' \
+            config --quiet
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose --profile '*' \
+            config --format json > /tmp/cardrag-compose.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          compose = json.loads(Path("/tmp/cardrag-compose.json").read_text())
+          expected = {
+              "volume-init": {
+                  "/var/lib/cardrag/objects": True,
+                  "/var/lib/cardrag/generations": True,
+              },
+              "admin": {
+                  "/var/lib/cardrag/objects": True,
+                  "/var/lib/cardrag/generations": True,
+              },
+              "worker": {
+                  "/var/lib/cardrag/objects": True,
+                  "/var/lib/cardrag/generations": False,
+              },
+              "mcp": {
+                  "/var/lib/cardrag/objects": False,
+                  "/var/lib/cardrag/generations": False,
+              },
+          }
+          for service, mounts in expected.items():
+              actual = {
+                  item["target"]: not item.get("read_only", False)
+                  for item in compose["services"][service].get("volumes", [])
+                  if item["target"] in mounts
+              }
+              assert actual == mounts, (service, actual, mounts)
+
+          worker_security = set(compose["services"]["worker"]["security_opt"])
+          assert {
+              "no-new-privileges:true",
+              "seccomp=unconfined",
+              "apparmor=unconfined",
+          }.issubset(worker_security), worker_security
+          PY
+
+  compose-fixture:
+    runs-on: ubuntu-24.04
+    needs: quality
+    timeout-minutes: 15
+    env:
+      # GitHub-hosted runners currently expose two CPUs. Keep the production
+      # worker default at four CPUs and constrain only this fixture runner.
+      CARDRAG_WORKER_CPUS: "2.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install locked test environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.8.17
+          uv sync --frozen --extra dev
+
+      - name: Run PostgreSQL, Keycloak, process, and auth fixture checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          secret_dir=$(mktemp -d)
+          project="cardrag-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+              -p "$project" \
+              -f compose.yaml \
+              -f deploy/keycloak/bootstrap.compose.yaml \
+              --profile '*' down --volumes --remove-orphans || true
+            rm -rf "$secret_dir"
+          }
+          trap cleanup EXIT
+          for name in postgres_admin_password cardrag_db_password cardrag_worker_db_password cardrag_mcp_db_password keycloak_db_password keycloak_admin_password openrouter_api_key; do
+            printf '%s\n' fixture-only > "$secret_dir/${name}.txt"
+          done
+          printf '%s\n' 'postgresql://cardrag:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_database_url.txt"
+          printf '%s\n' 'postgresql://cardrag_worker:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_worker_database_url.txt"
+          printf '%s\n' 'postgresql://cardrag_mcp:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_mcp_database_url.txt"
+          chmod 0444 "$secret_dir"/*.txt
+          export CARDRAG_SECRETS_DIR="$secret_dir"
+
+          docker compose -p "$project" \
+            -f compose.yaml \
+            -f deploy/keycloak/bootstrap.compose.yaml \
+            up -d --wait --wait-timeout 240 postgres keycloak
+
+          postgres_id=$(docker compose -p "$project" -f compose.yaml ps -q postgres)
+          postgres_ip=$(docker inspect "$postgres_id" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          CARDRAG_TEST_DATABASE_URL="postgresql://cardrag:fixture-only@${postgres_ip}:5432/cardrag" \
+          CARDRAG_TEST_WORKER_DATABASE_URL="postgresql://cardrag_worker:fixture-only@${postgres_ip}:5432/cardrag" \
+          CARDRAG_TEST_MCP_DATABASE_URL="postgresql://cardrag_mcp:fixture-only@${postgres_ip}:5432/cardrag" \
+          CARDRAG_TEST_KEYCLOAK_URL="http://cardrag-keycloak.localhost:8080" \
+          CARDRAG_TEST_KEYCLOAK_ADMIN_USERNAME="cardrag-bootstrap" \
+          CARDRAG_TEST_KEYCLOAK_ADMIN_PASSWORD="fixture-only" \
+            uv run --no-sync pytest -m integration
+
+          curl --fail --silent --show-error \
+            http://cardrag-keycloak.localhost:8080/realms/cardrag/.well-known/openid-configuration \
+            > /tmp/cardrag-oidc.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          discovery = json.loads(Path("/tmp/cardrag-oidc.json").read_text())
+          assert discovery["issuer"] == "http://cardrag-keycloak.localhost:8080/realms/cardrag"
+          PY
+          registration_status=$(curl --silent --show-error -o /dev/null -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data '{"client_name":"unauthorized-fixture"}' \
+            http://cardrag-keycloak.localhost:8080/realms/cardrag/clients-registrations/openid-connect)
+          test "$registration_status" = 401 -o "$registration_status" = 403
+
+          docker compose -p "$project" -f compose.yaml \
+            up -d --force-recreate --no-deps --wait --wait-timeout 180 keycloak
+          keycloak_id=$(docker compose -p "$project" -f compose.yaml ps -q keycloak)
+          if docker inspect "$keycloak_id" --format '{{json .Mounts}} {{json .Config.Env}}' \
+            | grep -q keycloak_admin_password; then
+            echo "bootstrap admin secret survived base Compose recreation" >&2
+            exit 1
+          fi
+
+          docker compose -p "$project" -f compose.yaml up -d --build mcp
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8000/health/live >/dev/null
+          test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health/ready)" = 503
+          test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/mcp)" = 401
+
+          python - <<'PY'
+          from concurrent.futures import ThreadPoolExecutor
+          from urllib.request import urlopen
+
+          def live(_: int) -> int:
+              with urlopen("http://127.0.0.1:8000/health/live", timeout=5) as response:
+                  return response.status
+
+          with ThreadPoolExecutor(max_workers=5) as pool:
+              assert list(pool.map(live, range(25))) == [200] * 25
+          PY
+
+          docker compose -p "$project" -f compose.yaml --profile worker \
+            run --rm --no-deps worker cardrag-worker --once
+          docker compose -p "$project" -f compose.yaml --profile worker \
+            run --rm --no-deps worker codex --version
+
+  image:
+    runs-on: ubuntu-24.04
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mcp, worker, admin]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build linux/amd64 target without registry push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: cardrag-ci:${{ matrix.target }}
+          build-args: |
+            APP_VERSION=ci-${{ github.run_id }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Check image architecture, user, and excluded content
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect "cardrag-ci:${TARGET}" --format '{{.Architecture}}')" = amd64
+          test "$(docker image inspect "cardrag-ci:${TARGET}" --format '{{.Config.User}}')" = 10001:10001
+          docker image inspect "cardrag-ci:${TARGET}" --format '{{json .Config.Env}}' \
+            | grep -q "CARDRAG_CONTAINER_ROLE=${TARGET}"
+          container_id=$(docker create "cardrag-ci:${TARGET}")
+          trap 'docker rm "$container_id" >/dev/null 2>&1 || true' EXIT
+          archive=$(mktemp)
+          docker export "$container_id" > "$archive"
+          contents=$(tar -tf "$archive")
+          if grep -Eq '(^|/)(\.env|credentials.*\.json|oauth.*\.json|.*\.pdf|.*\.sqlite3?)$' <<<"$contents"; then
+            echo "forbidden corpus or credential file found in image" >&2
+            exit 1
+          fi
+
+      - name: Smoke-test target entrypoint
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          common=(
+            "--rm" "--read-only"
+            "--tmpfs" "/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001"
+            "--tmpfs" "/var/lib/cardrag-home:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001"
+            "--user" "10001:10001"
+            "--cap-drop" "ALL"
+            "--security-opt" "no-new-privileges"
+          )
+          case "$TARGET" in
+            mcp)
+              test "$(docker image inspect "cardrag-ci:${TARGET}" --format '{{index .Config.Cmd 0}}')" = cardrag-mcp
+              if docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag --help; then
+                echo "MCP image accepted an admin command" >&2
+                exit 1
+              fi
+              ;;
+            worker)
+              docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag-worker --help
+              test "$(docker run "${common[@]}" \
+                --tmpfs "/run/cardrag-codex:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001" \
+                --env CODEX_HOME=/run/cardrag-codex \
+                "cardrag-ci:${TARGET}" codex --version)" = "codex-cli 0.147.0"
+              codex_features=(
+                shell_tool unified_exec multi_agent view_image apps plugins browser_use computer_use
+                standalone_web_search web_search_cached web_search_request image_generation skill_search
+                in_app_browser tool_search_always_defer_mcp_tools tool_search recommended_plugins
+                auth_elicitation browser_use_external browser_use_full_cdp_access code_mode_host goals hooks
+                plugin_sharing remote_plugin shell_snapshot skill_mcp_dependency_install
+                tool_call_mcp_elicitation tool_suggest workspace_dependencies
+              )
+              codex_debug_args=(
+                -C /work -c 'default_permissions="ocr"' -c 'model_reasoning_effort="high"'
+                --model gpt-5.4
+              )
+              for feature in "${codex_features[@]}"; do
+                codex_debug_args+=(--disable "$feature")
+              done
+              sandbox_root=$(mktemp -d)
+              mkdir -p "$sandbox_root/rendered" "$sandbox_root/secrets" "$sandbox_root/outside"
+              cleanup_sandbox() {
+                chmod 0755 \
+                  "$sandbox_root" "$sandbox_root/rendered" \
+                  "$sandbox_root/secrets" "$sandbox_root/outside"
+                if [ -f /tmp/cardrag-prompt-input.json ]; then
+                  unlink /tmp/cardrag-prompt-input.json
+                fi
+                unlink "$sandbox_root/rendered/page.txt"
+                unlink "$sandbox_root/secrets/token"
+                unlink "$sandbox_root/outside/data.txt"
+                rmdir \
+                  "$sandbox_root/rendered" "$sandbox_root/secrets" \
+                  "$sandbox_root/outside" "$sandbox_root"
+                if [ -n "${apparmor_userns_original:-}" ]; then
+                  sudo sysctl -q -w \
+                    "kernel.apparmor_restrict_unprivileged_userns=${apparmor_userns_original}" \
+                    || true
+                fi
+                if [ -n "${userns_clone_original:-}" ]; then
+                  sudo sysctl -q -w \
+                    "kernel.unprivileged_userns_clone=${userns_clone_original}" \
+                    || true
+                fi
+              }
+              trap cleanup_sandbox EXIT
+              printf '%s\n' 'rendered-canary' > "$sandbox_root/rendered/page.txt"
+              printf '%s\n' 'secret-canary' > "$sandbox_root/secrets/token"
+              printf '%s\n' 'outside-canary' > "$sandbox_root/outside/data.txt"
+              chmod 0555 \
+                "$sandbox_root" "$sandbox_root/rendered" \
+                "$sandbox_root/secrets" "$sandbox_root/outside"
+              chmod 0444 \
+                "$sandbox_root/rendered/page.txt" \
+                "$sandbox_root/secrets/token" "$sandbox_root/outside/data.txt"
+              # Ubuntu 24.04 restricts unprivileged user namespaces through a
+              # host AppArmor sysctl. Codex's bubblewrap sandbox needs that
+              # namespace to configure its isolated loopback interface. This
+              # relaxation is limited to the ephemeral worker-image CI VM and
+              # is restored by cleanup_sandbox; the production container is
+              # still exercised as non-root with cap-drop ALL and NNP.
+              apparmor_userns_original=""
+              userns_clone_original=""
+              if sysctl -n kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+                userns_clone_original=$(sysctl -n kernel.unprivileged_userns_clone)
+                sudo sysctl -q -w kernel.unprivileged_userns_clone=1
+              fi
+              if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+                apparmor_userns_original=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+                sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+              fi
+              docker run "${common[@]}" \
+                --tmpfs "/run/cardrag-codex:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001" \
+                --env CODEX_HOME=/run/cardrag-codex \
+                --volume "$sandbox_root/rendered:/work:ro" \
+                "cardrag-ci:${TARGET}" codex "${codex_debug_args[@]}" \
+                debug prompt-input 'OCR diagnostic only' > /tmp/cardrag-prompt-input.json
+              python - <<'PY'
+          import json
+          from pathlib import Path
+
+          items = json.loads(Path("/tmp/cardrag-prompt-input.json").read_text())
+          assert items
+          assert all(item.get("type") == "message" for item in items), items
+          assert not any(
+              key in item
+              for item in items
+              for key in ("function", "tool", "tools", "parameters", "input_schema")
+          ), items
+          PY
+              docker run "${common[@]}" \
+                --security-opt seccomp=unconfined \
+                --security-opt apparmor=unconfined \
+                --volume "$sandbox_root/rendered:/work:ro" \
+                --volume "$sandbox_root/secrets:/run/secrets:ro" \
+                --volume "$sandbox_root/outside:/outside:ro" \
+                "cardrag-ci:${TARGET}" codex sandbox -P ocr -C /work -- \
+                sh -c 'test "$(cat page.txt)" = rendered-canary'
+              if docker run "${common[@]}" \
+                --security-opt seccomp=unconfined \
+                --security-opt apparmor=unconfined \
+                --volume "$sandbox_root/rendered:/work:ro" \
+                --volume "$sandbox_root/secrets:/run/secrets:ro" \
+                "cardrag-ci:${TARGET}" codex sandbox -P ocr -C /work -- \
+                sh -c 'cat /run/secrets/token'; then
+                echo "OCR permission profile allowed a Docker secret read" >&2
+                exit 1
+              fi
+              if docker run "${common[@]}" \
+                --security-opt seccomp=unconfined \
+                --security-opt apparmor=unconfined \
+                --volume "$sandbox_root/rendered:/work:ro" \
+                --volume "$sandbox_root/outside:/outside:ro" \
+                "cardrag-ci:${TARGET}" codex sandbox -P ocr -C /work -- \
+                sh -c 'cat /outside/data.txt'; then
+                echo "OCR permission profile allowed an outside-root read" >&2
+                exit 1
+              fi
+              if docker run "${common[@]}" \
+                --security-opt seccomp=unconfined \
+                --security-opt apparmor=unconfined \
+                --volume "$sandbox_root/rendered:/work:ro" \
+                "cardrag-ci:${TARGET}" codex sandbox -P ocr -C /work -- \
+                sh -c 'touch denied.txt'; then
+                echo "OCR permission profile allowed a workspace write" >&2
+                exit 1
+              fi
+              if docker run "${common[@]}" \
+                --security-opt seccomp=unconfined \
+                --security-opt apparmor=unconfined \
+                --volume "$sandbox_root/rendered:/work:ro" \
+                "cardrag-ci:${TARGET}" codex sandbox -P ocr -C /work -- \
+                python -c 'import socket; socket.socket()'; then
+                echo "OCR permission profile allowed a network socket" >&2
+                exit 1
+              fi
+              if docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag --help; then
+                echo "worker image accepted an admin command" >&2
+                exit 1
+              fi
+              ;;
+            admin)
+              docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag --help
+              if docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag-worker --help; then
+                echo "admin image accepted a worker command" >&2
+                exit 1
+              fi
+              ;;
+          esac
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: cardrag-ci:${{ matrix.target }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.target }}.spdx.json
+
+      - name: Scan repository secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan image
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            ghcr.io/aquasecurity/trivy:0.67.2@sha256:e2b22eac59c02003d8749f5b8d9bd073b62e30fefaef5b7c8371204e0a4b0c08 \
+            image \
+            --scanners vuln \
+            --format table \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            "cardrag-ci:${TARGET}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-${{ matrix.target }}
+          path: sbom-${{ matrix.target }}.spdx.json
+          if-no-files-found: error

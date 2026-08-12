@@ -1,8 +1,8 @@
 # 목표 아키텍처
 
-> 문서 상태: 목표 설계 초안
+> 문서 상태: 구현·개발환경 검증된 v1 아키텍처 기준선
 > 기준일: 2026-08-12
-> 구현 상태: 아래 구성요소와 배포 단위는 목표 구조이며 아직 구현·배포되지 않았다.
+> 구현 상태: 아래 구성요소와 배포 단위는 코드·fixture/mock·자동 통합시험으로 구현·검증했다. 실제 카드사·provider·전체 corpus·운영 host 검증은 운영 인계로 분리한다.
 
 ## 1. 목적과 설계 전제
 
@@ -14,7 +14,10 @@
 - 두 영역 사이에서 전달되는 것은 검증 완료 후 불변으로 발행된 검색 `generation`이다.
 - 레거시 corpus는 원본 보존 상태에서 선별 복사·검증·변환하며 레거시 작업 디렉터리를 신규 런타임으로 사용하지 않는다.
 
-여기서 generation은 동일한 기준시점과 처리 설정으로 생성되어 함께 발행되는 catalog, evidence, structured 데이터와 검색 색인의 논리적 묶음을 뜻한다. 정확한 물리 형식과 저장 엔진은 Codex가 구현 중 benchmark와 운영 복잡도로 결정한다.
+여기서 generation은 동일한 기준시점과 처리 설정으로 생성되어 함께 발행되는 catalog, evidence,
+structured 데이터와 검색 색인의 논리적 묶음이다. v1은 PostgreSQL 17의 catalog·FTS·pgvector
+snapshot과 checksum·`READY` seal을 가진 불변 file generation을 사용한다. 실제 corpus가 단일 host
+한도를 넘는 경우에만 새 benchmark와 ADR로 저장 경계를 재검토한다.
 
 ## 2. 전체 구조
 
@@ -58,32 +61,34 @@
 
 운영 제어와 데이터 이동은 한 방향을 원칙으로 한다. 오프라인 영역은 새 generation을 만들 수 있지만 서비스 중인 generation을 직접 고치지 않는다. 온라인 영역은 generation을 읽을 수 있지만 수집·OCR·색인 작업을 시작하거나 상태를 변경할 수 없다.
 
-### 2.1 권장 논리 프로젝트 구조
+### 2.1 구현된 프로젝트 구조
 
-아래는 향후 구현을 분리하기 위한 논리 구조다. 디렉터리가 현재 생성되어 있거나 코드가 구현되었다는 뜻은 아니며, 실제 package 이름과 단일·다중 package 구성은 Codex가 응집도와 배포 경계를 기준으로 구현 중 결정한다.
+논리 경계는 하나의 `cardrag` package 아래 다음과 같이 구현했다. 컨테이너는 같은 검증된
+distribution을 사용하지만 역할별 entrypoint, PostgreSQL role과 volume 권한으로 실행 경계를
+강제한다.
 
 ```text
 project/
 ├── docs/                       # 개발·품질·운영 기준
-├── src/
+├── src/cardrag/
 │   ├── domain/                 # issuer-aware 상품·문서·근거 계약
-│   ├── offline/
-│   │   ├── collection/         # 카드사 adapter, 변경 판정, PDF 취합
-│   │   ├── ocr/                # 렌더링, OCR, 품질 검사
-│   │   ├── structure/          # 구조 분석과 원문 연결
-│   │   ├── indexing/           # 임베딩, text/vector 색인 build
-│   │   └── publishing/         # generation 검증·발행·rollback
-│   ├── online/
-│   │   ├── mcp/                # protocol·transport 경계
-│   │   ├── query/              # 조회 use case와 응답 조립
-│   │   └── retrieval/          # catalog·검색·evidence reader
-│   └── platform/               # 설정, 저장소 adapter, 관측성
+│   ├── issuers/                # 우리·KB·신한 adapter
+│   ├── acquisition/            # 제한 download와 PDF 검증
+│   ├── pipeline/               # OCR·구조 분석·chunk·durable worker
+│   ├── search/                 # embedding, PostgreSQL hybrid, 세대 reader
+│   ├── service/                # query/auth/source-file 경계
+│   ├── storage/                # content-addressed object와 안전한 경로
+│   ├── legacy/                 # read-only 이관 pilot
+│   └── db/                     # PostgreSQL migration과 role 계약
 ├── tests/                      # 단위·통합·품질·복구·성능 검증
-├── deployment/                 # 향후 Docker·운영 배포 정의
-└── config/                     # 비밀값을 제외한 설정 schema·기본값
+├── deploy/                     # Keycloak·PostgreSQL·systemd·관측성
+├── Dockerfile                  # MCP/worker/admin 역할별 target
+└── compose.yaml                # 단일-host 배포 경계
 ```
 
-`domain`은 카드사별 웹 구조나 특정 검색 엔진에 의존하지 않는다. `offline`은 domain artifact를 만들고 `online`은 published generation을 통해서만 이를 읽는다. 저장 제품, LLM provider와 MCP transport 같은 외부 기술은 `platform` 또는 해당 adapter 경계에 가두어 교체 가능하게 한다.
+`domain`은 카드사별 웹 구조나 특정 검색 엔진에 의존하지 않는다. `pipeline`은 domain artifact를
+만들고 `service`는 published generation만 읽는다. 저장 제품, LLM provider와 MCP transport는
+Protocol·adapter 경계 뒤에 두어 fixture와 운영 구현을 교체할 수 있다.
 
 ## 3. 배포와 권한 경계
 
@@ -99,7 +104,9 @@ project/
 - 실패한 문서가 다른 문서 처리나 현재 온라인 generation에 영향을 주지 않도록 격리한다.
 - build 완료 후 검증을 통과한 generation만 발행 권한을 가진다.
 
-수집, OCR, build를 하나의 컨테이너 이미지로 구성할지 역할별 이미지로 분리할지는 Codex가 image 크기·보안·운영 시험으로 결정한다. 다만 실행 프로세스, 작업 권한과 볼륨 경계는 역할별로 분리할 수 있어야 한다.
+수집·OCR·build는 worker target, 게시·운영 명령은 admin target에 두며 generation volume은
+worker read-only/admin read-write다. 온라인 MCP target은 수집·OCR 명령을 실행할 수 없고
+published object/generation volume만 읽는다.
 
 ### 3.2 온라인 MCP 서비스 영역
 
@@ -112,7 +119,11 @@ project/
 - 이메일 읽기·발송
 - 임의 경로 파일 출력
 
-선정한 vector 검색이 원격 query embedding을 요구하면 온라인 서비스가 OpenRouter에 제한적으로 통신할 수 있다. cache·quota·circuit breaker와 query 보존 세부값은 Codex가 부하·장애 시험으로 결정한다. 장애 시에는 caller가 `allow_degraded=true`로 허용한 요청만 lexical-only 결과를 받는다. 그 외 오프라인 endpoint와 비밀정보는 온라인 컨테이너에 제공하지 않는다.
+온라인 vector 검색은 OpenRouter query embedding에 제한적으로 통신한다. request timeout, bounded retry와
+circuit breaker를 개발 기준선으로 구현했고 질의 원문은 보존하지 않는다. 실제 provider quota·비용과
+운영 우선순위는 실환경 pilot에서 보정한다. 장애 시에는 caller가 `allow_degraded=true`로 허용한
+요청만 lexical-only 결과를 받는다. 그 외 오프라인 endpoint와 비밀정보는 온라인 컨테이너에
+제공하지 않는다.
 
 온라인 MCP는 HTTPS endpoint URL과 OAuth access token으로 접속한다. token은 `Authorization: Bearer` header에서만 받고 URL query·path와 일반 log에는 기록하지 않는다. client별로 `search`와 `source_pdf` scope를 분리한다. 최초 승인 이후 client는 access token을 자동 갱신하고 refresh token을 회전한다. 90일은 고정 연결 만료가 아니라 비활성 만료 기준이며, 정상적으로 계속 사용하는 동안 수동 token 재입력을 요구하지 않는다. refresh token 폐기·분실, 보안사고 또는 client의 refresh 미지원 시에는 재인증한다.
 
@@ -148,7 +159,9 @@ project/
 | generation 검증기 | 무결성·완전성·검색 smoke test 수행 | staging generation과 build manifest | 발행 승인 또는 실패 보고서 | 검증 실패 데이터는 온라인에 노출하지 않는다. |
 | generation 발행기 | 검증본을 불변으로 등록하고 active 참조 전환 | 승인된 generation | active generation과 rollback 이력 | build와 분리된 제한 권한을 사용한다. |
 
-구조 분석 방식은 Codex가 gold set에서 규칙 기반, LLM 기반, 혼합 방식을 원문 보존율, 조건 관계 정확도, 재현성, 비용과 변경 안정성으로 비교해 결정한다. downstream 계약은 엔진 교체와 무관하게 유지한다.
+구조 분석 v1은 canonical OCR을 변경하지 않는 결정론적 rule baseline과 exact source-span validator로
+확정했다. schema-guided LLM 보강은 같은 gold set에서 baseline 개선을 증명하기 전까지 기본 off다.
+downstream 계약은 향후 엔진 교체와 무관하게 유지한다.
 
 ### 4.2 온라인 구성요소
 
@@ -213,7 +226,10 @@ scheduled run은 매일 03:00 KST에 우리카드, KB국민카드, 신한카드 
 6. 상품·문서 버전·관련 섹션·원문 근거·출처·generation을 함께 반환한다. 페이지 요청은 OCR text와 원본 PDF에서 요청 시 생성해 7일 cache하는 PNG로 제공하고, 명시적 PDF 요청은 정확한 version과 hash를 확인한 전체 streaming file로 분리한다.
 7. 최신본과 과거본이 충돌하거나 충분한 근거가 없으면 그 상태를 명시한다.
 
-lexical/vector hybrid와 공통 stable evidence key 결합은 채택한다. 검색 엔진, ANN 구현, 후보 수와 ranking 값은 Codex가 실제 카드 도메인 benchmark 후 결정한다. 레거시의 Python exact full scan과 서로 다른 ID 공간을 사용한 hybrid는 그대로 채택하지 않는다.
+lexical/vector hybrid는 PostgreSQL FTS와 pgvector HNSW 후보를 공통 stable evidence ID로 RRF 결합한다.
+issuer·version/as-of·section filter는 두 후보 SQL에 동일하게 적용하고 query embedding은 요청당 한 번만
+생성한다. 후보 한도와 RRF의 개발 기본값은 자동시험으로 고정했으며 실제 corpus 품질·지연 측정에서
+보정한다. 레거시의 Python exact full scan과 서로 다른 ID 공간을 사용한 hybrid는 채택하지 않는다.
 
 ## 6. 식별자와 provenance 경계
 
@@ -230,7 +246,9 @@ lexical/vector hybrid와 공통 stable evidence key 결합은 채택한다. 검�
 | generation 식별자 | 온라인 응답이 사용한 corpus snapshot 확인 |
 | stable evidence 식별자 | 검색 결과에서 전체 원문·출처로 재조회 |
 
-구체적인 문자열 형식과 schema는 Codex가 migration·호환성 시험을 거쳐 결정한다. 다만 product dedupe, 검색 filter와 응답 조립에서 카드사를 제거하지 않으며, 검색 순위에 따라 변하는 값을 stable evidence ID로 사용하지 않는다.
+식별 문자열과 schema는 ADR-0002 및 migration 1~13으로 versioning했다. product dedupe, 검색 filter와
+응답 조립에서 카드사를 제거하지 않으며 검색 순위나 generation처럼 바뀌는 값을 stable evidence ID의
+재료로 사용하지 않는다.
 
 ## 7. 저장소와 상태 경계
 
@@ -247,7 +265,10 @@ lexical/vector hybrid와 공통 stable evidence key 결합은 채택한다. 검�
 
 원본 PDF·OCR·published generation은 단일 Linux host의 외부 불변 file volume에 둔다. durable 작업 상태와 catalog는 PostgreSQL에 저장한다. 하나의 공유 쓰기 볼륨을 모든 컨테이너에 마운트하지 않고 온라인 서비스에는 게시된 generation과 승인된 source artifact view만 read-only로 제공한다.
 
-초기 저장 경계는 확정됐지만 file layout, PostgreSQL schema·migration과 vector/lexical engine은 아직 구현 결정이 필요하다. 검색 엔진은 신한카드 BULK corpus benchmark 뒤 선정한다. backup·restore 구현은 v1 범위에서 제외하고 추후 개선 과제로 둔다.
+v1 저장 경계는 SHA-256 content-addressed PDF/OCR object, PostgreSQL 17 schema·migration 1~13,
+PostgreSQL FTS+pgvector HNSW와 불변 file generation으로 구현했다. 실제 전체 corpus의 index size와
+host resource 한도는 실환경 BULK에서 측정·보정한다. backup·restore 구현은 v1 범위에서 제외하고
+추후 개선 과제로 둔다.
 
 ## 8. generation build와 발행 경계
 
@@ -264,7 +285,9 @@ generation 발행은 데이터 처리와 서비스 운영을 분리하는 핵심
 - 금지된 이메일·인증정보·임시 chunk·실패 artifact가 포함되지 않는다.
 - generation 전체에 필요한 checksum 또는 동등한 무결성 정보가 있다.
 
-정확한 허용 오차와 검색 품질 임계값은 Codex가 benchmark 구축 후 결정한다.
+개발 합성 gate는 source-span 100%, Recall@10 95% 이상, critical Recall@10 100%, MRR·nDCG@10
+0.90 이상과 filter 정확도 100%로 확정했다. 실제 카드사 layout·provider·전체 corpus에는 같은
+evaluator를 적용하고 필요하면 새 ADR로 임계값을 보정한다.
 
 ### 8.2 발행과 전환
 
@@ -275,7 +298,9 @@ generation 발행은 데이터 처리와 서비스 운영을 분리하는 핵심
 - 새 generation open 또는 readiness가 실패하면 active 참조를 이전 generation으로 되돌린다.
 - 성공한 검색 generation은 최근 3개를 보존한다. 실패 candidate는 조사 가능하도록 7일 보존한 뒤 정리하고, 수동 pin한 generation은 명시적 unpin 전까지 보존한다.
 
-파일 symlink, manifest pointer, object storage alias 또는 배포 단위 교체 중 어느 방식을 사용할지는 저장 환경과 replica 구조를 확정한 뒤 결정한다.
+v1은 같은 filesystem의 atomic `current.json` 교체와 PostgreSQL `active_generation` row를 함께
+대사하는 publication protocol을 사용한다. 실패 시 DB/file 상태를 보상하고 readiness가 두 권위의
+불일치를 차단한다. 다른 storage나 다중 node로 전환할 때만 별도 alias/control-plane 방식을 재검토한다.
 
 ## 9. 실패 격리
 
@@ -324,7 +349,13 @@ scheduler, 발행기, 관측 agent는 초기에는 worker의 제한 entrypoint �
 - graceful shutdown 시 새 작업 claim을 중단하고 현재 checkpoint 또는 질의를 안전하게 마친다.
 - MCP application은 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host `127.0.0.1:8000`에만 publish한다. TLS·외부 hostname·Nginx Proxy Manager 연결은 개발 완료 후 별도 hosting 과제이며 stack에 reverse proxy를 포함하지 않는다.
 
-Docker Hub public repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. v1 platform은 `linux/amd64`로 한정한다. 일반 `main` push는 build·test까지만 수행하고 공개 registry에 push하지 않는다. `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 version+Git SHA tag로 push·promotion한다. GitHub Actions OIDC 기반 keyless Cosign으로 digest를 서명하고, private GitHub repository·workflow URI가 transparency log에 공개될 수 있음을 승인한다. 배포·rollback은 digest를 기준으로 한다. base image와 CPU·memory 한도는 구현 중 benchmark로 정한다.
+Docker Hub public repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. v1 platform은 `linux/amd64`로
+한정한다. 일반 `main` push는 build·test까지만 수행하고 공개 registry에 push하지 않는다. `vX.Y.Z`
+release tag와 manual approval을 모두 통과한 MCP/worker/admin target만 역할별 version+Git SHA tag로
+push한다. GitHub Actions OIDC 기반 keyless Cosign으로 각 역할 digest를 서명하고, private GitHub
+repository·workflow URI가 transparency log에 공개될 수 있음을 승인한다. 배포·rollback은 역할별
+digest를 기준으로 한다. base image와 Compose CPU·memory 개발 기본값은 고정했고 운영 host 한도는
+실제 BULK·질의 측정으로 보정한다.
 
 ## 12. 외부 의존성 경계
 
@@ -339,23 +370,26 @@ Docker Hub public repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. v
 
 OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질 동등성 검증을 통과하기 전에는 활성화하지 않는다. 초기 대량 OCR은 Codex exec만 사용한다. 구조 분석에서 LLM을 사용하기로 결정하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다. provider 또는 model을 바꾸는 페일오버는 문서 단위 새 attempt이며, 일부 성공 결과가 있어도 전체 문서를 다시 처리해 한 문서 안에서 backend 결과를 혼합하지 않는다.
 
-## 13. 구현 중 Codex가 결정할 아키텍처 항목
+## 13. 개발 중 확정한 아키텍처 항목
 
-아래 기술 선택은 개발 착수 차단사항이 아니다. Codex가 신한 BULK pilot, gold set, 부하·장애 시험으로 선택하고 간단한 ADR에 대안·근거·결과를 기록한다.
+개발 중 선택한 기술값과 근거는 `docs/adr/`에 기록했다. 실제 provider·전체 corpus·운영 host에서만
+측정 가능한 값은 기본값을 유지하되 운영 인계 후 새 ADR로 보정한다.
 
 | 항목 | 상태 | 결정이 영향을 주는 영역 |
 |---|---|---|
-| 목표 latency, QPS, 가용성 | pilot 후 Codex 결정 | 초기 동시 요청 5개·품질 우선 원칙 아래 BULK/load 측정 후 확정 |
-| hybrid 엔진과 ranking | 구현 중 Codex 결정 | 공통 evidence key 결합은 확정, query embedding·후보 수·가중치 품질 평가 |
-| vector/lexical 검색 엔진 | BULK 후 Codex 결정 | 외부 file volume·PostgreSQL은 확정, generation 포맷·memory·rollback benchmark 필요 |
-| 구조 분석 엔진 | 구현 중 Codex 결정 | worker 의존성, 비용, 재현성, 품질 관문 |
-| scheduled job 세부 구현 | 구현 중 Codex 결정 | CLI+scheduled job은 확정, host scheduler·Compose job 연결, lease·retry 필요 |
-| file layout·PostgreSQL 운영 방식 | 구현 중 Codex 결정 | high-level 저장 제품은 확정, schema·migration 필요; backup은 v1 후속 과제 |
-| generation 전환 방식 | 구현 중 Codex 결정 | replica 일관성, rollback과 zero-downtime |
+| 목표 latency, QPS, 가용성 | 개발 기준선 확정 | 동시 5, timeout 45초, 초기 P95 30초; 실제 corpus에서 보정 |
+| hybrid 엔진과 ranking | 결정 완료 | PostgreSQL FTS+pgvector HNSW, 공통 evidence ID RRF, query embedding 1회 |
+| vector/lexical 검색 엔진 | 결정 완료 | 1,536차원 vector와 prefilter; Python BLOB full scan 금지 |
+| 구조 분석 엔진 | 결정 완료 | canonical OCR 불변, 결정론적 rule baseline+exact span validator; LLM 보강 기본 off |
+| scheduled job 세부 구현 | 결정 완료 | host systemd one-shot, DB lease heartbeat, 03:00/04:00 KST |
+| file layout·PostgreSQL 운영 방식 | 결정 완료 | content-addressed object, immutable generation, migration 1~13 |
+| generation 전환 방식 | 결정 완료 | DB/file 대사, request pinning, compensation 가능한 publish/rollback |
 | 원본 PDF 이용조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 저작권·재배포 조건은 별도 확인 |
 | generation 부분 실패 | 결정 완료 | 최신 문서 실패는 게시 차단, 과거 실패는 격리·보고하고 최신 coverage 100%일 때만 게시 |
 
-원본 PDF 이용조건은 공개 운영 전 확인할 외부 gate다. 그 외 항목은 Codex가 구현 중 결정하며 구성요소 간 계약, issuer-scoped 식별, provenance, read/write 분리와 불변 generation 원칙을 유지한다. 제품 범위나 외부 공개 권한을 바꾸는 결정만 사용자에게 다시 확인한다.
+원본 PDF 이용조건과 실제 provider·전체 corpus 성능은 공개 운영 전 확인할 외부 gate다. 나머지
+기술 선택은 ADR·fixture/load/integration 증거로 확정했다. 제품 범위나 외부 공개 권한을 바꾸는
+결정만 사용자에게 다시 확인한다.
 
 ## 14. 아키텍처 검증 조건
 
@@ -371,4 +405,6 @@ OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질
 - 컨테이너 재생성 후 원본·OCR·작업 상태·generation이 유지되는 복구 테스트
 - secret과 대용량 데이터가 Git 이력·Docker image layer·일반 로그에 없다는 점검
 
-현재는 이 조건을 정의한 상태일 뿐, 테스트나 구현은 수행되지 않았다.
+위 조건 중 개발환경에서 재현 가능한 항목은 fixture/load/integration 및 배포 검증으로 수행했다.
+실제 카드사 endpoint·외부 모델·전체 corpus 성능, 운영 host와 public release는
+[실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)의 성공 조건으로 남긴다.

@@ -5,12 +5,12 @@
 이 문서는 신규 CardRAG MCP 시스템의 초기 대량 처리, 일일 증분 처리, 장애 복구, 관측성, Docker 운영과 배포 절차가 갖춰야 할 조건을 정의한다.
 
 - 작성일: 2026-08-12
-- 현재 상태: 운영·배포 계획 문서
-- 구현 상태: 미착수
-- 수행하지 않은 작업: OCR·임베딩 실행, Codex/OpenRouter 인증, Docker build·image push, container 기동, 애플리케이션 배포
-- 외부 상태: Docker CLI의 `ymtop59` 인증을 확인하고 public `ymtop59/mcp-card-prd-detail` repository를 생성했다. image는 아직 없다.
+- 현재 상태: 구현·검증된 v1 운영 계약과 실환경 인계 기준
+- 구현 상태: scheduler/worker/MCP, PostgreSQL·Keycloak, 관측성, Docker Compose와 `linux/amd64` 3-role image를 개발 환경에서 구현·검증했다.
+- 수행하지 않은 작업: 실제 카드사·Codex/OpenRouter 계정 호출, 전체 9.51 GiB 장시간 BULK, 운영 host 설치, public image push와 Nginx Proxy Manager 연결
+- 외부 상태: public `ymtop59/mcp-card-prd-detail` repository는 생성했지만, 정책대로 `vX.Y.Z` tag와 manual approval 전에는 image를 push하지 않았다.
 
-문서에 나오는 container, image, volume, metric과 상태 필드는 목표 계약이다. 존재하거나 검증된 것처럼 해석하지 않는다. 레거시에는 Dockerfile, Compose, MCP server, health check, durable queue 또는 immutable generation 게시 기능이 없다.
+문서의 container, image, volume, metric과 상태 필드는 신규 `src/cardrag`, `compose.yaml`, `Dockerfile`, `deploy/`와 자동시험의 구현 계약이다. 레거시에는 해당 기능이 없으며 계속 read-only로 유지한다. 실계정·운영 host가 필요한 검증 결과를 개발 검증과 혼동하지 않는다.
 
 ## 2. 운영 경계
 
@@ -133,7 +133,21 @@ preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로
 - 성공한 PDF/OCR stage는 입력 hash와 processor version이 같으면 다시 실행하지 않는다.
 - OCR page/chunk 단위 checkpoint를 지원하되 최종 문서 성공은 모든 페이지가 검증된 후 기록한다.
 - SIGTERM을 받으면 새 claim을 멈추고 진행 중 작업을 checkpoint하거나 lease가 안전하게 만료되도록 종료한다.
-- run을 재개해도 새 run ID와 원래 parent run ID를 남겨 이력을 잃지 않는다.
+- 중단된 동일 durable run ID의 상태를 조회해 미완료 issuer부터 idempotent하게 재개하고,
+  기존 job·attempt 이력과 generation 연결을 유지한다.
+
+systemd one-shot이 run 생성 후 중단되면 새 daily run을 시작하지 않는다. owner/admin container에서
+다음 순서로 PostgreSQL의 기존 run ID를 발견·점검·재개한다.
+
+```bash
+cardrag run list --state running
+cardrag run status RUN_ID
+cardrag run finalize RUN_ID
+```
+
+`finalize`는 동일 run ID와 issuer별 idempotency key를 유지해 누락 issuer부터 재개하고 모든 terminal
+상태와 품질 gate를 확인한 뒤에만 게시한다. 둘 이상의 예상하지 못한 running daily run이 보이면
+임의로 새 실행이나 게시를 진행하지 않고 scheduler lease와 journal을 먼저 조사한다.
 
 container 재생성 후 resume test는 필수 인수 항목이다.
 
@@ -218,7 +232,7 @@ publisher는 다음을 순서대로 검증한다.
 
 1. manifest와 실제 파일의 checksum·size 일치
 2. schema migration/version과 application compatibility
-3. DB/index integrity와 Docker runtime의 SQLite FTS5 지원
+3. PostgreSQL schema·FTS와 pgvector extension/HNSW index integrity
 4. 최신 문서의 current text hash+model+dimension embedding·색인 coverage 100%
 5. issuer/document/version count reconciliation
 6. stable evidence ID와 source span 역추적
@@ -232,11 +246,15 @@ publisher는 다음을 순서대로 검증한다.
 
 - candidate를 build 경로에서 완성하고 검증한다.
 - 같은 filesystem의 immutable generations 경로로 seal한다.
-- current pointer를 temporary file 작성 후 atomic replace한다.
+- `current.json` pointer를 temporary file·fsync 후 atomic replace하고 PostgreSQL
+  `active_generation`과 대사한다.
 - MCP instance는 요청 경계에서 새 generation을 열고 진행 중 요청은 이전 handle로 완료한다.
 - 모든 replica가 적용한 generation ID를 보고할 때까지 이전 generation을 유지한다.
 
-shared volume에서 symlink 교체를 사용할지 pointer file과 control plane을 사용할지는 Codex가 target filesystem의 atomicity·reload 시험으로 결정한다. 어느 방식이든 부분 generation을 관찰할 수 없어야 한다.
+publisher는 PostgreSQL publication을 먼저 commit한 뒤 filesystem pointer를 교체하며, 후속 단계가
+실패하면 이전 DB/file 권위를 복원하는 compensation을 실행한다. readiness는 두 권위와 manifest
+checksum을 매번 대사한다. 요청은 시작 시 generation handle을 pin하므로 교체 중 old/new를 섞지
+않는다.
 
 ### 7.4 Rollback
 
@@ -283,7 +301,10 @@ API key, OAuth access/refresh token, Authorization header, 전체 이메일·OCR
 
 provider 비용과 token/page 사용량은 provider 정책이 허용하는 범위에서 집계하되 요청 원문과 결합하지 않는다.
 
-온라인 성능은 품질 우선으로 운영한다. 초기 동시 요청 상한은 5개로 시작하고, 특정 P95 값을 구현 전에 약속하지 않는다. BULK corpus와 실제 질의로 latency 분포·timeout률·근거 품질·resource 사용량을 함께 측정한 뒤 SLO를 정한다. 다만 무제한 대기는 장애 격리를 해치므로 요청 timeout, cancellation과 서버측 작업 한도는 항상 유한해야 한다.
+온라인 성능은 품질 우선으로 운영한다. 개발 기준선은 동시 요청 5개, 요청 timeout 45초,
+검색 P95 경고 30초다. 합성 admission probe에서 제한 동작을 검증했지만 이는 실제 corpus SLO를
+주장하지 않는다. 운영 BULK corpus와 실제 질의로 latency·timeout·근거 품질·resource 사용량을
+함께 측정해 후속 ADR로 보정한다.
 
 ### 8.3 경보
 
@@ -300,7 +321,9 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 - volume 임계치 초과와 page PNG cache 정리 실패
 - MCP error/latency/no-result 비율 급증
 
-구체 threshold와 paging 대상은 Codex가 운영 baseline과 pilot 수치를 기준으로 결정한다.
+개발 alert는 15분 window의 검색 P95 30초와 error/degraded 5% 등
+`deploy/monitoring/cardrag-alerts.yml`의 초기값을 사용한다. paging route와 threshold는 실제 운영
+baseline 이후 조정한다.
 
 ## 9. Docker 운영 설계
 
@@ -342,7 +365,12 @@ PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·cata
 - memory/CPU/PID와 임시 disk 한도를 정하고 graceful termination 시간을 둔다.
 - init/reaping, health check, timezone과 clock sync를 명시한다.
 - Git, source PDF/OCR, build cache, local env, OAuth/token 파일은 build context에서 제외한다.
-- image 취약점 scan과 dependency license 검토를 release gate에 포함한다.
+- image 취약점 scan과 dependency license 검토를 release gate에 포함한다. locked runtime
+  inventory는 CI에서 생성하고, Proprietary project/image와 PyMuPDF의
+  AGPL-3.0/commercial dual-license 조합은 자동 승인하지 않는다. 현재 Proprietary 공개 image의
+  release gate는 Artifex commercial license 증빙을 확인한 뒤에만 protected environment secret의
+  exact attestation을 통과한다. AGPL을 선택하려면 먼저 project/image license, notice와
+  corresponding-source 공개 경로를 별도 구현·검증한 reviewed commit에서 policy와 gate를 바꾼다.
 - Docker Hub public image는 누구나 layer와 패키징된 애플리케이션 코드·dependency metadata를 검사할 수 있음을 전제로 한다. private GitHub의 비공개성만으로 image 내부 코드를 숨길 수 있다고 가정하지 않는다.
 
 레거시 OCR의 **danger-full-access** 설정은 그대로 계승하지 않는다. Codex CLI가 필요로 하는 최소 filesystem·network 권한을 exact version으로 검증하고 worker 격리 경계를 정의해야 한다.
@@ -373,15 +401,17 @@ authorization server는 사용자를 로그인시키거나 client를 식별하�
 
 ### 10.2 Codex CLI OAuth
 
-목표는 OCR worker image에 Codex CLI를 설치하고 OAuth 상태를 외부 제한 volume에 보존하여 container 재생성 후에도 인증을 재사용하는 것이다. 그러나 현재 문서 작성 단계에서는 CLI 설치·로그인을 실행하지 않았다.
+worker image에는 checksum-pinned Codex CLI 0.147.0과 전용 `CODEX_HOME` volume을 설치했다.
+`ocr` permission profile, tool-less prompt input과 bubblewrap canary가 rendered input 읽기만 허용하고
+secret/outside/write/socket을 거부함을 자동 검증했다. `codex login --device-auth` command와 auth
+volume 경계도 마련했다.
 
-다음 항목은 exact Codex CLI version과 깨끗한 test container에서 확인해야 한다.
+실제 계정 승인은 별도 사용자 기기가 필요하므로 다음 항목만 실환경 검증 대기다.
 
-1. **검토 필요:** 해당 버전이 headless Linux에서 device-code OAuth flow를 공식 지원하는지 확인한다.
-2. **검토 필요:** 로그인 command, TTY 필요 여부, device URL·user code가 stdout/stderr 중 어디에 출력되는지 확인한다.
-3. **검토 필요:** Docker 로그만으로 operator가 URL과 device code를 확인하고 다른 기기에서 승인을 완료할 수 있는지 end-to-end 시험한다.
-4. **검토 필요:** OAuth state 저장경로를 명시적으로 설정·mount할 수 있는지, 갱신 token이 재시작 후 정상 사용되는지 확인한다.
-5. **검토 필요:** 비대화형 **codex exec**가 장시간 OCR 중 token 갱신·만료를 어떻게 처리하는지 확인한다.
+1. 실제 device URL·user code로 운영 계정을 승인한다.
+2. token을 출력하지 않은 채 `codex login status`와 무해한 비대화형 실행을 확인한다.
+3. worker container 재생성 후 auth 상태 유지와 장시간 OCR 중 token 갱신을 확인한다.
+4. 실패 시 exact version, TTY, `CODEX_HOME` ownership, clock과 redacted exit code를 진단한다.
 
 device login을 Docker 로그로 제공해야 한다면 전용 1회성 auth job을 사용한다.
 
@@ -436,17 +466,27 @@ MCP readiness는 current generation ID, schema, embedding model/dimension, docum
 
 ## 12. Docker Hub 배포 계획
 
-public repository [`ymtop59/mcp-card-prd-detail`](https://hub.docker.com/r/ymtop59/mcp-card-prd-detail)은 2026-08-12 생성·공개 조회를 확인했다. v1 image platform은 `linux/amd64`다. 아래는 최종 구현 단계의 계획이며 이번 작업에서 image build, push 또는 promotion은 수행하지 않았다.
+public repository [`ymtop59/mcp-card-prd-detail`](https://hub.docker.com/r/ymtop59/mcp-card-prd-detail)은 2026-08-12 생성·공개 조회를 확인했다. v1 image platform은 `linux/amd64`다. MCP/worker/admin
+local image build, SBOM, content·sandbox·HIGH/CRITICAL 취약점 gate는 개발환경에서 통과했다.
+registry push와 promotion은 의도적으로 수행하지 않았으며 아래 release 절차를 운영 인계한다.
 
-1. test, license/secret scan, SBOM, vulnerability scan을 통과한 image를 재현 가능하게 build한다.
-2. release version과 Git SHA를 포함한 immutable tag를 붙이고 image digest를 기록한다.
+1. test, dependency license inventory, secret scan, SBOM, vulnerability scan을 통과한 image를
+   재현 가능하게 build한다. 현재 정책에서는 PyMuPDF 1.28.2의 Artifex commercial license 증빙이
+   없으면 release attestation을 설정하지 않고 공개 push를 fail closed한다. psycopg 계열 LGPL
+   및 certifi의 MPL-2.0 의무도 inventory의 exact version/metadata와 함께 검토하고 notice·
+   재링크 가능성 등 적용 의무를
+   release 기록에 남긴다.
+2. MCP/worker/admin 역할별 release version과 Git SHA를 포함한 immutable tag를 붙이고 각 image digest를 기록한다.
 3. GitHub Actions OIDC 기반 keyless Cosign으로 image digest를 서명하고 release manifest에 서명 identity와 transparency-log reference를 기록한다. long-lived signing key는 두지 않는다. private GitHub repository·workflow URI가 공개 log에 나타날 수 있음을 전제로 한다.
 4. 일반 `main` push에서는 build·test만 하고 공개 registry에는 push하지 않는다. `vX.Y.Z` release tag와 manual approval을 모두 통과한 candidate만 `ymtop59/mcp-card-prd-detail`에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
 5. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
-6. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
+6. 승인된 역할별 digest만 운영에 사용하고 deployment 기록에 세 image digest와 호환 generation을 남긴다.
 7. 실패 시 이전 digest로 rollback한다.
 
-**latest** tag만으로 배포 상태를 식별하지 않는다. repository는 public **ymtop59/mcp-card-prd-detail**, 서명은 GitHub Actions OIDC keyless Cosign으로 확정됐으며 GitHub repository는 private로 유지한다. v1은 `linux/amd64`만 제공하고 ARM64는 실제 필요가 생기면 후속 지원한다. build·push하지 않은 결과를 완료로 보고하지 않는다.
+**latest** tag만으로 배포 상태를 식별하지 않는다. repository는 public
+**ymtop59/mcp-card-prd-detail**, 서명은 GitHub Actions OIDC keyless Cosign으로 확정됐으며 GitHub
+repository는 private로 유지한다. v1은 `linux/amd64`만 제공하고 ARM64는 실제 필요가 생기면
+후속 지원한다. local build 완료와 public push 미수행을 구분해 보고한다.
 
 ## 13. 후속 개선 과제: Backup과 restore
 
@@ -521,20 +561,16 @@ PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는�
 | logs | token·본문 redaction, correlation ID, retention/RBAC |
 | registry | public `ymtop59/mcp-card-prd-detail`, `linux/amd64`, `vX.Y.Z`+manual approval만 push, version+Git SHA tag, keyless Cosign 서명, digest pull/run, data·secret 미포함, 공개 code 검토 |
 
-## 16. 구현 중 Codex 결정과 외부 검증
+## 16. 개발 중 결정 결과와 외부 검증
 
-제품·운영 P0 결정은 완료됐다. 아래 기술값은 Codex가 개발 중 benchmark·오류 주입·운영 rehearsal로 정하고 ADR과 test report에 근거를 남긴다.
+PostgreSQL migration·scheduler, durable lease/retry, generation ID/publish protocol,
+PostgreSQL FTS+pgvector hybrid, 동시 요청 5·timeout 45초·초기 검색 P95 30초,
+Codex CLI 0.147.0 sandbox, Keycloak, 역할별 `linux/amd64` image와 release promotion은 ADR과
+자동 검증으로 확정했다.
 
-- PostgreSQL schema·migration과 scheduler 세부 방식
-- offline BULK worker concurrency, provider quota와 비용한도
-- worker별 lease·timeout·retry budget
-- generation ID 형식과 atomic pointer 구현
-- BULK pilot 이후 SLO와 단일 host를 넘어설 autoscaling 기준
-- vector/lexical engine과 degraded mode의 정량 품질 합격선
-- Codex CLI exact version과 공식 headless/device-code 지원 여부
-- OAuth state 저장·갱신·회수와 device-code log 보안정책
-
-Keycloak 구성, generation 보존기간, image platform, keyless Cosign과 release promotion 조건은 결정 완료다. Codex headless OAuth 지원 여부는 실제 container에서 확인할 기술 gate이지 개발 착수 차단사항이 아니다.
+운영에서만 정할 값은 실제 provider quota·비용, 수일 BULK concurrency와 ETA, 전체 corpus의
+host sizing·SLO, Codex device 계정의 장기 token 갱신, public TLS/client와 registry 승인이다.
+이 항목들은 [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)에 절차와 성공 조건을 기록했다.
 
 ## 17. 이 문서 작성 시점의 완료 상태
 
@@ -545,13 +581,15 @@ Keycloak 구성, generation 보존기간, image platform, keyless Cosign과 rele
 | immutable generation publish·rollback 방향 문서화 | 문서화 완료 |
 | Docker volume·secret 방향 문서화 | 문서화 완료 |
 | backup·restore | v1 범위 밖, 후속 개선 과제 |
-| 신규 scheduler/worker/MCP 구현 | 미착수 |
-| 초기 3~4일 대량 처리 실행 | 미수행 |
-| 일일 증분 run 실행 | 미수행 |
-| Codex CLI 설치·OAuth/device login 검증 | 미수행, 검토 필요 |
-| OpenRouter key 주입·호출 | 미수행 |
-| Dockerfile/Compose 작성·image build | 미수행 |
+| 신규 scheduler/worker/MCP 구현 | 구현 및 자동 검증 완료 |
+| fixture 3-card BULK·재시작 | 개발환경 통합 검증 완료 |
+| 초기 3~4일 실제 대량 처리 실행 | 실환경 검증 대기 |
+| 일일 증분 run 구현 | 구현·fixture 검증 완료, 운영 timer 설치는 운영 인계 |
+| Codex CLI 설치·sandbox 검증 | 0.147.0 설치·tool-less/bubblewrap canary 완료, 실제 device login은 실환경 검증 대기 |
+| OpenRouter adapter·장애 검증 | mock 검증 완료, 실제 key·quota 호출은 실환경 검증 대기 |
+| Dockerfile/Compose 작성·image build | 3-role `linux/amd64` local build·보안 검증 완료 |
 | Docker Hub `ymtop59/mcp-card-prd-detail` 생성 | 완료, image 없음 |
-| Docker Hub image build·push | 미수행 |
+| Docker Hub image push | `vX.Y.Z`+manual approval 전 의도적으로 미수행, 운영 인계 |
 
-향후 체크리스트 상태는 실제 code, test report, generation ID, image digest와 운영 로그로 증명된 경우에만 “검증 완료”로 바꾼다.
+개발환경 상태는 [완료 체크리스트](08_COMPLETION_CHECKLIST.md)를 단일 기준으로 한다. 운영 인계
+항목은 실제 generation ID, role image digest와 운영 로그가 생길 때 해당 인계 기록만 갱신한다.

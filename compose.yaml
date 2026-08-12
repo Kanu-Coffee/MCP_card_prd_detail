@@ -1,0 +1,347 @@
+name: cardrag
+
+x-app-common: &app-common
+  platform: linux/amd64
+  restart: unless-stopped
+  init: true
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001
+    - /var/lib/cardrag-home:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10001,gid=10001
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  stop_grace_period: 60s
+  networks:
+    - backend
+  environment: &app-environment
+    CARDRAG_ENVIRONMENT: production
+    CARDRAG_DATABASE_URL_FILE: /run/secrets/cardrag_database_url
+    CARDRAG_STORAGE_ROOT: /var/lib/cardrag/objects
+    CARDRAG_GENERATION_ROOT: /var/lib/cardrag/generations
+    CARDRAG_BUILD_ROOT: /var/lib/cardrag-build
+    CARDRAG_PAGE_CACHE_ROOT: /var/cache/cardrag-pages
+    CARDRAG_MCP_SERVER_URL: http://localhost:8000/mcp
+    CARDRAG_OIDC_ISSUER: ${CARDRAG_OIDC_ISSUER:-http://cardrag-keycloak.localhost:8080/realms/cardrag}
+    CARDRAG_OIDC_AUDIENCE: cardrag-mcp
+    CARDRAG_OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
+    TZ: Asia/Seoul
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
+    platform: linux/amd64
+    restart: unless-stopped
+    shm_size: 256m
+    cpus: "${CARDRAG_POSTGRES_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_POSTGRES_MEMORY:-4g}
+    pids_limit: 256
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      CARDRAG_DB_PASSWORD_FILE: /run/secrets/cardrag_db_password
+      CARDRAG_WORKER_DB_PASSWORD_FILE: /run/secrets/cardrag_worker_db_password
+      CARDRAG_MCP_DB_PASSWORD_FILE: /run/secrets/cardrag_mcp_db_password
+      KEYCLOAK_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
+      TZ: Asia/Seoul
+    secrets:
+      - postgres_admin_password
+      - cardrag_db_password
+      - cardrag_worker_db_password
+      - cardrag_mcp_db_password
+      - keycloak_db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-cardrag-databases.sh:ro
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" &&
+          test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" --tuples-only --no-align
+          --command "SELECT count(*) FROM pg_roles WHERE rolname IN ('cardrag','cardrag_worker','cardrag_mcp','keycloak')")" = 4 &&
+          test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" --tuples-only --no-align
+          --command "SELECT count(*) FROM pg_database WHERE datname IN ('cardrag','keycloak')")" = 2 &&
+          test "$$(psql --username "$$POSTGRES_USER" --dbname cardrag --tuples-only --no-align
+          --command "SELECT count(*) FROM pg_extension WHERE extname='vector'")" = 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.7@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    cpus: "${CARDRAG_KEYCLOAK_CPUS:-1.5}"
+    mem_limit: ${CARDRAG_KEYCLOAK_MEMORY:-1536m}
+    pids_limit: 256
+    stop_grace_period: 60s
+    entrypoint: ["/opt/cardrag/keycloak-entrypoint.sh"]
+    command:
+      - start
+      - --http-enabled=true
+      - --hostname-strict=false
+      - --proxy-headers=xforwarded
+      - --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_SCHEME: http
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://cardrag-keycloak.localhost:8080}
+      TZ: Asia/Seoul
+    ports:
+      - "127.0.0.1:8080:8080"
+    secrets:
+      - keycloak_db_password
+    volumes:
+      - ./deploy/keycloak/cardrag-realm.json:/opt/keycloak/data/import/cardrag-realm.json:ro
+      - ./deploy/keycloak/entrypoint.sh:/opt/cardrag/keycloak-entrypoint.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      backend:
+        aliases:
+          - cardrag-keycloak.localhost
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  volume-init:
+    <<: *app-common
+    build:
+      context: .
+      target: admin
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    restart: "no"
+    user: "0:0"
+    command: ["cardrag-volume-init"]
+    environment:
+      TZ: Asia/Seoul
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    volumes:
+      - cardrag_objects:/var/lib/cardrag/objects:rw
+      - cardrag_generations:/var/lib/cardrag/generations:rw
+      - cardrag_build:/var/lib/cardrag-build:rw
+      - page_cache:/var/cache/cardrag-pages:rw
+      - codex_auth:/run/cardrag-codex:rw
+
+  admin:
+    <<: *app-common
+    build:
+      context: .
+      target: admin
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    profiles: ["ops"]
+    restart: "no"
+    cpus: "${CARDRAG_ADMIN_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_ADMIN_MEMORY:-4g}
+    command: ["cardrag", "--help"]
+    environment:
+      <<: *app-environment
+    secrets:
+      - source: cardrag_database_url
+        target: cardrag_database_url
+      - source: openrouter_api_key
+        target: openrouter_api_key
+    volumes:
+      - cardrag_objects:/var/lib/cardrag/objects:rw
+      - cardrag_generations:/var/lib/cardrag/generations:rw
+      - cardrag_build:/var/lib/cardrag-build:rw
+      - page_cache:/var/cache/cardrag-pages:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+
+  migrate:
+    <<: *app-common
+    build:
+      context: .
+      target: admin
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    restart: "no"
+    cpus: "${CARDRAG_ADMIN_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_ADMIN_MEMORY:-4g}
+    command: ["cardrag", "db", "migrate"]
+    environment:
+      <<: *app-environment
+    secrets:
+      - source: cardrag_database_url
+        target: cardrag_database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    <<: *app-common
+    build:
+      context: .
+      target: worker
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    profiles: ["worker"]
+    cpus: "${CARDRAG_WORKER_CPUS:-4.0}"
+    mem_limit: ${CARDRAG_WORKER_MEMORY:-6g}
+    pids_limit: 512
+    stop_grace_period: 120s
+    # Codex creates a nested bubblewrap+seccomp sandbox for OCR. Docker's
+    # default seccomp/AppArmor profiles block the required unprivileged user
+    # namespace and mount propagation setup; the inner profile is canary-tested
+    # below while the container remains non-root, cap-drop ALL, and NNP.
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+      - apparmor=unconfined
+    environment:
+      <<: *app-environment
+      CARDRAG_DATABASE_URL_FILE: /run/secrets/cardrag_worker_database_url
+      CARDRAG_CODEX_BIN: codex
+      CARDRAG_CODEX_AUTH_ROOT: /run/cardrag-codex
+      # Prometheus collector access is container-network only; no host port is published.
+      CARDRAG_WORKER_METRICS_HOST: 0.0.0.0
+      CARDRAG_WORKER_METRICS_PORT: "9090"
+      CODEX_HOME: /run/cardrag-codex
+    expose:
+      - "9090"
+    secrets:
+      - source: cardrag_worker_database_url
+        target: cardrag_worker_database_url
+      - source: openrouter_api_key
+        target: openrouter_api_key
+    volumes:
+      - cardrag_objects:/var/lib/cardrag/objects:rw
+      - cardrag_generations:/var/lib/cardrag/generations:ro
+      - cardrag_build:/var/lib/cardrag-build:rw
+      - codex_auth:/run/cardrag-codex:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+
+  mcp:
+    <<: *app-common
+    build:
+      context: .
+      target: mcp
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    restart: unless-stopped
+    cpus: "${CARDRAG_MCP_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_MCP_MEMORY:-2g}
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      <<: *app-environment
+      CARDRAG_DATABASE_URL_FILE: /run/secrets/cardrag_mcp_database_url
+      CARDRAG_HOST: 0.0.0.0
+      CARDRAG_PORT: "8000"
+      CARDRAG_MAX_CONCURRENT_REQUESTS: "5"
+      CARDRAG_REQUEST_TIMEOUT_SECONDS: "45"
+      CARDRAG_POSTGRES_STATEMENT_TIMEOUT_SECONDS: "40"
+      CARDRAG_POSTGRES_LOCK_TIMEOUT_SECONDS: "5"
+      CARDRAG_BUILD_ROOT: /tmp/cardrag-build
+    secrets:
+      - source: cardrag_mcp_database_url
+        target: cardrag_mcp_database_url
+      - source: openrouter_api_key
+        target: openrouter_api_key
+    volumes:
+      - cardrag_objects:/var/lib/cardrag/objects:ro
+      - cardrag_generations:/var/lib/cardrag/generations:ro
+      - page_cache:/var/cache/cardrag-pages:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200 else 1)"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  postgres_data:
+  cardrag_objects:
+  cardrag_generations:
+  cardrag_build:
+  page_cache:
+  codex_auth:
+
+networks:
+  backend:
+    internal: false
+
+secrets:
+  postgres_admin_password:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/postgres_admin_password.txt
+  cardrag_db_password:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/cardrag_db_password.txt
+  cardrag_worker_db_password:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/cardrag_worker_db_password.txt
+  cardrag_mcp_db_password:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/cardrag_mcp_db_password.txt
+  cardrag_database_url:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/cardrag_database_url.txt
+  cardrag_worker_database_url:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/cardrag_worker_database_url.txt
+  cardrag_mcp_database_url:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/cardrag_mcp_database_url.txt
+  keycloak_db_password:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/keycloak_db_password.txt
+  openrouter_api_key:
+    file: ${CARDRAG_SECRETS_DIR:-./deploy/secrets}/openrouter_api_key.txt

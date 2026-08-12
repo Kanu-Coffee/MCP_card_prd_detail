@@ -11,8 +11,9 @@
   - P: **H/process-kit/cardrag-conveyor**
   - D: **H/data-kit/cardrag-conveyor-data**
 - 사실 기준: [레거시 프로젝트 분석 기록](../LEGACY_PROJECT_ANALYSIS.md)
-- 현재 작업 범위: 분류와 이전 계획 문서화
-- 현재 수행하지 않는 작업: 데이터 복사·이동·삭제, OCR·구조 분석·임베딩 실행, DB 변환, 신규 generation 게시
+- 현재 작업 범위: 분류·이전 절차 구현과 5문서 read-only pilot 검증
+- 현재 수행하지 않는 작업: 레거시 원본의 이동·삭제, 전체 9.51 GiB 이관·장시간 재처리와 전체
+  legacy generation 게시
 
 이 문서에서 “재사용”은 레거시 디렉터리를 신규 서비스에 그대로 마운트한다는 뜻이 아니다. 검증된 내용을 신규 데이터 계약으로 받아들이는 것을 뜻한다.
 
@@ -150,7 +151,9 @@ rendered PNG와 보고서를 레거시 source에서 삭제하라는 뜻은 아�
 
 ## 6. 목표 데이터 디렉터리
 
-아래는 외부 volume의 논리 구조다. 실제 host 경로와 저장 기술은 구현 단계에서 결정한다. **CARDRAG_DATA_ROOT**는 source checkout과 Docker image 밖에 둔다.
+아래는 구현된 외부 volume의 논리 구조다. v1은 content-addressed object, PostgreSQL catalog/state와
+불변 generation을 사용하며 실제 host root만 배포 환경에서 설정한다. **CARDRAG_DATA_ROOT**는
+source checkout과 Docker image 밖에 둔다.
 
 ~~~text
 CARDRAG_DATA_ROOT/
@@ -211,7 +214,9 @@ CARDRAG_DATA_ROOT/
 4. hash에 맞는 파일이 없으면 **unresolved-pdf**로 보내고 generation 입력에서 제외한다.
 5. hash가 같아 byte content는 결정되지만 문서 provenance가 충돌하면 자동 승격하지 않고 수동 검토한다.
 
-현재 읽기 전용 조사에서는 1,592건의 manifest PDF hash가 모두 로컬 raw PDF와 일치했다. 이는 migration 구현 후 동일 결과를 재검증해야 한다는 기준선이지, 복사 작업이 이미 끝났다는 뜻이 아니다.
+현재 읽기 전용 조사에서는 1,592건의 manifest PDF hash가 모두 로컬 raw PDF와 일치했고 5문서
+pilot에서 copy·hash 대사를 재검증했다. 전체 migration을 수행할 때도 동일 결과를 다시 대사해야
+하며, 이 기준선이 전체 복사 완료를 뜻하지는 않는다.
 
 ### 7.3 중복 PDF
 
@@ -254,9 +259,12 @@ canonical OCR record에는 최소 다음이 필요하다.
 
 레거시 DB의 **PRAGMA integrity_check=ok**는 파일 구조가 읽힌다는 뜻이지 신규 검색 계약과 품질이 적합하다는 뜻은 아니다.
 
-## 10. 계획된 이전 절차
+## 10. 구현된 이전 절차와 실제 전체 이전
 
-아래 절차는 향후 migration 구현 순서다. 현재 실행된 절차가 아니다.
+아래 절차는 `cardrag legacy pilot`과 `cardrag legacy rollback`으로 구현했다. 현재
+개발 환경에서는 5문서 read-only pilot을 실행해 hash lookup, OCR hash, target object와
+source 무변경을 검증했다. 전체 9.51 GiB 이전은 장시간 실제 BULK에 해당하므로 운영
+preflight 후 같은 명령으로 수행하며, 개발 완료를 위해 이미 수행한 것으로 표시하지 않는다.
 
 ### 단계 A — 이전 기준 고정
 
@@ -331,15 +339,17 @@ canonical OCR record에는 최소 다음이 필요하다.
 
 rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경시각과 실행자를 감사 로그에 남긴다. 이전 generation을 재게시할 수 있다는 이유로 mutable job state까지 되돌리지는 않는다.
 
-## 13. 구현 중 Codex 결정과 외부 gate
+## 13. 개발 중 결정 결과와 외부 gate
 
-아래 기술 항목은 개발 착수를 막지 않으며 Codex가 pilot·benchmark·무결성 시험으로 결정한다.
+5문서 read-only pilot과 신규 pipeline 시험으로 개발 가능한 정책을 확정했다. 전체 9.51 GiB
+이관과 mismatch 1건의 수동 canonical 판정만 실환경 gate다.
 
-- 기본 검색은 최신 1,567건을 대상으로 하고 과거 25개 버전은 보존한다. 명시적 version/as-of 조회를 단일 filter 또는 별도 이력 색인 중 어떻게 구현할지는 검색 설계에서 정한다.
+- 기본 검색은 최신 문서를 대상으로 하고 과거 버전은 generation catalog에 보존한다. 명시적
+  version/as-of는 두 검색 branch의 후보 SQL에서 적용한다.
 - rendered PNG는 신규 runtime으로 이관하지 않고 페이지 요청 시 생성해 7일 cache한다.
-- OCR hash 불일치 1건의 canonical 채택 여부
-- 신규 구조 분석 방식과 taxonomy version
-- OpenRouter embedding model과 index engine
+- OCR hash 불일치 1건의 canonical 채택 여부는 운영 수동 판정으로 남기며 자동 이관에서는 quarantine한다.
+- 신규 구조 분석은 결정론적 taxonomy+exact source-span, embedding/index는 OpenRouter
+  1,536차원+PostgreSQL FTS/pgvector로 확정했다.
 - 기술적으로는 승인된 `source_pdf` scope 사용자의 명시적 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 다운로드 감사 metadata를 90일 보존한다. 페이지 OCR text는 `search`, 요청 시 생성해 7일 cache하는 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다.
 - 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위는 공개 운영 전 별도 확인하는 외부 gate다.
 - 성공한 검색 generation은 최근 3개, 실패 candidate는 7일 보존한다. 수동 pin한 generation은 명시적 unpin 전까지 보존하며 backup은 v1 후속 개선 과제다.
@@ -350,11 +360,12 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 |---|---|
 | 레거시 자산 읽기 전용 조사 | 검증 완료 |
 | 재사용 분류와 목표 구조 문서화 | 문서화 완료 |
-| source snapshot/checksum ledger 생성 | 미착수 |
-| PDF/OCR copy | 미수행 |
-| manifest/metadata 변환 | 미수행 |
-| structure·embedding·index 재생성 | 미수행 |
-| exception 수동 검토 | 미착수 |
-| generation 검증·게시 | 미수행 |
+| source snapshot/checksum ledger | 구현·5문서 pilot 검증 완료 |
+| PDF/OCR content-addressed copy | 구현·5문서 pilot 검증 완료 |
+| manifest/metadata 변환 | 구현·fixture/pilot 검증 완료 |
+| structure·embedding·index 재생성 | 신규 pipeline fixture 검증 완료; 전체 corpus 실행은 실환경 검증 대기 |
+| exception 분류 | hash mismatch quarantine·counter drift 경고 자동 검증 완료; 실제 1건 수동 판정은 운영 인계 |
+| generation 검증·게시 | fixture generation 검증 완료; 전체 legacy generation 게시 전 실환경 gate 필요 |
 
-이 문서만으로 기존 corpus가 신규 시스템에 이전되었거나 사용할 준비가 끝났다고 판단해서는 안 된다.
+증거는 `reports/legacy-pilot-20260812.json`, `tests/unit/test_legacy_migration.py`다.
+이 문서만으로 전체 corpus가 이미 신규 시스템에 이전되었다고 판단해서는 안 된다.

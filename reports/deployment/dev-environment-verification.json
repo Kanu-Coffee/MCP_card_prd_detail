@@ -1,0 +1,373 @@
+{
+  "schema_version": "cardrag-dev-environment-deployment-verification.v1",
+  "generated_at": "2026-08-12T10:03:00Z",
+  "status": "passed",
+  "public_release_status": "blocked_pending_dependency_license_approval",
+  "scope": "Clean development-environment deployment, authentication, PostgreSQL role, supply-chain, image, sandbox, and MCP runtime verification. This report does not claim live issuer, paid provider, production host, or public registry validation.",
+  "source": {
+    "git_head": "4812fbcf0b81ec7cce761fd22d6fd3ab05eae317",
+    "branch": "agent/implement-cardrag-mcp",
+    "worktree_candidate_included": true,
+    "candidate_file_count": 160,
+    "candidate_source_tree_fingerprint_sha256": "1ee44682ea36acc2fbbebf6eefe7b285165178402c218767634e25699f523190",
+    "fingerprint_contract": "SHA-256 of sorted '<sha256 of staged blob>  <path>' records for all git index files, excluding this verification report",
+    "runtime_image_input_fingerprint_sha256": "b66d5e0b2b966b9d182416aabd4b4523946dad4db05370e01791998ca719ee48",
+    "runtime_image_input_note": "All three linux/amd64 images were rebuilt from the final candidate and carry this exact revision label.",
+    "legacy_source_mutated": false
+  },
+  "environment": {
+    "docker_client": "29.7.2",
+    "docker_server": "29.7.2",
+    "docker_compose": "5.4.0",
+    "target_platform": "linux/amd64",
+    "postgres_image": "pgvector/pgvector:0.8.2-pg17-bookworm",
+    "keycloak_image": "quay.io/keycloak/keycloak:26.4.7",
+    "registry_push_performed": false,
+    "production_secrets_used": false,
+    "fixture_secrets_committed": false
+  },
+  "validation_summary": {
+    "static": "passed",
+    "ruff": "passed",
+    "mypy": "passed; 50 source files",
+    "non_integration_tests": "198 passed, 30 deselected in 8.13s",
+    "load_tests": "1 passed, 227 deselected in 1.17s",
+    "fresh_postgres_keycloak_integration": "29 passed, 199 deselected in 7.17s",
+    "role_images": "3 passed",
+    "authenticated_mcp_smoke": "passed",
+    "mcp_concurrency_smoke": "100/100 passed at concurrency 5",
+    "sbom": "3 generated and inspected",
+    "trivy_high_critical": "0 HIGH and 0 CRITICAL across all role images"
+  },
+  "static_validation": {
+    "actionlint_1_7_10": "passed",
+    "shellcheck_0_11_0": "passed",
+    "hadolint_2_14_0": "passed",
+    "promtool_3_5_0": {
+      "status": "passed",
+      "rules": 8
+    },
+    "systemd_analyze_259": {
+      "status": "passed",
+      "units": 4,
+      "daily_schedule": "03:00 Asia/Seoul",
+      "retention_schedule": "04:00 Asia/Seoul"
+    },
+    "compose_base_render": "passed",
+    "compose_keycloak_bootstrap_overlay_render": "passed",
+    "gitleaks_8_28_0": {
+      "status": "passed",
+      "mode": "redacted, no-git",
+      "bytes_scanned_approx": 62374910,
+      "leaks": 0
+    },
+    "git_diff_check": "passed"
+  },
+  "dependency_licenses": {
+    "status": "inventory_passed_public_release_blocked",
+    "project_license": "Proprietary",
+    "runtime_dependency_closure_packages": 52,
+    "manual_review_required": [
+      "certifi",
+      "psycopg",
+      "psycopg-binary",
+      "psycopg-pool",
+      "pymupdf"
+    ],
+    "policy_tests": "10 passed",
+    "fail_closed_families": [
+      "AGPL",
+      "GPL",
+      "LGPL",
+      "MPL",
+      "EUPL",
+      "SSPL",
+      "Commons Clause",
+      "commercial",
+      "proprietary",
+      "unknown"
+    ],
+    "release_without_attestation": {
+      "exit_code": 1,
+      "status": "blocked",
+      "reason": "PyMuPDF 1.28.2 commercial-license approval is missing from the protected environment"
+    },
+    "exact_attestation_contract": "covered by unit and synthetic local contract tests only",
+    "protected_environment_attestation_used": false,
+    "public_push_blocked": true
+  },
+  "request_budget_contract": {
+    "online_request_timeout_seconds": 45,
+    "max_concurrent_requests": 5,
+    "readiness_timeout_cap_seconds": 5,
+    "postgres_statement_timeout_seconds": 40,
+    "postgres_lock_timeout_seconds": 5,
+    "admission_semantics": "The deadline includes semaphore admission. Re-entrant calls in one logical request reuse the lease and cannot deadlock at concurrency one.",
+    "timeout_semantics": "A caller receives a stable ServiceTimeoutError at its deadline. Non-cancellable thread or database work remains shielded and retains the shared permit until actual completion, so repeated timeouts cannot exceed configured backend concurrency.",
+    "source_response_semantics": "PDF verification, page rendering, and response preparation share the request lease. File-body transmission starts a fresh 45-second phase, includes reacquisition wait, and retains the lease through the real ASGI body/background completion. Client cancellation records error after the detached stream actually ends.",
+    "observability_semantics": "Audit and anonymous metric persistence use an independent bounded auxiliary lane so timeout responses do not reacquire or queue behind their own read lease.",
+    "postgres_timeout_normalization": "psycopg QueryCanceled from statement_timeout is normalized to ServiceTimeoutError and the durable outcome is timeout; lock_timeout LockNotAvailable remains error.",
+    "verification": [
+      "repeated timed-out synchronous work never exceeded configured backend concurrency",
+      "readiness flood stayed inside the same admission budget",
+      "source preparation, body timeout, and cancellation outcome regressions passed",
+      "actual PostgreSQL pg_sleep statement timeout and owner-held lock timeout were bounded"
+    ]
+  },
+  "postgresql": {
+    "status": "passed",
+    "fresh_empty_named_volume": true,
+    "databases": [
+      "cardrag",
+      "keycloak"
+    ],
+    "vector_extension_version": "0.8.2",
+    "migrations": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "migration_idempotence": "13 before and 13 after repeated migrate",
+    "roles": {
+      "cardrag": "owner/admin; not superuser, createdb, or createrole",
+      "cardrag_worker": "runtime DML allowlist; DDL, generation publication, audit writes/deletes, metric deletion, and run-control mutation denied",
+      "cardrag_mcp": "published catalog reads, append-only audit insertion, and only EXECUTE on the fixed metric rollup function; direct metric_rollups SELECT/INSERT/UPDATE/DELETE and unrelated mutation denied",
+      "keycloak": "separate database owner; not superuser, createdb, or createrole"
+    },
+    "integration_tests": {
+      "status": "passed",
+      "passed": 29,
+      "failed": 0,
+      "deselected": 199,
+      "covered": [
+        "migrations 1 through 13 and checksum/idempotence",
+        "owner, worker, MCP, and Keycloak role DSNs",
+        "runtime least privilege and arbitrary MCP metric table DML denial",
+        "SECURITY DEFINER MCP metric function normalization and allowlists",
+        "online statement_timeout and lock_timeout",
+        "generation lifecycle, publication fencing, and exact-ID retention deletion",
+        "pgvector hybrid search and generation pinning",
+        "durable claims, cancellation, heartbeat, reclaim, scheduler lease, and run control",
+        "cancelled jobs fail issuer runs and prevent candidate generation reuse/publication",
+        "observability and retention authority",
+        "Keycloak client credentials, PKCE, refresh rotation/reuse/revocation, audience, and scope"
+      ]
+    },
+    "mcp_metric_rollups": {
+      "table": "metric_rollups",
+      "metric_name": "mcp_operation_duration_seconds",
+      "bucket": "hour",
+      "dimensions": [
+        "bounded operation",
+        "bounded outcome"
+      ],
+      "values": [
+        "count",
+        "sum duration seconds"
+      ],
+      "retention": "1 year",
+      "privacy": "No query, body, token, subject, request ID, document ID, Range header, or other user-controlled dimension is persisted.",
+      "operation_fallback": "unknown",
+      "outcome_fallback": "error",
+      "duration_normalization": "negative, NaN, and infinities become 0; finite values are capped at 600 seconds",
+      "security": "cardrag_mcp has EXECUTE only on a SECURITY DEFINER function with fixed metric name/vocabularies and no direct metric_rollups table DML"
+    }
+  },
+  "keycloak": {
+    "status": "passed",
+    "fresh_database_import": true,
+    "realm": "cardrag",
+    "dynamic_client_registration_http_status": 403,
+    "resource_audience": "cardrag-mcp",
+    "access_token_lifespan_seconds": 300,
+    "human_client": {
+      "flow": "Authorization Code with PKCE S256",
+      "refresh_token_type": "Offline",
+      "idle_timeout_seconds": 7776000,
+      "absolute_offline_lifespan_enabled": false,
+      "rotation": "new refresh token issued and old token reuse rejected",
+      "revocation": "revoked refresh token rejected"
+    },
+    "service_client": {
+      "flow": "Client Credentials",
+      "refresh_token_storage": false,
+      "access_token_reissuance": "passed",
+      "issuer_audience_scope_validation": "passed"
+    },
+    "bootstrap_secret": {
+      "first_start_overlay": "passed",
+      "base_compose_recreate": "passed",
+      "mounted_or_present_after_recreate": false
+    }
+  },
+  "images": [
+    {
+      "role": "mcp",
+      "tag": "cardrag-finalstaged-20260812:mcp",
+      "local_image_id": "sha256:abb3794c5b111f8866521ef7f2036d257eacd9c2a19e2f1e217fa7293ebf4cfe",
+      "architecture": "amd64",
+      "user": "10001:10001",
+      "read_only_runtime_smoke": "passed",
+      "capabilities_dropped": "ALL",
+      "no_new_privileges": true,
+      "entrypoint_allowlist": "passed",
+      "forbidden_corpus_or_credential_files": 0,
+      "trivy_high": 0,
+      "trivy_critical": 0,
+      "sbom_format": "SPDX JSON",
+      "sbom_packages": 174
+    },
+    {
+      "role": "worker",
+      "tag": "cardrag-finalstaged-20260812:worker",
+      "local_image_id": "sha256:95728cc3fe3ad0b7ae8b26ddb071495ca346c5a43fe23c77eb99e138941d4794",
+      "architecture": "amd64",
+      "user": "10001:10001",
+      "read_only_runtime_smoke": "passed",
+      "capabilities_dropped": "ALL",
+      "no_new_privileges": true,
+      "entrypoint_allowlist": "passed",
+      "forbidden_corpus_or_credential_files": 0,
+      "trivy_high": 0,
+      "trivy_critical": 0,
+      "sbom_format": "SPDX JSON",
+      "sbom_packages": 175
+    },
+    {
+      "role": "admin",
+      "tag": "cardrag-finalstaged-20260812:admin",
+      "local_image_id": "sha256:39c86a980bd25d748fdf139db28c58bea54c4590078aa7bd6bce196946fca93b",
+      "architecture": "amd64",
+      "user": "10001:10001",
+      "read_only_runtime_smoke": "passed",
+      "capabilities_dropped": "ALL",
+      "no_new_privileges": true,
+      "entrypoint_allowlist": "passed",
+      "forbidden_corpus_or_credential_files": 0,
+      "trivy_high": 0,
+      "trivy_critical": 0,
+      "sbom_format": "SPDX JSON",
+      "sbom_packages": 174
+    }
+  ],
+  "codex_ocr_sandbox": {
+    "status": "passed",
+    "codex_cli": "0.147.0",
+    "binary_sha256_verified_during_build": true,
+    "bubblewrap": "0.8.0-2+deb12u1",
+    "prompt_input": {
+      "message_items": 3,
+      "tool_schema_items": 0
+    },
+    "permission_profile": "ocr",
+    "rendered_workspace_read": "allowed",
+    "docker_secret_read": "denied",
+    "outside_workspace_read": "denied",
+    "workspace_write": "denied",
+    "network_socket": "denied",
+    "outer_worker_boundary": "non-root, cap-drop ALL, no-new-privileges, read-only root filesystem; Docker seccomp and AppArmor are unconfined only to permit the inner Codex bubblewrap and seccomp sandbox"
+  },
+  "compose_runtime": {
+    "status": "passed",
+    "mcp_host_binding": "127.0.0.1:8000",
+    "keycloak_host_binding": "127.0.0.1:8080",
+    "mcp_liveness_http_status": 200,
+    "mcp_readiness_without_published_generation_http_status": 503,
+    "readiness_note": "503 is expected for a clean database without a published generation.",
+    "unauthenticated_mcp_http_status": 401,
+    "invalid_bearer_mcp_http_status": 401,
+    "authenticated_mcp": {
+      "transport": "Streamable HTTP",
+      "initialize": "passed",
+      "listed_tool_count": 5,
+      "listed_tools": [
+        "search_evidence",
+        "get_evidence",
+        "get_product_versions",
+        "get_source_pdf",
+        "get_source_page"
+      ],
+      "listed_resource_count": 2,
+      "listed_resource_template_count": 5,
+      "issuer_catalog_resource": "passed",
+      "synthetic_service_client_deleted_after_smoke": true
+    },
+    "concurrent_liveness_requests": {
+      "concurrency": 5,
+      "requests": 100,
+      "successes": 100
+    },
+    "worker_once": "passed",
+    "worker_codex_version": "codex-cli 0.147.0"
+  },
+  "cleanup": {
+    "compose_project": "cardrag-staged-fresh-812",
+    "remaining_containers": 0,
+    "remaining_networks": 0,
+    "remaining_named_volumes": 0,
+    "remaining_compose_images": 0,
+    "synthetic_secret_directory_removed": true,
+    "temporary_sbom_trivy_license_files_removed": true,
+    "verified_role_images_retained_locally": true
+  },
+  "release_gate": {
+    "status": "blocked_pending_protected_dependency_license_approval",
+    "docker_hub_image": "ymtop59/mcp-card-prd-detail",
+    "trigger": "exact vX.Y.Z tag whose commit is an ancestor of origin/main",
+    "protected_environment": "dockerhub-public",
+    "roles": [
+      "mcp",
+      "worker",
+      "admin"
+    ],
+    "platforms": [
+      "linux/amd64"
+    ],
+    "sbom_required": true,
+    "provenance_required": true,
+    "cosign_keyless_digest_signature_required": true,
+    "dependency_license_job_required": true,
+    "manual_approval_required_before_push": true,
+    "registry_push_performed": false,
+    "production_secret_used": false,
+    "blocking_reason": "The public publish job needs the fail-closed protected license-approval job, including explicit PyMuPDF 1.28.2 commercial-license attestation. No protected approval or registry credentials were used in this development verification."
+  },
+  "real_environment_handoff": [
+    {
+      "item": "live issuer pilots and legal collection terms",
+      "state": "pending",
+      "reason": "Live endpoints, content terms, redirects, rate behavior, and the full corpus were intentionally outside fixture verification."
+    },
+    {
+      "item": "Codex device authorization and paid provider",
+      "state": "pending",
+      "reason": "No real Codex account, OpenRouter key, quota, billing, or production token was used."
+    },
+    {
+      "item": "production host, TLS, proxy, and timers",
+      "state": "operator_handoff",
+      "reason": "Host capacity, public DNS/certificates, Nginx Proxy Manager, permanent Keycloak administration, and systemd enablement require the deployment operator."
+    },
+    {
+      "item": "public Docker Hub release",
+      "state": "blocked",
+      "reason": "Protected dependency-license approval, release reviewer approval, SemVer tag ancestry, Docker Hub credentials, and post-push Cosign verification remain outstanding."
+    }
+  ],
+  "excluded_v1_scope": [
+    "backup and restore implementation or RPO/RTO validation",
+    "Nginx Proxy Manager container or public TLS configuration itself",
+    "ARM64 images",
+    "public administration API or operations web UI"
+  ]
+}

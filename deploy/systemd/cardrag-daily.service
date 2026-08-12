@@ -1,0 +1,17 @@
+[Unit]
+Description=Enqueue and supervise the CardRAG daily issuer run
+Documentation=file:/opt/cardrag/deploy/systemd/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cardrag
+Group=docker
+WorkingDirectory=/opt/cardrag
+EnvironmentFile=-/etc/cardrag/cardrag.env
+ExecStart=/usr/bin/docker compose --profile ops run --rm --no-deps admin cardrag run daily
+TimeoutStartSec=infinity
+TimeoutStopSec=180
+UMask=0077
