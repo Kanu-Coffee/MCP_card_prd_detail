@@ -160,7 +160,7 @@ LLM 제공자와 모델 운용 규칙은 `05_LLM_AND_DATA_QUALITY_POLICY.md`를 
 - 페이지 또는 처리 chunk별 성공·실패·검토 상태
 - 품질 검사 결과와 검토가 필요한 위치
 
-렌더 이미지는 재현 또는 감사에 필요한 기간 동안 외부 작업 볼륨에 둘 수 있다. 이미지 보존 기간과 최종 보존 여부는 `결정 필요`이며 Docker 이미지나 Git에는 넣지 않는다.
+OCR 처리용 렌더 이미지는 canonical OCR·page provenance 검증 후 재생성 가능한 임시 artifact로 정리한다. 온라인 페이지 PNG는 원본 PDF에서 요청 시 렌더링하고 별도 cache에 7일만 보존한 뒤 제거한다. 렌더 PNG를 영구 generation, Docker 이미지나 Git에 넣지 않는다.
 
 ### 4.4 OCR 원문 계약
 
@@ -312,7 +312,7 @@ LLM 출력은 원문 대체물이 아니다. LLM이 제시한 정규화 문구�
 - chunk 생성, 임베딩 요청, 색인 build, 검증, 게시 상태를 분리한다.
 - 임베딩은 내용 해시, 모델, 차원, 입력 형식이 모두 같은 경우에만 재사용한다.
 - 응답 개수, 차원, 유한값 여부와 입력 순서 대응을 검증한 뒤 저장한다.
-- 일부 임베딩 실패가 있으면 generation 전체를 게시하지 않거나, 사전에 승인된 degraded 정책을 명확히 적용한다. 허용 coverage 기준은 `결정 필요`다.
+- 최신 문서의 임베딩·색인 누락 또는 실패가 하나라도 있으면 generation 게시를 차단한다. 과거 이력 실패는 quarantine과 보고서에 기록하고 최신 문서의 current hash coverage가 100%일 때만 게시를 허용한다.
 - 모델 또는 차원이 바뀌면 기존 벡터와 혼합하지 않고 새 전체 generation을 만든다.
 - 삭제 또는 더 이상 최신이 아닌 문서는 새 generation에서 조회 범위에 맞게 제외하되 이력 보존 정책을 따른다.
 - 새 generation은 별도 위치에서 완성·검증한 뒤 원자적으로 게시한다. 실패하면 현재 서비스 generation을 유지한다.
@@ -349,7 +349,7 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 페이지 단위 OCR·원문 근거 조회
 - 사용자가 명시적으로 요청한 정확한 문서 버전의 보존 원본 PDF 파일 제공
 
-구체적인 tool/resource 이름, 인자와 응답 schema는 구현 단계에서 결정한다. MCP 서비스는 카드사 사이트 PDF 수집, OCR, 임베딩 build, DB 재구축, 임의 URL 다운로드, Codex privileged 실행 또는 이메일 발송을 동기식 요청으로 수행하지 않는다. 원본 PDF 제공은 이미 보존되어 게시 승인된 전체 파일의 읽기 전용 streaming이며 신규 수집 기능이 아니다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 사용하고 분할 PDF는 생성하지 않는다.
+구체적인 tool/resource 이름, 인자와 응답 schema는 구현 단계에서 결정한다. MCP 서비스는 카드사 사이트 PDF 수집, OCR, 임베딩 build, DB 재구축, 임의 URL 다운로드, Codex privileged 실행 또는 이메일 발송을 동기식 요청으로 수행하지 않는다. 원본 PDF 제공은 이미 보존되어 게시 승인된 전체 파일의 읽기 전용 streaming이며 신규 수집 기능이 아니다. 페이지 조회 PNG는 원본 PDF에서 요청 시 렌더링해 7일 cache하고 분할 PDF는 생성하지 않는다.
 
 ### 7.2 입력
 
@@ -369,7 +369,7 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - 페이지·원문 범위, 출처 URL 또는 보존 경로, 내용 해시
 - 안정적인 evidence ID와 검색 generation
 - 원본 PDF 요청 시 exact document version, SHA-256, MIME type, 파일 크기와 인증된 streaming file 응답; 승인 사용자, 100 MB 상한과 HTTP Range 적용
-- 페이지 요청 시 OCR text와 요청한 경우에만 렌더 PNG resource; 분할 PDF는 제공하지 않음
+- 페이지 요청 시 OCR text와 요청한 경우에만 생성하는 렌더 PNG resource; cache 7일, 분할 PDF는 제공하지 않음
 - retrieval 방식과 결과 해석에 필요한 점수 또는 품질 상태
 - 최신·과거 버전 충돌, 정보 부족, 부분 검색 또는 degraded 상태의 명시적 표시
 
@@ -413,6 +413,7 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 - [ ] 100 MB 초과 PDF가 거부되고 HTTP Range, 취소와 90일 감사 metadata가 검증된다.
 - [ ] 페이지 조회 결과가 동일 문서 version의 PDF page와 OCR source span으로 역추적된다.
 - [ ] 페이지 PNG는 명시적 요청에서만 제공되고 분할 PDF가 생성되지 않는다.
+- [ ] 페이지 PNG가 원본 PDF exact version에서 생성되고 7일 후 cache에서 제거되며 generation에는 영구 저장되지 않는다.
 - [ ] access token 만료 전 자동 refresh, refresh token rotation, 90일 비활성 만료와 revoke·재인증 흐름이 통합 시험에서 확인된다.
 - [ ] vector 장애 시 `allow_degraded` 유무에 따른 lexical-only 또는 실패 동작과 상태 표시가 검증된다.
 - [ ] 초기 동시 요청 5개에서 품질 손실 없이 bounded 응답한다. 목표 latency, 처리량과 가용성 수치는 BULK pilot 후 결정한다.
@@ -433,12 +434,12 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 
 | 항목 | 상태 |
 |---|---|
-| 신한카드 정식 일일 운영 편입 gate | `결정 필요` — 개인 신용·체크 현재본·과거 이력 BULK 범위는 확정 |
+| 일일 issuer 순서 | `결정 완료` — 03:00 KST, 우리카드 → KB국민카드 → 신한카드, 각 job 종료 후 10분 대기와 장애 격리 |
 | 단계별 retry 예산, timeout과 backoff | `결정 필요` |
-| 렌더 이미지 보존 기간과 최소 3개를 초과한 generation 보존 기간 | `결정 필요` |
+| 렌더 이미지와 generation 보존 | 페이지 PNG cache 7일·generation 최소 3개 확정; 3개 초과 generation 기간은 `결정 필요` |
 | 구조 taxonomy와 schema의 최초 승인 버전 | `결정 필요` |
 | 구조 분석에 LLM을 적용할 문서·필드 범위 | `결정 필요` |
 | chunk 크기, overlap과 표·각주 연결 정책 | `결정 필요` |
 | vector index 기술과 hybrid ranking 값 | `결정 필요` — hybrid와 공통 evidence key 결합은 확정 |
-| OAuth authorization server, 사용자·tenant와 운영자 권한 | `결정 필요` — 자동 refresh·rotation과 `search`·`source_pdf` scope는 확정 |
+| OAuth authorization server | `결정 완료` — self-hosted Keycloak 단일 tenant, 승인 사용자/client, `search`·`source_pdf`; client 등록 세부는 결정 필요 |
 | BULK pilot 이후 목표 latency, QPS, 가용성과 갱신 완료 시각 | `결정 필요` — 품질 우선·초기 동시 요청 5개는 확정 |

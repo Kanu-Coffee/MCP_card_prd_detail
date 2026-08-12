@@ -30,7 +30,8 @@
 | 레거시 데이터 재사용 계획 | 문서화 완료 | 원본을 변경하지 않는 분류·이전·검증 방향 정의 |
 | 신규 시스템 구현 | 미착수 | 실제 서비스·worker·수집기·DB schema 없음 |
 | OCR·구조 분석·임베딩 실행 | 미수행 | 외부 모델/API 호출 없음 |
-| Docker 빌드·배포 | 미수행 | 이미지·Compose·Docker Hub 배포 없음 |
+| Docker Hub repository | 생성 완료 | public `ymtop59/mcp-card-prd-detail`, 아직 image 없음 |
+| Docker 빌드·배포 | 미수행 | Dockerfile·Compose·image build/push 없음 |
 
 상세 상태의 단일 기준은 [08_COMPLETION_CHECKLIST.md](08_COMPLETION_CHECKLIST.md)다. 실제 파일·코드·시험 증거가 없는 항목은 완료로 표시하지 않는다.
 
@@ -82,7 +83,8 @@
 - 기본 검색은 최신 문서를 대상으로 한다. 과거 버전은 모두 보존하고 사용자가 버전 또는 기준일을 명시한 경우에만 조회한다.
 - 운영 MCP는 HTTP 기반으로 제공한다. 접속 정보는 endpoint URL과 OAuth token이며, 운영에서는 HTTPS와 `Authorization` header를 사용한다. token을 URL query·path·log에 넣지 않는다. client별 `search`·`source_pdf` scope를 분리한다.
 - 최초 승인 후에는 client가 짧은 수명의 access token을 자동 갱신하고 refresh token을 회전해, 정상적으로 계속 사용하는 동안 별도 token 재입력 없이 연결을 유지한다. 90일은 고정 접속 만료가 아니라 비활성 만료 기준이다. refresh token 폐기·분실, 보안사고 또는 client 미지원 시에는 재인증이 필요하다.
-- 사용자가 명시적으로 요청하면 보존된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 제공하고 별도 분할 PDF는 생성하지 않는다. 임의 외부 URL 다운로드 기능은 제공하지 않는다.
+- 별도 기존 OAuth/OIDC provider는 없으므로 v1 authorization server는 self-hosted Keycloak 단일 tenant로 구성한다. 승인 사용자와 client만 등록하고 `search`·`source_pdf` scope를 분리하며 애플리케이션 운영 권한은 local CLI로 유지한다.
+- 사용자가 명시적으로 요청하면 보존된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 요청 시 생성한 렌더 PNG를 제공하고, PNG는 7일 cache 후 제거하며 영구 보존하지 않는다. 별도 분할 PDF와 임의 외부 URL 다운로드 기능은 제공하지 않는다.
 - 검색은 lexical과 vector를 공통 stable evidence key로 결합하는 hybrid 방식을 채택한다. 구체 엔진과 ranking 값은 품질·부하 시험으로 정한다.
 - GitHub 저장소는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus·secret·인증 상태를 포함하지 않으며, image에 포함된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능하다는 점을 전제로 한다.
 - Gmail·이메일 Agent는 신규 범위에서 제외한다. 원본 PDF와 OCR 버전은 모두 보존하고, 검색 generation은 최소 3개를 보존한다.
@@ -91,27 +93,25 @@
 - 최초 배포는 단일 Linux host의 Docker Compose로 운영하며 online MCP와 offline worker를 별도 컨테이너로 분리한다.
 - PDF·OCR·generation은 외부 불변 file volume에 두고, durable 작업 상태와 catalog는 PostgreSQL에 저장한다. vector/lexical 검색 엔진은 신한카드 BULK benchmark 후 선정한다.
 - query embedding 또는 vector 검색 장애 시 lexical-only 결과는 caller가 `allow_degraded=true`로 명시한 경우에만 `degraded` 상태로 반환한다. 그렇지 않으면 품질 저하를 숨기지 않고 요청을 실패시킨다.
-- reverse proxy와 TLS는 별도 Nginx Proxy Manager가 담당하며 이 Compose stack에는 포함하지 않는다. MCP application은 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host의 `127.0.0.1:8000`에만 publish한다.
+- reverse proxy와 TLS는 개발 완료 후 별도 Nginx Proxy Manager에서 운영자가 연결하는 hosting 과제로 두며 이 Compose stack에는 포함하지 않는다. 현재 개발은 MCP application이 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host의 `127.0.0.1:8000`에만 publish하는 데까지 책임진다.
 - 원본 PDF는 이용조건 검토 전까지 승인 사용자에게만 제공하고 파일당 100 MB, HTTP Range, 다운로드 감사 metadata 90일 보존을 적용한다.
-- 일일 수집은 03:00 KST에 시작해 카드사별 간격을 두고 순차 실행하며, 한 카드사 실패가 다른 카드사 실행을 막지 않는다.
-- backup 목표는 RPO 24시간·RTO 4시간이다. PostgreSQL과 신규 file은 매일 backup하고 주 1회 별도 저장소에 복제하며 분기마다 restore를 시험한다.
+- 일일 수집은 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행하고 각 카드사 job 종료 후 10분 대기한다. 한 카드사 실패는 다음 카드사 실행을 막지 않는다.
+- 최신 문서의 OCR·구조·색인 누락 또는 실패가 있으면 candidate generation 게시를 차단하고 이전 generation을 계속 서비스한다. 과거 이력 실패는 quarantine과 보고서에 명시한 뒤 최신 문서 coverage가 100%일 때만 게시를 허용한다.
+- backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 관리한다. 현재 개발에서는 불변 artifact와 명확한 volume 경계를 유지해 후속 backup 도입을 막지 않는다.
 - 접근·권한·PDF 감사 metadata는 90일 보존하고 질의 원문은 기본 저장하지 않는다. 비식별 집계 metric은 1년 보존한다.
 - 1차 관리자 표면은 운영 CLI와 scheduled job만 제공하며 공개 관리자 API·웹 UI는 만들지 않는다.
-- public Docker Hub repository slug는 `mcp-card-prd-detail`로 하고 Cosign으로 image를 서명한다. 실제 namespace는 배포 계정 확인 후 결합한다.
+- public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했으며 향후 검증 image만 이 경로에 push한다. image는 Cosign으로 서명한다.
 
 ## 결정이 필요한 공통 항목
 
 다음 항목은 요구사항이나 레거시만으로 확정할 수 없다.
 
-- OAuth authorization server, 사용자/tenant 모델과 운영자 권한
-- PostgreSQL 운영·backup 방식과 vector/lexical 검색 엔진
+- Keycloak client 등록 방식과 초기 관리자 bootstrap 세부값
+- PostgreSQL schema·migration 방식과 vector/lexical 검색 엔진
 - BULK pilot 이후 목표 QPS, latency, resource 한도와 가용성
-- 신한카드 BULK 시험의 운영 편입 조건
 - OCR·구조 분석·임베딩 모델 및 정량 품질 기준
 - 카드사 공시자료의 수집·재배포·상업적 이용 조건
-- Docker Hub namespace와 Cosign identity·key 관리 방식
-- Nginx Proxy Manager container에서 MCP로 연결할 network 방식
-- 일일 issuer 실행 순서·간격과 backup target·암호화 방식
+- Cosign identity·key 관리 방식과 image promotion 승인 절차
 
 결정 전에는 특정 제품이나 모델을 사실상 확정된 것으로 구현 문서에 기록하지 않는다.
 

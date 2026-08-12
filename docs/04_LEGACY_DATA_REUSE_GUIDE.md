@@ -124,7 +124,7 @@ raw PDF 1,634개를 모두 무차별 복사하지 않는다. manifest 성공 문
 
 | 자산 | 미사용 범위 | 이유 |
 |---|---|---|
-| rendered PNG | 온라인 MCP와 기본 generation | 약 2.95 GB이며 검색에 직접 필요하지 않음. OCR 감사용 cold archive 여부는 결정 필요 |
+| rendered PNG | 온라인 MCP와 기본 generation | 약 2.95 GB이며 신규 runtime으로 이관하지 않음. 페이지 PNG는 원본 PDF에서 요청 시 생성해 7일 cache |
 | legacy-archive DB | 전부 | 약 1.97 GiB의 과거 중복 세대이며 경로 혼동 위험 |
 | Agent email jobs·mailbox·email outputs | 전부 | sender/body/output 평문과 업무 정보가 포함될 수 있음 |
 | Gmail·Hermes 자동화 | 신규 카드 조회 MCP | 카드 정보 검색의 권한·데이터 경계와 무관 |
@@ -134,7 +134,7 @@ raw PDF 1,634개를 모두 무차별 복사하지 않는다. manifest 성공 문
 | run_5_sample_pipeline.py의 clean 동작 | 신규 운영 경로 | 삭제 동작과 privileged OCR 실행을 일반 서비스에 노출하면 안 됨 |
 | 기존 danger-full-access OCR 설정 | 온라인 MCP | 장기 실행 읽기 서비스의 권한 경계와 충돌 |
 
-rendered PNG와 보고서를 즉시 삭제하라는 뜻은 아니다. 레거시 원본 안에 읽기 전용으로 유지하고, 법적·감사·재현 필요성이 확인된 경우에만 별도 cold archive 정책을 정한다.
+rendered PNG와 보고서를 레거시 source에서 삭제하라는 뜻은 아니다. 레거시 원본 안에는 읽기 전용으로 유지하되 신규 runtime이나 generation으로 복사하지 않는다. 온라인 페이지 PNG는 원본 PDF exact version에서 요청 시 생성하고 7일 뒤 cache에서 제거한다.
 
 ## 5. 원본 보존과 접근 원칙
 
@@ -178,8 +178,7 @@ CARDRAG_DATA_ROOT/
 │   ├── unresolved-pdf/
 │   ├── ocr-mismatch/
 │   └── metadata-invalid/
-├── current.json                        # 게시된 generation 포인터
-└── backup-staging/                   # 일관된 외부 backup을 만들기 위한 임시영역
+└── current.json                        # 게시된 generation 포인터
 ~~~
 
 설계 원칙은 다음과 같다.
@@ -190,7 +189,7 @@ CARDRAG_DATA_ROOT/
 - build는 writable, 게시된 generations는 immutable, 온라인 MCP mount는 read-only다.
 - current pointer는 완전히 검증된 generation만 가리키며 임시 파일 작성 후 atomic replace한다.
 - quarantine은 오류를 숨기지 않고 정식 generation에서 제외한 채 조사할 수 있게 한다.
-- 실제 backup은 이 tree와 다른 failure domain에 저장하며 backup-staging을 장기 보관소로 사용하지 않는다.
+- backup·restore 경로는 v1 구현에 포함하지 않고 추후 개선 과제에서 별도 failure domain과 함께 설계한다.
 
 ## 7. PDF 연결과 중복 처리 규칙
 
@@ -264,7 +263,7 @@ canonical OCR record에는 최소 다음이 필요하다.
 - 레거시 source를 read-only로 mount하고 source snapshot ID를 발급한다.
 - source 전체 file inventory와 가능한 SHA-256을 별도 ledger에 기록한다.
 - 신규 canonical schema와 라이선스·보존정책을 확정한다. 기본 조회는 latest, 과거본은 명시적 version/as-of 조회라는 범위 정책을 적용한다.
-- 대상 volume의 여유 공간과 backup 위치를 확인한다.
+- 대상 volume의 여유 공간을 확인한다.
 
 완료조건: source snapshot과 대상 schema가 승인되고 레거시에 write가 발생하지 않았다는 증거가 있다.
 
@@ -335,13 +334,13 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 ## 13. 결정 필요 항목
 
 - 기본 검색은 최신 1,567건을 대상으로 하고 과거 25개 버전은 보존한다. 명시적 version/as-of 조회를 단일 filter 또는 별도 이력 색인 중 어떻게 구현할지는 검색 설계에서 정한다.
-- rendered PNG를 cold archive로 별도 보존할지 재생성 가능한 부산물로 볼지
+- rendered PNG는 신규 runtime으로 이관하지 않고 페이지 요청 시 생성해 7일 cache한다.
 - OCR hash 불일치 1건의 canonical 채택 여부
 - 신규 구조 분석 방식과 taxonomy version
 - OpenRouter embedding model과 index engine
-- 기술적으로는 승인된 `source_pdf` scope 사용자의 명시적 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 다운로드 감사 metadata를 90일 보존한다. 페이지 OCR text는 `search`, 선택적 렌더 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다.
+- 기술적으로는 승인된 `source_pdf` scope 사용자의 명시적 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 다운로드 감사 metadata를 90일 보존한다. 페이지 OCR text는 `search`, 요청 시 생성해 7일 cache하는 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다.
 - 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위
-- 검색 generation은 최소 3개 보존한다. 이를 초과한 보존 기간과 backup 기간은 결정 필요다.
+- 검색 generation은 최소 3개 보존한다. 이를 초과한 보존 기간은 결정 필요이며 backup은 v1 후속 개선 과제다.
 
 ## 14. 이 문서 작성 시점의 상태
 
