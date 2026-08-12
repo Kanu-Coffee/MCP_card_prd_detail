@@ -49,7 +49,7 @@ DB/file에서 정리한다.
 
 공개 release는 하나의 tag가 세 target을 역할별 tag
 (`${version}-{role}`, `${version}-{role}-sha-${short_sha}`)로 만들고 각각의 digest를
-keyless Cosign 서명한다. 통합 manifest가 MCP/worker/admin의 digest와 signature bundle을 모두
+keyless Cosign 서명한다. 통합 manifest가 MCP/worker/admin의 digest와 검증된 signature evidence를 모두
 포함해야 release가 완성된다.
 
 ## 검증

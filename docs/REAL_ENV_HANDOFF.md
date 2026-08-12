@@ -137,8 +137,8 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   그 결과가 image 내부 manifest와 최종 release artifact의 SHA-256에 결속됐으며,
   공개 tag는 `${version}-{mcp|worker|admin}`과 역할별 Git SHA tag를 제공한다.
   통합 manifest는 세 역할의 서로 다른 digest와 `linux/amd64` platform을 기록하고,
-  deployment는 digest를 사용하며 각 `cosign-{role}.bundle.json`의 transparency-log
-  material이 검증된다. `latest`만으로 식별하지 않는다.
+  deployment는 digest를 사용하며 각 `cosign-{role}.verification.json`의 SHA-256과
+  registry OCI signature의 transparency-log material이 검증된다. `latest`만으로 식별하지 않는다.
 - **실패 진단:** environment approval, dependency-license policy/version/wheel·notice hash, tag pattern, Docker Hub permission,
   workflow OIDC subject, pushed digest와 Cosign certificate identity를 확인한다.
 

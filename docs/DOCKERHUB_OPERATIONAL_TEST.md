@@ -6,12 +6,16 @@ digest를 그대로 사용한다.
 
 ## 1. 이미지 선택
 
-기본 운영 테스트 버전은 `0.1.0`이다. `deploy/dockerhub.compose.yaml`은 아래 세 역할
+기본 운영 테스트 버전은 `0.1.1`이다. `deploy/dockerhub.compose.yaml`은 아래 세 역할
 태그를 사용한다.
 
-- `ymtop59/mcp-card-prd-detail:0.1.0-mcp`
-- `ymtop59/mcp-card-prd-detail:0.1.0-worker`
-- `ymtop59/mcp-card-prd-detail:0.1.0-admin`
+- `ymtop59/mcp-card-prd-detail:0.1.1-mcp`
+- `ymtop59/mcp-card-prd-detail:0.1.1-worker`
+- `ymtop59/mcp-card-prd-detail:0.1.1-admin`
+
+`0.1.0`은 최초 공개 과정에서 image push 뒤 signature 결속 전에 중단된 부분 release다. 운영
+테스트에는 사용하지 않고, OCI signature와 통합 release manifest까지 검증된 `0.1.1`만
+사용한다.
 
 Docker Hub 저장소는 SemVer 역할 tag(`X.Y.Z-{mcp|worker|admin}`와 대응 SHA alias)를
 immutable 정규식으로 설정한다. 동일 이름 tag는 덮어쓰거나 삭제하지 않고, 새 소스 revision은

@@ -160,6 +160,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          resolve_digest() {
+            local reference=$1 observed="" _attempt
+            for _attempt in $(seq 1 24); do
+              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                  | awk '$1 == "Digest:" {print $2; exit}'); then
+                if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  printf '%s\n' "$observed"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "registry digest did not become readable for ${reference}" >&2
+            cat /tmp/imagetools-error >&2 || true
+            return 1
+          }
+          pull_linux_amd64() {
+            local reference=$1 _attempt
+            for _attempt in $(seq 1 24); do
+              if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "registry image did not become pullable for ${reference}" >&2
+            return 1
+          }
           repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
             "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
           if ! jq -e \
@@ -185,18 +212,12 @@ jobs:
                   exit 1
                   ;;
               esac
-              docker manifest inspect "$reference" >/dev/null
-              docker pull --platform linux/amd64 "$reference" >/dev/null
+              observed=$(resolve_digest "$reference")
+              pull_linux_amd64 "$reference"
               revision=$(docker image inspect "$reference" \
                 --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
               if [[ "$revision" != "$GITHUB_SHA" ]]; then
                 echo "refusing to overwrite ${reference}; it belongs to ${revision:-unknown}" >&2
-                exit 1
-              fi
-              observed=$(docker buildx imagetools inspect "$reference" \
-                | awk '$1 == "Digest:" {print $2; exit}')
-              if [[ ! "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                echo "could not resolve immutable digest for ${reference}" >&2
                 exit 1
               fi
               if [[ -n "$digest" && "$digest" != "$observed" ]]; then
@@ -240,6 +261,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          resolve_digest() {
+            local reference=$1 observed="" _attempt
+            for _attempt in $(seq 1 24); do
+              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                  | awk '$1 == "Digest:" {print $2; exit}'); then
+                if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  printf '%s\n' "$observed"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "registry digest did not become readable for ${reference}" >&2
+            cat /tmp/imagetools-error >&2 || true
+            return 1
+          }
+          pull_linux_amd64() {
+            local reference=$1 _attempt
+            for _attempt in $(seq 1 24); do
+              if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "registry image did not become pullable for ${reference}" >&2
+            return 1
+          }
           digest=""
           for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
             reference="${IMAGE_NAME}:${tag}"
@@ -254,18 +302,12 @@ jobs:
                 exit 1
                 ;;
             esac
-            docker manifest inspect "$reference" >/dev/null
-            docker pull --platform linux/amd64 "$reference" >/dev/null
+            observed=$(resolve_digest "$reference")
+            pull_linux_amd64 "$reference"
             revision=$(docker image inspect "$reference" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
             if [[ "$revision" != "$GITHUB_SHA" ]]; then
               echo "refusing to overwrite ${reference}; it belongs to ${revision:-unknown}" >&2
-              exit 1
-            fi
-            observed=$(docker buildx imagetools inspect "$reference" \
-              | awk '$1 == "Digest:" {print $2; exit}')
-            if [[ ! "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "could not resolve immutable digest for ${reference}" >&2
               exit 1
             fi
             if [[ -n "$digest" && "$digest" != "$observed" ]]; then
@@ -324,7 +366,7 @@ jobs:
                 --tag "$reference" \
                 "${IMAGE_NAME}@${DIGEST}"
                 ;;
-              200) docker manifest inspect "$reference" >/dev/null ;;
+              200) ;;
               *)
                 echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
                 exit 1
@@ -358,14 +400,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          resolve_digest() {
+            local reference=$1 observed="" _attempt
+            for _attempt in $(seq 1 24); do
+              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                  | awk '$1 == "Digest:" {print $2; exit}'); then
+                if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  printf '%s\n' "$observed"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "registry digest did not become readable for ${reference}" >&2
+            cat /tmp/imagetools-error >&2 || true
+            return 1
+          }
           for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
             reference="${IMAGE_NAME}:${tag}"
             status=$(curl --silent --show-error --retry 3 --retry-all-errors \
               --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
             test "$status" = 200
-            observed=$(docker buildx imagetools inspect "$reference" \
-              | awk '$1 == "Digest:" {print $2; exit}')
+            observed=$(resolve_digest "$reference")
             if [[ "$observed" != "$DIGEST" ]]; then
               echo "immutable alias mismatch for ${reference}: ${observed:-missing}" >&2
               exit 1
@@ -381,7 +438,18 @@ jobs:
         run: |
           set -euo pipefail
           reference="${IMAGE_NAME}@${DIGEST}"
-          docker pull --platform linux/amd64 "$reference" >/dev/null
+          pulled=false
+          for _attempt in $(seq 1 24); do
+            if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
+              pulled=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$pulled" != true ]]; then
+            echo "registry image did not become pullable for ${reference}" >&2
+            exit 1
+          fi
           revision=$(docker image inspect "$reference" \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$revision" = "$GITHUB_SHA"
@@ -401,20 +469,44 @@ jobs:
           echo "sha256=$(sha256sum "image-license-${TARGET}.json" | cut -d' ' -f1)" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Keyless-sign pushed digest with GitHub Actions OIDC
+      - name: Ensure and verify keyless OCI signature with GitHub Actions OIDC
+        id: signature
         env:
           DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
-        run: cosign sign --yes --bundle "cosign-${TARGET}.bundle.json" "${IMAGE_NAME}@${DIGEST}"
-
-      - name: Verify keyless signature identity
-        env:
-          DIGEST: ${{ steps.resolved.outputs.digest }}
+        shell: bash
         run: |
-          cosign verify \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$" \
-            "${IMAGE_NAME}@${DIGEST}"
+          set -euo pipefail
+          reference="${IMAGE_NAME}@${DIGEST}"
+          evidence="cosign-${TARGET}.verification.json"
+          verify_signature() {
+            cosign verify \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$" \
+              --output json \
+              "$reference"
+          }
+          if ! verify_signature > /tmp/cosign-verification.json \
+              2>/tmp/cosign-verification-error; then
+            cosign sign --yes "$reference"
+          fi
+          verified=false
+          for _attempt in $(seq 1 24); do
+            if verify_signature > /tmp/cosign-verification.json \
+                2>/tmp/cosign-verification-error; then
+              mv /tmp/cosign-verification.json "$evidence"
+              verified=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$verified" != true ]]; then
+            cat /tmp/cosign-verification-error >&2 || true
+            exit 1
+          fi
+          jq -e 'if type == "array" then length > 0 else type == "object" end' \
+            "$evidence" >/dev/null
+          echo "sha256=$(sha256sum "$evidence" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Record immutable release manifest
         env:
@@ -423,6 +515,7 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
           IMAGE_LICENSE_SHA256: ${{ steps.image_license.outputs.sha256 }}
+          SIGNATURE_EVIDENCE_SHA256: ${{ steps.signature.outputs.sha256 }}
         run: |
           python - <<'PY'
           import json
@@ -430,7 +523,7 @@ jobs:
           from pathlib import Path
 
           manifest = {
-              "schema": "cardrag.container-release-part.v1",
+              "schema": "cardrag.container-release-part.v2",
               "role": os.environ["TARGET"],
               "image": os.environ["IMAGE_NAME"],
               "digest": os.environ["DIGEST"],
@@ -442,7 +535,10 @@ jobs:
                   f'{os.environ["VERSION"]}-{os.environ["TARGET"]}-sha-{os.environ["SHORT_SHA"]}',
               ],
               "signature": "github-actions-oidc-keyless-cosign",
-              "signature_bundle": f'cosign-{os.environ["TARGET"]}.bundle.json',
+              "signature_evidence": {
+                  "path": f'cosign-{os.environ["TARGET"]}.verification.json',
+                  "sha256": os.environ["SIGNATURE_EVIDENCE_SHA256"],
+              },
               "embedded_dependency_license_manifest": {
                   "path": f'image-license-{os.environ["TARGET"]}.json',
                   "sha256": os.environ["IMAGE_LICENSE_SHA256"],
@@ -460,7 +556,7 @@ jobs:
           name: release-part-${{ needs.validate.outputs.version }}-${{ matrix.target }}
           path: |
             release-manifest-${{ matrix.target }}.json
-            cosign-${{ matrix.target }}.bundle.json
+            cosign-${{ matrix.target }}.verification.json
             image-license-${{ matrix.target }}.json
           if-no-files-found: error
 
@@ -481,7 +577,7 @@ jobs:
           name: release-license-${{ needs.validate.outputs.version }}
           path: release-license
 
-      - name: Assemble all role digests and signature bundles
+      - name: Assemble all role digests and signature evidence
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
@@ -503,7 +599,13 @@ jobs:
           assert len({part["digest"] for part in parts}) == 3
           for role, part in roles.items():
               assert part["platforms"] == ["linux/amd64"]
-              assert (root / part["signature_bundle"]).is_file(), role
+              signature_evidence = root / part["signature_evidence"]["path"]
+              assert signature_evidence.is_file(), role
+              assert hashlib.sha256(signature_evidence.read_bytes()).hexdigest() == (
+                  part["signature_evidence"]["sha256"]
+              ), role
+              verified_signatures = json.loads(signature_evidence.read_text(encoding="utf-8"))
+              assert verified_signatures, role
               image_license = root / part["embedded_dependency_license_manifest"]["path"]
               assert image_license.is_file(), role
               assert hashlib.sha256(image_license.read_bytes()).hexdigest() == (
@@ -559,7 +661,7 @@ jobs:
           name: release-manifest-${{ needs.validate.outputs.version }}
           path: |
             release-manifest.json
-            release-parts/cosign-*.bundle.json
+            release-parts/cosign-*.verification.json
             release-parts/image-license-*.json
             release-license/release-dependency-licenses.json
           if-no-files-found: error
