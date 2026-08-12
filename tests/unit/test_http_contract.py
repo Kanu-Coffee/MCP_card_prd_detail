@@ -7,7 +7,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import fitz
 import httpx
 import pytest
 from mcp import ClientSession
@@ -29,6 +28,7 @@ from cardrag.service.models import (
     SourcePage,
     SourcePdf,
 )
+from tests.support_pdf import write_synthetic_pdf
 
 
 class FakeTokenVerifier(TokenVerifier):
@@ -140,10 +140,7 @@ def http_app(tmp_path: Path) -> tuple[Any, HttpRepository, bytes]:
     ):
         path.mkdir(parents=True)
     pdf_path = settings.storage_root / "source.pdf"
-    with fitz.open() as document:
-        page = document.new_page()
-        page.insert_text((72, 72), "CardRAG exact immutable page")
-        document.save(pdf_path)
+    write_synthetic_pdf(pdf_path, ["CardRAG exact immutable page"])
     content = pdf_path.read_bytes()
     digest = hashlib.sha256(content).hexdigest()
     source = SourcePdf(

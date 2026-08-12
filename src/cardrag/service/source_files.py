@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
 
-import fitz  # type: ignore[import-untyped]
 from mcp.server.auth.provider import AccessToken
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 from starlette.types import Receive, Scope, Send
 
+from cardrag.pdf import PDF_RENDERER_ID, PDFSecurityError, PDFStructureError, open_pdf
 from cardrag.service.auth import access_subject
 from cardrag.service.models import (
     AuditEvent,
@@ -481,7 +481,10 @@ class SourceFileService:
     async def _cached_page_path(self, source_pdf: SourcePdf, source_page: SourcePage) -> Path:
         verified_pdf = await self._verify_pdf(source_pdf)
         cache_key = hashlib.sha256(
-            f"{source_pdf.sha256}:{source_page.page}:{self.render_scale}:rgb-v1".encode()
+            (
+                f"{source_pdf.sha256}:{source_page.page}:{self.render_scale}:"
+                f"{PDF_RENDERER_ID}:source-page-v2"
+            ).encode()
         ).hexdigest()
         target = self.page_cache_root / cache_key[:2] / f"{cache_key}.png"
         if await asyncio.to_thread(self._fresh_png, target):
@@ -521,18 +524,15 @@ class SourceFileService:
             raise InvalidSourceError("page cache path contains a symlink")
         temporary: Path | None = None
         try:
-            with fitz.open(pdf_path) as document:
+            with open_pdf(pdf_path) as document:
                 if document.page_count != source_page.page_count:
                     raise InvalidSourceError("catalog page count does not match PDF")
                 if source_page.page > document.page_count:
                     raise InvalidSourceError("page is outside PDF")
-                pdf_page = document.load_page(source_page.page - 1)
-                pixmap = pdf_page.get_pixmap(
-                    matrix=fitz.Matrix(self.render_scale, self.render_scale),
-                    alpha=False,
-                    colorspace=fitz.csRGB,
+                png = document.render_page_png(
+                    source_page.page - 1,
+                    scale=self.render_scale,
                 )
-                png = pixmap.tobytes("png")
             descriptor, name = tempfile.mkstemp(prefix=".cardrag-page-", suffix=".png", dir=target.parent)
             temporary = Path(name)
             with os.fdopen(descriptor, "wb") as stream:
@@ -541,6 +541,10 @@ class SourceFileService:
                 os.fsync(stream.fileno())
             os.replace(temporary, target)
             temporary = None
+        except PDFSecurityError as exc:
+            raise InvalidSourceError("source PDF is encrypted or uses unsupported security") from exc
+        except PDFStructureError as exc:
+            raise InvalidSourceError("source PDF structure cannot be rendered") from exc
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

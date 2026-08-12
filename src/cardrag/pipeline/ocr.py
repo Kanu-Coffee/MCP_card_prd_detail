@@ -14,13 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-import fitz  # type: ignore[import-untyped]
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cardrag.jobs import LostLeaseError
+from cardrag.pdf import PDF_RENDERER_ID, PDFSecurityError, PDFStructureError, open_pdf
 
-OCR_SCHEMA_VERSION = "ocr-manifest.v1"
+OCR_SCHEMA_VERSION = "ocr-manifest.v2"
 OCR_PROMPT_VERSION = "cardrag-ocr.ko.v1"
 PAGE_MARKER = re.compile(r"^## Page (\d+)\s*$", re.MULTILINE)
 CRITICAL_TOKEN = re.compile(
@@ -49,6 +49,7 @@ class OCRAttempt(BaseModel):
     reasoning_effort: str | None
     prompt_version: str
     prompt_sha256: str
+    renderer: str = Field(min_length=1)
     render_scale: float
     input_pdf_sha256: str
     page_count: int = Field(gt=0)
@@ -142,7 +143,12 @@ def render_pdf(pdf_path: Path, output_dir: Path, *, scale: float = 3.0) -> Rende
     pages: list[Path] = []
     pdf_sha256 = file_sha256(pdf_path)
     render_contract = json.dumps(
-        {"schema_version": "cardrag-render.v1", "pdf_sha256": pdf_sha256, "scale": scale},
+        {
+            "schema_version": "cardrag-render.v2",
+            "renderer": PDF_RENDERER_ID,
+            "pdf_sha256": pdf_sha256,
+            "scale": scale,
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -151,16 +157,22 @@ def render_pdf(pdf_path: Path, output_dir: Path, *, scale: float = 3.0) -> Rende
         for stale in output_dir.glob("page-*.png"):
             stale.unlink()
         atomic_write(contract_path, render_contract)
-    with fitz.open(pdf_path) as document:
-        if document.needs_pass or document.page_count < 1:
-            raise ValueError("OCR input must be a non-encrypted PDF with pages")
-        matrix = fitz.Matrix(scale, scale)
-        for index in range(document.page_count):
-            destination = output_dir / f"page-{index + 1:04d}.png"
-            if not destination.exists():
-                pixmap = document.load_page(index).get_pixmap(matrix=matrix, alpha=False)
-                atomic_write(destination, pixmap.tobytes("png"))
-            pages.append(destination)
+    try:
+        with open_pdf(pdf_path) as document:
+            if document.page_count < 1:
+                raise ValueError("OCR input must be a non-encrypted PDF with pages")
+            for index in range(document.page_count):
+                destination = output_dir / f"page-{index + 1:04d}.png"
+                if not destination.exists():
+                    atomic_write(
+                        destination,
+                        document.render_page_png(index, scale=scale),
+                    )
+                pages.append(destination)
+    except PDFSecurityError as exc:
+        raise ValueError("OCR input must be a non-encrypted PDF with pages") from exc
+    except PDFStructureError as exc:
+        raise ValueError("OCR input PDF structure cannot be opened completely") from exc
     return RenderedDocument(pdf_sha256, tuple(pages), scale)
 
 
@@ -421,6 +433,7 @@ class OCRProcessor:
                 reasoning_effort=backend.reasoning_effort,
                 prompt_version=OCR_PROMPT_VERSION,
                 prompt_sha256=hashlib.sha256(self.prompt.encode()).hexdigest(),
+                renderer=PDF_RENDERER_ID,
                 render_scale=rendered.render_scale,
                 input_pdf_sha256=rendered.pdf_sha256,
                 page_count=len(rendered.page_images),
@@ -428,9 +441,10 @@ class OCRProcessor:
                 started_at=datetime.now(UTC),
             )
             input_contract = {
-                "schema_version": "cardrag-ocr-attempt-input.v1",
+                "schema_version": "cardrag-ocr-attempt-input.v2",
                 "input_pdf_sha256": rendered.pdf_sha256,
                 "page_image_sha256": [file_sha256(path) for path in rendered.page_images],
+                "renderer": PDF_RENDERER_ID,
                 "render_scale": rendered.render_scale,
                 "page_count": len(rendered.page_images),
                 "chunk_pages": self.chunk_pages,

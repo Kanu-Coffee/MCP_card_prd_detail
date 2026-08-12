@@ -110,6 +110,11 @@ jobs:
             config --quiet
           CARDRAG_SECRETS_DIR="$secret_dir" docker compose --profile '*' \
             config --format json > /tmp/cardrag-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f compose.yaml \
+            -f deploy/dockerhub.compose.yaml \
+            --profile '*' \
+            config --format json > /tmp/cardrag-dockerhub-compose.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -147,6 +152,17 @@ jobs:
               "seccomp=unconfined",
               "apparmor=unconfined",
           }.issubset(worker_security), worker_security
+
+          public_compose = json.loads(
+              Path("/tmp/cardrag-dockerhub-compose.json").read_text()
+          )
+          for service in ("volume-init", "admin", "migrate", "worker", "mcp"):
+              definition = public_compose["services"][service]
+              assert "build" not in definition, (service, definition.get("build"))
+              assert definition["pull_policy"] == "always", service
+              assert definition["image"].startswith(
+                  "ymtop59/mcp-card-prd-detail:"
+              ), (service, definition["image"])
           PY
 
   compose-fixture:
@@ -288,7 +304,7 @@ jobs:
             APP_VERSION=ci-${{ github.run_id }}
             VCS_REF=${{ github.sha }}
 
-      - name: Check image architecture, user, and excluded content
+      - name: Check image architecture, user, notices, and excluded content
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -306,6 +322,34 @@ jobs:
             echo "forbidden corpus or credential file found in image" >&2
             exit 1
           fi
+          for required in \
+            usr/share/licenses/cardrag/THIRD_PARTY_NOTICES.md \
+            usr/share/licenses/cardrag/dependency-license-manifest.json \
+            usr/share/licenses/cardrag/certifi/LICENSE \
+            usr/share/licenses/cardrag/pillow/LICENSE \
+            usr/share/licenses/cardrag/psycopg/LICENSE.txt \
+            usr/share/licenses/cardrag/psycopg-binary/LICENSE.txt \
+            usr/share/licenses/cardrag/psycopg-pool/LICENSE.txt \
+            usr/share/licenses/cardrag/pypdfium2/data/linux_x64/BUILD_LICENSES/pdfium.txt \
+            usr/share/licenses/cardrag/pypdfium2/data/linux_x64/BUILD_LICENSES/freetype.txt \
+            usr/share/licenses/cardrag/pypdfium2/data/linux_x64/BUILD_LICENSES/libjpeg_turbo.ijg; do
+            grep -Fxq "$required" <<<"$contents"
+          done
+          manifest=$(mktemp)
+          notice=$(mktemp)
+          tar -xOf "$archive" usr/share/licenses/cardrag/dependency-license-manifest.json > "$manifest"
+          tar -xOf "$archive" usr/share/licenses/cardrag/THIRD_PARTY_NOTICES.md > "$notice"
+          jq -e \
+            '.status == "passed"
+             and .mode == "release-notices-only"
+             and .manual_review_required == []
+             and ([.manual_review_resolved[].name] | sort)
+                 == (["certifi", "psycopg", "psycopg-binary", "psycopg-pool", "pypdfium2"] | sort)
+             and ([.license_payloads[] | select(.name == "pypdfium2") | .files | length] == [19])
+             and ([.license_payloads[].name] | (index("certifi") != null) and (index("pillow") != null) and (index("psycopg") != null))' \
+            "$manifest" >/dev/null
+          grep -Fq 'Independent JPEG Group' "$notice"
+          grep -Fq 'FreeType Project' "$notice"
 
       - name: Smoke-test target entrypoint
         env:

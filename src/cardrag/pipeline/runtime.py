@@ -39,6 +39,7 @@ from cardrag.observability import (
     hash_identifier,
     log_event,
 )
+from cardrag.pdf import PDF_RENDERER_ID
 from cardrag.pipeline.chunks import CHUNK_POLICY_VERSION, EvidenceChunk, build_chunks
 from cardrag.pipeline.ocr import (
     OCR_PROMPT_VERSION,
@@ -135,6 +136,7 @@ def attempt_provenance(claim: ClaimedJob, pipeline: OfflinePipeline) -> tuple[st
             "chunk_pages": settings.ocr_chunk_pages,
             "prompt_version": OCR_PROMPT_VERSION,
             "reasoning_effort": settings.ocr_reasoning_effort if provider == "codex-exec" else None,
+            "renderer": PDF_RENDERER_ID,
             "render_scale": settings.render_scale,
         }
     elif claim.stage == "index":
@@ -642,6 +644,7 @@ class OfflinePipeline:
                     d.ocr_sha256 AS reusable_ocr_sha256,
                     d.ocr_sha256 IS NOT NULL
                     AND d.ocr_manifest->'attempt'->>'prompt_version'=%s
+                    AND d.ocr_manifest->'attempt'->>'renderer'=%s
                     AND (
                         d.ocr_manifest->'attempt'->>'provider'<>'codex-exec'
                         OR d.ocr_manifest->'attempt'->>'reasoning_effort'=%s
@@ -672,6 +675,7 @@ class OfflinePipeline:
                 """,
                 (
                     OCR_PROMPT_VERSION,
+                    PDF_RENDERER_ID,
                     self.settings.ocr_reasoning_effort,
                     self.settings.render_scale,
                     self.settings.ocr_chunk_pages,
@@ -924,6 +928,7 @@ class OfflinePipeline:
                         "prompt_sha256": manifest.attempt.prompt_sha256,
                         "provider": manifest.attempt.provider,
                         "reasoning_effort": manifest.attempt.reasoning_effort,
+                        "renderer": manifest.attempt.renderer,
                         "render_scale": self.settings.render_scale,
                     }
                 ),
@@ -940,6 +945,7 @@ class OfflinePipeline:
                 ManifestAttribute(name="durable_job_attempt", value=claim.attempt_no),
                 ManifestAttribute(name="ocr_chars", value=manifest.ocr_chars),
                 ManifestAttribute(name="provider_attempt", value=manifest.successful_attempt),
+                ManifestAttribute(name="renderer", value=manifest.attempt.renderer),
                 ManifestAttribute(
                     name="reasoning_effort",
                     value=manifest.attempt.reasoning_effort or "none",
@@ -1024,6 +1030,7 @@ class OfflinePipeline:
             "config_hash": ocr_artifact.lineage.config_sha256,
             "model": manifest.attempt.model,
             "provider": manifest.attempt.provider,
+            "renderer": manifest.attempt.renderer,
         }
 
     async def structure(self, claim: ClaimedJob) -> None:
@@ -1350,6 +1357,7 @@ class OfflinePipeline:
                   AND old.embedding_dimension=target.embedding_dimension
                   AND d.structure_schema_version=%s AND d.chunk_policy=%s
                   AND d.ocr_manifest->'attempt'->>'prompt_version'=%s
+                  AND d.ocr_manifest->'attempt'->>'renderer'=%s
                   AND (
                       d.ocr_manifest->'attempt'->>'provider'<>'codex-exec'
                       OR d.ocr_manifest->'attempt'->>'reasoning_effort'=%s
@@ -1371,6 +1379,7 @@ class OfflinePipeline:
                     STRUCTURE_SCHEMA_VERSION,
                     CHUNK_POLICY_VERSION,
                     OCR_PROMPT_VERSION,
+                    PDF_RENDERER_ID,
                     self.settings.ocr_reasoning_effort,
                     self.settings.render_scale,
                     self.settings.ocr_chunk_pages,

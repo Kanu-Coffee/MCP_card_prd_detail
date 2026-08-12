@@ -9,7 +9,6 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-import fitz
 import pytest
 from psycopg.errors import QueryCanceled
 from pydantic import ValidationError
@@ -33,6 +32,7 @@ from cardrag.service.models import (
 from cardrag.service.postgres_repository import PostgresCardRAGRepository
 from cardrag.service.query import QueryService, ServiceTimeoutError, ServiceUnavailableError
 from cardrag.service.source_files import BoundedFileResponse, InvalidSourceError, SourceFileService
+from tests.support_pdf import write_synthetic_pdf
 
 SHA = "a" * 64
 TEXT_SHA = hashlib.sha256(b"Evidence text").hexdigest()
@@ -501,10 +501,7 @@ async def test_evidence_lookup_rejects_oversized_cursor() -> None:
 
 
 def _make_pdf(path: Path) -> tuple[str, int]:
-    with fitz.open() as document:
-        page = document.new_page()
-        page.insert_text((72, 72), "CardRAG source page")
-        document.save(path)
+    write_synthetic_pdf(path, ["CardRAG source page"])
     raw = path.read_bytes()
     return hashlib.sha256(raw).hexdigest(), len(raw)
 

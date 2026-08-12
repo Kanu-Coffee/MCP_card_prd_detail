@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-import fitz  # type: ignore[import-untyped]
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -39,6 +38,7 @@ from cardrag.search.hybrid import HybridSearchEngine
 from cardrag.service.auth import _make_access_token
 from cardrag.service.models import SearchRequest
 from cardrag.service.postgres_repository import PostgresCardRAGRepository
+from tests.support_pdf import write_synthetic_pdf
 
 pytestmark = pytest.mark.integration
 
@@ -193,11 +193,16 @@ def _write_pdfs(
     for issuer_records in records.values():
         for record in issuer_records:
             target = root / f"{record.source_post_id}.pdf"
-            with fitz.open() as document:
-                for page_number in range(1, len(split_pages(ocr_by_post[record.source_post_id])) + 1):
-                    page = document.new_page(width=320, height=320)
-                    page.insert_text((20, 40), f"CardRAG fixture {record.source_post_id} page {page_number}")
-                document.save(target)
+            write_synthetic_pdf(
+                target,
+                [
+                    f"CardRAG fixture {record.source_post_id} page {page_number}"
+                    for page_number in range(
+                        1,
+                        len(split_pages(ocr_by_post[record.source_post_id])) + 1,
+                    )
+                ],
+            )
             result[record.source_post_id] = target
     return result
 

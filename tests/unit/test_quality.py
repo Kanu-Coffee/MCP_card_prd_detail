@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 
-import fitz  # type: ignore[import-untyped]
 import pytest
 
 from cardrag.domain import Issuer
@@ -18,6 +18,7 @@ from cardrag.quality import (
     evaluate_structure,
 )
 from scripts.run_fixture_quality import run as run_fixture_quality
+from tests.support_pdf import pdf_page_count, pdf_page_text, write_synthetic_pdf
 
 GOLD_SET = Path(__file__).parents[1] / "fixtures/gold/gold_set.v1.json"
 
@@ -120,26 +121,16 @@ def test_fixture_gate_observes_real_pipeline_rankings_not_expected_order(
 
 
 def _write_synthetic_pdf(path: Path, *, image_only: bool) -> None:
-    source = fitz.open()
-    for page_number in range(1, 3):
-        page = source.new_page(width=595, height=842)
-        page.insert_text(
-            (48, 72),
-            f"SYNTHETIC CARD DISCLOSURE PAGE {page_number}\nANNUAL FEE 12000 KRW\nLIMIT 5000 KRW",
-            fontsize=12,
-        )
-    if not image_only:
-        source.save(path)
-        source.close()
-        return
-    target = fitz.open()
-    for page in source:
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-        output_page = target.new_page(width=595, height=842)
-        output_page.insert_image(output_page.rect, stream=pixmap.tobytes("png"))
-    target.save(path)
-    target.close()
-    source.close()
+    write_synthetic_pdf(
+        path,
+        [
+            f"SYNTHETIC CARD DISCLOSURE PAGE {page_number} ANNUAL FEE 12000 KRW LIMIT 5000 KRW"
+            for page_number in range(1, 3)
+        ],
+        image_only=image_only,
+        width=595,
+        height=842,
+    )
 
 
 def test_license_safe_gold_pdfs_cover_text_native_and_image_oriented_layouts(tmp_path: Path) -> None:
@@ -150,6 +141,9 @@ def test_license_safe_gold_pdfs_cover_text_native_and_image_oriented_layouts(tmp
 
         assert len(rendered.page_images) == 2
         assert all(page.stat().st_size > 0 for page in rendered.page_images)
-        with fitz.open(pdf_path) as document:
-            assert document.page_count == 2
-            assert bool(document[0].get_text().strip()) is (not image_only)
+        png_header = rendered.page_images[0].read_bytes()[:26]
+        assert png_header.startswith(b"\x89PNG\r\n\x1a\n")
+        assert struct.unpack(">II", png_header[16:24]) == (595, 842)
+        assert png_header[24:26] == b"\x08\x02"  # 8-bit RGB, never palette/alpha output.
+        assert pdf_page_count(pdf_path) == 2
+        assert bool(pdf_page_text(pdf_path).strip()) is (not image_only)

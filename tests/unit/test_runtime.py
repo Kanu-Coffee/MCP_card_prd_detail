@@ -10,13 +10,16 @@ import pytest
 
 from cardrag.acquisition import PDFValidationError
 from cardrag.acquisition.download import DownloadSecurityError
-from cardrag.domain import Issuer
+from cardrag.domain import Issuer, canonical_sha256
 from cardrag.issuers.base import IssuerMarkupChanged, SourceRecord, UnsupportedCategory
 from cardrag.jobs import ClaimedJob
+from cardrag.pdf import PDF_RENDERER_ID
 from cardrag.pipeline.runtime import (
     PERMANENT_PIPELINE_ERRORS,
     OfflinePipeline,
+    PermanentStageError,
     allow_daily_ocr_fallback,
+    attempt_provenance,
     authoritative_is_latest,
     http_retry_policy,
     validate_discovery_volume,
@@ -139,3 +142,116 @@ def test_ocr_workspace_is_generation_job_attempt_and_fence_scoped(tmp_path: Path
 
     assert root(first) != root(reclaimed)
     assert root(first).is_relative_to(tmp_path / "ocr" / "generation-a" / "doc-stable")
+
+
+def test_ocr_attempt_provenance_binds_renderer_identity() -> None:
+    pipeline = object.__new__(OfflinePipeline)
+    pipeline.settings = SimpleNamespace(
+        ocr_model="fixture-ocr",
+        ocr_chunk_pages=2,
+        ocr_reasoning_effort="high",
+        render_scale=3.0,
+    )
+    claim = ClaimedJob(
+        id=uuid.uuid4(),
+        issuer="woori",
+        stage="ocr",
+        document_id="doc-renderer-provenance",
+        payload={},
+        attempt_no=1,
+        max_attempts=3,
+        lease_until=datetime.now(UTC) + timedelta(seconds=30),
+        lease_owner="worker",
+        fencing_token=1,
+        generation_id="generation-renderer-provenance",
+    )
+
+    provider, model, config_hash = attempt_provenance(claim, pipeline)
+
+    assert (provider, model) == ("codex-exec", "fixture-ocr")
+    assert config_hash == canonical_sha256(
+        {
+            "chunk_pages": 2,
+            "prompt_version": "cardrag-ocr.ko.v1",
+            "reasoning_effort": "high",
+            "renderer": PDF_RENDERER_ID,
+            "render_scale": 3.0,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_materialize_compatibility_query_requires_current_renderer() -> None:
+    class Cursor:
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+            self.responses = iter(({"lease": 1}, None))
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            self.executed.append((query, params))
+
+        def fetchone(self) -> dict[str, object] | None:
+            return next(self.responses)
+
+    class Connection:
+        def __init__(self, cursor: Cursor) -> None:
+            self._cursor = cursor
+            self.rolled_back = False
+
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return self._cursor
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+    class Database:
+        def __init__(self) -> None:
+            self.cursor = Cursor()
+            self.connection_value = Connection(self.cursor)
+
+        def connection(self) -> Connection:
+            return self.connection_value
+
+    database = Database()
+    pipeline = object.__new__(OfflinePipeline)
+    pipeline.database = database  # type: ignore[assignment]
+    pipeline.settings = SimpleNamespace(
+        ocr_reasoning_effort="high",
+        render_scale=3.0,
+        ocr_chunk_pages=2,
+        ocr_model="gpt-5.4",
+        ocr_fallback_model="fixture-fallback",
+    )
+    claim = ClaimedJob(
+        id=uuid.uuid4(),
+        issuer="woori",
+        stage="materialize",
+        document_id="doc-renderer-materialize",
+        payload={},
+        attempt_no=1,
+        max_attempts=3,
+        lease_until=datetime.now(UTC) + timedelta(seconds=30),
+        lease_owner="worker",
+        fencing_token=1,
+        generation_id="generation-renderer-materialize",
+    )
+
+    with pytest.raises(PermanentStageError, match="processing contract is incompatible"):
+        await pipeline.materialize(claim)
+
+    query, params = database.cursor.executed[1]
+    assert "d.ocr_manifest->'attempt'->>'renderer'=%s" in query
+    assert PDF_RENDERER_ID in params
+    assert database.connection_value.rolled_back

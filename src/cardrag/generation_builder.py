@@ -17,6 +17,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstrai
 from cardrag.db import Postgres
 from cardrag.domain import canonical_json_bytes
 from cardrag.generation import GenerationManifest, GenerationStore
+from cardrag.pdf import PDF_RENDERER_ID
 from cardrag.pipeline.chunks import CHUNK_POLICY_VERSION
 from cardrag.pipeline.ocr import OCR_PROMPT_VERSION, critical_tokens
 from cardrag.pipeline.structure import STRUCTURE_SCHEMA_VERSION
@@ -1011,6 +1012,7 @@ class GenerationBuilder:
                        )::int AS latest_pdf,
                        count(*) FILTER (
                            WHERE d.is_latest AND d.ocr_sha256 IS NOT NULL
+                             AND d.ocr_manifest->'attempt'->>'renderer'=%s
                              AND jsonb_array_length(d.ocr_pages)=d.pdf_page_count
                              AND EXISTS (
                                  SELECT 1 FROM generation_artifacts a
@@ -1063,6 +1065,7 @@ class GenerationBuilder:
                 FROM generation_documents d WHERE d.generation_id=%s
                 """,
                 (
+                    PDF_RENDERER_ID,
                     embedding_provider,
                     embedding_model,
                     dimension,
@@ -1174,6 +1177,7 @@ class GenerationBuilder:
                                    ocr_manifest->'attempt'->>'reasoning_effort',
                                    ocr_manifest->'attempt'->>'provider',
                                    ocr_manifest->'attempt'->>'model',
+                                   ocr_manifest->'attempt'->>'renderer',
                                    ocr_manifest->'attempt'->>'render_scale',
                                    ocr_manifest->'attempt'->>'chunk_pages',
                                    structure_schema_version, embedding_provider, embedding_model,
@@ -1186,6 +1190,7 @@ class GenerationBuilder:
                                    ocr_manifest->'attempt'->>'reasoning_effort',
                                    ocr_manifest->'attempt'->>'provider',
                                    ocr_manifest->'attempt'->>'model',
+                                   ocr_manifest->'attempt'->>'renderer',
                                    ocr_manifest->'attempt'->>'render_scale',
                                    ocr_manifest->'attempt'->>'chunk_pages',
                                    structure_schema_version, embedding_provider, embedding_model,
@@ -1198,6 +1203,7 @@ class GenerationBuilder:
                                    ocr_manifest->'attempt'->>'reasoning_effort',
                                    ocr_manifest->'attempt'->>'provider',
                                    ocr_manifest->'attempt'->>'model',
+                                   ocr_manifest->'attempt'->>'renderer',
                                    ocr_manifest->'attempt'->>'render_scale',
                                    ocr_manifest->'attempt'->>'chunk_pages',
                                    structure_schema_version, embedding_provider, embedding_model,
@@ -1210,6 +1216,7 @@ class GenerationBuilder:
                                    ocr_manifest->'attempt'->>'reasoning_effort',
                                    ocr_manifest->'attempt'->>'provider',
                                    ocr_manifest->'attempt'->>'model',
+                                   ocr_manifest->'attempt'->>'renderer',
                                    ocr_manifest->'attempt'->>'render_scale',
                                    ocr_manifest->'attempt'->>'chunk_pages',
                                    structure_schema_version, embedding_provider, embedding_model,
@@ -1223,6 +1230,8 @@ class GenerationBuilder:
                                d.structure_schema_version IS DISTINCT FROM %s
                                OR d.chunk_policy IS DISTINCT FROM %s
                                OR d.ocr_manifest->'attempt'->>'prompt_version'
+                                    IS DISTINCT FROM %s
+                               OR d.ocr_manifest->'attempt'->>'renderer'
                                     IS DISTINCT FROM %s
                            )
                        ) AS same_documents
@@ -1239,6 +1248,7 @@ class GenerationBuilder:
                     STRUCTURE_SCHEMA_VERSION,
                     CHUNK_POLICY_VERSION,
                     OCR_PROMPT_VERSION,
+                    PDF_RENDERER_ID,
                     generation_id,
                 ),
             )

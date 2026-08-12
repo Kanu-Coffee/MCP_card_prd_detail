@@ -11,6 +11,7 @@ from cardrag.db import Postgres
 from cardrag.generation import GenerationStore, new_generation_id
 from cardrag.generation_builder import GenerationBuilder
 from cardrag.jobs import JobRepository
+from cardrag.pdf import PDF_RENDERER_ID
 from cardrag.pipeline.chunks import CHUNK_POLICY_VERSION
 from cardrag.pipeline.ocr import OCR_PROMPT_VERSION
 from cardrag.pipeline.structure import STRUCTURE_SCHEMA_VERSION
@@ -71,6 +72,7 @@ def _insert_complete_document(
     snapshot_id: str,
     latest: bool,
     discovery_mode: str = "current",
+    renderer: str = PDF_RENDERER_ID,
 ) -> None:
     pdf_sha = hashlib.sha256(f"pdf:{pdf_seed}".encode()).hexdigest()
     ocr = (
@@ -171,6 +173,7 @@ def _insert_complete_document(
                     {
                         "attempt": {
                             "prompt_version": OCR_PROMPT_VERSION,
+                            "renderer": renderer,
                             "provider": "codex-exec",
                             "model": "gpt-5.4",
                             "reasoning_effort": "high",
@@ -380,6 +383,87 @@ def test_quality_evaluation_rejects_fabricated_exact_source_span(
     quality, _ = builder.evaluate(generation_id)
     assert quality.status == "failed"
     assert quality.structure_span_accuracy < 1.0
+
+
+def test_legacy_renderer_manifest_cannot_satisfy_generation_coverage(
+    clean_database: Postgres,
+    tmp_path: Path,
+) -> None:
+    generation_id = new_generation_id(
+        datetime(2026, 8, 12, 0, 0, tzinfo=UTC),
+        "e" * 12,
+    )
+    _new_candidate(clean_database, generation_id)
+    snapshots = _snapshots(clean_database, generation_id, "legacy-renderer")
+    _insert_complete_document(
+        clean_database,
+        generation_id,
+        document_id="doc-legacy-renderer",
+        version="v1",
+        pdf_seed="legacy-renderer",
+        snapshot_id=snapshots["woori"],
+        latest=True,
+        renderer="pymupdf-legacy-rgb",
+    )
+    builder = GenerationBuilder(
+        clean_database,
+        GenerationStore(tmp_path / "published", tmp_path / "build"),
+    )
+    quality, retrieval = builder.evaluate(generation_id)
+
+    with pytest.raises(ValueError, match="latest document coverage is not 100%"):
+        builder.seal(
+            generation_id,
+            embedding_provider="openrouter",
+            embedding_model="openai/text-embedding-3-small",
+            dimension=1536,
+            quality_report=quality,
+            retrieval_report=retrieval,
+        )
+
+
+def test_daily_scheduler_refuses_to_reuse_legacy_renderer_manifest(
+    clean_database: Postgres,
+) -> None:
+    active = new_generation_id(
+        datetime(2026, 8, 12, 0, 0, tzinfo=UTC),
+        "d" * 12,
+    )
+    _new_candidate(clean_database, active)
+    snapshots = _snapshots(clean_database, active, "renderer-upgrade")
+    _insert_complete_document(
+        clean_database,
+        active,
+        document_id="doc-before-renderer-upgrade",
+        version="v1",
+        pdf_seed="before-renderer-upgrade",
+        snapshot_id=snapshots["woori"],
+        latest=True,
+        renderer="pymupdf-legacy-rgb",
+    )
+    with clean_database.connection() as connection, connection.cursor() as cursor:
+        # Model a generation published by the pre-PDFium application.  Building
+        # the legacy manifest before publication preserves the production
+        # immutability trigger instead of mutating a sealed provenance row.
+        cursor.execute(
+            "UPDATE generations SET state='published', published_at=now() WHERE generation_id=%s",
+            (active,),
+        )
+        cursor.execute(
+            "INSERT INTO active_generation(singleton, generation_id) VALUES (true, %s)",
+            (active,),
+        )
+        connection.commit()
+
+    scheduler = DailyScheduler(clean_database, object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="BULK rebuild.*preserve all versions"):
+        scheduler.create_run(
+            run_type="daily",
+            bulk=False,
+            embedding_provider="openrouter",
+            embedding_model="openai/text-embedding-3-small",
+            embedding_dimension=1536,
+        )
 
 
 def test_daily_contract_change_requires_bulk_to_preserve_history(

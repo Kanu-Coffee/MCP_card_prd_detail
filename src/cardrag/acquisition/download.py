@@ -10,10 +10,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urljoin, urlparse
 
-import fitz  # type: ignore[import-untyped]
 import httpx
 
 from cardrag.issuers.base import SourceRecord
+from cardrag.pdf import PDFSecurityError, PDFStructureError, open_pdf
 
 
 class PDFValidationError(RuntimeError):
@@ -79,14 +79,15 @@ def validate_pdf(path: Path, *, expected_hash: str | None = None) -> tuple[str, 
     if expected_hash and hexdigest != expected_hash:
         raise PDFValidationError("downloaded PDF hash differs from the catalog")
     try:
-        with fitz.open(path) as document:
-            if document.needs_pass:
-                raise PDFValidationError("encrypted PDFs are not accepted")
+        with open_pdf(path) as document:
             pages = document.page_count
             if pages <= 0:
                 raise PDFValidationError("PDF contains no pages")
-            for page_index in range(pages):
-                document.load_page(page_index)
+            document.validate_all_pages()
+    except PDFSecurityError as exc:
+        raise PDFValidationError("encrypted PDFs are not accepted") from exc
+    except PDFStructureError as exc:
+        raise PDFValidationError("PDF structure cannot be opened completely") from exc
     except PDFValidationError:
         raise
     except Exception as exc:

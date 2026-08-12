@@ -14,6 +14,7 @@ from cardrag.db import Postgres
 from cardrag.domain import Issuer
 from cardrag.generation import new_generation_id
 from cardrag.jobs import JobRepository
+from cardrag.pdf import PDF_RENDERER_ID
 from cardrag.pipeline.chunks import CHUNK_POLICY_VERSION
 from cardrag.pipeline.ocr import OCR_PROMPT_VERSION
 from cardrag.pipeline.structure import STRUCTURE_SCHEMA_VERSION
@@ -276,6 +277,7 @@ class DailyScheduler:
                   AND active.embedding_dimension=%s
                   AND d.structure_schema_version=%s AND d.chunk_policy=%s
                   AND d.ocr_manifest->'attempt'->>'prompt_version'=%s
+                  AND d.ocr_manifest->'attempt'->>'renderer'=%s
                   AND (
                       d.ocr_manifest->'attempt'->>'provider'<>'codex-exec'
                       OR d.ocr_manifest->'attempt'->>'reasoning_effort'=%s
@@ -298,6 +300,7 @@ class DailyScheduler:
                     structure_schema_version,
                     chunk_policy,
                     OCR_PROMPT_VERSION,
+                    PDF_RENDERER_ID,
                     ocr_reasoning_effort,
                     render_scale,
                     ocr_chunk_pages,

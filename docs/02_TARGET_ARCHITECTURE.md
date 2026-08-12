@@ -351,7 +351,7 @@ scheduler, 발행기, 관측 agent는 초기에는 worker의 제한 entrypoint �
 
 Docker Hub public repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. v1 platform은 `linux/amd64`로
 한정한다. 일반 `main` push는 build·test까지만 수행하고 공개 registry에 push하지 않는다. `vX.Y.Z`
-release tag와 manual approval을 모두 통과한 MCP/worker/admin target만 역할별 version+Git SHA tag로
+release tag 대상 수동 workflow와 exact confirmation을 모두 통과한 MCP/worker/admin target만 역할별 version+Git SHA tag로
 push한다. GitHub Actions OIDC 기반 keyless Cosign으로 각 역할 digest를 서명하고, private GitHub
 repository·workflow URI가 transparency log에 공개될 수 있음을 승인한다. 배포·rollback은 역할별
 digest를 기준으로 한다. base image와 Compose CPU·memory 개발 기본값은 고정했고 운영 host 한도는

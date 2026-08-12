@@ -104,7 +104,7 @@
 - backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 관리한다. 현재 개발에서는 불변 artifact와 명확한 volume 경계를 유지해 후속 backup 도입을 막지 않는다.
 - 접근·권한·PDF 감사 metadata는 90일 보존하고 질의 원문은 기본 저장하지 않는다. 비식별 집계 metric은 1년 보존한다.
 - 1차 관리자 표면은 운영 CLI와 scheduled job만 제공하며 공개 관리자 API·웹 UI는 만들지 않는다.
-- public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. 일반 `main` push는 build·test만 수행하고 공개 push하지 않으며, `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 이 경로에 push·promotion한다. image는 GitHub Actions OIDC 기반 keyless Cosign으로 서명하고 private GitHub repository·workflow URI가 공개 transparency log에 나타날 수 있음을 승인한다.
+- public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. 일반 `main`·tag push는 공개 push를 수행하지 않으며, `vX.Y.Z` tag를 대상으로 `PUBLISH-vX.Y.Z`를 입력한 수동 release workflow를 통과한 digest만 이 경로에 push·promotion한다. image는 GitHub Actions OIDC 기반 keyless Cosign으로 서명하고 private GitHub repository·workflow URI가 공개 transparency log에 나타날 수 있음을 승인한다.
 - OCR·구조 분석에서 provider 또는 model을 전환해야 하면 한 문서 안의 결과를 혼합하지 않는다. 부분 성공이 있더라도 전체 문서를 새 attempt로 재처리하고 실제 provider·model·prompt·입출력 hash를 보존한다.
 
 ## 개발 중 결정 결과와 외부 보정

@@ -210,7 +210,7 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 보류한다.
 - 접근·권한·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존하고 질의 원문은 기본 저장하지 않는다.
 - 관리자 기능은 운영 CLI와 scheduled job으로 제한하고 공개 관리자 API·웹 UI는 만들지 않는다.
-- public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성했다. v1은 `linux/amd64`만 build한다. 일반 `main` push에는 공개 image를 push하지 않고 `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 공개한다. GitHub Actions OIDC keyless Cosign으로 서명하며 transparency log에 private repository·workflow identity가 드러날 수 있음을 승인한다.
+- public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성했다. v1은 `linux/amd64`만 build한다. 일반 `main`·tag push에는 공개 image를 push하지 않고 `vX.Y.Z` tag를 대상으로 exact confirmation을 입력한 수동 release workflow를 통과한 digest만 공개한다. GitHub Actions OIDC keyless Cosign으로 서명하며 transparency log에 private repository·workflow identity가 드러날 수 있음을 승인한다.
 - OCR·구조 분석 provider 또는 model 전환 시 한 문서 안의 결과를 혼합하지 않는다. 부분 성공분이 있어도 전체 문서를 새 attempt로 재실행한다.
 
 ### 8.2 개발 중 확정한 기술값과 외부 gate
