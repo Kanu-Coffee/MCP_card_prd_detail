@@ -57,7 +57,7 @@
 
 - 네트워크 timeout, 일시적인 외부 서비스 제한, 호스트 자원 부족은 재시도 가능 실패로 분류한다.
 - HTML 오인식, PDF가 아닌 응답, 암호화·손상 PDF, 페이지 누락, 스키마 위반은 원인별로 구분한다.
-- 재시도 예산과 backoff는 구성요소 및 오류 분류별로 설정한다. 구체 횟수와 시간은 `결정 필요`다.
+- 재시도 예산과 backoff는 구성요소 및 오류 분류별로 설정한다. 구체 횟수와 시간은 Codex가 오류 주입·장기 실행 시험으로 결정한다.
 - 입력 내용 해시와 처리 정책 버전이 같으면 검증 완료 산출물을 재사용한다.
 - 처리 정책, 구조 스키마 또는 임베딩 모델이 바뀌면 영향받는 파생 단계부터 다시 처리한다. 원본 PDF를 다시 수집하거나 OCR을 불필요하게 반복하지 않는다.
 - 실패 산출물과 진단 로그는 성공 산출물과 구분하고, 디렉터리 존재만으로 성공 처리하지 않는다.
@@ -83,7 +83,7 @@ PDF 수집기는 각 카드사의 상품공시실에서 상품과 상품안내�
 - timeout, 응답 크기 제한, 요청 속도와 재시도 정책
 - 최초 수집 시 상품별 최신 PDF 우선이라는 범위 정책
 
-상품코드는 카드사 원천에서 확인한 값을 우선 사용한다. 원천이 안정적인 코드를 제공하지 않는 경우 대체 식별 규칙과 충돌 해소 방법은 카드사별로 `결정 필요`이며, 추정값을 확정 상품코드처럼 저장해서는 안 된다.
+상품코드는 카드사 원천에서 확인한 값을 우선 사용한다. 원천이 안정적인 코드를 제공하지 않는 경우 Codex가 카드사 fixture와 충돌 분석으로 대체 식별 규칙을 정하되, 추정값을 확정 상품코드처럼 저장해서는 안 된다.
 
 ### 3.3 출력
 
@@ -181,6 +181,7 @@ OCR 처리용 렌더 이미지는 canonical OCR·page provenance 검증 후 재�
 - 중단 후 재시작 시 입력 해시와 정책 버전이 같은 검증 완료 단위는 건너뛴다.
 - PDF, prompt 계약 또는 모델이 변경되면 영향 범위를 명시적으로 새 OCR 세대로 처리한다. 기존 결과는 감사·비교를 위해 보존한다.
 - 초기 대량 OCR에서는 Codex exec만 사용하며, 자동 OpenRouter 전환으로 완료율을 꾸미지 않는다.
+- 증분 OCR·구조 분석에서 provider 또는 model을 전환하면 부분 성공분을 섞지 않고 전체 문서를 새 attempt로 재처리한다.
 
 ### 4.6 검증 가능한 완료조건
 
@@ -305,7 +306,7 @@ LLM 출력은 원문 대체물이 아니다. LLM이 제시한 정규화 문구�
 - 온라인 서비스가 읽을 수 있는 immutable 검색 generation
 - 현재 generation을 가리키는 원자적 게시 정보와 이전 generation rollback 정보
 
-검색 구현 방식과 저장 기술은 `결정 필요`다. 레거시처럼 모든 4,096차원 BLOB을 요청마다 Python에서 전수 순회하는 방식은 온라인 기본 경로로 채택하지 않는다. ANN 또는 동등한 bounded 검색 방식의 정확도와 운영 복잡도를 비교해야 한다.
+검색 구현 방식과 저장 기술은 Codex가 신한 BULK benchmark로 결정한다. 레거시처럼 모든 4,096차원 BLOB을 요청마다 Python에서 전수 순회하는 방식은 온라인 기본 경로로 채택하지 않는다. ANN 또는 동등한 bounded 검색 방식의 정확도와 운영 복잡도를 비교해야 한다.
 
 ### 6.5 상태, 실패와 재처리
 
@@ -329,7 +330,7 @@ LLM 출력은 원문 대체물이 아니다. LLM이 제시한 정규화 문구�
 - [ ] query embedding은 document embedding과 호환되는 동일 모델·입력 정책을 사용한다.
 - [ ] 새 generation 검증 실패 시 현재 generation이 중단 없이 유지되는 것이 확인된다.
 - [ ] 게시와 rollback이 부분 세대 노출 없이 동작하는 통합 시험이 통과한다.
-- [ ] 목표 corpus 규모와 예상 동시성에서 latency·메모리·I/O 기준을 충족한다. 목표치는 `결정 필요`다.
+- [ ] 목표 corpus 규모와 예상 동시성에서 latency·메모리·I/O 기준을 충족한다. 목표치는 Codex가 품질 우선 원칙과 pilot baseline으로 정한다.
 
 ## 7. MCP 서비스
 
@@ -430,16 +431,18 @@ MCP 서비스는 외부 LLM이 카드상품 정보를 검색하고 근거 원문
 
 선행 단계가 `검증 완료`가 아니면 후행 단계의 정상 corpus에 포함하지 않는다. 예외적으로 검토용 환경에서 불완전 데이터를 사용할 경우 운영 generation과 물리·논리적으로 분리하고 결과에 그 상태를 표시한다.
 
-## 9. 구현 전에 결정할 항목
+## 9. 구현 중 Codex가 결정·검증할 항목
+
+아래 기술값은 개발 시작 차단사항이 아니다. Codex가 gold set, 신한 BULK pilot과 부하·장애 시험에 따라 선택하고 ADR과 체크리스트에 증거를 남긴다.
 
 | 항목 | 상태 |
 |---|---|
 | 일일 issuer 순서 | `결정 완료` — 03:00 KST, 우리카드 → KB국민카드 → 신한카드, 각 job 종료 후 10분 대기와 장애 격리 |
-| 단계별 retry 예산, timeout과 backoff | `결정 필요` |
-| 렌더 이미지와 generation 보존 | 페이지 PNG cache 7일·generation 최소 3개 확정; 3개 초과 generation 기간은 `결정 필요` |
-| 구조 taxonomy와 schema의 최초 승인 버전 | `결정 필요` |
-| 구조 분석에 LLM을 적용할 문서·필드 범위 | `결정 필요` |
-| chunk 크기, overlap과 표·각주 연결 정책 | `결정 필요` |
-| vector index 기술과 hybrid ranking 값 | `결정 필요` — hybrid와 공통 evidence key 결합은 확정 |
-| OAuth authorization server | `결정 완료` — self-hosted Keycloak 단일 tenant, 승인 사용자/client, `search`·`source_pdf`; client 등록 세부는 결정 필요 |
-| BULK pilot 이후 목표 latency, QPS, 가용성과 갱신 완료 시각 | `결정 필요` — 품질 우선·초기 동시 요청 5개는 확정 |
+| 단계별 retry 예산, timeout과 backoff | `구현 중 Codex 결정` |
+| 렌더 이미지와 generation 보존 | `결정 완료` — PNG cache 7일, 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin은 unpin 전까지 |
+| 구조 taxonomy와 schema의 최초 승인 버전 | `구현 중 Codex 결정` |
+| 구조 분석에 LLM을 적용할 문서·필드 범위 | `구현 중 Codex 결정` |
+| chunk 크기, overlap과 표·각주 연결 정책 | `구현 중 Codex 결정` |
+| vector index 기술과 hybrid ranking 값 | `구현 중 Codex 결정` — hybrid와 공통 evidence key 결합은 확정 |
+| OAuth authorization server | `결정 완료` — 같은 Compose의 Keycloak `cardrag` realm, 별도 DB/user, 수동 client 등록, PKCE/Client Credentials, Docker secret admin bootstrap |
+| BULK pilot 이후 목표 latency, QPS, 가용성과 갱신 완료 시각 | `pilot 후 Codex 결정` — 품질 우선·초기 동시 요청 5개는 확정 |

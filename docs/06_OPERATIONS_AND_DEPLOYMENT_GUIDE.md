@@ -236,7 +236,7 @@ publisher는 다음을 순서대로 검증한다.
 - MCP instance는 요청 경계에서 새 generation을 열고 진행 중 요청은 이전 handle로 완료한다.
 - 모든 replica가 적용한 generation ID를 보고할 때까지 이전 generation을 유지한다.
 
-shared volume에서 symlink 교체를 사용할지 pointer file과 control plane을 사용할지는 배포환경에 따라 **결정 필요**다. 어느 방식이든 부분 generation을 관찰할 수 없어야 한다.
+shared volume에서 symlink 교체를 사용할지 pointer file과 control plane을 사용할지는 Codex가 target filesystem의 atomicity·reload 시험으로 결정한다. 어느 방식이든 부분 generation을 관찰할 수 없어야 한다.
 
 ### 7.4 Rollback
 
@@ -247,7 +247,7 @@ shared volume에서 symlink 교체를 사용할지 pointer file과 control plane
 - rollback 사유, 영향, generation/image 전후 값과 실행자를 감사 로그에 남긴다.
 - 실패 generation은 조사 전 삭제하지 않고 서비스 대상에서만 제외한다.
 
-검색 generation은 최소 3개를 보존한다. 3개를 초과하는 보존 기간은 storage 비용, 재처리시간과 복구 목표를 기준으로 **결정 필요**다.
+성공한 검색 generation은 최근 3개를 보존한다. 실패 candidate는 조사 가능하도록 7일 보존한 뒤 정리하고, 수동 pin한 generation은 명시적 unpin 전까지 보존한다.
 
 ## 8. 로그, metric과 경보
 
@@ -300,7 +300,7 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 - volume 임계치 초과와 page PNG cache 정리 실패
 - MCP error/latency/no-result 비율 급증
 
-구체 threshold와 paging 대상은 운영 SLO와 pilot 수치를 기준으로 **결정 필요**다.
+구체 threshold와 paging 대상은 Codex가 운영 baseline과 pilot 수치를 기준으로 결정한다.
 
 ## 9. Docker 운영 설계
 
@@ -369,7 +369,7 @@ HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`sourc
 
 authorization server는 사용자를 로그인시키거나 client를 식별하고, access token과 refresh token을 발급·갱신·회전·폐기하는 별도 보안 구성요소다. MCP server는 이 token을 직접 만들어 장기 보관하는 대신 서명, 발급자, 대상, 만료와 `search`·`source_pdf` scope를 검증한다. 따라서 한번 승인한 뒤 별도 조작 없이 계속 사용하는 자동 갱신과 refresh token rotation을 적용하려면 이를 지원하도록 설정된 authorization server와 호환 MCP client가 필요하다. refresh token 폐기·분실, 90일 비활성, 보안사고 또는 client 미지원 때만 재인증한다.
 
-기존 OAuth/OIDC provider가 없으므로 v1 authorization server는 self-hosted Keycloak으로 확정한다. 모든 승인 사용자가 같은 카드 공시 corpus를 조회하는 단일 tenant로 구성하고 `search`·`source_pdf` scope만 분리한다. 운영 권한은 외부 MCP token에 싣지 않고 local CLI 실행 권한으로 유지한다. Keycloak admin credential은 runtime 환경변수 평문이나 image에 넣지 않으며 admin console을 공개 MCP endpoint와 함께 노출하지 않는다. client 수동 사전등록 여부와 초기 관리자 bootstrap 방식은 구현 전 확정한다.
+기존 OAuth/OIDC provider가 없으므로 v1 authorization server는 self-hosted Keycloak으로 확정한다. 같은 Docker Compose의 별도 service로 구성하고 PostgreSQL server는 공유하되 애플리케이션과 별도 database·user를 사용한다. realm은 `cardrag` 단일 tenant다. 사용자 self-registration과 dynamic client registration은 끄고 승인 client만 수동 사전등록한다. 사람용 client는 Authorization Code+PKCE, service client는 Client Credentials를 사용한다. 모든 승인 사용자가 같은 카드 공시 corpus를 조회하며 `search`·`source_pdf` scope만 분리한다. 운영 권한은 외부 MCP token에 싣지 않고 local CLI 실행 권한으로 유지한다. 초기 Keycloak admin credential은 Docker secret으로 1회 bootstrap하고 즉시 회전·제거하며 admin console을 공개 MCP endpoint와 함께 노출하지 않는다.
 
 ### 10.2 Codex CLI OAuth
 
@@ -436,17 +436,17 @@ MCP readiness는 current generation ID, schema, embedding model/dimension, docum
 
 ## 12. Docker Hub 배포 계획
 
-public repository [`ymtop59/mcp-card-prd-detail`](https://hub.docker.com/r/ymtop59/mcp-card-prd-detail)은 2026-08-12 생성·공개 조회를 확인했다. 아래는 최종 구현 단계의 계획이며 이번 작업에서 image build, push 또는 promotion은 수행하지 않았다.
+public repository [`ymtop59/mcp-card-prd-detail`](https://hub.docker.com/r/ymtop59/mcp-card-prd-detail)은 2026-08-12 생성·공개 조회를 확인했다. v1 image platform은 `linux/amd64`다. 아래는 최종 구현 단계의 계획이며 이번 작업에서 image build, push 또는 promotion은 수행하지 않았다.
 
 1. test, license/secret scan, SBOM, vulnerability scan을 통과한 image를 재현 가능하게 build한다.
 2. release version과 Git SHA를 포함한 immutable tag를 붙이고 image digest를 기록한다.
-3. Cosign으로 image digest를 서명하고 release manifest에 서명 identity 또는 key reference를 기록한다.
-4. candidate tag를 `ymtop59/mcp-card-prd-detail`에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
+3. GitHub Actions OIDC 기반 keyless Cosign으로 image digest를 서명하고 release manifest에 서명 identity와 transparency-log reference를 기록한다. long-lived signing key는 두지 않는다. private GitHub repository·workflow URI가 공개 log에 나타날 수 있음을 전제로 한다.
+4. 일반 `main` push에서는 build·test만 하고 공개 registry에는 push하지 않는다. `vX.Y.Z` release tag와 manual approval을 모두 통과한 candidate만 `ymtop59/mcp-card-prd-detail`에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
 5. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
 6. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
 7. 실패 시 이전 digest로 rollback한다.
 
-**latest** tag만으로 배포 상태를 식별하지 않는다. repository는 public **ymtop59/mcp-card-prd-detail**, 서명은 Cosign으로 확정됐으며 GitHub repository는 private로 유지한다. multi-architecture 필요성과 Cosign identity/key 관리 방식은 구현 시 확인한다. build·push하지 않은 결과를 완료로 보고하지 않는다.
+**latest** tag만으로 배포 상태를 식별하지 않는다. repository는 public **ymtop59/mcp-card-prd-detail**, 서명은 GitHub Actions OIDC keyless Cosign으로 확정됐으며 GitHub repository는 private로 유지한다. v1은 `linux/amd64`만 제공하고 ARM64는 실제 필요가 생기면 후속 지원한다. build·push하지 않은 결과를 완료로 보고하지 않는다.
 
 ## 13. 후속 개선 과제: Backup과 restore
 
@@ -519,20 +519,22 @@ PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는�
 | Docker | non-root, read-only root, resource limit, health probe |
 | auth | MCP OAuth 자동 refresh·revoke·비활성 만료, Codex headless login, OpenRouter secret 비노출 |
 | logs | token·본문 redaction, correlation ID, retention/RBAC |
-| registry | public `ymtop59/mcp-card-prd-detail`, version+Git SHA tag, Cosign 서명, digest pull/run, data·secret 미포함, 공개 code 검토 |
+| registry | public `ymtop59/mcp-card-prd-detail`, `linux/amd64`, `vX.Y.Z`+manual approval만 push, version+Git SHA tag, keyless Cosign 서명, digest pull/run, data·secret 미포함, 공개 code 검토 |
 
-## 16. 결정 필요 항목
+## 16. 구현 중 Codex 결정과 외부 검증
 
-- Keycloak client 등록 정책과 초기 관리자 bootstrap 방식
+제품·운영 P0 결정은 완료됐다. 아래 기술값은 Codex가 개발 중 benchmark·오류 주입·운영 rehearsal로 정하고 ADR과 test report에 근거를 남긴다.
+
 - PostgreSQL schema·migration과 scheduler 세부 방식
 - offline BULK worker concurrency, provider quota와 비용한도
 - worker별 lease·timeout·retry budget
-- generation ID 형식과 최소 3개 초과 보존기간
+- generation ID 형식과 atomic pointer 구현
 - BULK pilot 이후 SLO와 단일 host를 넘어설 autoscaling 기준
 - vector/lexical engine과 degraded mode의 정량 품질 합격선
 - Codex CLI exact version과 공식 headless/device-code 지원 여부
 - OAuth state 저장·갱신·회수와 device-code log 보안정책
-- Cosign identity/key 관리와 promotion 승인 정책
+
+Keycloak 구성, generation 보존기간, image platform, keyless Cosign과 release promotion 조건은 결정 완료다. Codex headless OAuth 지원 여부는 실제 container에서 확인할 기술 gate이지 개발 착수 차단사항이 아니다.
 
 ## 17. 이 문서 작성 시점의 완료 상태
 

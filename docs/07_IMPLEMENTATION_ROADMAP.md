@@ -7,16 +7,17 @@
 - `검증 완료`: 산출물과 검증 증거가 모두 존재한다.
 - `진행 중`: 구현 또는 검증이 시작되었으나 인수 기준을 충족하지 못했다.
 - `미착수`: 구현 증거가 없다.
-- `결정 필요`: 구현 전에 제품·운영 결정이 필요하다.
+- `결정 필요`: 사용자나 외부 권한자의 제품·운영 결정이 선행되어야 한다. 현재 개발 착수 P0에는 해당 항목이 없다.
+- `착수 가능`: 제품·운영 결정이 완료됐고 남은 기술값은 개발 중 검증한다.
 
-현재 검증 완료된 것은 레거시 분석, 본 개발 문서세트와 빈 public Docker Hub repository 생성뿐이다. 신규 코드, Docker image와 runtime 외부 서비스 연동은 모두 미착수다.
+현재 검증 완료된 것은 레거시 분석, 본 개발 문서세트와 빈 public Docker Hub repository 생성뿐이다. 신규 코드, Docker image와 runtime 외부 서비스 연동은 모두 미착수지만, 이를 시작하기 전에 사용자에게 받아야 할 제품·운영 P0 결정은 남아 있지 않아 개발 착수가 가능하다.
 
 ## 2. 단계와 의존관계
 
 | 단계 | 이름 | 주요 선행조건 | 현재 상태 |
 |---:|---|---|---|
 | 0 | 기준 문서와 의사결정 체계 | 없음 | 검증 완료 |
-| 1 | 요구사항·품질 기준 확정 | 단계 0 | 결정 필요 |
+| 1 | 요구사항·품질 기준 확정 | 단계 0 | 착수 가능 — 기술 기준은 pilot로 확정 |
 | 2 | 신규 프로젝트 골격과 도메인 계약 | 단계 1 핵심 결정 | 미착수 |
 | 3 | 레거시 자산 이전 pilot | 단계 2, 품질 표본 정의 | 미착수 |
 | 4 | 카드사별 PDF 수집기 | 단계 2 | 미착수 |
@@ -39,7 +40,7 @@
 
 - 레거시 분석 문서
 - `docs/` 개발가이드 문서세트
-- 완료 체크리스트와 결정 필요 목록
+- 완료 체크리스트와 의사결정 기록
 
 인수 기준:
 
@@ -54,11 +55,11 @@
 - 우리카드·KB국민카드를 우선 지원하고 신한카드 개인 신용·체크카드 상품안내장의 현재본·과거 이력을 신규 BULK 시험 대상으로 추가한다. 신한 법인·선불카드는 1차에서 제외한다.
 - 기본 검색은 latest이며 과거 PDF/OCR version은 모두 보존하고 명시적 version/as-of 요청에서만 조회한다.
 - 운영 MCP는 HTTPS 기반 HTTP endpoint와 OAuth token으로 접속한다. client별 `search`·`source_pdf` scope, 자동 access token refresh, refresh token rotation과 90일 비활성 만료를 적용한다.
-- 기존 provider가 없으므로 self-hosted Keycloak 단일 tenant를 authorization server로 사용하고 승인 사용자·client에 `search`·`source_pdf` scope를 부여한다.
+- 기존 provider가 없으므로 같은 Compose의 별도 Keycloak service와 PostgreSQL 별도 database·user를 사용한다. `cardrag` 단일 realm에서 self-registration·dynamic client registration을 끄고 승인 client만 수동 등록한다. 사람용은 Authorization Code+PKCE, service용은 Client Credentials를 사용하며 초기 admin은 Docker secret으로 1회 bootstrap 후 회전·제거한다.
 - 승인된 `source_pdf` 사용자 요청에는 저장된 전체 원본 PDF를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 접근 감사 metadata를 90일 보존한다. 페이지 PNG는 요청 시 생성해 7일 cache하고 분할 PDF는 만들지 않는다.
 - 검색은 공통 stable evidence key 기반 lexical/vector hybrid로 한다.
-- GitHub는 private, Docker Hub repository는 public **ymtop59/mcp-card-prd-detail**로 하며 version+Git SHA tag, Cosign 서명과 digest 배포를 사용한다. repository는 생성됐고 아직 image는 없다.
-- 원본 PDF·OCR 전 버전과 검색 generation 최소 3개를 보존하고 Gmail·이메일 Agent는 제외한다.
+- GitHub는 private, Docker Hub repository는 public **ymtop59/mcp-card-prd-detail**로 한다. v1 `linux/amd64` image는 일반 `main` push가 아니라 `vX.Y.Z` release tag와 manual approval 때만 공개 push하며 version+Git SHA tag, GitHub Actions OIDC keyless Cosign 서명과 digest 배포를 사용한다. repository는 생성됐고 아직 image는 없다.
+- 원본 PDF·OCR 전 버전을 보존한다. 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin은 unpin 전까지 보존하고 Gmail·이메일 Agent는 제외한다.
 - 온라인은 초기 동시 요청 5개로 시작하며 수치 latency SLO보다 결과 품질을 우선한다.
 - 최초 배포는 단일 Linux host의 Docker Compose로 하고 online MCP와 offline worker를 분리한다.
 - reverse proxy·TLS·Nginx Proxy Manager 연결은 개발 완료 후 별도 hosting 과제로 둔다. 이 Compose에는 proxy를 포함하지 않고 application은 container `0.0.0.0:8000`, host `127.0.0.1:8000`으로 노출한다.
@@ -69,16 +70,16 @@
 - 최신 문서 처리 실패·누락은 generation 게시를 차단하고, 과거 이력 실패는 격리·보고 후 최신 coverage 100%일 때만 게시를 허용한다.
 - backup·restore는 v1 개발 범위에서 제외하고 추후 개선 과제로 둔다.
 - query 원문은 저장하지 않고 접근·인증·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존한다.
+- OCR·구조 분석 provider/model 전환 시 부분 결과를 섞지 않고 전체 문서를 새 attempt로 처리한다.
 
-계속 결정해야 할 사항은 다음과 같다.
+다음 기술값은 Codex가 구현 중 gold set, 신한 BULK pilot, 부하·장애 시험으로 결정하고 간단한 ADR에 근거를 남긴다. 이 목록은 개발 착수 차단사항이 아니다.
 
-- Keycloak client 등록 정책과 초기 관리자 bootstrap 방식
 - BULK pilot 이후 목표 응답시간·QPS·가용성과 resource 한도
 - PostgreSQL schema·migration, 외부 file layout과 lexical/vector 검색 엔진
 - OCR·구조 분석·임베딩 모델 선정 절차와 비용 한도
 - OCR 문자·표·숫자·섹션 관계의 합격 기준
-- 공시자료의 이용 조건과 개인정보·보안 정책
-- Cosign identity/key 관리 방식
+
+공시자료의 이용 조건은 공개 운영 전 별도 확인할 외부 gate다. 승인 사용자 한정 개발·검증은 진행할 수 있으며, 확인 전 공개 범위를 확대하지 않는다.
 
 산출물:
 
@@ -89,7 +90,7 @@
 
 인수 기준:
 
-- 모든 P0 결정의 담당자와 승인 기록이 있다.
+- 모든 제품·운영 P0 결정과 기술 의사결정 위임 기록이 있다.
 - gold set에 표, 각주, 전월실적, 제외조건, 복수 버전 사례가 포함된다.
 - 품질 지표의 계산 방법과 합격선이 재현 가능하다.
 
@@ -288,7 +289,7 @@
 - OpenRouter key secret 주입
 - HTTP MCP endpoint와 self-hosted Keycloak 단일 tenant, OAuth discovery·Bearer header·자동 refresh/rotation·revoke
 - 운영 CLI·scheduled job과 매일 03:00 KST 우리카드 → KB국민카드 → 신한카드 순차 실행, 각 job 종료 후 10분 대기·격리
-- public Docker Hub **ymtop59/mcp-card-prd-detail** image와 private GitHub 경계, version+Git SHA tag, Cosign 서명, digest 배포
+- public Docker Hub **ymtop59/mcp-card-prd-detail**와 private GitHub 경계, v1 `linux/amd64`, `vX.Y.Z`+manual approval 공개 push, version+Git SHA tag, GitHub Actions OIDC keyless Cosign 서명, digest 배포
 - health/readiness, structured logs, metrics, alerting
 - 접근·인증·PDF audit metadata 90일과 비식별 metric 1년 보존
 - generation rollback rehearsal; backup·restore는 v1 후속 과제
@@ -318,7 +319,7 @@
 - 장기 OCR 중단·재개, worker crash, 외부 API 장애 시험
 - rebuild/publish 중 온라인 무중단 조회 시험
 - load, 보안, prompt injection, SSRF, 권한 시험
-- public Docker Hub **ymtop59/mcp-card-prd-detail**에 version+Git SHA candidate tag와 Cosign 서명을 게시 후 digest 기반 promotion
+- `vX.Y.Z` release tag와 manual approval을 통과한 `linux/amd64` candidate만 public Docker Hub **ymtop59/mcp-card-prd-detail**에 version+Git SHA tag와 keyless Cosign 서명으로 게시한 뒤 digest 기반 promotion
 
 산출물:
 
@@ -337,7 +338,7 @@
 
 | Gate | 통과 전 금지되는 작업 | 최소 증거 |
 |---|---|---|
-| 요구사항 gate | storage/model/transport 확정 구현 | 승인된 결정 기록과 SLO |
+| 요구사항 gate | 대량 처리·공개 운영 | 승인된 제품 결정, Codex 기술 ADR와 측정 가능한 품질 기준 |
 | 데이터 pilot gate | 전체 레거시 이전 | checksum·lineage·예외 report |
 | OCR 품질 gate | 초기 전체 OCR | gold-set 원문 충실도 평가 |
 | 구조 품질 gate | 전체 구조화 | source-span 및 관계 정확성 평가 |

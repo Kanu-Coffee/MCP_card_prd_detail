@@ -32,6 +32,7 @@
 | OCR·구조 분석·임베딩 실행 | 미수행 | 외부 모델/API 호출 없음 |
 | Docker Hub repository | 생성 완료 | public `ymtop59/mcp-card-prd-detail`, 아직 image 없음 |
 | Docker 빌드·배포 | 미수행 | Dockerfile·Compose·image build/push 없음 |
+| 개발 착수 준비 | 착수 가능 | 제품·운영 P0 결정 완료, 남은 기술 선택은 구현 중 benchmark와 시험으로 결정 |
 
 상세 상태의 단일 기준은 [08_COMPLETION_CHECKLIST.md](08_COMPLETION_CHECKLIST.md)다. 실제 파일·코드·시험 증거가 없는 항목은 완료로 표시하지 않는다.
 
@@ -83,13 +84,13 @@
 - 기본 검색은 최신 문서를 대상으로 한다. 과거 버전은 모두 보존하고 사용자가 버전 또는 기준일을 명시한 경우에만 조회한다.
 - 운영 MCP는 HTTP 기반으로 제공한다. 접속 정보는 endpoint URL과 OAuth token이며, 운영에서는 HTTPS와 `Authorization` header를 사용한다. token을 URL query·path·log에 넣지 않는다. client별 `search`·`source_pdf` scope를 분리한다.
 - 최초 승인 후에는 client가 짧은 수명의 access token을 자동 갱신하고 refresh token을 회전해, 정상적으로 계속 사용하는 동안 별도 token 재입력 없이 연결을 유지한다. 90일은 고정 접속 만료가 아니라 비활성 만료 기준이다. refresh token 폐기·분실, 보안사고 또는 client 미지원 시에는 재인증이 필요하다.
-- 별도 기존 OAuth/OIDC provider는 없으므로 v1 authorization server는 self-hosted Keycloak 단일 tenant로 구성한다. 승인 사용자와 client만 등록하고 `search`·`source_pdf` scope를 분리하며 애플리케이션 운영 권한은 local CLI로 유지한다.
+- 별도 기존 OAuth/OIDC provider는 없으므로 v1 authorization server는 self-hosted Keycloak 단일 tenant로 구성한다. Keycloak은 같은 Compose의 별도 service로 두고 PostgreSQL server는 공유하되 별도 database·user를 사용한다. realm은 `cardrag`로 하며 사용자 self-registration과 dynamic client registration은 끄고 승인 client만 수동 사전등록한다. 사람용 client는 Authorization Code+PKCE, service client는 Client Credentials를 사용한다. 초기 admin credential은 Docker secret으로 1회 bootstrap한 뒤 회전·제거한다. `search`·`source_pdf` scope를 분리하며 애플리케이션 운영 권한은 local CLI로 유지한다.
 - 사용자가 명시적으로 요청하면 보존된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 요청 시 생성한 렌더 PNG를 제공하고, PNG는 7일 cache 후 제거하며 영구 보존하지 않는다. 별도 분할 PDF와 임의 외부 URL 다운로드 기능은 제공하지 않는다.
 - 검색은 lexical과 vector를 공통 stable evidence key로 결합하는 hybrid 방식을 채택한다. 구체 엔진과 ranking 값은 품질·부하 시험으로 정한다.
 - GitHub 저장소는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus·secret·인증 상태를 포함하지 않으며, image에 포함된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능하다는 점을 전제로 한다.
-- Gmail·이메일 Agent는 신규 범위에서 제외한다. 원본 PDF와 OCR 버전은 모두 보존하고, 검색 generation은 최소 3개를 보존한다.
+- Gmail·이메일 Agent는 신규 범위에서 제외한다. 원본 PDF와 OCR 버전은 모두 보존한다. 성공한 검색 generation은 최근 3개를 보존하고 실패 candidate는 7일 뒤 정리하되, 수동 pin한 generation은 명시적으로 해제할 때까지 보존한다.
 - 초기 온라인 동시 요청 기준은 5개로 시작한다. 응답 품질을 지연시간보다 우선하며, 수치 latency 목표는 BULK pilot과 부하 시험 후 정한다. 모든 요청에는 운영 보호를 위한 유한 timeout과 cancellation을 적용한다.
-- image tag는 버전과 Git SHA를 포함하고, 실제 배포와 rollback은 image digest를 기준으로 한다.
+- v1 image platform은 `linux/amd64`로 한정한다. image tag는 버전과 Git SHA를 포함하고, 실제 배포와 rollback은 image digest를 기준으로 한다.
 - 최초 배포는 단일 Linux host의 Docker Compose로 운영하며 online MCP와 offline worker를 별도 컨테이너로 분리한다.
 - PDF·OCR·generation은 외부 불변 file volume에 두고, durable 작업 상태와 catalog는 PostgreSQL에 저장한다. vector/lexical 검색 엔진은 신한카드 BULK benchmark 후 선정한다.
 - query embedding 또는 vector 검색 장애 시 lexical-only 결과는 caller가 `allow_degraded=true`로 명시한 경우에만 `degraded` 상태로 반환한다. 그렇지 않으면 품질 저하를 숨기지 않고 요청을 실패시킨다.
@@ -100,25 +101,28 @@
 - backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 관리한다. 현재 개발에서는 불변 artifact와 명확한 volume 경계를 유지해 후속 backup 도입을 막지 않는다.
 - 접근·권한·PDF 감사 metadata는 90일 보존하고 질의 원문은 기본 저장하지 않는다. 비식별 집계 metric은 1년 보존한다.
 - 1차 관리자 표면은 운영 CLI와 scheduled job만 제공하며 공개 관리자 API·웹 UI는 만들지 않는다.
-- public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했으며 향후 검증 image만 이 경로에 push한다. image는 Cosign으로 서명한다.
+- public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. 일반 `main` push는 build·test만 수행하고 공개 push하지 않으며, `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 이 경로에 push·promotion한다. image는 GitHub Actions OIDC 기반 keyless Cosign으로 서명하고 private GitHub repository·workflow URI가 공개 transparency log에 나타날 수 있음을 승인한다.
+- OCR·구조 분석에서 provider 또는 model을 전환해야 하면 한 문서 안의 결과를 혼합하지 않는다. 부분 성공이 있더라도 전체 문서를 새 attempt로 재처리하고 실제 provider·model·prompt·입출력 hash를 보존한다.
 
-## 결정이 필요한 공통 항목
+## 구현 중 Codex가 결정·검증할 기술 항목
 
-다음 항목은 요구사항이나 레거시만으로 확정할 수 없다.
+제품·운영·보안 경계는 개발 착수가 가능할 만큼 확정됐다. 다음 기술값은 Codex가 gold set, 신한 BULK pilot, 부하·장애 시험의 증거로 최적안을 선택하고 간단한 ADR과 체크리스트에 근거를 남긴다. 이 항목들은 구현 시작 차단사항이 아니다.
 
-- Keycloak client 등록 방식과 초기 관리자 bootstrap 세부값
 - PostgreSQL schema·migration 방식과 vector/lexical 검색 엔진
 - BULK pilot 이후 목표 QPS, latency, resource 한도와 가용성
 - OCR·구조 분석·임베딩 모델 및 정량 품질 기준
-- 카드사 공시자료의 수집·재배포·상업적 이용 조건
-- Cosign identity·key 관리 방식과 image promotion 승인 절차
+- chunking, hybrid ranking, retry·timeout·lease와 generation pointer 구현
 
-결정 전에는 특정 제품이나 모델을 사실상 확정된 것으로 구현 문서에 기록하지 않는다.
+카드사 공시자료의 수집·재배포·상업적 이용 조건은 기술 선택이 아니므로 공개 운영 전 별도 확인한다. 확인 전에도 로컬 개발·승인 사용자 한정 검증은 진행할 수 있지만 원본 PDF 공개 범위를 확대하지 않는다.
+
+Codex는 위 기술 선택을 사용자에게 다시 묻지 않고 합리적인 기본값으로 구현할 수 있다. 단, 제품 범위 확대, 외부 공개·과금·법적 권한, secret 전달, 파괴적 데이터 변경처럼 새 권한이 필요한 사항은 임의 결정하지 않는다.
+
+결정한 기술값은 코드·시험 결과·benchmark와 함께 기록하며, 증거 없이 특정 제품이나 모델을 영구 표준으로 간주하지 않는다.
 
 ## 문서 변경 규칙
 
 - 설계가 바뀌면 관련 가이드와 체크리스트를 같은 변경에서 갱신한다.
 - 완료 상태에는 파일 경로, 시험 결과, image digest 등 재검증 가능한 증거를 남긴다.
-- 가정은 `가정`, 미확정 사항은 `결정 필요`, 기술 검증이 필요한 사항은 `검토 필요`로 표시한다.
+- 가정은 `가정`, 외부 승인이 필요한 사항은 `결정 필요`, 개발자가 실측해 정할 사항은 `구현 중 결정`, 기술 지원 여부는 `검토 필요`로 표시한다.
 - 레거시 자산을 조사하더라도 원본 파일과 DB는 수정하지 않는다.
 - 운영 명령과 구체 API schema는 실제 구현 저장소가 생긴 뒤 해당 코드와 가까운 문서에서 관리한다.
