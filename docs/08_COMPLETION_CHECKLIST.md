@@ -8,14 +8,19 @@
 
 - `[x] [검증 완료]`: 산출물과 재현 가능한 검증 증거가 존재한다.
 - `[x] [결정 완료]`: 사용자가 제품·운영 방향을 승인했지만 구현 완료를 뜻하지 않는다.
+- `[x] [착수 가능]`: 구현 시작에 필요한 제품·운영 결정이 완료됐다.
 - `[ ] [진행 중]`: 작업은 시작됐지만 완료조건을 모두 충족하지 않았다.
 - `[ ] [미착수]`: 신규 구현 또는 검증 증거가 없다.
-- `[ ] [결정 필요]`: 제품·운영 결정이 선행되어야 한다.
+- `[ ] [결정 필요]`: 사용자 또는 외부 권한자의 제품·운영 결정이 선행되어야 한다.
+- `[ ] [구현 중 결정]`: Codex가 개발 중 benchmark·시험으로 선택하고 ADR에 근거를 남긴다.
 - `[ ] [검토 필요]`: 기술 지원 여부나 현실성을 실제 환경에서 확인해야 한다.
 
 체크할 때는 항목 끝에 증거를 기록한다. 인정 가능한 증거는 versioned 파일 경로, test report, run ID, corpus/index generation ID, image digest, 복구 훈련 report 등이다. 계획 문서만 존재하는 것은 구현 완료 증거가 아니다.
 
 기준일: 2026-08-12
+
+- [x] [착수 가능] 제품·운영·보안 P0 결정을 완료했고 남은 기술 선택을 Codex에 위임했으므로 신규 구현을 시작할 수 있다. 신규 코드가 이미 구현됐다는 뜻은 아니다.
+  증거: 사용자 결정 2026-08-12, `docs/README.md`, `docs/07_IMPLEMENTATION_ROADMAP.md`
 
 ## 2. 문서와 요구사항
 
@@ -35,7 +40,7 @@
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] 초기 동시 요청 5개와 품질 우선 원칙을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
-- [ ] [결정 필요] BULK pilot 후 목표 QPS, latency, 가용성과 resource 한도를 승인한다.
+- [ ] [구현 중 결정] Codex가 BULK pilot과 부하 시험 후 목표 QPS, latency, 가용성과 resource 한도를 정하고 ADR에 근거를 남긴다.
 - [x] [결정 완료] 명시적 요청 시 전체 원본 PDF streaming, 페이지 OCR text·요청 시 생성하는 PNG, 분할 PDF 미생성을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/03_COMPONENT_DEVELOPMENT_GUIDE.md`
 - [x] [결정 완료] 원본 PDF는 승인된 `source_pdf` 사용자에게만 제공하고 100 MB 상한, HTTP Range와 90일 접근 감사 metadata를 적용한다.
@@ -62,9 +67,15 @@
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] v1 운영 관리면은 CLI와 scheduled job으로 한정하며 public admin API와 web UI를 만들지 않는다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
-- [ ] [결정 필요] 공시자료 수집·재배포·상업적 이용 조건을 확인한다.
+- [x] [결정 완료] Keycloak은 같은 Compose의 별도 service와 PostgreSQL 별도 database·user, `cardrag` realm, self-registration·dynamic client registration 비활성, 수동 client 등록, Authorization Code+PKCE/Client Credentials, Docker secret 1회 admin bootstrap으로 구성한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin은 unpin 전까지 보존한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] provider/model 페일오버 시 부분 결과를 혼합하지 않고 전체 문서를 새 attempt로 재처리한다.
+  증거: 사용자 결정 2026-08-12, `docs/05_LLM_AND_DATA_QUALITY_POLICY.md`
+- [ ] [결정 필요] 공시자료 수집·재배포·상업적 이용 조건을 공개 운영 전에 확인한다. 이는 로컬 개발·승인 사용자 한정 검증의 착수 차단사항이 아니다.
 - [ ] [미착수] 대표 PDF·질문·정답 근거로 gold evaluation set을 만든다.
-- [ ] [미착수] OCR·구조·검색별 정량 합격선을 승인한다.
+- [ ] [구현 중 결정] Codex가 gold baseline을 측정하고 OCR·구조·검색별 정량 합격선을 ADR로 확정한다.
 
 ## 3. 신규 프로젝트 기반과 도메인 계약
 
@@ -89,7 +100,7 @@
 | KB국민카드 | 확인 완료 | 미착수 | 미착수 | 미착수 |
 | 신한카드 | adapter·corpus 없음 | 개인 신용·체크 전 이력 BULK로 결정, 구현 미착수 | 미착수 | 미착수 |
 | 삼성카드 | adapter·corpus 없음 | 대상 아님 | 미착수 | 미착수 |
-| 그 외 카드사 | 확인하지 않음 | 결정 필요 | 미착수 | 미착수 |
+| 그 외 카드사 | 확인하지 않음 | v1 대상 아님 | 미착수 | 미착수 |
 
 - [ ] [미착수] 카드사별 상품코드를 안정적으로 수집·정규화한다.
 - [ ] [미착수] bootstrap은 상품별 최신 PDF를 우선 수집한다.
@@ -132,12 +143,12 @@
 - [ ] [미착수] 혜택과 조건·제외조건·각주의 관계를 명시적으로 표현한다.
 - [ ] [미착수] confidence와 extraction method를 저장한다.
 - [ ] [미착수] 분석 실패가 canonical OCR을 덮어쓰지 않는 것을 시험한다.
-- [ ] [결정 필요] LLM 보강 적용 범위와 수동 검수 대상을 승인한다.
+- [ ] [구현 중 결정] Codex가 gold set 비교로 LLM 보강 적용 범위와 수동 검수 대상을 정하고 ADR에 기록한다.
 
 ## 7. 임베딩과 검색 색인
 
-- [ ] [결정 필요] OpenRouter embedding 모델 선택 기준과 최초 모델을 승인한다.
-- [ ] [결정 필요] lexical/vector 저장 엔진과 운영 방식을 승인한다.
+- [ ] [구현 중 결정] Codex가 gold retrieval benchmark로 OpenRouter embedding 모델 선택 기준과 최초 모델을 정한다.
+- [ ] [구현 중 결정] Codex가 신한 BULK·부하 시험으로 lexical/vector 저장 엔진과 운영 방식을 정한다.
 - [ ] [미착수] section·조건 관계와 문맥을 보존하는 chunking을 구현한다.
 - [ ] [미착수] chunk에 issuer, 상품코드·명, 문서 version·기준일, section과 source span을 포함한다.
 - [ ] [미착수] token upper bound와 overlap 정책을 시험한다.
@@ -161,7 +172,8 @@
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] self-hosted Keycloak 단일 tenant와 승인 사용자/client, `search`·`source_pdf`, local CLI 운영 권한 분리를 정한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
-- [ ] [결정 필요] Keycloak client 등록 정책과 초기 관리자 bootstrap 방식을 정한다.
+- [x] [결정 완료] Keycloak은 같은 Compose의 별도 service, PostgreSQL 별도 DB/user, `cardrag` realm, self-registration·dynamic client registration 비활성, 수동 client 등록, 사람용 PKCE·service용 Client Credentials, Docker secret 1회 admin bootstrap을 사용한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [ ] [미착수] Keycloak과 MCP protected-resource metadata, issuer·audience·scope 검증을 구현한다.
 - [ ] [미착수] MCP SDK dependency와 server entrypoint를 추가한다.
 - [ ] [미착수] 카드상품 검색 역할을 구현·시험한다.
@@ -229,9 +241,15 @@
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] Docker Hub repository **ymtop59/mcp-card-prd-detail**과 Cosign image 서명을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] v1 image는 `linux/amd64`만 제공하고 ARM64는 후속 필요 시 지원한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] 일반 `main` push에는 공개 image를 push하지 않고 `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 공개한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] GitHub Actions OIDC keyless Cosign을 사용하고 private repository·workflow identity의 transparency-log 공개 가능성을 승인한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [검증 완료] public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성하고 공개 조회를 확인했다. image는 아직 없다.
   증거: [Docker Hub repository](https://hub.docker.com/r/ymtop59/mcp-card-prd-detail), 2026-08-12 API 확인
-- [x] [결정 완료] PDF·OCR 전 버전과 검색 generation 최소 3개 보존, Gmail·이메일 Agent 제외를 승인한다.
+- [x] [결정 완료] PDF·OCR 전 버전, 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin generation의 unpin 전 보존과 Gmail·이메일 Agent 제외를 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/README.md`
 
 ## 11. 테스트와 배포
@@ -244,21 +262,21 @@
 - [ ] [미착수] retrieval과 grounded-answer regression을 gold set으로 시험한다.
 - [ ] [미착수] prompt injection, SSRF, path traversal, 권한 우회, secret 노출을 시험한다.
 - [ ] [미착수] 목표 QPS/latency에서 load와 resource 한도를 검증한다.
-- [ ] [결정 필요] Cosign identity/key 관리와 image promotion 승인 절차를 정한다.
+- [x] [결정 완료] GitHub Actions OIDC keyless Cosign과 `vX.Y.Z` release tag+manual approval promotion을 정한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [ ] [미착수] staging image를 Docker Hub에 push하고 digest를 기록한다.
 - [ ] [미착수] 검증된 digest만 운영 tag로 promotion한다.
 - [ ] [미착수] 배포 후 health, smoke query, evidence provenance와 rollback을 검증한다.
 
-## 12. 현재 차단사항과 다음 갱신 조건
+## 12. 개발 착수 판단과 구현 중 gate
 
-현재 신규 구현을 시작하기 전의 주요 차단사항은 다음과 같다.
+**개발 착수 가능**이다. 사용자에게 사전 확인해야 할 제품·운영·보안 P0 결정은 남아 있지 않다. 신규 구현은 여전히 미착수이며, 아래 항목은 개발을 진행하면서 해소할 단계별 기술·외부 gate다.
 
-- self-hosted Keycloak 단일 tenant는 확정됐지만 client 등록 정책과 초기 관리자 bootstrap 방식이 남아 있다.
-- PostgreSQL·file volume은 확정됐지만 vector/lexical engine, BULK pilot 이후 수치 SLO와 세부 데이터 보존정책이 남아 있다.
-- 원본 PDF 기술 제공과 100 MB 상한은 확정됐지만 카드사 자료의 재배포·서비스 이용 조건이 남아 있다.
-- OCR·구조·검색 품질 gold set과 합격선이 없다.
-- 카드사 공시자료 이용 조건 확인이 남아 있다.
-- Codex OAuth의 headless Docker device-code 흐름은 실제 환경 검증이 필요하다.
+- Codex는 PostgreSQL schema·migration, vector/lexical engine, 모델, chunking·ranking, retry·timeout과 수치 SLO를 pilot·benchmark·시험으로 선택하고 ADR에 기록한다.
+- OCR·구조·검색 gold set과 합격선은 대량 처리 전에 만들고 통과해야 한다.
+- 카드사 공시자료 이용 조건은 공개 운영 전에 확인하며, 그 전에는 원본 PDF 범위를 승인 사용자 한정으로 유지한다.
+- Codex OAuth의 headless Docker device-code 흐름은 target container에서 검증하고, 지원되지 않으면 문서화된 안전한 bootstrap 대안을 선택한다.
+- Keycloak 상세, generation 보존, fallback 단위, image platform, keyless signing과 공개 promotion 조건은 결정 완료다.
 - backup·restore와 Nginx Proxy Manager 연결은 v1 차단사항이 아닌 후속 운영 과제다.
 
-다음 작업자는 [구현 로드맵](07_IMPLEMENTATION_ROADMAP.md)의 단계 1부터 시작하고, 항목을 완료할 때 이 문서의 상태와 증거를 같은 변경에서 갱신해야 한다.
+다음 작업자는 [구현 로드맵](07_IMPLEMENTATION_ROADMAP.md)의 단계 1부터 즉시 시작할 수 있다. 안전한 기술 선택은 사용자 재질의 없이 진행하되 제품 범위 확대, 외부 공개 권한, 과금·법적 승인, secret 제공 또는 파괴적 데이터 변경이 필요하면 사용자에게 확인한다. 각 항목 완료 시 이 문서의 상태와 증거를 같은 변경에서 갱신한다.

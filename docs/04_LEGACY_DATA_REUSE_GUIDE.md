@@ -331,7 +331,9 @@ canonical OCR record에는 최소 다음이 필요하다.
 
 rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경시각과 실행자를 감사 로그에 남긴다. 이전 generation을 재게시할 수 있다는 이유로 mutable job state까지 되돌리지는 않는다.
 
-## 13. 결정 필요 항목
+## 13. 구현 중 Codex 결정과 외부 gate
+
+아래 기술 항목은 개발 착수를 막지 않으며 Codex가 pilot·benchmark·무결성 시험으로 결정한다.
 
 - 기본 검색은 최신 1,567건을 대상으로 하고 과거 25개 버전은 보존한다. 명시적 version/as-of 조회를 단일 filter 또는 별도 이력 색인 중 어떻게 구현할지는 검색 설계에서 정한다.
 - rendered PNG는 신규 runtime으로 이관하지 않고 페이지 요청 시 생성해 7일 cache한다.
@@ -339,8 +341,8 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 - 신규 구조 분석 방식과 taxonomy version
 - OpenRouter embedding model과 index engine
 - 기술적으로는 승인된 `source_pdf` scope 사용자의 명시적 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 다운로드 감사 metadata를 90일 보존한다. 페이지 OCR text는 `search`, 요청 시 생성해 7일 cache하는 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다.
-- 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위
-- 검색 generation은 최소 3개 보존한다. 이를 초과한 보존 기간은 결정 필요이며 backup은 v1 후속 개선 과제다.
+- 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위는 공개 운영 전 별도 확인하는 외부 gate다.
+- 성공한 검색 generation은 최근 3개, 실패 candidate는 7일 보존한다. 수동 pin한 generation은 명시적 unpin 전까지 보존하며 backup은 v1 후속 개선 과제다.
 
 ## 14. 이 문서 작성 시점의 상태
 

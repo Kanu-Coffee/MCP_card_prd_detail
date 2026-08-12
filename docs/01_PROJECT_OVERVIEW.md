@@ -167,7 +167,7 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 
 “구현함”이 아니라 실제 artifact, 테스트 결과와 운영 증거로 완료를 판단한다. 데이터 품질, 검색 품질, 지연시간, 복구와 보안 기준을 사전에 정의하고 체크리스트에 증거 위치를 남긴다.
 
-## 8. 현재 확정된 방향과 결정 필요 사항
+## 8. 현재 확정된 방향과 구현 중 기술 결정
 
 ### 8.1 이 문서세트에서 채택한 방향
 
@@ -177,17 +177,17 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - PDF, OCR, 검색 데이터와 작업 상태는 Docker 이미지 밖에 둔다.
 - 초기 수집은 상품별 최신 PDF를 우선하고 이후 신규·변경본을 증분 처리한다.
 - OCR은 Codex exec 우선이며 초기 대량 처리는 Codex exec만 사용한다. 일반 실행의 OpenRouter 페일오버는 별도 품질 동등성 검증 후 허용한다.
-- 구조 분석에 LLM을 사용하기로 결정하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다. 구조 분석 엔진 자체는 아직 결정하지 않았다.
+- 구조 분석에 LLM을 사용하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다. 구체 엔진은 Codex가 gold set의 규칙-only·LLM 보강 비교로 구현 중 결정한다.
 - 임베딩은 OpenRouter의 임베딩 전용 모델을 사용하되 모델은 설정으로 교체 가능해야 한다.
 - 모든 조회 결과는 문서 버전과 근거로 역추적 가능해야 한다.
 - 1차 지원 대상은 우리카드와 KB국민카드이며, 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 adapter로 수집해 BULK 처리 시험에 포함한다. 법인·선불카드는 신한 1차 범위에서 제외한다.
 - 기본 검색은 최신본으로 제한하고 과거본은 모두 보존한다. 과거본은 명시적 version 또는 as-of 요청에서만 조회한다.
 - 운영 MCP는 HTTP endpoint로 제공하고 HTTPS URL과 OAuth token으로 접속한다. client별 `search`·`source_pdf` scope를 분리하고 token은 인증 header로 전달하며 URL·log에 노출하지 않는다. 최초 승인 후 access token 갱신과 refresh token 회전은 client가 자동 수행하고, 90일 비활성·폐기·분실·미지원 상황에서만 재인증을 요구한다.
-- 기존 OAuth/OIDC provider가 없으므로 self-hosted Keycloak 단일 tenant를 사용한다. 승인 사용자·client만 등록하고 애플리케이션 운영 권한은 local CLI로 분리한다.
+- 기존 OAuth/OIDC provider가 없으므로 self-hosted Keycloak 단일 tenant를 사용한다. 같은 Compose의 별도 service와 PostgreSQL 별도 database·user로 격리하고 realm은 `cardrag`로 한다. self-registration·dynamic client registration은 끄며 승인 client만 수동 등록한다. 사람용 client는 Authorization Code+PKCE, service client는 Client Credentials를 사용하고 초기 admin credential은 Docker secret으로 1회 bootstrap한 뒤 회전·제거한다. 애플리케이션 운영 권한은 local CLI로 분리한다.
 - 검색은 공통 stable evidence key를 사용하는 lexical/vector hybrid를 기본 정책으로 한다.
 - 명시적으로 요청된 보존 원본 PDF 전체를 인증 후 streaming file로 제공한다. 페이지 조회용 PNG는 요청 시 렌더링하고 7일 cache 후 제거하며 영구 저장하지 않는다. 분할 PDF는 만들지 않고 임의 URL 다운로드는 계속 금지한다.
 - GitHub는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus와 secret을 포함하지 않는다.
-- 원본 PDF와 OCR 버전은 모두 보존하고 검색 generation은 최소 3개 보존한다. Gmail·이메일 Agent는 신규 범위에서 제외한다.
+- 원본 PDF와 OCR 버전은 모두 보존한다. 성공 generation 최근 3개, 실패 candidate 7일, 수동 pin generation은 해제 시까지 보존한다. Gmail·이메일 Agent는 신규 범위에서 제외한다.
 - 초기 동시 요청 기준은 5개이며 응답 품질을 지연시간보다 우선한다. 수치 latency 목표는 BULK pilot 후 정하되 유한 timeout과 cancellation은 항상 둔다.
 - image tag는 version과 Git SHA를 포함하고 배포·rollback은 digest 기준으로 수행한다.
 - 최초 운영 topology는 단일 Linux host의 Docker Compose이며 online MCP와 offline worker를 별도 컨테이너로 둔다.
@@ -200,21 +200,25 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 보류한다.
 - 접근·권한·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존하고 질의 원문은 기본 저장하지 않는다.
 - 관리자 기능은 운영 CLI와 scheduled job으로 제한하고 공개 관리자 API·웹 UI는 만들지 않는다.
-- public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성했으며 image signing은 Cosign으로 확정한다. signing identity·key 관리는 배포 시 결정한다.
+- public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성했다. v1은 `linux/amd64`만 build한다. 일반 `main` push에는 공개 image를 push하지 않고 `vX.Y.Z` release tag와 manual approval을 모두 통과한 digest만 공개한다. GitHub Actions OIDC keyless Cosign으로 서명하며 transparency log에 private repository·workflow identity가 드러날 수 있음을 승인한다.
+- OCR·구조 분석 provider 또는 model 전환 시 한 문서 안의 결과를 혼합하지 않는다. 부분 성공분이 있어도 전체 문서를 새 attempt로 재실행한다.
 
-### 8.2 결정 필요
+### 8.2 구현 중 Codex 결정과 외부 gate
+
+다음 기술 항목은 개발 시작을 막지 않는다. Codex가 pilot·benchmark·시험 결과로 선택하고 ADR과 체크리스트에 근거를 남긴다.
 
 | 주제 | 상태 | 결정 시 필요한 기준 |
 |---|---|---|
-| Keycloak 인증 세부 설정 | 일부 결정 | self-hosted·단일 tenant·scope 분리는 확정, client 등록과 초기 관리자 bootstrap 방식 결정 필요 |
-| 목표 지연시간·QPS·가용성 | pilot 후 결정 | 품질 우선 원칙과 초기 동시 요청 5개를 기준으로 BULK·부하 시험에서 측정 |
-| vector/lexical 검색 엔진 | BULK 후 결정 | PostgreSQL 상태·catalog와 외부 file volume은 확정, 검색 엔진은 corpus benchmark로 선정 |
-| hybrid 구현·ranking | 결정 필요 | 공통 evidence key 결합은 확정, 엔진·가중치·후보 수는 카드 도메인 benchmark로 결정 |
-| 구조 분석 엔진 | 결정 필요 | 규칙 기반, LLM 보조, 혼합 방식의 정확도·재현성·비용 평가 |
-| 온라인 query embedding | 일부 결정 | 장애 시 opt-in lexical-only 정책은 확정, OpenRouter 호출·cache·회로 차단 상세는 결정 필요 |
+| 목표 지연시간·QPS·가용성 | pilot 후 Codex 결정 | 품질 우선 원칙과 초기 동시 요청 5개를 기준으로 BULK·부하 시험에서 측정 |
+| vector/lexical 검색 엔진 | BULK 후 Codex 결정 | PostgreSQL 상태·catalog와 외부 file volume은 확정, 검색 엔진은 corpus benchmark로 선정 |
+| hybrid 구현·ranking | 구현 중 Codex 결정 | 공통 evidence key 결합은 확정, 엔진·가중치·후보 수는 카드 도메인 benchmark로 결정 |
+| 구조 분석 엔진 | 구현 중 Codex 결정 | 규칙 기반, LLM 보조, 혼합 방식의 정확도·재현성·비용 평가 |
+| 온라인 query embedding | 구현 중 Codex 결정 | 장애 시 opt-in lexical-only 정책은 확정, OpenRouter 호출·cache·회로 차단 상세를 시험으로 결정 |
 | 원문·PDF 이용 조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 재배포·상업적 이용 조건은 별도 확인 |
-| 보존·삭제·감사 정책 | 일부 결정 | PDF/OCR 전 버전, generation 최소 3개, 감사 90일·metric 1년, PNG cache 7일은 확정 |
+| 보존·삭제·감사 정책 | 결정 완료 | PDF/OCR 전 버전, 성공 generation 최근 3개, 실패 candidate 7일, pin은 해제 시까지, 감사 90일·metric 1년, PNG cache 7일 |
 | backup·restore | v1 범위 밖 | 추후 개선 과제로 별도 설계·구현 |
+
+개발 착수에 필요한 제품·운영 P0 결정은 완료됐다. 공시자료 이용조건은 공개 운영 범위를 넓히기 전 확인하는 외부 gate이며, 승인 사용자 한정 개발과 품질 검증의 시작을 막지 않는다.
 
 ## 9. 성공 상태
 
