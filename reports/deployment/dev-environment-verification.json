@@ -9,7 +9,7 @@
     "branch": "agent/implement-cardrag-mcp",
     "worktree_candidate_included": true,
     "candidate_file_count": 160,
-    "candidate_source_tree_fingerprint_sha256": "b66d5e0b2b966b9d182416aabd4b4523946dad4db05370e01791998ca719ee48",
+    "candidate_source_tree_fingerprint_sha256": "54d510e0059c106b210c646204aed747f91d4a22e7950db369d3ece639991f28",
     "fingerprint_contract": "SHA-256 of sorted '<sha256 of staged blob>  <path>' records for all git index files, excluding this verification report",
     "runtime_image_input_fingerprint_sha256": "b66d5e0b2b966b9d182416aabd4b4523946dad4db05370e01791998ca719ee48",
     "runtime_image_input_note": "All three linux/amd64 images were rebuilt from the final candidate and carry this exact revision label.",
