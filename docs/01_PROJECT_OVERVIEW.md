@@ -77,7 +77,7 @@
 
 ### 5.1 목표 시스템의 제품 범위
 
-- 우리카드와 KB국민카드 우선 지원, 신한카드 신규 adapter 및 BULK 처리 시험
+- 우리카드와 KB국민카드 우선 지원, 신한카드 개인 신용·체크카드 현재본·과거 이력의 신규 adapter 및 BULK 처리 시험
 - 카드사별 상품공시 discovery와 PDF 수집
 - 상품코드·카드사·문서 유형·효력일·버전을 포함한 정규 문서 식별
 - 원본 PDF 변경 이력과 content hash 관리
@@ -180,27 +180,30 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - 구조 분석에 LLM을 사용하기로 결정하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다. 구조 분석 엔진 자체는 아직 결정하지 않았다.
 - 임베딩은 OpenRouter의 임베딩 전용 모델을 사용하되 모델은 설정으로 교체 가능해야 한다.
 - 모든 조회 결과는 문서 버전과 근거로 역추적 가능해야 한다.
-- 1차 지원 대상은 우리카드와 KB국민카드이며, 신한카드는 신규 adapter와 BULK 처리 시험 대상으로 도입한다.
+- 1차 지원 대상은 우리카드와 KB국민카드이며, 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 adapter로 수집해 BULK 처리 시험에 포함한다. 법인·선불카드는 신한 1차 범위에서 제외한다.
 - 기본 검색은 최신본으로 제한하고 과거본은 모두 보존한다. 과거본은 명시적 version 또는 as-of 요청에서만 조회한다.
-- 운영 MCP는 HTTP endpoint로 제공하고 HTTPS URL과 인증 token으로 접속한다. token은 인증 header로 전달하며 URL·log에 노출하지 않는다.
+- 운영 MCP는 HTTP endpoint로 제공하고 HTTPS URL과 OAuth token으로 접속한다. client별 `search`·`source_pdf` scope를 분리하고 token은 인증 header로 전달하며 URL·log에 노출하지 않는다. 최초 승인 후 access token 갱신과 refresh token 회전은 client가 자동 수행하고, 90일 비활성·폐기·분실·미지원 상황에서만 재인증을 요구한다.
 - 검색은 공통 stable evidence key를 사용하는 lexical/vector hybrid를 기본 정책으로 한다.
-- 명시적으로 요청된 보존 원본 PDF 파일을 인증 후 제공하고 OCR·근거는 페이지 단위 조회를 허용한다. 임의 URL 다운로드는 계속 금지한다.
+- 명시적으로 요청된 보존 원본 PDF 전체를 인증 후 streaming file로 제공한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 제공하며 분할 PDF는 만들지 않는다. 임의 URL 다운로드는 계속 금지한다.
 - GitHub는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus와 secret을 포함하지 않는다.
 - 원본 PDF와 OCR 버전은 모두 보존하고 검색 generation은 최소 3개 보존한다. Gmail·이메일 Agent는 신규 범위에서 제외한다.
 - 초기 동시 요청 기준은 5개이며 응답 품질을 지연시간보다 우선한다. 수치 latency 목표는 BULK pilot 후 정하되 유한 timeout과 cancellation은 항상 둔다.
 - image tag는 version과 Git SHA를 포함하고 배포·rollback은 digest 기준으로 수행한다.
+- 최초 운영 topology는 단일 Linux host의 Docker Compose이며 online MCP와 offline worker를 별도 컨테이너로 둔다.
+- PDF·OCR·generation은 외부 불변 file volume, durable 작업 상태와 catalog는 PostgreSQL을 사용한다. vector/lexical engine은 신한 BULK benchmark 후 정한다.
+- vector 경로 장애 시 caller가 `allow_degraded=true`를 명시한 요청만 lexical-only 결과를 `degraded`로 반환하고, 나머지는 실패시킨다.
 
 ### 8.2 결정 필요
 
 | 주제 | 상태 | 결정 시 필요한 기준 |
 |---|---|---|
-| token·인가 상세 | 결정 필요 | token 발급 단위·만료·회전·폐기, 사용자/tenant와 도구별 권한 |
+| OAuth authorization server·사용자 모델 | 결정 필요 | OAuth provider, 사용자/tenant, 운영자 권한과 client 등록 방식 |
 | 목표 지연시간·QPS·가용성 | pilot 후 결정 | 품질 우선 원칙과 초기 동시 요청 5개를 기준으로 BULK·부하 시험에서 측정 |
-| 검색 엔진·vector store | 결정 필요 | corpus 규모, pre-filter, 지연시간, 운영 복잡도, backup·rollback |
+| vector/lexical 검색 엔진 | BULK 후 결정 | PostgreSQL 상태·catalog와 외부 file volume은 확정, 검색 엔진은 corpus benchmark로 선정 |
 | hybrid 구현·ranking | 결정 필요 | 공통 evidence key 결합은 확정, 엔진·가중치·후보 수는 카드 도메인 benchmark로 결정 |
 | 구조 분석 엔진 | 결정 필요 | 규칙 기반, LLM 보조, 혼합 방식의 정확도·재현성·비용 평가 |
-| 온라인 query embedding | 결정 필요 | OpenRouter 호출 허용 범위, 캐시, 장애 시 FTS fallback |
-| 신한카드 세부 범위 | 결정 필요 | BULK 시험에 포함할 상품 유형·기간·문서 종류와 운영 편입 gate |
+| 온라인 query embedding | 일부 결정 | 장애 시 opt-in lexical-only 정책은 확정, OpenRouter 호출·cache·회로 차단 상세는 결정 필요 |
+| 신한카드 운영 편입 | 결정 필요 | 개인 신용·체크 전 이력 BULK 범위는 확정, 정식 일일 운영 편입 gate는 결정 필요 |
 | 원문·PDF 이용 조건 | 결정 필요 | 기술적 제공 방식은 확정, 재배포·상업적 이용·감사·최대 파일 크기는 별도 확인 |
 | 보존·삭제·감사 정책 | 일부 결정 | PDF/OCR 전 버전과 generation 최소 3개는 확정, 로그·질의·렌더 이미지 기간은 결정 필요 |
 | 관리자 운영 표면 | 결정 필요 | MCP와 분리된 CLI·job API·스케줄러 중 필요한 방식 |

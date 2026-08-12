@@ -78,24 +78,28 @@
 
 ## 사전 결정 기록 (2026-08-12)
 
-- 1차 지원 대상은 우리카드와 KB국민카드다. 신한카드는 신규 adapter와 BULK 처리 시험 대상으로 함께 도입한다.
+- 1차 지원 대상은 우리카드와 KB국민카드다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 adapter로 수집해 BULK 처리 시험에 포함한다. 법인·선불카드는 1차 신한 범위에서 제외한다.
 - 기본 검색은 최신 문서를 대상으로 한다. 과거 버전은 모두 보존하고 사용자가 버전 또는 기준일을 명시한 경우에만 조회한다.
-- 운영 MCP는 HTTP 기반으로 제공한다. 접속 정보는 endpoint URL과 token이며, 운영에서는 HTTPS와 `Authorization` header를 사용한다. token을 URL query·path·log에 넣지 않는다.
-- 사용자가 명시적으로 요청하면 보존된 원본 PDF 파일을 제공하고, OCR·원문 근거는 페이지 단위 조회를 허용한다. 임의 외부 URL 다운로드 기능은 제공하지 않는다.
+- 운영 MCP는 HTTP 기반으로 제공한다. 접속 정보는 endpoint URL과 OAuth token이며, 운영에서는 HTTPS와 `Authorization` header를 사용한다. token을 URL query·path·log에 넣지 않는다. client별 `search`·`source_pdf` scope를 분리한다.
+- 최초 승인 후에는 client가 짧은 수명의 access token을 자동 갱신하고 refresh token을 회전해, 정상적으로 계속 사용하는 동안 별도 token 재입력 없이 연결을 유지한다. 90일은 고정 접속 만료가 아니라 비활성 만료 기준이다. refresh token 폐기·분실, 보안사고 또는 client 미지원 시에는 재인증이 필요하다.
+- 사용자가 명시적으로 요청하면 보존된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 제공하고 별도 분할 PDF는 생성하지 않는다. 임의 외부 URL 다운로드 기능은 제공하지 않는다.
 - 검색은 lexical과 vector를 공통 stable evidence key로 결합하는 hybrid 방식을 채택한다. 구체 엔진과 ranking 값은 품질·부하 시험으로 정한다.
 - GitHub 저장소는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus·secret·인증 상태를 포함하지 않으며, image에 포함된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능하다는 점을 전제로 한다.
 - Gmail·이메일 Agent는 신규 범위에서 제외한다. 원본 PDF와 OCR 버전은 모두 보존하고, 검색 generation은 최소 3개를 보존한다.
 - 초기 온라인 동시 요청 기준은 5개로 시작한다. 응답 품질을 지연시간보다 우선하며, 수치 latency 목표는 BULK pilot과 부하 시험 후 정한다. 모든 요청에는 운영 보호를 위한 유한 timeout과 cancellation을 적용한다.
 - image tag는 버전과 Git SHA를 포함하고, 실제 배포와 rollback은 image digest를 기준으로 한다.
+- 최초 배포는 단일 Linux host의 Docker Compose로 운영하며 online MCP와 offline worker를 별도 컨테이너로 분리한다.
+- PDF·OCR·generation은 외부 불변 file volume에 두고, durable 작업 상태와 catalog는 PostgreSQL에 저장한다. vector/lexical 검색 엔진은 신한카드 BULK benchmark 후 선정한다.
+- query embedding 또는 vector 검색 장애 시 lexical-only 결과는 caller가 `allow_degraded=true`로 명시한 경우에만 `degraded` 상태로 반환한다. 그렇지 않으면 품질 저하를 숨기지 않고 요청을 실패시킨다.
 
 ## 결정이 필요한 공통 항목
 
 다음 항목은 요구사항이나 레거시만으로 확정할 수 없다.
 
-- token 발급 단위·만료·회전·폐기와 사용자/tenant·tool별 권한
-- 상태·메타데이터 DB와 vector/lexical 검색 엔진
+- OAuth authorization server, 사용자/tenant 모델과 운영자 권한
+- PostgreSQL 운영·backup 방식과 vector/lexical 검색 엔진
 - BULK pilot 이후 목표 QPS, latency, resource 한도와 가용성
-- 신한카드 BULK 시험의 상품 범위와 운영 편입 조건
+- 신한카드 BULK 시험의 운영 편입 조건
 - OCR·구조 분석·임베딩 모델 및 정량 품질 기준
 - 카드사 공시자료의 수집·재배포·상업적 이용 조건
 - Docker Hub namespace·repository 이름, image signing과 promotion 승인 절차

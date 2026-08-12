@@ -102,7 +102,7 @@ portable path의 절대경로·URL·상위 경로 차단 개념도 유지한다.
 
 raw PDF 1,634개를 모두 무차별 복사하지 않는다. manifest 성공 문서와 hash로 연결된 집합을 우선 이전하고, 성공 문서와 연결되지 않은 파일은 provenance 확인 전 quarantine 또는 cold archive 후보로 둔다.
 
-우리카드와 KB국민카드에는 위 레거시 기준선이 있지만 신한카드에는 재사용할 adapter·corpus가 없다. 신한카드 BULK 시험 데이터는 신규 수집 경로로 만들고 레거시 migration 성공 건수에 포함하지 않는다.
+우리카드와 KB국민카드에는 위 레거시 기준선이 있지만 신한카드에는 재사용할 adapter·corpus가 없다. 신한카드 개인 신용·체크카드 상품안내장의 현재본과 과거 이력은 신규 수집 경로로 만들고 레거시 migration 성공 건수에 포함하지 않는다. 신한 법인·선불카드는 1차 BULK 범위에서 제외한다.
 
 ### 4.3 변환 또는 재색인이 필요한 자산
 
@@ -339,7 +339,7 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 - OCR hash 불일치 1건의 canonical 채택 여부
 - 신규 구조 분석 방식과 taxonomy version
 - OpenRouter embedding model과 index engine
-- 기술적으로는 명시적 사용자 요청에 exact version·hash의 보존 원본 PDF를 인증된 file/resource로 제공하고 OCR 원문은 페이지 단위 조회를 허용한다. 최대 파일 크기, streaming·range 방식과 감사 항목은 결정 필요다.
+- 기술적으로는 `source_pdf` scope를 가진 명시적 사용자 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 페이지 OCR text는 `search`, 선택적 렌더 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다. 최대 파일 크기·range와 감사 보존기간은 결정 필요다.
 - 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위
 - 검색 generation은 최소 3개 보존한다. 이를 초과한 보존 기간과 backup 기간은 결정 필요다.
 

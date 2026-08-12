@@ -15,6 +15,8 @@
 
 ### 2.1 실행 단위
 
+최초 운영 topology는 단일 Linux host의 Docker Compose다. online MCP와 offline worker는 별도 컨테이너로 실행하고 PostgreSQL, 외부 불변 file volume과 운영 job을 같은 Compose project에서 명시적으로 연결한다. 다중 node 전환은 BULK·부하·가용성 측정 후 검토한다.
+
 | 실행 단위 | 주기 | 권한·network | storage | 장애 영향 |
 |---|---|---|---|---|
 | 온라인 MCP service | 상시 | HTTPS MCP endpoint와 query embedding에 필요한 최소 egress | 게시 generation과 승인 원본 PDF view read-only | 장애 시 조회 중단, ingestion에는 영향 없음 |
@@ -23,7 +25,7 @@
 | generation publisher | candidate 검증 후 | current pointer 변경 권한 | generations와 publish metadata write | 실패 시 이전 generation 유지 |
 | backup/restore job | 정책에 따른 주기 | backup target 접근 | snapshot read, backup write | 실행 중 일관성 확보 필요 |
 
-온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 사용자가 명시적으로 요청한 경우 게시 대상 document ID에 연결된 보존 원본 PDF를 인증 후 읽기 전용으로 전달한다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
+온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 `source_pdf` scope를 가진 사용자가 명시적으로 요청하면 게시 대상 document ID에 연결된 보존 원본 PDF 전체를 streaming file로 전달한다. 페이지 조회는 OCR text와 선택적 렌더 PNG를 사용하고 분할 PDF는 만들지 않는다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
 
 ### 2.2 최소 장애 격리 원칙
 
@@ -78,15 +80,13 @@ preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로
 
 초기 대량 OCR은 Codex exec만 사용한다. OpenRouter를 OCR 자동 fallback으로 사용해 실패를 성공으로 바꾸지 않으며, 실패 문서는 retry 또는 dead-letter 상태로 남긴다. OpenRouter key는 이 초기 run에서도 문서·query embedding에 필요할 수 있으므로 OCR 인증과 별개로 preflight한다.
 
-우리카드와 KB국민카드를 우선 처리하고 신한카드를 신규 BULK 시험 대상으로 포함한다. 신한카드 adapter는 레거시 재사용이 아니라 신규 구현이며, 카드사별 rate limit과 오류 격리가 확인되기 전에는 운영 주기 편입으로 간주하지 않는다.
+우리카드와 KB국민카드를 우선 처리한다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 BULK 시험 대상으로 포함하고 법인·선불카드는 1차 범위에서 제외한다. 신한카드 adapter는 레거시 재사용이 아니라 신규 구현이며, 카드사별 rate limit과 오류 격리가 확인되기 전에는 운영 주기 편입으로 간주하지 않는다.
 
 ## 4. Durable 작업상태
 
 ### 4.1 상태의 단일 기준
 
-분산 JSON과 directory 존재 여부를 완료 판단에 사용하지 않는다. 외부 volume에 있는 transactional state store를 단일 기준으로 사용한다.
-
-**결정 필요:** 단일 host의 제한된 writer에는 SQLite를 검토할 수 있지만 network filesystem 위의 다중 writer를 전제로 해서는 안 된다. 다중 node·고가용성이 필요하면 lease와 row lock을 안정적으로 제공하는 별도 DB를 선택한다.
+분산 JSON과 directory 존재 여부를 완료 판단에 사용하지 않는다. Docker volume의 PostgreSQL을 durable 작업 상태와 catalog의 단일 기준으로 사용한다. job claim은 PostgreSQL transaction과 row locking 또는 동등한 원자적 방식으로 구현하며, file 존재만으로 성공을 판정하지 않는다.
 
 최소 상태 필드는 다음과 같다.
 
@@ -321,13 +321,13 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 | published generations/current pointer | read-only | publisher만 write | 온라인 검색 snapshot |
 | PDF/OCR object store | 게시 승인 원본의 제한 view만 read-only | read-write | 불변 source artifact와 명시적 PDF·페이지 조회 |
 | build workspace | 미마운트 | read-write | candidate generation과 임시 파일 |
-| durable job state | 미마운트 또는 status read-only | scheduler/worker read-write | queue, lease, run event |
+| PostgreSQL data | catalog 조회에 필요한 최소 권한 | scheduler/worker read-write | durable catalog, queue, lease, run event |
 | quarantine | 미마운트 | 제한 read-write | 실패 artifact와 조사자료 |
 | Codex auth state | 미마운트 | OCR worker만 제한 read-write | container 재생성 후 OAuth 상태 유지 |
 | backup staging | 미마운트 | backup job만 | 일관된 snapshot 준비 |
 | temporary scratch | 미마운트 | ephemeral | render·CLI 임시 파일, 재생성 가능 |
 
-PDF, OCR, index, 작업상태와 OAuth state는 서로 다른 접근정책을 적용한다. 단순히 하나의 data root를 모든 container에 read-write로 mount하지 않는다. container 삭제 후에도 필요한 volume은 유지하되 auth volume과 일반 backup의 정책은 분리한다.
+PDF, OCR과 generation은 외부 불변 file volume에 두고 작업상태·catalog는 PostgreSQL에 둔다. index, PostgreSQL data와 OAuth state에는 서로 다른 접근정책을 적용하며 하나의 data root를 모든 container에 read-write로 mount하지 않는다. container 삭제 후에도 필요한 volume은 유지하되 auth volume과 일반 backup의 정책은 분리한다.
 
 ### 9.3 Image와 runtime hardening
 
@@ -355,7 +355,7 @@ PDF, OCR, index, 작업상태와 OAuth state는 서로 다른 접근정책을 �
 - token은 `Authorization` header에서만 받고 URL query·path, access log와 error log에 남기지 않는다.
 - 원본 PDF 전달은 게시 catalog의 document ID를 통해서만 허용하고 임의 URL·host path·object key를 외부 입력으로 사용하지 않는다.
 
-HTTP+token 접속과 운영 HTTPS 사용은 확정이다. TLS termination 위치, token 발급 단위·만료·회전·폐기, 인증정보 저장 방식, 인가와 multi-tenant 여부는 **결정 필요**다.
+HTTP+OAuth token 접속과 운영 HTTPS 사용은 확정이다. `search`·`source_pdf` scope, 자동 access token 갱신, refresh token rotation과 90일 비활성 만료를 적용한다. TLS termination 위치, authorization server 제품·배포, 사용자/tenant와 운영자 권한은 **결정 필요**다.
 
 ## 10. 인증과 secret
 
@@ -393,12 +393,18 @@ CLI가 요구한 headless/device-code 동작을 제공하지 않는다면 log sc
 - 실제 사용 model/config hash를 OCR 또는 embedding provenance와 generation manifest에 기록한다.
 - 외부 전송 데이터 범위와 provider 보존정책을 보안·법무 관점에서 승인받는다.
 
-### 10.3 MCP access token
+### 10.3 MCP OAuth token
 
-- client에는 HTTPS endpoint URL과 token을 별도 설정으로 전달한다.
-- token은 `Authorization` header로 보내며 URL query·path, image, Git, Compose 평문과 일반 log에 넣지 않는다.
-- 서버에는 token 원문을 장기 저장하지 않고 가능한 경우 검증용 hash 또는 secret manager reference를 사용한다.
-- token 발급 단위, 만료, rotation, 즉시 revoke, scope와 tenant 정책은 구현 전에 확정한다.
+HTTP MCP 인증은 [MCP 2026-07-28 Authorization specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)의 OAuth 2.1 discovery, Bearer token, audience와 refresh 지침을 따른다.
+
+- client에는 HTTPS endpoint URL을 설정하고 최초 1회 authorization을 완료한다.
+- access token은 짧게 유지하고 `Authorization: Bearer` header로만 보낸다. URL query·path, image, Git, Compose 평문과 일반 log에 넣지 않는다.
+- 일반 검색과 페이지 OCR text에는 `search`, 원본 PDF 전체 파일과 페이지 PNG에는 `source_pdf` scope를 요구한다.
+- client는 access token 만료 전에 refresh하고, authorization server는 refresh token을 사용할 때마다 새 refresh token으로 회전한다.
+- 90일은 token을 90일마다 수동 교체한다는 뜻이 아니라 **비활성 만료**다. 정상적으로 계속 사용하는 client는 자동 refresh/rotation으로 수동 조작 없이 연결을 유지한다.
+- refresh token이 폐기·분실됐거나 보안사고가 발생한 경우, 90일간 사용하지 않은 경우, 또는 client가 refresh를 지원하지 않는 경우에는 재인증이 필요하다. 임의의 MCP client가 자동 갱신을 지원한다고 가정하지 않고 호환성 시험을 한다.
+- 비대화형 service client는 지원되는 경우 client credentials로 짧은 수명의 access token을 만료 전에 자동 재발급한다.
+- authorization server는 token audience를 MCP resource에 고정하고 즉시 revoke, refresh 재사용 탐지와 secure token storage를 제공해야 한다.
 - 원본 PDF·페이지 조회를 포함한 모든 요청에 호출자, 허용 scope, document ID, 결과 상태와 비민감 request ID를 감사 event로 남긴다.
 
 ### 10.4 그 밖의 secret
@@ -414,7 +420,7 @@ Docker Hub credential은 build/push host 또는 CI secret store에만 둔다. ru
 | dependency status | 외부 의존 상태 | OpenRouter 등 선택적 의존의 정상·degraded 구분 |
 | worker status | 처리 가능 여부 | state/volume/auth/provider와 lease 기능 정상 |
 
-MCP readiness는 current generation ID, schema, embedding model/dimension, document count와 FTS/vector open 결과를 내부적으로 검사한다. 민감 path나 secret은 응답하지 않는다. 외부 embedding 장애 시 lexical-only degraded mode를 제공할지는 검색 품질 정책과 함께 **결정 필요**다.
+MCP readiness는 current generation ID, schema, embedding model/dimension, document count와 FTS/vector open 결과를 내부적으로 검사한다. 민감 path나 secret은 응답하지 않는다. 외부 embedding 또는 vector 장애 시 `allow_degraded=true` 요청만 lexical-only 결과와 `degraded` 상태를 받으며, flag가 없거나 false인 요청은 실패한다.
 
 ## 12. Docker Hub 배포 계획
 
@@ -440,13 +446,13 @@ MCP readiness는 current generation ID, schema, embedding model/dimension, docum
 | PDF/OCR content objects | 최고 | immutable, checksum 포함, 암호화된 별도 storage |
 | canonical catalog/source manifest | 최고 | object와 같은 snapshot ID로 보존 |
 | published generations | 높음 | 재생성 가능하지만 비용이 크므로 manifest와 함께 보존 |
-| durable job/migration state | 최고 | DB가 보장하는 consistent snapshot/backup 기능 사용 |
+| PostgreSQL catalog·job/migration state | 최고 | PostgreSQL consistent backup과 WAL 정책 사용 |
 | quarantine와 audit event | 정책에 따름 | 민감도·조사 필요기간에 맞춰 암호화·보존 |
 | application image digest·설정 | 높음 | registry와 release manifest에 보존 |
 | API key/OAuth token | 일반 data backup에서 제외 | secret manager 또는 별도 암호화·회수 정책 |
 | build scratch/render temp | 낮음 | 재생성 가능, 기본 backup 제외 |
 
-live SQLite 파일을 일반 file copy만으로 backup하지 않는다. SQLite backup API 또는 quiesced snapshot을 사용하고 integrity check를 수행한다. immutable generation은 checksum manifest와 함께 copy하면 일관성을 검증하기 쉽다.
+PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는다. PostgreSQL의 일관된 backup과 WAL 정책을 사용하고 복원 시험을 수행한다. immutable generation은 checksum manifest와 함께 copy하면 일관성을 검증하기 쉽다.
 
 ### 13.2 RPO·RTO와 보존
 
@@ -498,23 +504,23 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 | retry | 429/5xx/auth/invalid PDF/OCR incomplete가 올바른 상태로 전이 |
 | generation | 부분 build 미노출, atomic publish와 이전 generation rollback |
 | data | checksum, schema, current embedding coverage, citation 역추적 |
-| MCP | HTTPS+token, read-only mount, 동시 요청 5개, timeout, graceful shutdown, PDF·페이지 권한 |
+| MCP | HTTPS+OAuth, 자동 refresh/rotation, scope, read-only mount, 동시 요청 5개, timeout, PDF·페이지 권한, degraded opt-in |
 | Docker | non-root, read-only root, resource limit, health probe |
-| auth | Codex headless login과 재시작 유지, OpenRouter secret 비노출 |
+| auth | MCP OAuth 자동 refresh·revoke·비활성 만료, Codex headless login, OpenRouter secret 비노출 |
 | logs | token·본문 redaction, correlation ID, retention/RBAC |
 | backup | consistent snapshot과 격리 경로 restore drill |
 | registry | public repository, version+Git SHA tag, digest pull/run, data·secret 미포함, 공개 code 검토 |
 
 ## 16. 결정 필요 항목
 
-- 운영 topology가 단일 host인지 다중 node인지
-- durable state engine과 scheduler/lock 방식
+- OAuth authorization server, 사용자/tenant 모델과 운영자 권한
+- PostgreSQL schema·migration·backup과 scheduler 세부 방식
 - offline BULK worker concurrency, provider quota와 비용한도
 - worker별 lease·timeout·retry budget
 - 일일 실행시각과 issuer별 rate limit
 - generation ID 형식, 최소 3개 초과 보존기간, RPO·RTO와 backup target
-- HTTP token 수명주기·인가·tenant, BULK pilot 이후 SLO와 autoscaling 기준
-- vector engine과 query embedding 장애 시 degraded mode
+- BULK pilot 이후 SLO와 단일 host를 넘어설 autoscaling 기준
+- vector/lexical engine과 degraded mode의 정량 품질 합격선
 - Codex CLI exact version과 공식 headless/device-code 지원 여부
 - OAuth state 저장·갱신·회수와 device-code log 보안정책
 - Docker Hub namespace·lowercase repository slug, image signing·promotion 승인 정책
