@@ -29,7 +29,7 @@
 | 7 | 임베딩·검색 색인과 세대 게시 | 단계 1, 3, 6 | fake embedding, pgvector hybrid, generation gate 검증 완료 |
 | 8 | 온라인 MCP 조회 서비스 | 단계 2, 7 | HTTP MCP·source file·auth contract 검증 완료 |
 | 9 | Docker 운영·인증·관측 | 단계 4~8 | Compose/Keycloak/3-role image/관측성 개발 검증 완료 |
-| 10 | 통합 검증과 운영 release | 단계 3~9 | local 검증·CI workflow 구성 완료; remote CI run, registry push·host 설치는 인계 |
+| 10 | 통합 검증과 운영 release | 단계 3~9 | local·remote CI 검증 완료; registry push·host 설치는 인계 |
 
 단계 4의 수집기 개발과 단계 5의 OCR worker 기반 개발은 도메인·상태 계약이 확정된 뒤 일부 병행할 수 있다. 다만 대량 실행은 pilot 품질 gate 통과 이후에만 시작한다.
 
