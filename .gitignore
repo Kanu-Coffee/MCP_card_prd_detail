@@ -1,0 +1,46 @@
+# Legacy hatch package and large runtime data
+/cardrag-conveyor-hatch-*/
+/artifacts/
+/corpus/
+/data/
+/storage/
+/volumes/
+/state/
+/outputs/
+/logs/
+/backups/
+/quarantine/
+/build/
+
+# Card documents and generated indexes
+*.pdf
+*.png
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.faiss
+*.index
+
+# Secrets and local authentication
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+oauth*.json
+.codex/
+
+# Python and local tooling
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
