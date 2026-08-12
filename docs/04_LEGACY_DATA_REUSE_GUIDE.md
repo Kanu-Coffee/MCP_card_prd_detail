@@ -102,6 +102,8 @@ portable path의 절대경로·URL·상위 경로 차단 개념도 유지한다.
 
 raw PDF 1,634개를 모두 무차별 복사하지 않는다. manifest 성공 문서와 hash로 연결된 집합을 우선 이전하고, 성공 문서와 연결되지 않은 파일은 provenance 확인 전 quarantine 또는 cold archive 후보로 둔다.
 
+우리카드와 KB국민카드에는 위 레거시 기준선이 있지만 신한카드에는 재사용할 adapter·corpus가 없다. 신한카드 BULK 시험 데이터는 신규 수집 경로로 만들고 레거시 migration 성공 건수에 포함하지 않는다.
+
 ### 4.3 변환 또는 재색인이 필요한 자산
 
 | 자산 | 필요한 작업 | 그대로 운영할 수 없는 이유 |
@@ -261,7 +263,7 @@ canonical OCR record에는 최소 다음이 필요하다.
 
 - 레거시 source를 read-only로 mount하고 source snapshot ID를 발급한다.
 - source 전체 file inventory와 가능한 SHA-256을 별도 ledger에 기록한다.
-- 신규 canonical schema, latest/as-of 범위, 라이선스·보존정책을 확정한다.
+- 신규 canonical schema와 라이선스·보존정책을 확정한다. 기본 조회는 latest, 과거본은 명시적 version/as-of 조회라는 범위 정책을 적용한다.
 - 대상 volume의 여유 공간과 backup 위치를 확인한다.
 
 완료조건: source snapshot과 대상 schema가 승인되고 레거시에 write가 발생하지 않았다는 증거가 있다.
@@ -332,14 +334,14 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 
 ## 13. 결정 필요 항목
 
-- 최신 1,567건만 1차 온라인 색인에 넣을지 과거 25개 버전도 함께 제공할지
+- 기본 검색은 최신 1,567건을 대상으로 하고 과거 25개 버전은 보존한다. 명시적 version/as-of 조회를 단일 filter 또는 별도 이력 색인 중 어떻게 구현할지는 검색 설계에서 정한다.
 - rendered PNG를 cold archive로 별도 보존할지 재생성 가능한 부산물로 볼지
 - OCR hash 불일치 1건의 canonical 채택 여부
 - 신규 구조 분석 방식과 taxonomy version
 - OpenRouter embedding model과 index engine
-- raw PDF/OCR 원문의 MCP resource 공개 범위
-- 카드사 공시 PDF의 저장·재배포·서비스 이용 조건
-- data generation 보존 개수와 backup 기간
+- 기술적으로는 명시적 사용자 요청에 exact version·hash의 보존 원본 PDF를 인증된 file/resource로 제공하고 OCR 원문은 페이지 단위 조회를 허용한다. 최대 파일 크기, streaming·range 방식과 감사 항목은 결정 필요다.
+- 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위
+- 검색 generation은 최소 3개 보존한다. 이를 초과한 보존 기간과 backup 기간은 결정 필요다.
 
 ## 14. 이 문서 작성 시점의 상태
 
