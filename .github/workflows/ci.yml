@@ -153,6 +153,10 @@ jobs:
     runs-on: ubuntu-24.04
     needs: quality
     timeout-minutes: 15
+    env:
+      # GitHub-hosted runners currently expose two CPUs. Keep the production
+      # worker default at four CPUs and constrain only this fixture runner.
+      CARDRAG_WORKER_CPUS: "2.0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -360,6 +364,16 @@ jobs:
                 rmdir \
                   "$sandbox_root/rendered" "$sandbox_root/secrets" \
                   "$sandbox_root/outside" "$sandbox_root"
+                if [ -n "${apparmor_userns_original:-}" ]; then
+                  sudo sysctl -q -w \
+                    "kernel.apparmor_restrict_unprivileged_userns=${apparmor_userns_original}" \
+                    || true
+                fi
+                if [ -n "${userns_clone_original:-}" ]; then
+                  sudo sysctl -q -w \
+                    "kernel.unprivileged_userns_clone=${userns_clone_original}" \
+                    || true
+                fi
               }
               trap cleanup_sandbox EXIT
               printf '%s\n' 'rendered-canary' > "$sandbox_root/rendered/page.txt"
@@ -371,6 +385,22 @@ jobs:
               chmod 0444 \
                 "$sandbox_root/rendered/page.txt" \
                 "$sandbox_root/secrets/token" "$sandbox_root/outside/data.txt"
+              # Ubuntu 24.04 restricts unprivileged user namespaces through a
+              # host AppArmor sysctl. Codex's bubblewrap sandbox needs that
+              # namespace to configure its isolated loopback interface. This
+              # relaxation is limited to the ephemeral worker-image CI VM and
+              # is restored by cleanup_sandbox; the production container is
+              # still exercised as non-root with cap-drop ALL and NNP.
+              apparmor_userns_original=""
+              userns_clone_original=""
+              if sysctl -n kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+                userns_clone_original=$(sysctl -n kernel.unprivileged_userns_clone)
+                sudo sysctl -q -w kernel.unprivileged_userns_clone=1
+              fi
+              if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+                apparmor_userns_original=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+                sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+              fi
               docker run "${common[@]}" \
                 --tmpfs "/run/cardrag-codex:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001" \
                 --env CODEX_HOME=/run/cardrag-codex \
@@ -463,13 +493,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Scan image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          image-ref: cardrag-ci:${{ matrix.target }}
-          format: table
-          exit-code: "1"
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            ghcr.io/aquasecurity/trivy:0.67.2@sha256:e2b22eac59c02003d8749f5b8d9bd073b62e30fefaef5b7c8371204e0a4b0c08 \
+            image \
+            --scanners vuln \
+            --format table \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            "cardrag-ci:${TARGET}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

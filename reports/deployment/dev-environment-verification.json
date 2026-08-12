@@ -1,15 +1,15 @@
 {
   "schema_version": "cardrag-dev-environment-deployment-verification.v1",
-  "generated_at": "2026-08-12T09:38:02Z",
+  "generated_at": "2026-08-12T09:57:24Z",
   "status": "passed",
   "public_release_status": "blocked_pending_dependency_license_approval",
   "scope": "Clean development-environment deployment, authentication, PostgreSQL role, supply-chain, image, sandbox, and MCP runtime verification. This report does not claim live issuer, paid provider, production host, or public registry validation.",
   "source": {
-    "git_head": "890c669a7ddf125a59e5dc553a23b4089e40eeca",
+    "git_head": "4119d3898111e1e699eeb6c89e26aeba39b4501c",
     "branch": "agent/implement-cardrag-mcp",
     "worktree_candidate_included": true,
     "candidate_file_count": 160,
-    "candidate_source_tree_fingerprint_sha256": "a6b9a6e1e5bb045e12c7f06db969b5a2dacaaf48ea9a313cd2295d3c0d847e2c",
+    "candidate_source_tree_fingerprint_sha256": "64b95d00eb0dd139534ba0f1cde9c43c5c9eb068ba0b593ecd174193f292e23a",
     "fingerprint_contract": "SHA-256 of sorted '<sha256 of staged blob>  <path>' records for all git index files, excluding this verification report",
     "runtime_image_input_fingerprint_sha256": "b66d5e0b2b966b9d182416aabd4b4523946dad4db05370e01791998ca719ee48",
     "runtime_image_input_note": "All three linux/amd64 images were rebuilt from the final candidate and carry this exact revision label.",
