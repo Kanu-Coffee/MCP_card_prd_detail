@@ -245,6 +245,8 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+        with:
+          cosign-release: v3.1.3
 
       - name: Authenticate to Docker Hub after environment approval
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -472,17 +474,24 @@ jobs:
       - name: Ensure and verify keyless OCI signature with GitHub Actions OIDC
         id: signature
         env:
+          COSIGN_VERSION: v3.1.3
           DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           reference="${IMAGE_NAME}@${DIGEST}"
           evidence="cosign-${TARGET}.verification.json"
+          expected_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          test "$(cosign version --json | jq -er '.gitVersion')" = "$COSIGN_VERSION"
           verify_signature() {
             cosign verify \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$" \
+              --certificate-identity "$expected_identity" \
+              --certificate-github-workflow-sha "$GITHUB_SHA" \
+              --check-claims=true \
+              --timeout 15s \
               --output json \
               "$reference"
           }
@@ -491,10 +500,9 @@ jobs:
             cosign sign --yes "$reference"
           fi
           verified=false
-          for _attempt in $(seq 1 24); do
+          for _attempt in $(seq 1 12); do
             if verify_signature > /tmp/cosign-verification.json \
                 2>/tmp/cosign-verification-error; then
-              mv /tmp/cosign-verification.json "$evidence"
               verified=true
               break
             fi
@@ -504,8 +512,17 @@ jobs:
             cat /tmp/cosign-verification-error >&2 || true
             exit 1
           fi
-          jq -e 'if type == "array" then length > 0 else type == "object" end' \
-            "$evidence" >/dev/null
+          jq -e --arg digest "$DIGEST" --arg subject "$reference" '
+            type == "array"
+            and length > 0
+            and all(.[];
+              .critical.identity["docker-reference"] == $subject
+              and
+              .critical.image["docker-manifest-digest"] == $digest
+              and .critical.type == "https://sigstore.dev/cosign/sign/v1"
+            )
+          ' /tmp/cosign-verification.json >/dev/null
+          jq -S . /tmp/cosign-verification.json > "$evidence"
           echo "sha256=$(sha256sum "$evidence" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Record immutable release manifest
@@ -516,6 +533,7 @@ jobs:
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
           IMAGE_LICENSE_SHA256: ${{ steps.image_license.outputs.sha256 }}
           SIGNATURE_EVIDENCE_SHA256: ${{ steps.signature.outputs.sha256 }}
+          COSIGN_VERSION: v3.1.3
         run: |
           python - <<'PY'
           import json
@@ -523,7 +541,7 @@ jobs:
           from pathlib import Path
 
           manifest = {
-              "schema": "cardrag.container-release-part.v2",
+              "schema": "cardrag.container-release-part.v3",
               "role": os.environ["TARGET"],
               "image": os.environ["IMAGE_NAME"],
               "digest": os.environ["DIGEST"],
@@ -538,6 +556,12 @@ jobs:
               "signature_evidence": {
                   "path": f'cosign-{os.environ["TARGET"]}.verification.json',
                   "sha256": os.environ["SIGNATURE_EVIDENCE_SHA256"],
+                  "subject": f'{os.environ["IMAGE_NAME"]}@{os.environ["DIGEST"]}',
+                  "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+                  "certificate_identity": f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}',
+                  "github_workflow_sha": os.environ["GITHUB_SHA"],
+                  "cosign_version": os.environ["COSIGN_VERSION"],
+                  "check_claims": True,
               },
               "embedded_dependency_license_manifest": {
                   "path": f'image-license-{os.environ["TARGET"]}.json',
@@ -579,6 +603,8 @@ jobs:
 
       - name: Assemble all role digests and signature evidence
         env:
+          COSIGN_VERSION: v3.1.3
+          GIT_SHA: ${{ github.sha }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           python - <<'PY'
@@ -593,19 +619,44 @@ jobs:
               for path in sorted(root.glob("release-manifest-*.json"))
           ]
           roles = {part["role"]: part for part in parts}
+          assert len(parts) == 3, parts
           assert set(roles) == {"mcp", "worker", "admin"}, roles
+          assert all(part["schema"] == "cardrag.container-release-part.v3" for part in parts)
+          assert all(part["image"] == os.environ["IMAGE_NAME"] for part in parts)
           assert all(part["version"] == os.environ["VERSION"] for part in parts)
-          assert len({part["git_sha"] for part in parts}) == 1
+          assert all(part["git_sha"] == os.environ["GIT_SHA"] for part in parts)
+          assert all(part["workflow"] == os.environ["GITHUB_WORKFLOW_REF"] for part in parts)
           assert len({part["digest"] for part in parts}) == 3
           for role, part in roles.items():
               assert part["platforms"] == ["linux/amd64"]
+              assert part["tags"] == [
+                  f'{os.environ["VERSION"]}-{role}',
+                  f'{os.environ["VERSION"]}-{role}-sha-{os.environ["GIT_SHA"][:12]}',
+              ], role
+              expected_subject = f'{os.environ["IMAGE_NAME"]}@{part["digest"]}'
+              expected_identity = f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}'
+              assert part["signature_evidence"]["subject"] == expected_subject, role
+              assert part["signature_evidence"]["certificate_oidc_issuer"] == (
+                  "https://token.actions.githubusercontent.com"
+              ), role
+              assert part["signature_evidence"]["certificate_identity"] == expected_identity, role
+              assert part["signature_evidence"]["github_workflow_sha"] == os.environ["GIT_SHA"], role
+              assert part["signature_evidence"]["cosign_version"] == os.environ["COSIGN_VERSION"], role
+              assert part["signature_evidence"]["check_claims"] is True, role
               signature_evidence = root / part["signature_evidence"]["path"]
               assert signature_evidence.is_file(), role
               assert hashlib.sha256(signature_evidence.read_bytes()).hexdigest() == (
                   part["signature_evidence"]["sha256"]
               ), role
               verified_signatures = json.loads(signature_evidence.read_text(encoding="utf-8"))
-              assert verified_signatures, role
+              assert isinstance(verified_signatures, list) and verified_signatures, role
+              assert all(
+                  signature["critical"]["identity"]["docker-reference"] == expected_subject
+                  and
+                  signature["critical"]["image"]["docker-manifest-digest"] == part["digest"]
+                  and signature["critical"]["type"] == "https://sigstore.dev/cosign/sign/v1"
+                  for signature in verified_signatures
+              ), role
               image_license = root / part["embedded_dependency_license_manifest"]["path"]
               assert image_license.is_file(), role
               assert hashlib.sha256(image_license.read_bytes()).hexdigest() == (
@@ -635,7 +686,7 @@ jobs:
           }
 
           manifest = {
-              "schema": "cardrag.container-release.v2",
+              "schema": "cardrag.container-release.v3",
               "image": os.environ["IMAGE_NAME"],
               "version": os.environ["VERSION"],
               "git_sha": parts[0]["git_sha"],

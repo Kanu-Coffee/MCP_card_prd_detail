@@ -126,9 +126,13 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   fail-closed한다. Cosign digest signature/attestation tag는 재서명을 위해 regex 밖에 둔다.
 
   ```bash
+  export RELEASE_VERSION=0.1.1
+  export RELEASE_GIT_SHA=REPLACE_WITH_RELEASE_GIT_SHA
   cosign verify \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    --certificate-identity-regexp '^https://github.com/Kanu-Coffee/MCP_card_prd_detail/.github/workflows/release.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+    --certificate-identity "https://github.com/Kanu-Coffee/MCP_card_prd_detail/.github/workflows/release.yml@refs/tags/v${RELEASE_VERSION}" \
+    --certificate-github-workflow-sha "$RELEASE_GIT_SHA" \
+    --check-claims=true \
     ymtop59/mcp-card-prd-detail@sha256:REPLACE_WITH_ROLE_DIGEST
   ```
 
