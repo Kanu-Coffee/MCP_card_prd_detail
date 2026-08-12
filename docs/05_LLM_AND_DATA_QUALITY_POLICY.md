@@ -273,6 +273,7 @@ hybrid 검색은 lexical chunk ID와 structured ID를 그대로 섞지 않고 �
 | chunking | 조건·제외와 본문 분리 | 관계 metadata, 의미 경계, 인접 context와 gold query 검증 |
 | 임베딩 | stale·혼합 모델 vector | content hash coverage, 모델·차원 generation 고정 |
 | 검색 | issuer 충돌, filter 후처리로 관련 결과 손실 | issuer-scoped ID, 후보 단계 filter, 공통 evidence ID |
+| 원본 PDF 제공 | 잘못된 버전·변조 파일·과도한 파일 전달 | 명시적 요청, 권한 확인, exact document ID·SHA-256·MIME·크기 검증 |
 | MCP 반환 | 짧은 인용으로 핵심 조건 손실 | 충분한 원문과 후속 전체 근거 조회, version·generation 표시 |
 | 외부 LLM 답변 | 근거 밖 결론, 버전 혼합 | evidence-only 계약, 인용 검증, 불충분·충돌 명시 |
 
@@ -412,7 +413,7 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 - 게시 대상 content hash의 임베딩 coverage가 승인 기준을 충족한다. 기준은 `결정 필요`다.
 - 모델·차원·입력 정책이 generation 안에서 일관되고 stale vector가 없다.
 - gold query의 Recall@K, MRR, nDCG@K와 filter 정확도가 승인 threshold를 충족한다. 각 K와 threshold는 `결정 필요`다.
-- 목표 corpus 규모에서 검색 latency, 메모리와 I/O 기준을 충족한다. 기준은 `결정 필요`다.
+- 목표 corpus 규모와 초기 동시 요청 5개에서 검색 품질을 유지하고 bounded timeout·cancellation이 동작한다. 수치 latency, 메모리와 I/O 기준은 BULK pilot 후 결정한다.
 - 새 generation 검증 실패 시 기존 generation 유지 및 rollback이 확인된다.
 
 ### 11.5 Gate E: MCP 근거 제공
@@ -422,6 +423,8 @@ gold 자체도 작성자, 검토자, 근거 페이지와 변경 이력을 가진
 - 혜택 조건과 제외조건이 결과 제한 때문에 조용히 누락되지 않는다.
 - 근거 부족과 버전 충돌 시 abstention 또는 충돌 표시가 검증된다.
 - 정상, lexical-only 등 retrieval mode와 degraded 상태가 정확히 구분된다.
+- 페이지 조회가 동일 version의 PDF page와 OCR source span으로 역추적된다.
+- 명시적으로 요청한 원본 PDF 파일이 exact document version·SHA-256과 일치하며, 모델이 만든 대체 문서나 요약본으로 바뀌지 않는다.
 
 ### 11.6 gate 판정
 
@@ -470,5 +473,5 @@ Codex와 OpenRouter 호출은 카드상품 원문, 페이지 이미지, OCR text
 | Recall@K, MRR, nDCG@K와 filter 합격선 | `결정 필요` | 실제 사용 질의와 기대 서비스 수준 |
 | lexical-only degraded 검색 허용 여부 | `결정 필요` | 품질 손실과 가용성 요구 비교 |
 | 조건부 gate 승인 범위와 승인자 | `결정 필요` | 운영·품질 책임 분리 |
-| generation·렌더 이미지·품질 보고서 보존 기간 | `결정 필요` | 감사, 저장비용과 법적 요건 |
+| 최소 3개를 초과한 generation·렌더 이미지·품질 보고서 보존 기간 | `결정 필요` | 감사, 저장비용과 법적 요건 |
 | 외부 제공자 데이터 취급·보존 정책 | `결정 필요` | 약관·보안·법무 검토 |

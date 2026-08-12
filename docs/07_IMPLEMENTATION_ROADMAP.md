@@ -49,12 +49,22 @@
 
 ### 단계 1. 요구사항·품질 기준 확정
 
-먼저 다음을 결정한다.
+다음 제품 방향은 2026-08-12에 사전 확정됐다.
 
-- 최초 지원 카드사와 상품 범위
-- 최신본·과거본 조회 정책 및 보존기간
-- MCP 전송 방식, 사용자 범위와 인증·인가
-- 목표 응답시간, QPS, 동시성, 가용성
+- 우리카드·KB국민카드를 우선 지원하고 신한카드를 신규 BULK 시험 대상으로 추가한다.
+- 기본 검색은 latest이며 과거 PDF/OCR version은 모두 보존하고 명시적 version/as-of 요청에서만 조회한다.
+- 운영 MCP는 HTTPS 기반 HTTP endpoint와 token으로 접속한다.
+- 명시적 요청에는 저장된 원본 PDF 파일을 제공하고 원문은 페이지 단위 조회를 허용한다.
+- 검색은 공통 stable evidence key 기반 lexical/vector hybrid로 한다.
+- GitHub는 private, Docker Hub repository는 public으로 하며 version+Git SHA tag와 digest 배포를 사용한다.
+- 원본 PDF·OCR 전 버전과 검색 generation 최소 3개를 보존하고 Gmail·이메일 Agent는 제외한다.
+- 온라인은 초기 동시 요청 5개로 시작하며 수치 latency SLO보다 결과 품질을 우선한다.
+
+계속 결정해야 할 사항은 다음과 같다.
+
+- 신한카드 BULK 시험의 상품·문서·기간 범위와 운영 편입 gate
+- token 발급·만료·회전·폐기, 사용자/tenant와 tool별 권한
+- BULK pilot 이후 목표 응답시간·QPS·가용성과 resource 한도
 - 상태 DB, 원본 저장소, lexical/vector 검색 엔진
 - OCR·구조 분석·임베딩 모델 선정 절차와 비용 한도
 - OCR 문자·표·숫자·섹션 관계의 합격 기준
@@ -126,11 +136,12 @@
 
 ### 단계 4. 카드사별 PDF 수집기
 
-우리카드와 KB 레거시 adapter는 동작 이해와 fixture의 출발점으로만 사용하고, 신규 adapter 계약에 맞게 재구현한다.
+우리카드와 KB 레거시 adapter는 동작 이해와 fixture의 출발점으로만 사용하고, 신규 adapter 계약에 맞게 재구현한다. 신한카드는 레거시가 없는 신규 adapter로 구현하고 BULK 시험 corpus를 만든다.
 
 개발 범위:
 
 - 카드사별 discovery·download adapter
+- 우리카드·KB국민카드 우선 지원과 신한카드 BULK 시험 adapter
 - 상품코드 확보 및 정규화
 - 최신본 우선 bootstrap과 이후 변경 이력 보존
 - content hash 중심의 중복·변경 판정
@@ -222,7 +233,7 @@
 
 ### 단계 8. 온라인 MCP 조회 서비스
 
-온라인 서비스는 게시된 검색 세대만 읽는다. PDF 다운로드, OCR, DB rebuild, Gmail 발송은 일반 조회 경로에 포함하지 않는다.
+온라인 서비스는 게시된 검색 세대만 읽는다. 카드사 사이트 PDF 다운로드, OCR, DB rebuild, Gmail 발송은 일반 조회 경로에 포함하지 않는다. 이미 보존된 원본 PDF의 인증된 읽기 전용 제공은 명시적 사용자 요청에만 허용한다.
 
 역할 범위:
 
@@ -230,11 +241,13 @@
 - issuer+상품코드 기반 상세·버전 조회
 - 혜택 조건, 전월실적, 제외조건과 유의사항 조회
 - stable evidence 원문과 출처 조회
+- 페이지 단위 OCR·원문 근거 조회
+- exact version·hash의 보존 원본 PDF 파일 제공
 - index generation과 readiness 조회
 
 산출물:
 
-- MCP server와 역할별 tool/resource 계약
+- HTTP MCP server와 역할별 tool/resource·file 전달 계약
 - 인증·인가, 오류, limit와 timeout 정책
 - contract/integration/security test
 
@@ -244,6 +257,7 @@
 - 정보 부족과 버전 충돌이 명시적으로 표현된다.
 - 임의 URL·경로·배치 실행을 조회 tool로 유발할 수 없다.
 - 과도한 결과는 손실 없이 pagination/resource로 이어진다.
+- 원본 PDF와 페이지 응답이 요청한 document version·hash·source span과 일치한다.
 
 ### 단계 9. Docker 운영·인증·관측·복구
 
@@ -254,6 +268,8 @@
 - Codex CLI 설치와 OAuth credential 지속성
 - headless device-code 로그인 흐름의 실제 지원 여부 검증
 - OpenRouter key secret 주입
+- HTTPS MCP endpoint, token header 인증과 수명주기·인가
+- public Docker Hub image와 private GitHub 경계, version+Git SHA tag, digest 배포
 - health/readiness, structured logs, metrics, alerting
 - backup/restore와 generation rollback rehearsal
 
@@ -267,6 +283,7 @@
 
 - container 재생성 후 데이터와 durable 상태가 보존된다.
 - secret과 대용량 artifact가 image layer·Git·일반 log에 없다.
+- public image에 포함된 code·dependency metadata가 공개됨을 점검하고 비공개 corpus·secret이 없는지 검증한다.
 - OAuth device-code가 지원된다면 Docker log에서 필요한 정보만 안전하게 확인된다.
 - 지원되지 않는다면 승인된 대체 bootstrap 절차가 문서화된다.
 - 이전 generation으로 rollback하고 조회 정상화를 입증한다.
@@ -279,7 +296,7 @@
 - 장기 OCR 중단·재개, worker crash, 외부 API 장애 시험
 - rebuild/publish 중 온라인 무중단 조회 시험
 - load, 보안, prompt injection, SSRF, 권한 시험
-- Docker Hub staging tag 게시 후 digest 기반 promotion
+- public Docker Hub에 version+Git SHA candidate tag 게시 후 digest 기반 promotion
 
 산출물:
 
@@ -291,7 +308,7 @@
 
 - [완료 체크리스트](08_COMPLETION_CHECKLIST.md)의 필수 항목에 증거가 연결된다.
 - 미해결 P0/P1 위험이 없거나 승인된 예외와 만료일이 있다.
-- Docker Hub의 대상·가시성·tag 정책이 확인되고 digest로 재배포 가능하다.
+- Docker Hub public 대상·tag 정책이 확인되고 digest로 재배포 가능하다.
 - 운영 담당자가 신규 세대 게시와 rollback을 독립 수행해 검증한다.
 
 ## 4. 주요 gate
@@ -313,12 +330,12 @@ P0:
 - document/evidence/generation identity
 - 품질 기준과 gold set
 - durable 상태와 atomic generation publish
-- MCP transport·인증·사용자 범위 결정
+- HTTP token 수명주기·인가·사용자/tenant 범위 결정
 - vector full scan과 레거시 hybrid 결함을 계승하지 않는 검색 방식
 
 P1:
 
-- 우리카드·KB 수집기와 migration pilot
+- 우리카드·KB 수집기와 migration pilot, 신한카드 BULK 시험 adapter
 - 재시작 가능한 OCR worker
 - 원문 근거를 강제하는 구조 분석
 - stable evidence를 제공하는 MCP 조회
@@ -326,7 +343,7 @@ P1:
 
 P2:
 
-- 지원 카드사 확대
+- 신한카드 외 지원 카드사 확대
 - 모델·검색 engine 교체 자동화
 - 비용 최적화와 보존정책 자동화
 - 품질 regression dashboard와 운영 자동화

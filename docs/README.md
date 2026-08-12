@@ -76,19 +76,29 @@
 - 대용량 데이터와 인증정보는 Git과 Docker 이미지에 포함하지 않는다.
 - 정보 부족, 버전 충돌, 근거 불일치는 숨기지 않고 응답에 표시한다.
 
+## 사전 결정 기록 (2026-08-12)
+
+- 1차 지원 대상은 우리카드와 KB국민카드다. 신한카드는 신규 adapter와 BULK 처리 시험 대상으로 함께 도입한다.
+- 기본 검색은 최신 문서를 대상으로 한다. 과거 버전은 모두 보존하고 사용자가 버전 또는 기준일을 명시한 경우에만 조회한다.
+- 운영 MCP는 HTTP 기반으로 제공한다. 접속 정보는 endpoint URL과 token이며, 운영에서는 HTTPS와 `Authorization` header를 사용한다. token을 URL query·path·log에 넣지 않는다.
+- 사용자가 명시적으로 요청하면 보존된 원본 PDF 파일을 제공하고, OCR·원문 근거는 페이지 단위 조회를 허용한다. 임의 외부 URL 다운로드 기능은 제공하지 않는다.
+- 검색은 lexical과 vector를 공통 stable evidence key로 결합하는 hybrid 방식을 채택한다. 구체 엔진과 ranking 값은 품질·부하 시험으로 정한다.
+- GitHub 저장소는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus·secret·인증 상태를 포함하지 않으며, image에 포함된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능하다는 점을 전제로 한다.
+- Gmail·이메일 Agent는 신규 범위에서 제외한다. 원본 PDF와 OCR 버전은 모두 보존하고, 검색 generation은 최소 3개를 보존한다.
+- 초기 온라인 동시 요청 기준은 5개로 시작한다. 응답 품질을 지연시간보다 우선하며, 수치 latency 목표는 BULK pilot과 부하 시험 후 정한다. 모든 요청에는 운영 보호를 위한 유한 timeout과 cancellation을 적용한다.
+- image tag는 버전과 Git SHA를 포함하고, 실제 배포와 rollback은 image digest를 기준으로 한다.
+
 ## 결정이 필요한 공통 항목
 
 다음 항목은 요구사항이나 레거시만으로 확정할 수 없다.
 
-- MCP 전송 방식과 원격 접근 여부
-- 인증·인가 및 사용자/tenant 범위
+- token 발급 단위·만료·회전·폐기와 사용자/tenant·tool별 권한
 - 상태·메타데이터 DB와 vector/lexical 검색 엔진
-- 목표 QPS, 응답시간, 동시성, 가용성
-- 최초 지원 카드사 범위와 추가 순서
-- 과거 버전 보존 기간과 as-of 조회 범위
+- BULK pilot 이후 목표 QPS, latency, resource 한도와 가용성
+- 신한카드 BULK 시험의 상품 범위와 운영 편입 조건
 - OCR·구조 분석·임베딩 모델 및 정량 품질 기준
 - 카드사 공시자료의 수집·재배포·상업적 이용 조건
-- Docker Hub repository, tag, promotion·rollback 정책
+- Docker Hub namespace·repository 이름, image signing과 promotion 승인 절차
 
 결정 전에는 특정 제품이나 모델을 사실상 확정된 것으로 구현 문서에 기록하지 않는다.
 

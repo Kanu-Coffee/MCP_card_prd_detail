@@ -46,7 +46,7 @@
                                        ▼
                            온라인 MCP 서비스 영역
 
-  외부 LLM/MCP client → [MCP transport 경계] → [질의 서비스]
+  외부 LLM/MCP client → [HTTPS MCP+token 경계] → [질의 서비스]
                                                    │
                                   ┌────────────────┼───────────────┐
                                   ▼                ▼               ▼
@@ -89,7 +89,7 @@ project/
 
 ### 3.1 오프라인 데이터 처리 영역
 
-이 영역은 초기 대량 처리와 일일 증분 처리를 담당한다. 카드사 공개 endpoint, Codex CLI와 OpenRouter에 접근할 수 있으며 원본·파생 artifact와 작업 상태를 쓸 수 있다.
+이 영역은 초기 대량 처리와 일일 증분 처리를 담당한다. 우리카드·KB국민카드를 우선 처리하고 신한카드를 BULK 시험 대상으로 추가한다. 카드사 공개 endpoint, Codex CLI와 OpenRouter에 접근할 수 있으며 원본·파생 artifact와 작업 상태를 쓸 수 있다.
 
 특징은 다음과 같다.
 
@@ -113,6 +113,8 @@ project/
 - 임의 경로 파일 출력
 
 vector 검색에 원격 query embedding이 필요하다면 온라인 서비스가 OpenRouter에 제한적으로 통신할 수 있다. 이 통신의 허용 여부, 장애 시 FTS fallback, query 보존 정책은 `결정 필요`다. 그 외 오프라인 endpoint와 비밀정보는 온라인 컨테이너에 제공하지 않는다.
+
+온라인 MCP는 HTTPS endpoint URL과 token으로 접속한다. token은 `Authorization` header에서만 받고 URL query·path와 일반 log에는 기록하지 않는다. 온라인 서비스는 사용자가 명시적으로 요청한 경우에 한해 게시 대상 문서와 연결된 보존 원본 PDF를 인증 후 읽기 전용으로 제공할 수 있다. 이는 카드사 사이트에서 새 PDF를 내려받는 권한과 다르며, 임의 URL·임의 host path는 받지 않는다.
 
 ### 3.3 운영 제어 영역
 
@@ -153,11 +155,12 @@ vector 검색에 원격 query embedding이 필요하다면 온라인 서비스�
 | catalog/product reader | 카드사·상품·문서 버전과 최신본 조회 | catalog snapshot | 최신본 상태 변경 |
 | retrieval service | 검색어와 filter를 적용해 후보 검색·ranking | text/vector index snapshot | index 쓰기·재임베딩 |
 | evidence reader | stable 근거 ID로 전체 원문 구간·출처 조회 | evidence snapshot | 임의 filesystem 탐색 |
+| source artifact reader | 정확한 document version과 hash로 원본 PDF·페이지 근거 제공 | 게시 승인된 원본의 read-only view | 카드사 재다운로드, 임의 path 접근 |
 | response assembler | 중복 제거, 버전 충돌 표시, 근거 묶음 구성 | 조회된 product·evidence | 원문에 없는 조건 추론 |
 | snapshot manager | active generation 확인, read-only open, 안전한 세대 교체 | published generation | staging·원본 영역 접근 |
 | 상태·관측 adapter | build ID, generation, readiness, latency와 오류 집계 | 비민감 상태 metadata | 비밀정보·질의 원문 무제한 노출 |
 
-구체적인 MCP tool 이름, 인자와 응답 schema는 이 단계에서 정의하지 않는다. 역할 수준에서 최소한 상품 탐색, 상품 상세·버전, 조건별 근거 검색, 근거 원문 조회와 index 상태 확인이 필요하다.
+구체적인 MCP tool 이름, 인자와 응답 schema는 이 단계에서 정의하지 않는다. 역할 수준에서 최소한 상품 탐색, 상품 상세·버전, 조건별 근거 검색, 페이지 단위 근거 원문 조회, 명시적 원본 PDF 파일 요청과 index 상태 확인이 필요하다. PDF 응답은 exact document version, content hash, MIME type과 크기를 포함하고, 대용량 파일은 인증된 streaming 또는 동등한 resource 전달을 사용한다.
 
 ### 4.3 공통 기반 구성요소
 
@@ -172,7 +175,7 @@ vector 검색에 원격 query embedding이 필요하다면 온라인 서비스�
 ### 5.1 최초 대량 처리
 
 1. 카드사별 adapter가 상품과 상품안내장 후보를 발견하고 issuer-scoped 상품코드로 정규화한다.
-2. 상품별 최신 PDF를 우선 대상으로 선정한다. 이력 전체 수집 여부와 순서는 `결정 필요`다.
+2. 상품별 최신 PDF를 우선 처리하고 과거 버전도 모두 보존 대상으로 수집한다. 검색의 기본 범위는 최신본이며, 과거본은 version 또는 as-of가 명시된 조회에서만 노출한다.
 3. PDF 취합기가 허용된 카드사 endpoint에서 원본을 받아 content hash와 출처 metadata를 기록한다.
 4. OCR 처리기가 PDF를 페이지 단위로 렌더링하고 Codex exec를 통해 OCR Markdown을 만든다. 초기 대량 OCR은 Codex exec만 사용한다.
 5. 품질 검사가 페이지 누락, 비정상적으로 짧은 결과, hash와 필수 metadata를 확인한다. 실패 문서는 격리하고 성공 문서만 다음 단계로 넘긴다.
@@ -199,12 +202,12 @@ vector 검색에 원격 query embedding이 필요하다면 온라인 서비스�
 1. MCP protocol adapter가 요청 크기, 필수 필드와 허용 범위를 검증한다.
 2. 질의 서비스가 active generation과 corpus 기준시점을 고정한다.
 3. issuer, 문서 기준일, section 등 filter를 검색 전에 적용한다.
-4. text/vector 후보를 검색하고 선택된 ranking 정책으로 결합한다.
+4. text/vector 후보를 검색하고 공통 stable evidence key로 결합한다.
 5. stable evidence ID를 통해 원문 구간과 문서 metadata를 다시 읽어 결과를 검증한다.
-6. 상품·문서 버전·관련 섹션·원문 근거·출처·generation을 함께 반환한다.
+6. 상품·문서 버전·관련 섹션·원문 근거·출처·generation을 함께 반환한다. 원문 요청은 페이지 단위로 제공하고, 명시적 PDF 요청은 정확한 version과 hash를 확인한 파일 resource로 분리한다.
 7. 최신본과 과거본이 충돌하거나 충분한 근거가 없으면 그 상태를 명시한다.
 
-검색 엔진, ANN 구현, hybrid 결합 방식과 ranking 값은 실제 카드 도메인 benchmark 후 `결정 필요`다. 레거시의 Python exact full scan과 서로 다른 ID 공간을 사용한 hybrid는 그대로 채택하지 않는다.
+lexical/vector hybrid와 공통 stable evidence key 결합은 채택한다. 검색 엔진, ANN 구현, 후보 수와 ranking 값은 실제 카드 도메인 benchmark 후 `결정 필요`다. 레거시의 Python exact full scan과 서로 다른 ID 공간을 사용한 hybrid는 그대로 채택하지 않는다.
 
 ## 6. 식별자와 provenance 경계
 
@@ -227,7 +230,7 @@ vector 검색에 원격 query embedding이 필요하다면 온라인 서비스�
 
 | 저장 영역 | 주요 내용 | 쓰기 주체 | 읽기 주체 | 수명·운영 원칙 |
 |---|---|---|---|---|
-| 원본 보관 영역 | PDF, 출처 metadata, content hash | PDF 취합기 | OCR·감사 작업 | 버전별 보존, 수정 대신 새 버전 추가 |
+| 원본 보관 영역 | PDF, 출처 metadata, content hash | PDF 취합기 | OCR·감사 작업, 제한된 source artifact reader | 전 버전 보존, 수정 대신 새 버전 추가, 온라인에는 게시 승인된 read-only view만 제공 |
 | 파생 artifact 영역 | 렌더 페이지, OCR Markdown, 구조 결과 | 해당 offline worker | downstream worker·검증기 | 입력 hash·설정과 연결, 부분 결과와 완료본 구분 |
 | 작업 상태 영역 | run, stage, retry, lease, 오류 | orchestrator·worker | 운영 제어·관측 | mutable, 원자 갱신, crash recovery 지원 |
 | staging build 영역 | 미완성 catalog·evidence·색인 | 색인 빌더 | 검증기 | online 접근 금지, 실패 시 격리·정리 가능 |
@@ -264,7 +267,7 @@ generation 발행은 데이터 처리와 서비스 운영을 분리하는 핵심
 - active 참조 전환은 중간 상태가 보이지 않는 원자적 방법을 사용한다.
 - 온라인의 진행 중 요청은 시작할 때 선택한 generation을 끝까지 사용한다.
 - 새 generation open 또는 readiness가 실패하면 active 참조를 이전 generation으로 되돌린다.
-- 이전 generation의 보존 개수와 기간은 `결정 필요`다.
+- 검색 generation은 최소 3개를 보존한다. 3개를 초과하는 세대의 기간·비용 기준은 별도 보존정책으로 정한다.
 
 파일 symlink, manifest pointer, object storage alias 또는 배포 단위 교체 중 어느 방식을 사용할지는 저장 환경과 replica 구조를 확정한 뒤 결정한다.
 
@@ -310,10 +313,11 @@ scheduler, 발행기, 관측 agent를 별도 컨테이너로 둘지는 `결정 �
 - Codex CLI 인증과 OpenRouter key는 역할별 secret으로 주입한다.
 - 헤드리스 Codex device-code 흐름은 exact CLI 버전에서 지원 여부를 먼저 검증한다. 지원되는 경우에만 전용 offline auth job의 제한된 로그로 필요한 URL·user code를 노출하고 로그 보존·접근을 제한한다.
 - online 이미지는 수집·OCR용 실행파일과 권한을 갖지 않는 구성을 우선한다.
+- 공개 Docker Hub image에는 corpus·PDF·OCR·secret·인증 상태를 포함하지 않는다. GitHub가 private여도 image에 패키징된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능함을 전제로 한다.
 - readiness는 프로세스 생존뿐 아니라 generation open, schema, FTS/vector 사용 가능성을 확인한다.
 - graceful shutdown 시 새 작업 claim을 중단하고 현재 checkpoint 또는 질의를 안전하게 마친다.
 
-base image, container 수, orchestration 도구, CPU·memory 한도와 Docker Hub 배포 방식은 구현 단계에서 `결정 필요`다.
+Docker Hub repository는 public으로 운영하고 image tag에 version과 Git SHA를 포함하며 배포·rollback은 digest를 기준으로 한다. base image, container 수, orchestration 도구, CPU·memory 한도, Docker Hub namespace·repository slug와 signing 방식은 구현 단계에서 `결정 필요`다.
 
 ## 12. 외부 의존성 경계
 
@@ -323,7 +327,7 @@ base image, container 수, orchestration 도구, CPU·memory 한도와 Docker Hu
 | Codex CLI | OCR 처리기 | 고품질 OCR, 선택적 구조 분석 | 실제 모델·설정 provenance, 격리 권한, 인증정보 보호 |
 | OpenRouter | 임베딩 생성기 | 문서 임베딩 | model·dimension 검증, retry, 비용·rate 관측 |
 | OpenRouter | 온라인 질의 서비스 후보 | query embedding | 사용 여부·fallback·query 정책 결정 필요 |
-| MCP client | MCP protocol adapter | 검색·상세조회 | transport, 인증·인가, 요청 제한 결정 필요 |
+| MCP client | HTTP MCP protocol adapter | 검색·상세·페이지·원본 PDF 조회 | HTTPS, token header, 인가, 요청·파일 크기 제한 |
 
 OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질 동등성 검증을 통과하기 전에는 활성화하지 않는다. 초기 대량 OCR은 Codex exec만 사용한다. 구조 분석에서 LLM을 사용하기로 결정하면 Codex exec를 우선하고 OpenRouter를 페일오버로 사용한다.
 
@@ -331,18 +335,17 @@ OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질
 
 | 항목 | 상태 | 결정이 영향을 주는 영역 |
 |---|---|---|
-| MCP stdio 또는 Streamable HTTP | 결정 필요 | 네트워크 경계, 배포, 인증, 상태 점검 |
-| 사용자·tenant 모델과 인증 방식 | 결정 필요 | 인가, rate limit, 감사 로그, 데이터 공개 범위 |
-| 목표 latency, QPS, 동시 요청 수 | 결정 필요 | 검색 엔진, cache, replica와 resource limit |
-| text/vector/hybrid 검색 범위 | 결정 필요 | 색인 구조, query embedding, 품질 평가 |
+| token 수명주기와 사용자·tenant 모델 | 결정 필요 | 발급 단위·만료·회전·폐기, 인가, rate limit, 감사 로그 |
+| 목표 latency, QPS, 가용성 | pilot 후 결정 | 초기 동시 요청 5개·품질 우선 원칙 아래 BULK/load 측정 후 확정 |
+| hybrid 엔진과 ranking | 결정 필요 | 공통 evidence key 결합은 확정, query embedding·후보 수·가중치 품질 평가 |
 | vector 저장·ANN 엔진 | 결정 필요 | generation 포맷, memory, backup·rollback |
 | 구조 분석 엔진 | 결정 필요 | worker 의존성, 비용, 재현성, 품질 관문 |
 | job queue·scheduler 구현 | 결정 필요 | lease, retry, 수평 확장, 운영 복잡도 |
 | metadata·artifact 저장 제품 | 결정 필요 | atomic publish, 보존, 비용, disaster recovery |
 | generation 전환 방식 | 결정 필요 | replica 일관성, rollback과 zero-downtime |
-| 과거 버전·원본 PDF 공개 정책 | 결정 필요 | 저장량, 저작권·이용 조건, MCP resource 범위 |
+| 원본 PDF 이용·제공 세부정책 | 결정 필요 | 기술적 제공은 확정, 저작권·재배포 조건, 최대 크기, 감사·보존 정책 |
 | 부분 실패 허용 기준 | 결정 필요 | generation coverage, freshness와 발행 정책 |
-| 카드사 추가 우선순위 | 결정 필요 | adapter 일정, benchmark와 운영 용량 |
+| 신한카드 BULK 시험 세부 범위 | 결정 필요 | 상품·문서 유형, 대상 기간, 운영 지원 편입 기준 |
 
 위 항목이 확정되기 전에도 구성요소 간 계약, issuer-scoped 식별, provenance, read/write 분리와 불변 generation 원칙은 유지할 수 있다.
 

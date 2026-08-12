@@ -17,13 +17,13 @@
 
 | 실행 단위 | 주기 | 권한·network | storage | 장애 영향 |
 |---|---|---|---|---|
-| 온라인 MCP service | 상시 | 공개 MCP endpoint와 query embedding에 필요한 최소 egress | 게시 generation read-only | 장애 시 조회 중단, ingestion에는 영향 없음 |
+| 온라인 MCP service | 상시 | HTTPS MCP endpoint와 query embedding에 필요한 최소 egress | 게시 generation과 승인 원본 PDF view read-only | 장애 시 조회 중단, ingestion에는 영향 없음 |
 | ingestion worker | 초기 대량·일일 증분 | 카드사 endpoint, Codex CLI, OpenRouter 접근 | raw/OCR/build/state read-write | 온라인은 이전 generation으로 계속 서비스 |
 | scheduler/controller | 일일 또는 운영자 실행 | job 제출 권한만 | durable state read-write | 새 작업 지연, 현재 MCP 조회는 유지 |
 | generation publisher | candidate 검증 후 | current pointer 변경 권한 | generations와 publish metadata write | 실패 시 이전 generation 유지 |
 | backup/restore job | 정책에 따른 주기 | backup target 접근 | snapshot read, backup write | 실행 중 일관성 확보 필요 |
 
-온라인 MCP process에서 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
+온라인 MCP process에서 카드사 사이트 PDF 다운로드, OCR, DB drop/rebuild, OAuth login, Gmail 전송을 실행하지 않는다. 다만 사용자가 명시적으로 요청한 경우 게시 대상 document ID에 연결된 보존 원본 PDF를 인증 후 읽기 전용으로 전달한다. ingestion worker도 게시된 generation을 in-place 변경하지 않는다.
 
 ### 2.2 최소 장애 격리 원칙
 
@@ -67,7 +67,7 @@ preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로
 ### 3.3 대량 처리 순서
 
 1. source snapshot과 document catalog를 만들고 issuer-scoped idempotency key를 부여한다.
-2. 최신 문서를 우선 queue에 넣는다. 과거 버전 범위는 별도 결정에 따른다.
+2. 최신 문서를 먼저 queue에 넣고 과거 버전도 보존 대상으로 뒤이어 처리한다. 기본 검색은 최신본이며 과거본은 명시적 version/as-of 요청에서만 조회한다.
 3. PDF 다운로드·검증, render, OCR, 구조화, embedding을 독립 stage로 실행한다.
 4. 각 stage가 검증된 artifact hash를 durable state에 commit한 뒤 다음 stage를 연다.
 5. 실패는 retry 대기 또는 dead-letter로 보내고 다른 문서 처리를 계속한다.
@@ -77,6 +77,8 @@ preflight 실패는 처리 실패 document로 세지 않고 run 시작 실패로
 장기 실행 중에도 처리율, 남은 queue, oldest job age, dead-letter, provider quota와 예상 완료시간을 볼 수 있어야 한다.
 
 초기 대량 OCR은 Codex exec만 사용한다. OpenRouter를 OCR 자동 fallback으로 사용해 실패를 성공으로 바꾸지 않으며, 실패 문서는 retry 또는 dead-letter 상태로 남긴다. OpenRouter key는 이 초기 run에서도 문서·query embedding에 필요할 수 있으므로 OCR 인증과 별개로 preflight한다.
+
+우리카드와 KB국민카드를 우선 처리하고 신한카드를 신규 BULK 시험 대상으로 포함한다. 신한카드 adapter는 레거시 재사용이 아니라 신규 구현이며, 카드사별 rate limit과 오류 격리가 확인되기 전에는 운영 주기 편입으로 간주하지 않는다.
 
 ## 4. Durable 작업상태
 
@@ -243,7 +245,7 @@ shared volume에서 symlink 교체를 사용할지 pointer file과 control plane
 - rollback 사유, 영향, generation/image 전후 값과 실행자를 감사 로그에 남긴다.
 - 실패 generation은 조사 전 삭제하지 않고 서비스 대상에서만 제외한다.
 
-generation 보존 개수와 기간은 storage 비용, 재처리시간과 복구 목표를 기준으로 **결정 필요**다.
+검색 generation은 최소 3개를 보존한다. 3개를 초과하는 보존 기간은 storage 비용, 재처리시간과 복구 목표를 기준으로 **결정 필요**다.
 
 ## 8. 로그, metric과 경보
 
@@ -278,6 +280,8 @@ API key, OAuth access/refresh token, Authorization header, 전체 이메일·OCR
 | 인증 | Codex/OpenRouter auth failure, token 만료 임박 여부(비밀값 제외) |
 
 provider 비용과 token/page 사용량은 provider 정책이 허용하는 범위에서 집계하되 요청 원문과 결합하지 않는다.
+
+온라인 성능은 품질 우선으로 운영한다. 초기 동시 요청 상한은 5개로 시작하고, 특정 P95 값을 구현 전에 약속하지 않는다. BULK corpus와 실제 질의로 latency 분포·timeout률·근거 품질·resource 사용량을 함께 측정한 뒤 SLO를 정한다. 다만 무제한 대기는 장애 격리를 해치므로 요청 timeout, cancellation과 서버측 작업 한도는 항상 유한해야 한다.
 
 ### 8.3 경보
 
@@ -315,7 +319,7 @@ provider 비용과 token/page 사용량은 provider 정책이 허용하는 범�
 | volume | MCP | worker/publisher | 용도 |
 |---|---|---|---|
 | published generations/current pointer | read-only | publisher만 write | 온라인 검색 snapshot |
-| PDF/OCR object store | 기본 미마운트 | read-write | 불변 source artifact |
+| PDF/OCR object store | 게시 승인 원본의 제한 view만 read-only | read-write | 불변 source artifact와 명시적 PDF·페이지 조회 |
 | build workspace | 미마운트 | read-write | candidate generation과 임시 파일 |
 | durable job state | 미마운트 또는 status read-only | scheduler/worker read-write | queue, lease, run event |
 | quarantine | 미마운트 | 제한 read-write | 실패 artifact와 조사자료 |
@@ -336,19 +340,22 @@ PDF, OCR, index, 작업상태와 OAuth state는 서로 다른 접근정책을 �
 - init/reaping, health check, timezone과 clock sync를 명시한다.
 - Git, source PDF/OCR, build cache, local env, OAuth/token 파일은 build context에서 제외한다.
 - image 취약점 scan과 dependency license 검토를 release gate에 포함한다.
+- Docker Hub public image는 누구나 layer와 패키징된 애플리케이션 코드·dependency metadata를 검사할 수 있음을 전제로 한다. private GitHub의 비공개성만으로 image 내부 코드를 숨길 수 있다고 가정하지 않는다.
 
 레거시 OCR의 **danger-full-access** 설정은 그대로 계승하지 않는다. Codex CLI가 필요로 하는 최소 filesystem·network 권한을 exact version으로 검증하고 worker 격리 경계를 정의해야 한다.
 
 ### 9.4 Network 경계
 
-- MCP service의 inbound는 선택한 MCP transport와 인증 endpoint만 연다.
+- MCP service의 inbound는 HTTPS 기반 HTTP MCP endpoint와 health endpoint만 연다.
 - MCP가 query embedding에 OpenRouter를 사용한다면 해당 egress만 허용하고 timeout/circuit breaker를 둔다.
 - worker는 승인된 카드사 domain, Codex 인증·실행 endpoint, OpenRouter만 egress allowlist 후보로 둔다.
 - discovery가 돌려준 URL은 host·redirect·size·PDF 검증을 거친다.
 - publisher와 backup job은 외부 공개 port를 갖지 않는다.
 - container network와 log 접근 권한을 운영자 role로 제한한다.
+- token은 `Authorization` header에서만 받고 URL query·path, access log와 error log에 남기지 않는다.
+- 원본 PDF 전달은 게시 catalog의 document ID를 통해서만 허용하고 임의 URL·host path·object key를 외부 입력으로 사용하지 않는다.
 
-MCP transport, TLS termination, 인증·인가와 multi-tenant 여부는 **결정 필요**다.
+HTTP+token 접속과 운영 HTTPS 사용은 확정이다. TLS termination 위치, token 발급 단위·만료·회전·폐기, 인증정보 저장 방식, 인가와 multi-tenant 여부는 **결정 필요**다.
 
 ## 10. 인증과 secret
 
@@ -386,7 +393,15 @@ CLI가 요구한 headless/device-code 동작을 제공하지 않는다면 log sc
 - 실제 사용 model/config hash를 OCR 또는 embedding provenance와 generation manifest에 기록한다.
 - 외부 전송 데이터 범위와 provider 보존정책을 보안·법무 관점에서 승인받는다.
 
-### 10.3 그 밖의 secret
+### 10.3 MCP access token
+
+- client에는 HTTPS endpoint URL과 token을 별도 설정으로 전달한다.
+- token은 `Authorization` header로 보내며 URL query·path, image, Git, Compose 평문과 일반 log에 넣지 않는다.
+- 서버에는 token 원문을 장기 저장하지 않고 가능한 경우 검증용 hash 또는 secret manager reference를 사용한다.
+- token 발급 단위, 만료, rotation, 즉시 revoke, scope와 tenant 정책은 구현 전에 확정한다.
+- 원본 PDF·페이지 조회를 포함한 모든 요청에 호출자, 허용 scope, document ID, 결과 상태와 비민감 request ID를 감사 event로 남긴다.
+
+### 10.4 그 밖의 secret
 
 Docker Hub credential은 build/push host 또는 CI secret store에만 둔다. runtime container에 mount하지 않는다. TLS private key, remote storage credential과 monitoring token도 용도별로 분리하고 secret scan을 release gate에 포함한다.
 
@@ -406,15 +421,15 @@ MCP readiness는 current generation ID, schema, embedding model/dimension, docum
 아래는 최종 구현 단계의 계획이며 이번 작업에서 build, login, push 또는 promotion을 수행하지 않았다.
 
 1. 현재 로그인된 Docker 계정과 namespace를 실제로 확인한다.
-2. 대상 **MCP_card_prd_detail** repository의 존재 여부와 private 가시성을 확인하거나 승인 후 생성한다.
+2. 대상 public repository의 namespace와 lowercase slug를 확인하거나 승인 후 생성한다. 후보 slug는 **mcp_card_prd_detail**이다.
 3. test, license/secret scan, SBOM, vulnerability scan을 통과한 image를 재현 가능하게 build한다.
-4. release version과 source commit을 포함한 immutable tag를 붙이고 image digest를 기록한다.
-5. candidate tag를 private repository에 push한다.
+4. release version과 Git SHA를 포함한 immutable tag를 붙이고 image digest를 기록한다.
+5. candidate tag를 public repository에 push한다. 이 시점부터 image에 패키징된 code와 metadata는 공개된 것으로 취급한다.
 6. 깨끗한 host에서 digest로 pull하여 data를 포함하지 않았는지, non-root/read-only 실행과 smoke test를 확인한다.
 7. 승인된 digest만 운영 tag로 promotion하고 deployment 기록에 image digest와 호환 generation을 남긴다.
 8. 실패 시 이전 digest로 rollback한다.
 
-**latest** tag만으로 배포 상태를 식별하지 않는다. Docker Hub 로그인 상태, repository 이름·가시성, multi-architecture 필요성, image signing·provenance 방식은 구현 시 확인한다. 확인·push하지 않은 결과를 완료로 보고하지 않는다.
+**latest** tag만으로 배포 상태를 식별하지 않는다. repository 가시성은 public으로 확정됐으며 GitHub repository는 private로 유지한다. Docker Hub 로그인 상태, namespace·lowercase repository 이름, multi-architecture 필요성, image signing·provenance 방식은 구현 시 확인한다. 확인·push하지 않은 결과를 완료로 보고하지 않는다.
 
 ## 13. Backup과 restore
 
@@ -483,26 +498,26 @@ backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 정기
 | retry | 429/5xx/auth/invalid PDF/OCR incomplete가 올바른 상태로 전이 |
 | generation | 부분 build 미노출, atomic publish와 이전 generation rollback |
 | data | checksum, schema, current embedding coverage, citation 역추적 |
-| MCP | read-only mount, concurrency, timeout, graceful shutdown |
+| MCP | HTTPS+token, read-only mount, 동시 요청 5개, timeout, graceful shutdown, PDF·페이지 권한 |
 | Docker | non-root, read-only root, resource limit, health probe |
 | auth | Codex headless login과 재시작 유지, OpenRouter secret 비노출 |
 | logs | token·본문 redaction, correlation ID, retention/RBAC |
 | backup | consistent snapshot과 격리 경로 restore drill |
-| registry | private repository, digest pull/run, data·secret 미포함 |
+| registry | public repository, version+Git SHA tag, digest pull/run, data·secret 미포함, 공개 code 검토 |
 
 ## 16. 결정 필요 항목
 
 - 운영 topology가 단일 host인지 다중 node인지
 - durable state engine과 scheduler/lock 방식
-- initial bulk concurrency, provider quota와 비용한도
+- offline BULK worker concurrency, provider quota와 비용한도
 - worker별 lease·timeout·retry budget
 - 일일 실행시각과 issuer별 rate limit
-- generation ID, 보존개수, RPO·RTO와 backup target
-- MCP transport, 인증·인가, SLO와 autoscaling 기준
+- generation ID 형식, 최소 3개 초과 보존기간, RPO·RTO와 backup target
+- HTTP token 수명주기·인가·tenant, BULK pilot 이후 SLO와 autoscaling 기준
 - vector engine과 query embedding 장애 시 degraded mode
 - Codex CLI exact version과 공식 headless/device-code 지원 여부
 - OAuth state 저장·갱신·회수와 device-code log 보안정책
-- Docker Hub namespace, repository 가시성, tag·signing·promotion 정책
+- Docker Hub namespace·lowercase repository slug, image signing·promotion 승인 정책
 
 ## 17. 이 문서 작성 시점의 완료 상태
 
