@@ -91,6 +91,13 @@
 - 최초 배포는 단일 Linux host의 Docker Compose로 운영하며 online MCP와 offline worker를 별도 컨테이너로 분리한다.
 - PDF·OCR·generation은 외부 불변 file volume에 두고, durable 작업 상태와 catalog는 PostgreSQL에 저장한다. vector/lexical 검색 엔진은 신한카드 BULK benchmark 후 선정한다.
 - query embedding 또는 vector 검색 장애 시 lexical-only 결과는 caller가 `allow_degraded=true`로 명시한 경우에만 `degraded` 상태로 반환한다. 그렇지 않으면 품질 저하를 숨기지 않고 요청을 실패시킨다.
+- reverse proxy와 TLS는 별도 Nginx Proxy Manager가 담당하며 이 Compose stack에는 포함하지 않는다. MCP application은 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host의 `127.0.0.1:8000`에만 publish한다.
+- 원본 PDF는 이용조건 검토 전까지 승인 사용자에게만 제공하고 파일당 100 MB, HTTP Range, 다운로드 감사 metadata 90일 보존을 적용한다.
+- 일일 수집은 03:00 KST에 시작해 카드사별 간격을 두고 순차 실행하며, 한 카드사 실패가 다른 카드사 실행을 막지 않는다.
+- backup 목표는 RPO 24시간·RTO 4시간이다. PostgreSQL과 신규 file은 매일 backup하고 주 1회 별도 저장소에 복제하며 분기마다 restore를 시험한다.
+- 접근·권한·PDF 감사 metadata는 90일 보존하고 질의 원문은 기본 저장하지 않는다. 비식별 집계 metric은 1년 보존한다.
+- 1차 관리자 표면은 운영 CLI와 scheduled job만 제공하며 공개 관리자 API·웹 UI는 만들지 않는다.
+- public Docker Hub repository slug는 `mcp-card-prd-detail`로 하고 Cosign으로 image를 서명한다. 실제 namespace는 배포 계정 확인 후 결합한다.
 
 ## 결정이 필요한 공통 항목
 
@@ -102,7 +109,9 @@
 - 신한카드 BULK 시험의 운영 편입 조건
 - OCR·구조 분석·임베딩 모델 및 정량 품질 기준
 - 카드사 공시자료의 수집·재배포·상업적 이용 조건
-- Docker Hub namespace·repository 이름, image signing과 promotion 승인 절차
+- Docker Hub namespace와 Cosign identity·key 관리 방식
+- Nginx Proxy Manager container에서 MCP로 연결할 network 방식
+- 일일 issuer 실행 순서·간격과 backup target·암호화 방식
 
 결정 전에는 특정 제품이나 모델을 사실상 확정된 것으로 구현 문서에 기록하지 않는다.
 

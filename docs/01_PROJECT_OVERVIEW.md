@@ -123,7 +123,7 @@
 - Gmail 읽기·답장과 범용 이메일 Agent
 - 임의 파일시스템 경로로 내보내기
 
-이 기능들이 향후 필요하다면 별도의 관리자 권한과 durable job 경계를 가진 오프라인 운영 영역으로 설계한다. 관리자 표면의 필요 여부 자체는 `결정 필요`다.
+이 기능은 별도의 관리자 권한과 durable job 경계를 가진 오프라인 운영 영역으로 설계한다. v1 관리자 표면은 local 운영 CLI와 scheduled job으로 한정하며 공개 관리자 API·웹 UI는 만들지 않는다.
 
 ## 7. 핵심 설계 원칙
 
@@ -192,6 +192,13 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - 최초 운영 topology는 단일 Linux host의 Docker Compose이며 online MCP와 offline worker를 별도 컨테이너로 둔다.
 - PDF·OCR·generation은 외부 불변 file volume, durable 작업 상태와 catalog는 PostgreSQL을 사용한다. vector/lexical engine은 신한 BULK benchmark 후 정한다.
 - vector 경로 장애 시 caller가 `allow_degraded=true`를 명시한 요청만 lexical-only 결과를 `degraded`로 반환하고, 나머지는 실패시킨다.
+- reverse proxy·TLS는 별도 Nginx Proxy Manager가 담당한다. stack은 proxy를 포함하지 않고 container `0.0.0.0:8000`을 host `127.0.0.1:8000`에만 publish한다.
+- 원본 PDF는 승인 사용자에게만 제공하고 100 MB 상한, HTTP Range와 90일 감사 metadata 보존을 적용한다.
+- 일일 수집은 03:00 KST에 카드사별 간격을 두고 순차 실행하며 issuer 실패를 격리한다.
+- RPO 24시간·RTO 4시간을 목표로 일일 PostgreSQL·신규 file backup, 주간 별도 저장소 복제와 분기별 restore 시험을 수행한다.
+- 접근·권한·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존하고 질의 원문은 기본 저장하지 않는다.
+- 관리자 기능은 운영 CLI와 scheduled job으로 제한하고 공개 관리자 API·웹 UI는 만들지 않는다.
+- Docker Hub repository slug는 `mcp-card-prd-detail`, image signing은 Cosign으로 확정한다. namespace와 signing identity·key 관리는 배포 시 결정한다.
 
 ### 8.2 결정 필요
 
@@ -204,9 +211,8 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 | 구조 분석 엔진 | 결정 필요 | 규칙 기반, LLM 보조, 혼합 방식의 정확도·재현성·비용 평가 |
 | 온라인 query embedding | 일부 결정 | 장애 시 opt-in lexical-only 정책은 확정, OpenRouter 호출·cache·회로 차단 상세는 결정 필요 |
 | 신한카드 운영 편입 | 결정 필요 | 개인 신용·체크 전 이력 BULK 범위는 확정, 정식 일일 운영 편입 gate는 결정 필요 |
-| 원문·PDF 이용 조건 | 결정 필요 | 기술적 제공 방식은 확정, 재배포·상업적 이용·감사·최대 파일 크기는 별도 확인 |
-| 보존·삭제·감사 정책 | 일부 결정 | PDF/OCR 전 버전과 generation 최소 3개는 확정, 로그·질의·렌더 이미지 기간은 결정 필요 |
-| 관리자 운영 표면 | 결정 필요 | MCP와 분리된 CLI·job API·스케줄러 중 필요한 방식 |
+| 원문·PDF 이용 조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 재배포·상업적 이용 조건은 별도 확인 |
+| 보존·삭제·감사 정책 | 일부 결정 | PDF/OCR 전 버전, generation 최소 3개, 감사 90일·metric 1년은 확정; 렌더 이미지 등은 결정 필요 |
 
 ## 9. 성공 상태
 

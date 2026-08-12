@@ -273,7 +273,7 @@ hybrid 검색은 lexical chunk ID와 structured ID를 그대로 섞지 않고 �
 | chunking | 조건·제외와 본문 분리 | 관계 metadata, 의미 경계, 인접 context와 gold query 검증 |
 | 임베딩 | stale·혼합 모델 vector | content hash coverage, 모델·차원 generation 고정 |
 | 검색 | issuer 충돌, filter 후처리로 관련 결과 손실 | issuer-scoped ID, 후보 단계 filter, 공통 evidence ID |
-| 원본 PDF 제공 | 잘못된 버전·변조 파일·과도한 파일 전달 | 명시적 요청, `source_pdf` scope, exact document ID·SHA-256·MIME·크기 검증, 전체 파일 streaming |
+| 원본 PDF 제공 | 잘못된 버전·변조 파일·과도한 파일 전달 | 승인 사용자, `source_pdf` scope, exact ID·SHA-256·MIME 검증, 100 MB·Range, 전체 파일 streaming |
 | 페이지 제공 | 잘못된 page·파생물 혼동 | OCR text는 `search`, 선택적 PNG는 `source_pdf`, source span 연결, 분할 PDF 생성 금지 |
 | MCP 반환 | 짧은 인용으로 핵심 조건 손실 | 충분한 원문과 후속 전체 근거 조회, version·generation 표시 |
 | 외부 LLM 답변 | 근거 밖 결론, 버전 혼합 | evidence-only 계약, 인용 검증, 불충분·충돌 명시 |

@@ -37,14 +37,26 @@
 - [ ] [결정 필요] BULK pilot 후 목표 QPS, latency, 가용성과 resource 한도를 승인한다.
 - [x] [결정 완료] 명시적 요청 시 전체 원본 PDF streaming, 페이지 OCR text·선택적 PNG, 분할 PDF 미생성을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/03_COMPONENT_DEVELOPMENT_GUIDE.md`
+- [x] [결정 완료] 원본 PDF는 승인된 `source_pdf` 사용자에게만 제공하고 100 MB 상한, HTTP Range와 90일 접근 감사 metadata를 적용한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] 공통 evidence key 기반 lexical/vector hybrid 검색을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/05_LLM_AND_DATA_QUALITY_POLICY.md`
 - [x] [결정 완료] vector 장애 시 `allow_degraded=true` 요청에만 명시적 lexical-only 결과를 허용한다.
   증거: 사용자 결정 2026-08-12, `docs/05_LLM_AND_DATA_QUALITY_POLICY.md`
 - [x] [결정 완료] 최초 단일 Linux host Docker Compose와 online/offline 컨테이너 분리를 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] reverse proxy와 TLS는 별도 Nginx Proxy Manager가 담당하고 project Compose에 proxy를 포함하지 않으며 MCP는 container `0.0.0.0:8000`, host `127.0.0.1:8000`으로 노출한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] PDF·OCR·generation은 외부 불변 file volume, durable state·catalog는 PostgreSQL을 사용한다.
   증거: 사용자 결정 2026-08-12, `docs/02_TARGET_ARCHITECTURE.md`
+- [x] [결정 완료] 일일 증분은 매일 03:00 KST에 issuer별 순차·장애 격리 방식으로 실행한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] RPO 24시간/RTO 4시간, DB·신규 file 일일 backup, 주간 별도 저장소 복제, 분기별 restore drill을 적용한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] query 원문은 저장하지 않고 접근·인증·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] v1 운영 관리면은 CLI와 scheduled job으로 한정하며 public admin API와 web UI를 만들지 않는다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [ ] [결정 필요] 공시자료 수집·재배포·상업적 이용 조건을 확인한다.
 - [ ] [미착수] 대표 PDF·질문·정답 근거로 gold evaluation set을 만든다.
 - [ ] [미착수] OCR·구조·검색별 정량 합격선을 승인한다.
@@ -148,7 +160,7 @@
 - [ ] [미착수] 혜택 조건·전월실적·제외조건·유의사항 조회 역할을 구현·시험한다.
 - [ ] [미착수] stable evidence와 full source pagination/resource를 제공한다.
 - [ ] [미착수] 페이지 단위 OCR text와 선택적 렌더 PNG를 exact document version과 source span으로 제공하고 분할 PDF를 생성하지 않는다.
-- [ ] [미착수] `source_pdf` scope의 명시적 사용자 요청에 exact version·SHA-256의 보존 원본 PDF 전체를 streaming한다.
+- [ ] [미착수] 승인된 `source_pdf` 사용자의 명시적 요청에 exact version·SHA-256의 보존 원본 PDF 전체를 100 MB 상한과 HTTP Range로 streaming하고 접근 감사 metadata를 90일 보존한다.
 - [ ] [미착수] 모든 근거에 issuer, 상품코드, 문서 version·기준일, generation과 source span을 포함한다.
 - [ ] [미착수] 정보 부족, 상충 version과 낮은 confidence를 숨기지 않는다.
 - [ ] [미착수] online process가 published generation을 read-only로 연다.
@@ -179,9 +191,12 @@
 
 - [x] [결정 완료] 최초 topology를 단일 Linux host Docker Compose로 정한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] 별도 Nginx Proxy Manager가 reverse proxy/TLS를 담당하고 이 project에는 proxy를 포함하지 않으며 MCP는 host `127.0.0.1:8000`에 publish한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] durable state·catalog는 PostgreSQL, PDF·OCR·generation은 외부 불변 file volume으로 정한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [ ] [미착수] offline worker와 online MCP를 별도 container/process로 구성한다.
+- [ ] [미착수] MCP가 container `0.0.0.0:8000`에서 listen하고 host `127.0.0.1:8000`에만 publish되며 외부 Nginx Proxy Manager에서 실제 연결되는지 시험한다.
 - [ ] [미착수] raw/OCR/build/state/index/output volume을 목적과 권한별로 분리한다.
 - [ ] [미착수] 대용량 PDF·OCR·index가 Git과 image layer에 없음을 검사한다.
 - [ ] [미착수] OpenRouter API key를 secret으로 주입하고 log redaction을 시험한다.
@@ -191,12 +206,20 @@
 - [ ] [검토 필요] 지원되지 않을 경우 승인된 대체 bootstrap·credential 전달 방식을 정한다.
 - [ ] [미착수] container 재생성 후 durable job과 artifact가 유지되는 것을 시험한다.
 - [ ] [미착수] structured logs, metrics, trace correlation과 alert를 구현한다.
+- [ ] [미착수] query 원문 미저장, 감사 metadata 90일과 비식별 metric 1년 retention·삭제를 시험한다.
 - [ ] [미착수] 장기 OCR의 진행률과 ETA, retry/dead-letter를 운영 화면 또는 report로 확인한다.
-- [ ] [미착수] backup 대상·주기·보존·암호화·복구 목표를 승인한다.
+- [x] [결정 완료] RPO 24시간/RTO 4시간과 일일 DB·신규 file backup, 주간 별도 저장소 복제, 분기 restore drill을 승인한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [ ] [결정 필요] backup target과 암호화 key 관리, 원본·과거 generation 보존기간을 정한다.
 - [ ] [미착수] DB·artifact·generation을 일관된 시점으로 backup한다.
 - [ ] [미착수] 빈 환경에서 restore와 generation rollback을 rehearsal한다.
+- [x] [결정 완료] v1 운영은 CLI와 scheduled job만 사용하고 public admin API·web UI를 만들지 않는다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [ ] [미착수] 매일 03:00 KST issuer별 순차·장애 격리 scheduled job과 운영 CLI를 구현한다.
 - [ ] [미착수] image SBOM, 취약점, non-root, read-only filesystem 정책을 검증한다.
 - [x] [결정 완료] GitHub private, Docker Hub public 운영과 version+Git SHA tag·digest 배포를 승인한다.
+  증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
+- [x] [결정 완료] Docker Hub repository slug **mcp-card-prd-detail**과 Cosign image 서명을 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md`
 - [x] [결정 완료] PDF·OCR 전 버전과 검색 generation 최소 3개 보존, Gmail·이메일 Agent 제외를 승인한다.
   증거: 사용자 결정 2026-08-12, `docs/README.md`
@@ -211,7 +234,7 @@
 - [ ] [미착수] retrieval과 grounded-answer regression을 gold set으로 시험한다.
 - [ ] [미착수] prompt injection, SSRF, path traversal, 권한 우회, secret 노출을 시험한다.
 - [ ] [미착수] 목표 QPS/latency에서 load와 resource 한도를 검증한다.
-- [ ] [결정 필요] Docker Hub namespace·lowercase repository slug, image signing과 promotion 승인 절차를 정한다.
+- [ ] [결정 필요] Docker Hub namespace, Cosign identity/key 관리와 promotion 승인 절차를 정한다.
 - [ ] [미착수] staging image를 Docker Hub에 push하고 digest를 기록한다.
 - [ ] [미착수] 검증된 digest만 운영 tag로 promotion한다.
 - [ ] [미착수] 배포 후 health, smoke query, evidence provenance와 rollback을 검증한다.
@@ -223,7 +246,7 @@
 - HTTP OAuth 자동 refresh·scope는 확정됐지만 authorization server, 사용자/tenant와 운영자 권한이 남아 있다.
 - PostgreSQL·file volume은 확정됐지만 vector/lexical engine, BULK pilot 이후 수치 SLO와 세부 데이터 보존정책이 남아 있다.
 - 신한카드 개인 신용·체크 전 이력 BULK 범위는 확정됐지만 정식 일일 운영 편입 gate가 남아 있다.
-- 원본 PDF 기술 제공은 확정됐지만 카드사 자료의 재배포·서비스 이용 조건과 파일 한도가 남아 있다.
+- 원본 PDF 기술 제공과 100 MB 상한은 확정됐지만 카드사 자료의 재배포·서비스 이용 조건이 남아 있다.
 - OCR·구조·검색 품질 gold set과 합격선이 없다.
 - 카드사 공시자료 이용 조건 확인이 남아 있다.
 - Codex OAuth의 headless Docker device-code 흐름은 실제 환경 검증이 필요하다.
