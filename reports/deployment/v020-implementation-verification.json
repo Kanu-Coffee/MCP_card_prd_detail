@@ -1,6 +1,6 @@
 {
   "schema_version": "cardrag-v020-implementation-verification.v1",
-  "generated_at": "2026-08-14T03:06:00Z",
+  "generated_at": "2026-08-14T03:13:26Z",
   "status": "passed",
   "scope": "CardRAG 0.2.0 legacy OCR reuse, normalized bundle creation, Portainer host persistence, portable state export/restore, schema-13 bridge, and three-role local image verification. A production database import, a real NAS/Portainer-host restore drill, live providers, and a public 0.2.0 release are not claimed.",
   "source": {
@@ -8,7 +8,7 @@
     "base_git_sha": "bbe36c3f71d0337eb53ea31e0e671c2c87aa33f2",
     "worktree_changes_included": true,
     "candidate_file_count_excluding_this_report_and_ignored_local_tools": 229,
-    "candidate_source_fingerprint_sha256": "d478cf4fb7fda3a0aaada81a42ce295bd7ab380b1af9dd2e1929b24affd39b0a",
+    "candidate_source_fingerprint_sha256": "a60e19a21fdb377d604f1c265a111ec08705e8b756e9f36e6216cd0b03a5eb9a",
     "candidate_source_fingerprint_algorithm": "SHA-256 over sorted git ls-files --cached --others --exclude-standard paths excluding this report; each record is path, NUL, SHA-256(file bytes), LF",
     "runtime_image_input_file_count": 137,
     "runtime_image_input_manifest_sha256": "ebebdf010825a6f00bf7f11cfe12ae7a298e45402efbf99dc5671500e2791ea1",
