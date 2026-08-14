@@ -1,6 +1,6 @@
 {
   "schema_version": "cardrag-v020-implementation-verification.v1",
-  "generated_at": "2026-08-14T02:52:17Z",
+  "generated_at": "2026-08-14T03:06:00Z",
   "status": "passed",
   "scope": "CardRAG 0.2.0 legacy OCR reuse, normalized bundle creation, Portainer host persistence, portable state export/restore, schema-13 bridge, and three-role local image verification. A production database import, a real NAS/Portainer-host restore drill, live providers, and a public 0.2.0 release are not claimed.",
   "source": {
@@ -8,7 +8,7 @@
     "base_git_sha": "bbe36c3f71d0337eb53ea31e0e671c2c87aa33f2",
     "worktree_changes_included": true,
     "candidate_file_count_excluding_this_report_and_ignored_local_tools": 229,
-    "candidate_source_fingerprint_sha256": "ffcff462e1ed4127ee7cb18e4bf3068caeae3c0a780fbfa5f1adce958c978a3d",
+    "candidate_source_fingerprint_sha256": "d478cf4fb7fda3a0aaada81a42ce295bd7ab380b1af9dd2e1929b24affd39b0a",
     "candidate_source_fingerprint_algorithm": "SHA-256 over sorted git ls-files --cached --others --exclude-standard paths excluding this report; each record is path, NUL, SHA-256(file bytes), LF",
     "runtime_image_input_file_count": 137,
     "runtime_image_input_manifest_sha256": "ebebdf010825a6f00bf7f11cfe12ae7a298e45402efbf99dc5671500e2791ea1",
@@ -22,8 +22,9 @@
     "unit_tests": "278 passed",
     "python_3_12_cli_regression": "passed in an isolated uv 0.8.17 environment",
     "git_diff_check": "passed",
-    "actionlint": "passed; workflow files are unchanged from the validated snapshot",
+    "actionlint": "passed with actionlint 1.7.10 after the Compose 2.38 compatibility change",
     "portainer_shell_and_compose_tests": "9 passed; schema-13 integration has separate real PostgreSQL evidence",
+    "docker_compose_2_38_2_compatibility": "passed; explicit create_host_path:false is verified from raw YAML independently of normalized JSON",
     "source_fingerprint_stable_during_validation": true
   },
   "database_and_pipeline": {

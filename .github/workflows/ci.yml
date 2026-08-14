@@ -222,7 +222,12 @@ jobs:
               assert definition["image"] == image, (service, definition["image"])
               for mount in definition.get("volumes", []):
                   if mount["type"] == "bind":
-                      assert mount["bind"]["create_host_path"] is False, (service, mount)
+                      # Compose 2.38 omits explicit false values from JSON.
+                      # The Portainer source test separately proves that every
+                      # bind declaration spells out create_host_path: false.
+                      assert mount.get("bind", {}).get(
+                          "create_host_path", False
+                      ) is False, (service, mount)
 
           def mounts(service):
               return {
@@ -281,8 +286,9 @@ jobs:
           assert dedicated_mounts["/mnt/cardrag-runtime"]["source"] == "/srv/cardrag/runtime"
           assert dedicated_mounts["/mnt/cardrag-archive"]["read_only"] is True
           assert dedicated_mounts["/mnt/cardrag-deployment"]["read_only"] is True
+          assert all(item["type"] == "bind" for item in dedicated_mounts.values())
           assert all(
-              item["bind"]["create_host_path"] is False
+              item.get("bind", {}).get("create_host_path", False) is False
               for item in dedicated_mounts.values()
           )
           assert restore_stack["networks"]["backend"]["internal"] is True

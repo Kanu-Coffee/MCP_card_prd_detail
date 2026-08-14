@@ -68,7 +68,11 @@ assert mounts["/var/lib/cardrag/objects"]["type"] == "bind"
 assert mounts["/var/lib/cardrag/generations"]["type"] == "bind"
 assert mounts["/var/lib/cardrag-build"]["type"] == "bind"
 assert mounts["/var/cache/cardrag-pages"]["type"] == "bind"
-assert all(item["bind"]["create_host_path"] is False for item in mounts.values())
+assert all(item["type"] == "bind" for item in mounts.values())
+assert all(
+    item.get("bind", {}).get("create_host_path", False) is False
+    for item in mounts.values()
+)
 entrypoint = admin["entrypoint"][2]
 assert "run-daily) set -- cardrag run daily" in entrypoint
 assert "retention-prune) set -- cardrag retention prune" in entrypoint
