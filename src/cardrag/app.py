@@ -37,7 +37,7 @@ class UnavailableEmbeddingProvider:
 def create_app(settings: Settings | None = None) -> tuple[Any, Postgres]:
     settings = settings or Settings()  # type: ignore[call-arg]
     database = Postgres(
-        settings.database_url.get_secret_value(),
+        settings.database_url_value(),
         min_size=1,
         max_size=8,
         statement_timeout_seconds=settings.postgres_statement_timeout_seconds,

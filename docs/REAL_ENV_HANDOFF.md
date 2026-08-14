@@ -126,7 +126,7 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   fail-closed한다. Cosign digest signature/attestation tag는 재서명을 위해 regex 밖에 둔다.
 
   ```bash
-  export RELEASE_VERSION=0.1.2
+  export RELEASE_VERSION=0.2.0
   export RELEASE_GIT_SHA=REPLACE_WITH_RELEASE_GIT_SHA
   cosign verify \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -190,8 +190,10 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   retention을 fixture로 검증한다. 단일 retention one-shot은 최신 성공 3세대와
   active/pin 세대를 보존하고 7일 지난 실패 세대 및 만료된 audit/metric을 함께 정리한다.
   timer는 `Persistent=true`로 host 중단 뒤 catch-up한다.
-- **실환경 절차:** `deploy/systemd/README.md`의 경로와 전용 계정을 검토한 뒤
-  unit을 설치한다. worker를 먼저 상시 기동하고 다음 실행시각을 확인한 후
+- **실환경 절차:** 일반 Compose 배포는 `deploy/systemd/README.md`를 사용한다.
+  Portainer host-bind 배포는 개발 named volume을 가리키는 해당 unit을 설치하지
+  않고 `deploy/portainer/RUNBOOK.md`의 전용 `cardrag-portainer-*` unit만 사용한다.
+  경로와 실행 계정을 검토한 뒤 worker를 먼저 상시 기동하고 다음 실행시각을 확인한 후
   두 timer를 enable한다. 의도적인 한 번의 daily 수동 start로 우리 → KB → 신한 순서,
   issuer 종료 후 10분 대기와 실패 격리를 확인하고 retention 수동 start 결과도 검토한다.
 - **성공 조건:** pipeline 03:00·retention 04:00 KST 실행, 중복 daily run 거부,
@@ -215,9 +217,11 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
 - **실패 진단:** current pointer, READY/checksum, application-generation 호환성,
   replica generation과 image digest를 대사한다.
 
-## v1 범위 밖
+## v1 범위 밖 / v0.2에서 추가된 범위
 
-- backup·restore 구현과 RPO/RTO 검증
+- v0.1에서는 backup·restore 구현과 RPO/RTO 검증이 범위 밖이었다. v0.2에는 maintenance-window
+  portable export/verify/empty-target restore 자동화를 추가했다. 실제 NAS·다른 물리 서버의
+  RPO/RTO drill과 최근 검증본 3개 NAS lifecycle 적용은 여전히 운영 인계다.
 - Nginx Proxy Manager container 또는 public TLS 구성 자체
 - ARM64 image
 - public admin API와 운영 웹 UI

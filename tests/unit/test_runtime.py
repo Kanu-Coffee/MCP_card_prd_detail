@@ -252,6 +252,6 @@ async def test_materialize_compatibility_query_requires_current_renderer() -> No
         await pipeline.materialize(claim)
 
     query, params = database.cursor.executed[1]
-    assert "d.ocr_manifest->'attempt'->>'renderer'=%s" in query
+    assert "cardrag_ocr_manifest_reusable" in query
     assert PDF_RENDERER_ID in params
     assert database.connection_value.rolled_back

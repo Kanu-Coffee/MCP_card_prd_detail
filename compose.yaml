@@ -55,8 +55,16 @@ services:
       - cardrag_mcp_db_password
       - keycloak_db_password
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./deploy/postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-cardrag-databases.sh:ro
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ./deploy/postgres/init-databases.sh
+        target: /docker-entrypoint-initdb.d/10-cardrag-databases.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
     networks:
       - backend
     healthcheck:
@@ -110,8 +118,20 @@ services:
     secrets:
       - keycloak_db_password
     volumes:
-      - ./deploy/keycloak/cardrag-realm.json:/opt/keycloak/data/import/cardrag-realm.json:ro
-      - ./deploy/keycloak/entrypoint.sh:/opt/cardrag/keycloak-entrypoint.sh:ro
+      - type: bind
+        source: ./deploy/keycloak/cardrag-realm.json
+        target: /opt/keycloak/data/import/cardrag-realm.json
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/keycloak/entrypoint.sh
+        target: /opt/cardrag/keycloak-entrypoint.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
     depends_on:
       postgres:
         condition: service_healthy
@@ -188,6 +208,304 @@ services:
         condition: service_healthy
       volume-init:
         condition: service_completed_successfully
+
+  legacy-import:
+    <<: *app-common
+    build:
+      context: .
+      target: admin
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    profiles: ["legacy-import"]
+    restart: "no"
+    cpus: "${CARDRAG_ADMIN_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_ADMIN_MEMORY:-4g}
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        if [ "$${CARDRAG_LEGACY_IMPORT_ENABLED:-false}" != true ]; then
+          echo "legacy import job is disabled; set CARDRAG_LEGACY_IMPORT_ENABLED=true for one deployment"
+          exit 0
+        fi
+        case "$${CARDRAG_LEGACY_OPERATION:-import}" in
+          import) ;;
+          resume)
+            if [ -z "$${CARDRAG_LEGACY_IMPORT_ID:-}" ]; then
+              echo "CARDRAG_LEGACY_IMPORT_ID is required for a resume" >&2
+              exit 64
+            fi
+            set -- cardrag legacy resume "$${CARDRAG_LEGACY_IMPORT_ID}"
+            ;;
+          *)
+            echo "CARDRAG_LEGACY_OPERATION must be import or resume" >&2
+            exit 64
+            ;;
+        esac
+        exec /opt/cardrag-portainer/storage-preflight.sh \
+          /var/lib/cardrag/objects /var/lib/cardrag/generations \
+          /var/lib/cardrag-build \
+          -- /usr/local/bin/cardrag-entrypoint "$$@"
+      - --
+    command:
+      - cardrag
+      - legacy
+      - import
+      - --bundle
+      - /mnt/cardrag-imports/${CARDRAG_LEGACY_BUNDLE_NAME:-READY-NOT-SET}
+      - --wait
+      - --no-publish
+    environment:
+      <<: *app-environment
+      CARDRAG_MINIMUM_FREE_GIB: ${CARDRAG_MINIMUM_FREE_GIB:-50}
+      CARDRAG_MINIMUM_FREE_PERCENT: ${CARDRAG_MINIMUM_FREE_PERCENT:-20}
+      CARDRAG_MAXIMUM_USED_PERCENT: ${CARDRAG_MAXIMUM_USED_PERCENT:-85}
+      CARDRAG_WARNING_USED_PERCENT: ${CARDRAG_WARNING_USED_PERCENT:-70}
+      CARDRAG_LEGACY_IMPORT_ENABLED: ${CARDRAG_LEGACY_IMPORT_ENABLED:-false}
+      CARDRAG_LEGACY_OPERATION: ${CARDRAG_LEGACY_OPERATION:-import}
+      CARDRAG_LEGACY_IMPORT_ID: ${CARDRAG_LEGACY_IMPORT_ID:-}
+      CARDRAG_IMPORT_ROOT: /mnt/cardrag-imports
+    secrets:
+      - source: cardrag_database_url
+        target: cardrag_database_url
+    volumes:
+      - cardrag_objects:/var/lib/cardrag/objects:rw
+      - cardrag_generations:/var/lib/cardrag/generations:rw
+      - cardrag_build:/var/lib/cardrag-build:rw
+      - type: bind
+        source: ${CARDRAG_IMPORT_ROOT:-/srv/cardrag/imports}
+        target: /mnt/cardrag-imports
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/portainer/scripts/storage-preflight.sh
+        target: /opt/cardrag-portainer/storage-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+
+  state-export:
+    <<: *app-common
+    build:
+      context: .
+      target: admin
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    profiles: ["state-maintenance"]
+    restart: "no"
+    cpus: "${CARDRAG_ADMIN_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_ADMIN_MEMORY:-4g}
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        if [ "$${CARDRAG_STATE_EXPORT_ENABLED:-false}" != true ]; then
+          echo "state export job is disabled; set CARDRAG_STATE_EXPORT_ENABLED=true for one deployment"
+          exit 0
+        fi
+        case "$${CARDRAG_STATE_SELF_CONTAINED:-false}" in
+          true) set -- "$$@" --self-contained ;;
+          false) ;;
+          *)
+            echo "CARDRAG_STATE_SELF_CONTAINED must be true or false" >&2
+            exit 64
+            ;;
+        esac
+        exec /opt/cardrag-portainer/archive-preflight.sh \
+          /mnt/cardrag-archive -- \
+          /opt/cardrag-portainer/storage-preflight.sh \
+          /mnt/cardrag-archive -- \
+          /usr/local/bin/cardrag-entrypoint "$$@"
+      - --
+    command:
+      - cardrag
+      - state
+      - export
+      - --destination
+      - /mnt/cardrag-archive
+    environment:
+      <<: *app-environment
+      CARDRAG_MINIMUM_FREE_GIB: ${CARDRAG_MINIMUM_FREE_GIB:-50}
+      CARDRAG_MINIMUM_FREE_PERCENT: ${CARDRAG_MINIMUM_FREE_PERCENT:-20}
+      CARDRAG_MAXIMUM_USED_PERCENT: ${CARDRAG_MAXIMUM_USED_PERCENT:-85}
+      CARDRAG_WARNING_USED_PERCENT: ${CARDRAG_WARNING_USED_PERCENT:-70}
+      CARDRAG_POSTGRES_ADMIN_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      CARDRAG_POSTGRES_ADMIN_HOST: postgres
+      CARDRAG_POSTGRES_ADMIN_PORT: "5432"
+      CARDRAG_POSTGRES_ADMIN_USER: postgres
+      CARDRAG_DEPLOYMENT_METADATA_ROOT: /mnt/cardrag-deployment
+      CARDRAG_ARCHIVE_EXPECTED_SOURCE: ${CARDRAG_ARCHIVE_EXPECTED_SOURCE:-}
+      CARDRAG_STATE_EXPORT_ENABLED: ${CARDRAG_STATE_EXPORT_ENABLED:-false}
+      CARDRAG_STATE_SELF_CONTAINED: ${CARDRAG_STATE_SELF_CONTAINED:-false}
+    secrets:
+      - source: cardrag_database_url
+        target: cardrag_database_url
+      - source: postgres_admin_password
+        target: postgres_admin_password
+    volumes:
+      - cardrag_objects:/var/lib/cardrag/objects:ro
+      - cardrag_generations:/var/lib/cardrag/generations:ro
+      - type: bind
+        source: ${CARDRAG_IMPORT_ROOT:-/srv/cardrag/imports}
+        target: /mnt/cardrag-imports
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_DEPLOYMENT_ROOT:-/srv/cardrag/config/deployment}
+        target: /mnt/cardrag-deployment
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_ARCHIVE_ROOT:-/mnt/cardrag-backup/cardrag}
+        target: /mnt/cardrag-archive
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/portainer/scripts/storage-preflight.sh
+        target: /opt/cardrag-portainer/storage-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/portainer/scripts/archive-preflight.sh
+        target: /opt/cardrag-portainer/archive-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  state-restore:
+    <<: *app-common
+    build:
+      context: .
+      target: admin
+      args:
+        APP_VERSION: ${CARDRAG_VERSION:-dev}
+        VCS_REF: ${CARDRAG_VCS_REF:-unknown}
+    profiles: ["state-maintenance"]
+    restart: "no"
+    cpus: "${CARDRAG_ADMIN_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_ADMIN_MEMORY:-4g}
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        if [ "$${CARDRAG_STATE_RESTORE_ENABLED:-false}" != true ]; then
+          echo "state restore job is disabled; set CARDRAG_STATE_RESTORE_ENABLED=true for one deployment"
+          exit 0
+        fi
+        exec /opt/cardrag-portainer/archive-preflight.sh \
+          /mnt/cardrag-archive -- \
+          /opt/cardrag-portainer/restore-preflight.sh \
+          /mnt/cardrag-runtime /mnt/cardrag-archive -- \
+          /usr/local/bin/cardrag-entrypoint "$$@"
+      - --
+    command:
+      - cardrag
+      - state
+      - restore
+      - --source
+      - ${CARDRAG_STATE_PACKAGE_PATH:-/mnt/cardrag-archive/READY-NOT-SET}
+      - --empty-target
+    environment:
+      <<: *app-environment
+      CARDRAG_MINIMUM_FREE_GIB: ${CARDRAG_MINIMUM_FREE_GIB:-50}
+      CARDRAG_MINIMUM_FREE_PERCENT: ${CARDRAG_MINIMUM_FREE_PERCENT:-20}
+      CARDRAG_MAXIMUM_USED_PERCENT: ${CARDRAG_MAXIMUM_USED_PERCENT:-85}
+      CARDRAG_WARNING_USED_PERCENT: ${CARDRAG_WARNING_USED_PERCENT:-70}
+      CARDRAG_STORAGE_ROOT: /mnt/cardrag-runtime/objects
+      CARDRAG_GENERATION_ROOT: /mnt/cardrag-runtime/generations
+      CARDRAG_POSTGRES_ADMIN_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      CARDRAG_POSTGRES_ADMIN_HOST: postgres
+      CARDRAG_POSTGRES_ADMIN_PORT: "5432"
+      CARDRAG_POSTGRES_ADMIN_USER: postgres
+      CARDRAG_DEPLOYMENT_METADATA_ROOT: /mnt/cardrag-deployment
+      CARDRAG_DB_PASSWORD_FILE: /run/secrets/cardrag_db_password
+      CARDRAG_WORKER_DB_PASSWORD_FILE: /run/secrets/cardrag_worker_db_password
+      CARDRAG_MCP_DB_PASSWORD_FILE: /run/secrets/cardrag_mcp_db_password
+      KEYCLOAK_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
+      CARDRAG_ARCHIVE_EXPECTED_SOURCE: ${CARDRAG_ARCHIVE_EXPECTED_SOURCE:-}
+      CARDRAG_STATE_RESTORE_ENABLED: ${CARDRAG_STATE_RESTORE_ENABLED:-false}
+      CARDRAG_STATE_PACKAGE_PATH: ${CARDRAG_STATE_PACKAGE_PATH:-/mnt/cardrag-archive/READY-NOT-SET}
+    secrets:
+      - source: cardrag_database_url
+        target: cardrag_database_url
+      - source: postgres_admin_password
+        target: postgres_admin_password
+      - source: cardrag_db_password
+        target: cardrag_db_password
+      - source: cardrag_worker_db_password
+        target: cardrag_worker_db_password
+      - source: cardrag_mcp_db_password
+        target: cardrag_mcp_db_password
+      - source: keycloak_db_password
+        target: keycloak_db_password
+    volumes:
+      - type: bind
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}
+        target: /mnt/cardrag-runtime
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_ARCHIVE_ROOT:-/mnt/cardrag-backup/cardrag}
+        target: /mnt/cardrag-archive
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_DEPLOYMENT_ROOT:-/srv/cardrag/config/deployment}
+        target: /mnt/cardrag-deployment
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/portainer/scripts/storage-preflight.sh
+        target: /opt/cardrag-portainer/storage-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/portainer/scripts/archive-preflight.sh
+        target: /opt/cardrag-portainer/archive-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ./deploy/portainer/scripts/restore-preflight.sh
+        target: /opt/cardrag-portainer/restore-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   migrate:
     <<: *app-common

@@ -53,6 +53,16 @@ artifact references and hashes are recorded in `uv.lock`. Release review must
 continue to assess any applicable source, modification and relinking
 obligations; including these notices is not by itself a legal conclusion.
 
+## PostgreSQL 17 client tools
+
+The owner-only admin image includes the PostgreSQL 17 `pg_dump`, `pg_restore`
+and `psql` clients, plus `libpq`, for portable logical backup and restore.  They
+are distributed under the PostgreSQL License.  The exact client binaries and
+license are copied from the same digest-pinned PostgreSQL/pgvector image used
+by the deployment.  The license notice is installed at
+`/usr/share/licenses/cardrag/postgresql-client-17/COPYRIGHT`.  These tools are
+not present in the public MCP or worker role images.
+
 ## Runtime license inventory
 
 The release workflow creates an SBOM and a locked runtime dependency-license

@@ -91,7 +91,10 @@ class JobRepository:
                       AND NOT EXISTS (
                           SELECT 1 FROM pipeline_runs r
                           WHERE r.run_id::text = jobs.payload->>'run_id'
-                            AND (r.pause_requested OR r.cancel_requested OR r.state IN ('paused','cancelled'))
+                            AND (
+                                r.pause_requested OR r.cancel_requested
+                                OR r.state NOT IN ('queued','running')
+                            )
                       )
                       AND (%(issuer)s::text IS NULL OR issuer = %(issuer)s::text)
                     ORDER BY available_at, created_at, id

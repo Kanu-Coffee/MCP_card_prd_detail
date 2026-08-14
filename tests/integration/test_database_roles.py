@@ -20,6 +20,24 @@ def _runtime_url(name: str) -> str:
 
 
 @pytest.mark.integration
+def test_legacy_policy_functions_are_not_publicly_executable(
+    migrated_database: Postgres,
+) -> None:
+    signatures = (
+        "set_generation_root_key()",
+        "cardrag_ocr_manifest_reusable(jsonb,text,text,text,text,text,double precision,integer,text,text)",
+        "cardrag_legacy_adoption_bound(jsonb,text,text,text,text[])",
+    )
+    with migrated_database.connection() as connection, connection.cursor() as cursor:
+        for signature in signatures:
+            cursor.execute(
+                "SELECT has_function_privilege('public', %s, 'EXECUTE') AS allowed",
+                (signature,),
+            )
+            assert cursor.fetchone() == {"allowed": False}
+
+
+@pytest.mark.integration
 def test_mcp_role_is_read_only_except_audit_and_anonymous_metric_upsert(
     migrated_database: object,
 ) -> None:

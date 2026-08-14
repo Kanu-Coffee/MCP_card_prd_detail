@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, SecretStr, ValidationInfo, field_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,7 +25,8 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "production"
     application_version: str = "dev"
     image_revision: str = "unknown"
-    database_url: SecretStr
+    database_url: SecretStr | None = None
+    database_url_file: Path | None = None
     storage_root: Path
     generation_root: Path
     build_root: Path
@@ -78,12 +79,39 @@ class Settings(BaseSettings):
     shinhan_discovery_minimum: int = Field(default=20, ge=2)
     discovery_minimum_previous_ratio: float = Field(default=0.6, gt=0.0, le=1.0)
 
+    @model_validator(mode="after")
+    def resolve_database_url_secret(self) -> Settings:
+        """Load the database URL from its Docker secret when no value is set.
+
+        The container entrypoint still exports ``CARDRAG_DATABASE_URL`` for the
+        normal process.  Resolving the file here as well keeps operator commands
+        launched from a Portainer console inside the same security boundary,
+        without requiring the secret value to be copied into the shell history.
+        """
+
+        if self.database_url is not None:
+            return self
+        if self.database_url_file is None:
+            raise ValueError("database_url or database_url_file is required")
+        raw = self.secret_text_from_file(self.database_url_file)
+        if raw is None:  # pragma: no cover - guarded by the path check above
+            raise ValueError("database URL secret is unavailable")
+        self.database_url = SecretStr(raw)
+        return self
+
     def issuer_discovery_minimum(self, issuer: str) -> int:
         return {
             "woori": self.woori_discovery_minimum,
             "kb": self.kb_discovery_minimum,
             "shinhan": self.shinhan_discovery_minimum,
         }[issuer]
+
+    def database_url_value(self) -> str:
+        """Return the resolved URL without exposing it through model output."""
+
+        if self.database_url is None:  # defensive; the model validator rejects this state
+            raise RuntimeError("database URL is not configured")
+        return self.database_url.get_secret_value()
 
     @field_validator("storage_root", "generation_root", "build_root", "page_cache_root")
     @classmethod

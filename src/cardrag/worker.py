@@ -30,7 +30,7 @@ async def run_worker(*, once: bool = False) -> None:
         application_version=settings.application_version,
         image_revision=settings.image_revision,
     )
-    database = Postgres(settings.database_url.get_secret_value(), min_size=1, max_size=4)
+    database = Postgres(settings.database_url_value(), min_size=1, max_size=4)
     database.open()
     jobs = JobRepository(database)
     pipeline = OfflinePipeline(settings, database, jobs)

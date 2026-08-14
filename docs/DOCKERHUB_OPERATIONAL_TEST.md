@@ -6,16 +6,17 @@ digest를 그대로 사용한다.
 
 ## 1. 이미지 선택
 
-기본 운영 테스트 버전은 `0.1.2`이다. `deploy/dockerhub.compose.yaml`은 아래 세 역할
-태그를 사용한다.
+이 저장소의 v0.2 기능 운영 테스트는 서명과 통합 release manifest까지 성공한
+`0.2.0` 공개 릴리스가 생성된 뒤에만 수행한다. 예상 역할 태그는 아래와 같다.
 
-- `ymtop59/mcp-card-prd-detail:0.1.2-mcp`
-- `ymtop59/mcp-card-prd-detail:0.1.2-worker`
-- `ymtop59/mcp-card-prd-detail:0.1.2-admin`
+- `ymtop59/mcp-card-prd-detail:0.2.0-mcp`
+- `ymtop59/mcp-card-prd-detail:0.2.0-worker`
+- `ymtop59/mcp-card-prd-detail:0.2.0-admin`
 
 `0.1.0`과 `0.1.1`은 공개 과정에서 image push 뒤 통합 release manifest 생성 전에 중단된
 부분 release다. 운영 테스트에는 사용하지 않고, OCI signature와 통합 release manifest까지
-검증된 `0.1.2`만 사용한다.
+검증된 `0.1.2`는 이전 기능의 기준 릴리스일 뿐 레거시 import·portable state 기능을
+포함하지 않는다. v0.2 운영 전환에 대신 사용하지 않는다.
 
 Docker Hub 저장소는 SemVer 역할 tag(`X.Y.Z-{mcp|worker|admin}`와 대응 SHA alias)를
 immutable 정규식으로 설정한다. 동일 이름 tag는 덮어쓰거나 삭제하지 않고, 새 소스 revision은
@@ -31,7 +32,9 @@ export CARDRAG_WORKER_IMAGE='ymtop59/mcp-card-prd-detail@sha256:REPLACE_WORKER_D
 export CARDRAG_ADMIN_IMAGE='ymtop59/mcp-card-prd-detail@sha256:REPLACE_ADMIN_DIGEST'
 ```
 
-digest를 아직 고정하지 않은 최초 smoke에서는 위 세 변수를 생략할 수 있다.
+세 변수는 모든 Docker Hub Compose 명령에서 필수다. digest를 모르는 상태에서 tag로
+대체하거나 변수를 생략하면 overlay가 즉시 실패한다. 같은 릴리스의 통합 manifest와
+Cosign 증거로 세 digest를 먼저 검증한다.
 
 ## 2. Secret과 인증 준비
 
@@ -155,7 +158,8 @@ curl --fail http://127.0.0.1:8000/health/ready
 
 중간에 운영 terminal이 끊겼다면 새 BULK를 만들지 말고 `cardrag run list --state running`으로
 기존 run ID를 찾은 뒤 `cardrag run status RUN_ID`, `cardrag run finalize RUN_ID` 순서로
-동일 run을 복구한다. 자세한 절차는 운영 RUNBOOK을 따른다.
+동일 run을 복구한다. Portainer에서는 같은 명령을 직접 입력하지 않고 RUNBOOK의 admin
+allow-list one-shot을 사용한다.
 
 초기 migration, Keycloak/OIDC client, Codex device token, issuer 실사이트와 generation
 게시 절차는 `docs/REAL_ENV_HANDOFF.md`의 성공 조건을 함께 따른다.

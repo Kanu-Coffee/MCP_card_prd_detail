@@ -514,6 +514,9 @@ async def test_three_issuer_bulk_pipeline_restart_publish_and_http_mcp(
     # finalize`: existing durable jobs are accounted, validated, sealed and
     # published without re-enqueueing.
     monkeypatch.setattr("cardrag.cli._settings", lambda: settings)
+    # The isolated fixture is tiny; production's absolute 50 GiB admission is
+    # covered separately and must not depend on the CI host disk size.
+    monkeypatch.setenv("CARDRAG_MINIMUM_FREE_GIB", "0")
     finalized = await _finalize_existing_run(run_id)
     assert finalized["state"] == "succeeded"
     assert finalized["publication"] == "published"

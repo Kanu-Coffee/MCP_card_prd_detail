@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Portainer CardRAG daily pipeline at 03:00 Asia/Seoul
+Documentation=file:/opt/cardrag/deploy/portainer/RUNBOOK.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=cardrag-portainer-daily.service
+
+[Install]
+WantedBy=timers.target

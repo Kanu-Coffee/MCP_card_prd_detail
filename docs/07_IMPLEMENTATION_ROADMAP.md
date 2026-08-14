@@ -72,7 +72,8 @@
 - 일일 증분은 매일 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행하고 각 job 종료 후 10분 대기하며 issuer 장애를 격리한다.
 - v1 운영 관리면은 CLI와 scheduled job만 사용하며 public admin API와 web UI는 만들지 않는다.
 - 최신 문서 처리 실패·누락은 generation 게시를 차단하고, 과거 이력 실패는 격리·보고 후 최신 coverage 100%일 때만 게시를 허용한다.
-- backup·restore는 v1 개발 범위에서 제외하고 추후 개선 과제로 둔다.
+- v1에서 제외했던 backup·restore를 0.2 범위로 승격하고 host bind, normalized legacy import와
+  PostgreSQL+CAS+generation portable state를 구현한다.
 - query 원문은 저장하지 않고 접근·인증·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존한다.
 - OCR·구조 분석 provider/model 전환 시 부분 결과를 섞지 않고 전체 문서를 새 attempt로 처리한다.
 
@@ -81,7 +82,7 @@
 
 - 동시 요청 5, request timeout 45초, 초기 검색 P95 30초와 Compose resource 개발 기본값;
   실제 BULK 이후 QPS·가용성·host sizing 보정
-- PostgreSQL 17 schema·migration 1~13, content-addressed file layout와 FTS+pgvector/RRF
+- PostgreSQL 17 schema·migration 1~14, content-addressed file layout와 FTS+pgvector/RRF
 - Codex `gpt-5.4`, 결정론적 구조 baseline, OpenRouter `text-embedding-3-small` 1,536차원;
   실제 모델 비용·quota·품질 재측정
 - 문자 99.5%+, critical/page/source-span 100%, Recall@10 95%+, critical Recall/filter 100%,
@@ -300,7 +301,7 @@
 - public Docker Hub **ymtop59/mcp-card-prd-detail**와 private GitHub 경계, v1 `linux/amd64`, `vX.Y.Z`+manual approval 공개 push, version+Git SHA tag, GitHub Actions OIDC keyless Cosign 서명, digest 배포
 - health/readiness, structured logs, metrics, alerting
 - 접근·인증·PDF audit metadata 90일과 비식별 metric 1년 보존
-- generation rollback rehearsal; backup·restore는 v1 후속 과제
+- generation rollback rehearsal, portable state export/empty-target restore와 다른-host cutover drill
 
 산출물:
 
@@ -378,6 +379,6 @@ P2:
 - 모델·검색 engine 교체 자동화
 - provider 비용 최적화
 - 품질 regression dashboard와 운영 자동화
-- backup·restore 설계와 복구 훈련
+- 증분 backup/PITR와 자동 주기화(0.2의 점검시간 full export/restore 이후 단계)
 
 우선순위는 난이도가 아니라 잘못 결정했을 때의 재작업·데이터 손실·운영 위험을 기준으로 한다.

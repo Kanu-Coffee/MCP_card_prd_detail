@@ -31,6 +31,7 @@ def clean_database(migrated_database: Postgres) -> Postgres:
             """
             TRUNCATE TABLE
                 metric_rollups, audit_events, stage_checkpoints, job_attempts, jobs,
+                legacy_import_documents, legacy_imports,
                 run_issuer_status, pipeline_runs, scheduler_locks, generation_pins,
                 issuer_rate_limits, generation_artifacts, generation_documents,
                 generation_expected_documents, generation_snapshots,

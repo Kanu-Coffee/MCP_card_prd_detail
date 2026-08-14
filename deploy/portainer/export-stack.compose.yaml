@@ -1,0 +1,183 @@
+name: cardrag-export
+
+# Dedicated portable-state export Stack. Stop the normal application Stack
+# first; this Stack deliberately contains no Keycloak, MCP, worker, migration,
+# scheduler, retention, or admin service.
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
+    platform: linux/amd64
+    restart: "no"
+    shm_size: 256m
+    cpus: "${CARDRAG_POSTGRES_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_POSTGRES_MEMORY:-4g}
+    pids_limit: 256
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      TZ: Asia/Seoul
+    secrets:
+      - postgres_admin_password
+    volumes:
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" &&
+          test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" --tuples-only --no-align
+          --command "SELECT count(*) FROM pg_roles WHERE rolname IN ('cardrag','cardrag_worker','cardrag_mcp','keycloak')")" = 4 &&
+          test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" --tuples-only --no-align
+          --command "SELECT count(*) FROM pg_database WHERE datname IN ('cardrag','keycloak')")" = 2
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  state-export:
+    image: ${CARDRAG_ADMIN_IMAGE:?CARDRAG_ADMIN_IMAGE_required}
+    platform: linux/amd64
+    pull_policy: always
+    restart: "no"
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=0700,uid=10001,gid=10001
+      - /var/lib/cardrag-home:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 60s
+    cpus: "${CARDRAG_ADMIN_CPUS:-2.0}"
+    mem_limit: ${CARDRAG_ADMIN_MEMORY:-4g}
+    entrypoint:
+      - /bin/sh
+      - -euc
+      - |
+        if [ "$${CARDRAG_STATE_EXPORT_ENABLED:-false}" != true ]; then
+          echo "state export job is disabled; set CARDRAG_STATE_EXPORT_ENABLED=true for one deployment"
+          exit 0
+        fi
+        case "$${CARDRAG_STATE_SELF_CONTAINED:-false}" in
+          true) set -- "$$@" --self-contained ;;
+          false) ;;
+          *)
+            echo "CARDRAG_STATE_SELF_CONTAINED must be true or false" >&2
+            exit 64
+            ;;
+        esac
+        exec /opt/cardrag-portainer/archive-preflight.sh \
+          /mnt/cardrag-archive -- \
+          /opt/cardrag-portainer/storage-preflight.sh \
+          /mnt/cardrag-archive -- \
+          /usr/local/bin/cardrag-entrypoint "$$@"
+      - --
+    command:
+      - cardrag
+      - state
+      - export
+      - --destination
+      - /mnt/cardrag-archive
+    environment:
+      CARDRAG_ENVIRONMENT: production
+      CARDRAG_DATABASE_URL_FILE: /run/secrets/cardrag_database_url
+      CARDRAG_STORAGE_ROOT: /var/lib/cardrag/objects
+      CARDRAG_GENERATION_ROOT: /var/lib/cardrag/generations
+      CARDRAG_POSTGRES_ADMIN_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      CARDRAG_POSTGRES_ADMIN_HOST: postgres
+      CARDRAG_POSTGRES_ADMIN_PORT: "5432"
+      CARDRAG_POSTGRES_ADMIN_USER: postgres
+      CARDRAG_DEPLOYMENT_METADATA_ROOT: /mnt/cardrag-deployment
+      CARDRAG_ARCHIVE_EXPECTED_SOURCE: ${CARDRAG_ARCHIVE_EXPECTED_SOURCE:-}
+      CARDRAG_STATE_EXPORT_ENABLED: ${CARDRAG_STATE_EXPORT_ENABLED:-false}
+      CARDRAG_STATE_SELF_CONTAINED: ${CARDRAG_STATE_SELF_CONTAINED:-false}
+      CARDRAG_MINIMUM_FREE_GIB: ${CARDRAG_MINIMUM_FREE_GIB:-50}
+      CARDRAG_MINIMUM_FREE_PERCENT: ${CARDRAG_MINIMUM_FREE_PERCENT:-20}
+      CARDRAG_MAXIMUM_USED_PERCENT: ${CARDRAG_MAXIMUM_USED_PERCENT:-85}
+      CARDRAG_WARNING_USED_PERCENT: ${CARDRAG_WARNING_USED_PERCENT:-70}
+      TZ: Asia/Seoul
+    secrets:
+      - source: cardrag_database_url
+        target: cardrag_database_url
+      - source: postgres_admin_password
+        target: postgres_admin_password
+    volumes:
+      - type: bind
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}/objects
+        target: /var/lib/cardrag/objects
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}/generations
+        target: /var/lib/cardrag/generations
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_IMPORT_ROOT:-/srv/cardrag/imports}
+        target: /mnt/cardrag-imports
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_DEPLOYMENT_ROOT:-/srv/cardrag/config/deployment}
+        target: /mnt/cardrag-deployment
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_ARCHIVE_ROOT:-/mnt/cardrag-backup/cardrag}
+        target: /mnt/cardrag-archive
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/portainer/storage-preflight.sh
+        target: /opt/cardrag-portainer/storage-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/portainer/archive-preflight.sh
+        target: /opt/cardrag-portainer/archive-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+    name: ${CARDRAG_POSTGRES_VOLUME:-cardrag-postgres-v1}
+    external: true
+
+networks:
+  backend:
+    internal: true
+
+secrets:
+  postgres_admin_password:
+    file: ${CARDRAG_SECRETS_DIR:-/srv/cardrag/secrets}/postgres_admin_password.txt
+  cardrag_database_url:
+    file: ${CARDRAG_SECRETS_DIR:-/srv/cardrag/secrets}/cardrag_database_url.txt

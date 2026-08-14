@@ -7,7 +7,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, time, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from cardrag.db import Postgres
@@ -223,6 +223,7 @@ class DailyScheduler:
         ocr_chunk_pages: int = 2,
         structure_schema_version: str = STRUCTURE_SCHEMA_VERSION,
         chunk_policy: str = CHUNK_POLICY_VERSION,
+        transaction_connection: Any | None = None,
     ) -> tuple[uuid.UUID, str]:
         if not embedding_provider.strip() or not embedding_model.strip():
             raise ValueError("embedding provider and model must be explicit")
@@ -230,7 +231,13 @@ class DailyScheduler:
             raise ValueError("embedding dimension must be positive")
         run_id = uuid.uuid4()
         generation_id = new_generation_id()
-        with self.database.connection() as connection, connection.cursor() as cursor:
+        owns_connection = transaction_connection is None
+        connection_scope = (
+            self.database.connection()
+            if transaction_connection is None
+            else contextlib.nullcontext(transaction_connection)
+        )
+        with connection_scope as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO pipeline_runs(run_id, run_type, state, generation_id, started_at)
@@ -240,12 +247,22 @@ class DailyScheduler:
             )
             cursor.execute(
                 """
-                INSERT INTO generations(generation_id, state, manifest_sha256, root_uri, schema_version,
-                                        embedding_provider, embedding_model, embedding_dimension)
-                VALUES (%s, 'building', repeat('0', 64), '', 'cardrag-generation.v1',
-                        %s, %s, %s)
+                INSERT INTO generations(
+                    generation_id, state, manifest_sha256, root_uri, root_key, schema_version,
+                    embedding_provider, embedding_model, embedding_dimension
+                )
+                VALUES (%s, 'building', repeat('0', 64), 'generations/' || %s,
+                        'generations/' || %s,
+                        'cardrag-generation.v1', %s, %s, %s)
                 """,
-                (generation_id, embedding_provider, embedding_model, embedding_dimension),
+                (
+                    generation_id,
+                    generation_id,
+                    generation_id,
+                    embedding_provider,
+                    embedding_model,
+                    embedding_dimension,
+                ),
             )
             # Start every candidate as a complete, standalone materialization of
             # the active immutable generation. Fresh issuer snapshots are *not*
@@ -276,20 +293,15 @@ class DailyScheduler:
                 WHERE active.embedding_provider=%s AND active.embedding_model=%s
                   AND active.embedding_dimension=%s
                   AND d.structure_schema_version=%s AND d.chunk_policy=%s
-                  AND d.ocr_manifest->'attempt'->>'prompt_version'=%s
-                  AND d.ocr_manifest->'attempt'->>'renderer'=%s
-                  AND (
-                      d.ocr_manifest->'attempt'->>'provider'<>'codex-exec'
-                      OR d.ocr_manifest->'attempt'->>'reasoning_effort'=%s
+                  AND cardrag_ocr_manifest_reusable(
+                      d.ocr_manifest, d.pdf_sha256, d.ocr_sha256, %s, %s, %s, %s, %s, %s, %s
                   )
-                  AND (d.ocr_manifest->'attempt'->>'render_scale')::double precision=%s
-                  AND (d.ocr_manifest->'attempt'->>'chunk_pages')::integer=%s
                   AND (
-                      (d.ocr_manifest->'attempt'->>'provider'='codex-exec'
-                       AND d.ocr_manifest->'attempt'->>'model'=%s)
-                      OR
-                      (d.ocr_manifest->'attempt'->>'provider'='openrouter'
-                       AND d.ocr_manifest->'attempt'->>'model'=%s)
+                      d.ocr_manifest->>'schema_version' IS DISTINCT FROM 'cardrag.legacy-ocr-adoption.v1'
+                      OR cardrag_legacy_adoption_bound(
+                          d.ocr_manifest, d.document_id, d.pdf_sha256, d.ocr_sha256,
+                          ARRAY['succeeded']::text[]
+                      )
                   )
                 """,
                 (
@@ -319,7 +331,6 @@ class DailyScheduler:
             active_count_row = cursor.fetchone()
             active_documents = int(active_count_row["document_count"]) if active_count_row is not None else 0
             if not bulk and copied_documents != active_documents:
-                connection.rollback()
                 raise ValueError(
                     "processing contract changed; a BULK rebuild is required to preserve all versions"
                 )
@@ -364,7 +375,8 @@ class DailyScheduler:
                     "INSERT INTO run_issuer_status(run_id, issuer, sequence_no) VALUES (%s, %s, %s)",
                     (run_id, issuer.value, sequence),
                 )
-            connection.commit()
+            if owns_connection:
+                connection.commit()
         return run_id, generation_id
 
     async def enqueue_sequence(

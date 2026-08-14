@@ -33,6 +33,26 @@ def test_runtime_paths_must_be_explicit_and_absolute() -> None:
         _settings(storage_root=Path("relative"))
 
 
+def test_database_url_can_be_loaded_directly_from_a_secret_file(tmp_path: Path) -> None:
+    secret = tmp_path / "cardrag_database_url"
+    secret.write_text("postgresql://cardrag:secret@postgres/cardrag\n", encoding="utf-8")
+
+    settings = _settings(database_url=None, database_url_file=secret)
+
+    assert settings.database_url_value() == "postgresql://cardrag:secret@postgres/cardrag"
+    assert "secret" not in repr(settings.database_url)
+
+
+def test_database_url_secret_file_is_required_when_url_is_unset(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="database_url or database_url_file is required"):
+        _settings(database_url=None)
+
+    empty = tmp_path / "empty"
+    empty.write_text("\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="secret file is empty"):
+        _settings(database_url=None, database_url_file=empty)
+
+
 def test_online_postgres_timeouts_are_ordered_inside_the_request_deadline() -> None:
     settings = _settings()
     assert settings.postgres_lock_timeout_seconds == 5
