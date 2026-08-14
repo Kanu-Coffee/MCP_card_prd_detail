@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from cardrag import cli
@@ -105,7 +106,7 @@ def test_restore_requires_explicit_empty_target_flag(tmp_path: Path) -> None:
     result = CliRunner().invoke(cli.app, ["state", "restore", "--source", str(package)])
 
     assert result.exit_code != 0
-    assert "--empty-target" in result.output
+    assert "--empty-target" in unstyle(result.output)
 
 
 def test_restore_verify_flag_opens_database_inspector_only_after_activation(
