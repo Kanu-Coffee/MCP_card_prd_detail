@@ -102,6 +102,10 @@ jobs:
           printf '%s\n' 'postgresql://cardrag_worker:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_worker_database_url.txt"
           printf '%s\n' 'postgresql://cardrag_mcp:fixture-only@postgres:5432/cardrag' > "$secret_dir/cardrag_mcp_database_url.txt"
           chmod 0444 "$secret_dir"/*.txt
+          export CARDRAG_ADMIN_IMAGE=ymtop59/mcp-card-prd-detail@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          export CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          export CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+          export CARDRAG_ARCHIVE_EXPECTED_SOURCE=nas.example:/cardrag
           CARDRAG_SECRETS_DIR="$secret_dir" docker compose --profile '*' config --quiet
           CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
             -f compose.yaml \
@@ -115,6 +119,36 @@ jobs:
             -f deploy/dockerhub.compose.yaml \
             --profile '*' \
             config --format json > /tmp/cardrag-dockerhub-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f compose.yaml \
+            -f deploy/dockerhub.compose.yaml \
+            -f deploy/portainer/host-storage.compose.yaml \
+            --profile '*' \
+            config --format json > /tmp/cardrag-portainer-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f compose.yaml \
+            -f deploy/dockerhub.compose.yaml \
+            -f deploy/portainer/host-storage.compose.yaml \
+            config --services > /tmp/cardrag-portainer-default-services.txt
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f compose.yaml \
+            -f deploy/dockerhub.compose.yaml \
+            -f deploy/portainer/host-storage.compose.yaml \
+            -f deploy/portainer/validation.compose.yaml \
+            config --format json > /tmp/cardrag-portainer-validation-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f deploy/portainer/restore-stack.compose.yaml \
+            config --format json > /tmp/cardrag-portainer-restore-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f deploy/portainer/export-stack.compose.yaml \
+            config --format json > /tmp/cardrag-portainer-export-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" \
+          CARDRAG_LEGACY_OBJECTS_VOLUME=fixture-objects \
+          CARDRAG_LEGACY_GENERATIONS_VOLUME=fixture-generations \
+          docker compose \
+            -f deploy/portainer/export-stack.compose.yaml \
+            -f deploy/portainer/legacy-export-storage.compose.yaml \
+            config --format json > /tmp/cardrag-portainer-pre-export-compose.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -156,14 +190,158 @@ jobs:
           public_compose = json.loads(
               Path("/tmp/cardrag-dockerhub-compose.json").read_text()
           )
-          for service in ("volume-init", "admin", "migrate", "worker", "mcp"):
+          expected_image = {
+              "volume-init": "ymtop59/mcp-card-prd-detail@sha256:" + "a" * 64,
+              "admin": "ymtop59/mcp-card-prd-detail@sha256:" + "a" * 64,
+              "legacy-import": "ymtop59/mcp-card-prd-detail@sha256:" + "a" * 64,
+              "state-export": "ymtop59/mcp-card-prd-detail@sha256:" + "a" * 64,
+              "state-restore": "ymtop59/mcp-card-prd-detail@sha256:" + "a" * 64,
+              "migrate": "ymtop59/mcp-card-prd-detail@sha256:" + "a" * 64,
+              "worker": "ymtop59/mcp-card-prd-detail@sha256:" + "b" * 64,
+              "mcp": "ymtop59/mcp-card-prd-detail@sha256:" + "c" * 64,
+          }
+          for service, image in expected_image.items():
               definition = public_compose["services"][service]
               assert "build" not in definition, (service, definition.get("build"))
               assert definition["pull_policy"] == "always", service
-              assert definition["image"].startswith(
-                  "ymtop59/mcp-card-prd-detail:"
-              ), (service, definition["image"])
+              assert definition["image"] == image, (service, definition["image"])
+
+          portainer = json.loads(
+              Path("/tmp/cardrag-portainer-compose.json").read_text()
+          )
+          assert portainer["volumes"]["postgres_data"] == {
+              "name": "cardrag-postgres-v1", "external": True
+          }
+          assert portainer["volumes"]["codex_auth"] == {
+              "name": "cardrag-codex-auth-v1", "external": True
+          }
+          for service in ("volume-init", "admin", "legacy-import", "migrate", "worker", "mcp"):
+              image = expected_image[service]
+              definition = portainer["services"][service]
+              assert "build" not in definition, (service, definition.get("build"))
+              assert definition["image"] == image, (service, definition["image"])
+              for mount in definition.get("volumes", []):
+                  if mount["type"] == "bind":
+                      # Compose 2.38 omits explicit false values from JSON.
+                      # The Portainer source test separately proves that every
+                      # bind declaration spells out create_host_path: false.
+                      assert mount.get("bind", {}).get(
+                          "create_host_path", False
+                      ) is False, (service, mount)
+
+          def mounts(service):
+              return {
+                  entry["target"]: entry
+                  for entry in portainer["services"][service].get("volumes", [])
+              }
+
+          assert mounts("legacy-import")["/mnt/cardrag-imports"]["read_only"] is True
+          assert "/mnt/cardrag-imports" not in mounts("worker")
+          assert "/mnt/cardrag-imports" not in mounts("mcp")
+          assert "state-export" not in portainer["services"]
+          assert "state-restore" not in portainer["services"]
+          assert "/mnt/cardrag-archive" not in mounts("worker")
+          assert "/mnt/cardrag-archive" not in mounts("mcp")
+          assert portainer["services"]["admin"]["profiles"] == ["ops"]
+          assert portainer["services"]["legacy-import"]["profiles"] == ["legacy-import"]
+          assert not portainer["services"]["worker"].get("profiles")
+
+          default_services = set(
+              Path("/tmp/cardrag-portainer-default-services.txt").read_text().splitlines()
+          )
+          assert "worker" in default_services
+          assert not default_services.intersection({
+              "admin", "legacy-import", "state-export", "state-restore"
+          }), default_services
+
+          validation = json.loads(
+              Path("/tmp/cardrag-portainer-validation-compose.json").read_text()
+          )
+          assert validation["name"] == "cardrag-validation"
+          assert set(validation["services"]) == {
+              "postgres", "keycloak", "volume-init", "migrate", "admin", "mcp"
+          }
+          assert "worker" not in validation["services"]
+          assert validation["services"]["admin"]["environment"][
+              "CARDRAG_VALIDATION_ROLLBACK_ENABLED"
+          ] == "false"
+          assert "legacy-import" not in validation["services"]
+
+          restore_stack = json.loads(
+              Path("/tmp/cardrag-portainer-restore-compose.json").read_text()
+          )
+          assert set(restore_stack["services"]) == {"postgres", "state-restore"}
+          assert restore_stack["services"]["postgres"]["restart"] == "no"
+          dedicated_restore = restore_stack["services"]["state-restore"]
+          assert "build" not in dedicated_restore
+          assert dedicated_restore["image"] == expected_image["state-restore"]
+          assert dedicated_restore["command"][-2:] == [
+              "--empty-target", "--verify-restored"
+          ]
+          assert dedicated_restore["environment"]["CARDRAG_STATE_PACKAGE_PATH"] == \
+              "/mnt/cardrag-archive/READY-NOT-SET"
+          dedicated_mounts = {
+              item["target"]: item for item in dedicated_restore["volumes"]
+          }
+          assert dedicated_mounts["/mnt/cardrag-runtime"]["source"] == "/srv/cardrag/runtime"
+          assert dedicated_mounts["/mnt/cardrag-archive"]["read_only"] is True
+          assert dedicated_mounts["/mnt/cardrag-deployment"]["read_only"] is True
+          assert all(item["type"] == "bind" for item in dedicated_mounts.values())
+          assert all(
+              item.get("bind", {}).get("create_host_path", False) is False
+              for item in dedicated_mounts.values()
+          )
+          assert restore_stack["networks"]["backend"]["internal"] is True
+
+          export_stack = json.loads(
+              Path("/tmp/cardrag-portainer-export-compose.json").read_text()
+          )
+          assert set(export_stack["services"]) == {"postgres", "state-export"}
+          assert export_stack["services"]["postgres"]["restart"] == "no"
+          dedicated_export = export_stack["services"]["state-export"]
+          assert "build" not in dedicated_export
+          assert dedicated_export["image"] == expected_image["state-export"]
+          assert "--self-contained" not in dedicated_export["command"]
+          assert dedicated_export["environment"]["CARDRAG_STATE_SELF_CONTAINED"] == "false"
+          assert 'set -- "$$@" --self-contained' in dedicated_export["entrypoint"][2]
+          dedicated_export_mounts = {
+              item["target"]: item for item in dedicated_export["volumes"]
+          }
+          assert dedicated_export_mounts["/var/lib/cardrag/objects"]["read_only"] is True
+          assert dedicated_export_mounts["/var/lib/cardrag/generations"]["read_only"] is True
+          assert dedicated_export_mounts["/mnt/cardrag-deployment"]["read_only"] is True
+          assert not dedicated_export_mounts["/mnt/cardrag-archive"].get("read_only", False)
+          assert export_stack["networks"]["backend"]["internal"] is True
+          assert {
+              item["source"]
+              for item in export_stack["services"]["postgres"].get("secrets", [])
+          } == {"postgres_admin_password"}
+
+          pre_export_stack = json.loads(
+              Path("/tmp/cardrag-portainer-pre-export-compose.json").read_text()
+          )
+          assert set(pre_export_stack["services"]) == {
+              "postgres", "schema13-safety-backup", "schema14-upgrade", "state-export"
+          }
+          assert set(pre_export_stack["services"]["schema14-upgrade"]["depends_on"]) == {
+              "postgres", "schema13-safety-backup"
+          }
+          assert set(pre_export_stack["services"]["state-export"]["depends_on"]) == {
+              "postgres", "schema14-upgrade"
+          }
+          pre_export_mounts = {
+              item["target"]: item
+              for item in pre_export_stack["services"]["state-export"]["volumes"]
+          }
+          assert pre_export_mounts["/var/lib/cardrag/objects"]["type"] == "volume"
+          assert pre_export_mounts["/var/lib/cardrag/objects"]["read_only"] is True
+          assert pre_export_mounts["/var/lib/cardrag/generations"]["type"] == "volume"
+          assert pre_export_mounts["/var/lib/cardrag/generations"]["read_only"] is True
           PY
+
+          for test_script in deploy/portainer/tests/*.sh; do
+            "$test_script"
+          done
 
   compose-fixture:
     runs-on: ubuntu-24.04
@@ -304,6 +482,12 @@ jobs:
             APP_VERSION=ci-${{ github.run_id }}
             VCS_REF=${{ github.sha }}
 
+      - name: Prove schema 13 to 14 transition bridge
+        if: matrix.target == 'admin'
+        env:
+          CARDRAG_TRANSITION_TEST_IMAGE: cardrag-ci:admin
+        run: deploy/portainer/tests/test-schema13-transition.sh
+
       - name: Check image architecture, user, notices, and excluded content
         env:
           TARGET: ${{ matrix.target }}
@@ -350,6 +534,14 @@ jobs:
             "$manifest" >/dev/null
           grep -Fq 'Independent JPEG Group' "$notice"
           grep -Fq 'FreeType Project' "$notice"
+          if [ "$TARGET" = admin ]; then
+            grep -Fxq \
+              usr/share/licenses/cardrag/postgresql-client-17/COPYRIGHT \
+              <<<"$contents"
+          elif grep -Fq 'usr/local/bin/pg_dump' <<<"$contents"; then
+            echo "PostgreSQL backup client leaked into a non-admin role" >&2
+            exit 1
+          fi
 
       - name: Smoke-test target entrypoint
         env:
@@ -517,6 +709,10 @@ jobs:
               ;;
             admin)
               docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag --help
+              test "$(docker run --rm --entrypoint pg_dump "cardrag-ci:${TARGET}" --version \
+                | awk '{print $3}' | tr -d ')')" = 17.10
+              test "$(docker run --rm --entrypoint pg_restore "cardrag-ci:${TARGET}" --version \
+                | awk '{print $3}' | tr -d ')')" = 17.10
               if docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag-worker --help; then
                 echo "admin image accepted a worker command" >&2
                 exit 1

@@ -54,6 +54,8 @@
    개발 순서, 의존관계, 단계별 산출물과 인수 기준
 8. [완료 체크리스트](08_COMPLETION_CHECKLIST.md)
    영역·카드사별 검증 완료/실환경 검증 대기/운영 인계 상태
+9. [레거시 Import·호스트 영속 저장·서버 이전 운영서](09_LEGACY_IMPORT_AND_PORTABLE_STATE.md)
+   Portainer host bind, normalized bundle, portable state export/restore와 서버 cutover 절차
 
 ## 권장 읽기 순서
 
@@ -101,7 +103,9 @@
 - 원본 PDF는 이용조건 검토 전까지 승인 사용자에게만 제공하고 파일당 100 MB, HTTP Range, 다운로드 감사 metadata 90일 보존을 적용한다.
 - 일일 수집은 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행하고 각 카드사 job 종료 후 10분 대기한다. 한 카드사 실패는 다음 카드사 실행을 막지 않는다.
 - 최신 문서의 OCR·구조·색인 누락 또는 실패가 있으면 candidate generation 게시를 차단하고 이전 generation을 계속 서비스한다. 과거 이력 실패는 quarantine과 보고서에 명시한 뒤 최신 문서 coverage가 100%일 때만 게시를 허용한다.
-- backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 관리한다. 현재 개발에서는 불변 artifact와 명확한 volume 경계를 유지해 후속 backup 도입을 막지 않는다.
+- v1에서는 제외했던 backup·restore를 0.2 범위로 승격한다. PostgreSQL 두 DB, 전체 CAS와
+  generation authority를 같은 maintenance epoch의 portable package로 묶고, 다른 빈 host의
+  restore drill을 운영 완료 조건으로 삼는다.
 - 접근·권한·PDF 감사 metadata는 90일 보존하고 질의 원문은 기본 저장하지 않는다. 비식별 집계 metric은 1년 보존한다.
 - 1차 관리자 표면은 운영 CLI와 scheduled job만 제공하며 공개 관리자 API·웹 UI는 만들지 않는다.
 - public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. 일반 `main`·tag push는 공개 push를 수행하지 않으며, `vX.Y.Z` tag를 대상으로 `PUBLISH-vX.Y.Z`를 입력한 수동 release workflow를 통과한 digest만 이 경로에 push·promotion한다. image는 GitHub Actions OIDC 기반 keyless Cosign으로 서명하고 private GitHub repository·workflow URI가 공개 transparency log에 나타날 수 있음을 승인한다.
@@ -109,7 +113,7 @@
 
 ## 개발 중 결정 결과와 외부 보정
 
-PostgreSQL 17 migration 1~13, FTS+pgvector hybrid, Codex `gpt-5.4`, 결정론적 구조 분석,
+PostgreSQL 17 migration 1~14, FTS+pgvector hybrid, Codex `gpt-5.4`, 결정론적 구조 분석,
 OpenRouter `text-embedding-3-small` 1,536차원, chunk/retry/lease와 DB+file generation protocol은
 ADR 0001~0005와 fixture·integration·load 결과로 확정했다.
 

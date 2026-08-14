@@ -34,6 +34,7 @@ oauth*.json
 /deploy/secrets/*.txt
 
 # Python and local tooling
+.task-tools/
 __pycache__/
 *.py[cod]
 .venv/

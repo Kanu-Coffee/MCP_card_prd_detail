@@ -44,3 +44,9 @@ Published role images are consumed through
 [`deploy/dockerhub.compose.yaml`](deploy/dockerhub.compose.yaml). The pull,
 digest-pinning, bootstrap, MCP, and worker commands are documented in
 [`docs/DOCKERHUB_OPERATIONAL_TEST.md`](docs/DOCKERHUB_OPERATIONAL_TEST.md).
+
+CardRAG 0.2 adds deterministic legacy PDF/OCR import, explicit Portainer host
+storage, and maintenance-window state export/restore.  Do not copy legacy files
+into a running admin container or treat a Docker volume as a backup.  The
+required host layout, one-shot jobs, migration order, and rollback checks are in
+[`docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md`](docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md).

@@ -494,9 +494,13 @@ registry push와 promotion은 의도적으로 수행하지 않았으며 아래 r
 repository는 private로 유지한다. v1은 `linux/amd64`만 제공하고 ARM64는 실제 필요가 생기면
 후속 지원한다. local build 완료와 public push 미수행을 구분해 보고한다.
 
-## 13. 후속 개선 과제: Backup과 restore
+## 13. Portable state export와 restore
 
-backup·restore는 현재 v1 개발·인수 범위에 포함하지 않는다. 아래 내용은 후속 개선 과제의 설계 참고이며 현재 release 차단조건, 구현 완료조건 또는 운영 보장으로 사용하지 않는다. RPO·RTO, 대상 저장소, 주기와 암호화 방식은 후속 과제를 시작할 때 다시 결정한다.
+v1에서 제외했던 backup·restore를 0.2에서 점검시간 기반 portable state로 구현한다. 운영
+검색 상태는 PostgreSQL `cardrag`·`keycloak` DB, 전체 content-addressed object store와 전체
+generation store/current pointer가 같은 export ID에 결속돼야 한다. host bind나 Docker named
+volume 하나만 복사한 것은 복구본이 아니다. 실행 명령과 Portainer 절차의 단일 기준은
+[레거시 Import·호스트 영속 저장·서버 이전 운영서](09_LEGACY_IMPORT_AND_PORTABLE_STATE.md)다.
 
 ### 13.1 Backup 대상
 
@@ -511,30 +515,41 @@ backup·restore는 현재 v1 개발·인수 범위에 포함하지 않는다. �
 | API key/OAuth token | 일반 data backup에서 제외 | secret manager 또는 별도 암호화·회수 정책 |
 | build scratch/render temp | 낮음 | 재생성 가능, 기본 backup 제외 |
 
-PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는다. PostgreSQL의 일관된 backup과 WAL 정책을 사용하고 복원 시험을 수행한다. immutable generation은 checksum manifest와 함께 copy하면 일관성을 검증하기 쉽다.
+PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는다. admin maintenance
+image의 digest-pinned PostgreSQL 17 client로 두 DB를 custom format dump한다. writer와 외부 DB
+session이 없는 maintenance window에서 전체 CAS와 generation root를 함께 복사하며,
+`.incoming`, `.publish.lock`, build, page cache, Codex auth와 secret은 제외한다. checksum,
+DB/file reference와 두 번의 DB epoch 대사가 끝난 뒤 `READY`를 마지막에 기록한다.
 
 ### 13.2 RPO·RTO와 보존
 
-후속 구현 전 다음 사항을 새로 결정한다.
+운영에서 다음 사항을 측정·확정한다.
 
 - RPO·RTO와 backup·restore 시험 주기
 - raw PDF/OCR과 과거 generation 보존기간
 - 일일·주간 backup의 실제 target과 별도 failure domain 구성
 - 암호화 key 관리, 개인정보·원문 삭제 요청 처리
 
-후속 backup을 도입할 때는 최소한 current와 직전 검증 generation, 해당 source catalog, job state의 같은 시점 snapshot을 함께 복구할 수 있어야 한다.
+portable export의 최근 검증본 3개 보존은 NAS snapshot/lifecycle 정책으로 시행한다. v0.2
+CLI는 package 자동 삭제를 하지 않으며, `READY`와 `cardrag state verify`가 모두 통과한
+package만 외부 보관 정책에서 정리한다. current와 직전 generation은 export 중 pin한다.
+CAS는 참조 catalog가 완성되기 전까지 선별하거나 GC하지 않고 전체를 복사한다. 낮은 RPO가
+필요한 운영에서는 이 full export를 기준선으로 삼아 별도 WAL/PITR 정책을 추가한다.
 
 ### 13.3 Restore 절차
 
-1. 원인을 확인하고 writer·publisher를 중지한다.
-2. 기존 운영 경로를 덮어 쓰지 않고 격리된 새 restore 경로에 복원한다.
-3. checksum, manifest, catalog 참조, DB/index integrity를 검증한다.
-4. candidate를 read-only로 열어 MCP와 대표 검색 smoke test를 수행한다.
-5. durable state의 lease를 만료·회수하고 이미 성공한 artifact와 중복 실행 여부를 점검한다.
-6. 승인 후 current pointer 또는 deployment를 교체한다.
-7. 복구시각, RPO/RTO 실제값, 손실·재처리 범위와 후속조치를 기록한다.
+1. 원인을 확인하고 양쪽 host의 writer·publisher를 중지한다.
+2. 기존 경로가 아닌 빈 runtime roots와 빈 PostgreSQL DB를 준비한다.
+3. archive sentinel, `READY`, package checksum과 runtime compatibility를 먼저 검증한다.
+4. CAS/generation을 sibling staging에서 검증하고 두 DB를 transaction 단위로 restore한다.
+5. target file secret 값으로 DB role password를 회전한다.
+6. DB active generation, filesystem pointer, manifest, object reference, FTS/vector를 대사한다.
+7. Keycloak과 MCP만 시작해 readiness·인증·검색·citation·PDF Range와 generation rollback을
+   시험한 뒤 worker/scheduler와 proxy를 전환한다.
+8. 복구시각, RPO/RTO 실제값, 손실·재처리 범위와 후속조치를 기록한다.
 
-후속 과제에서도 backup 성공 로그만으로 복구 가능성을 인정하지 않고 정기 restore drill과 다른 host 검증을 인수 기준으로 삼는다.
+backup 성공 로그만으로 복구 가능성을 인정하지 않는다. 다른 빈 host에서 restore drill과
+application smoke가 통과한 package만 검증본으로 취급한다.
 
 ## 14. 운영 runbook 최소 목록
 
@@ -546,6 +561,8 @@ PostgreSQL data directory를 실행 중 일반 file copy로 backup하지 않는�
 - OpenRouter key rotation과 quota/rate-limit 대응
 - volume 부족과 artifact cleanup
 - candidate generation 검증·publish·rollback
+- normalized legacy bundle prepare/import/resume/finalize
+- portable state export/verify/empty-target restore와 다른-host cutover
 - MCP instance의 generation reload 실패
 - Docker Hub candidate push·검증·promotion·rollback
 - secret 또는 원문 로그 노출 사고 대응
@@ -586,7 +603,7 @@ host sizing·SLO, Codex device 계정의 장기 token 갱신, public TLS/client�
 | durable state·lease·retry·dead-letter 계약 문서화 | 문서화 완료 |
 | immutable generation publish·rollback 방향 문서화 | 문서화 완료 |
 | Docker volume·secret 방향 문서화 | 문서화 완료 |
-| backup·restore | v1 범위 밖, 후속 개선 과제 |
+| portable state export·restore | 0.2 구현·자동시험, 실제 NAS/다른 host drill은 운영 인계 |
 | 신규 scheduler/worker/MCP 구현 | 구현 및 자동 검증 완료 |
 | fixture 3-card BULK·재시작 | 개발환경 통합 검증 완료 |
 | 초기 3~4일 실제 대량 처리 실행 | 실환경 검증 대기 |

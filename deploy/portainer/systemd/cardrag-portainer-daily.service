@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the CardRAG daily pipeline through the installed Portainer Stack
+Documentation=file:/opt/cardrag/deploy/portainer/RUNBOOK.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cardrag
+Group=docker
+WorkingDirectory=/opt/cardrag
+ExecStart=/usr/bin/docker compose --project-name cardrag --env-file /etc/cardrag/stack.env --file /opt/cardrag/deploy/portainer/cardrag-stack.yaml --profile ops run --rm --no-deps --pull never -T --env CARDRAG_ADMIN_OPERATION_ENABLED=true --env CARDRAG_ADMIN_OPERATION=run-daily admin
+TimeoutStartSec=infinity
+TimeoutStopSec=180
+UMask=0077

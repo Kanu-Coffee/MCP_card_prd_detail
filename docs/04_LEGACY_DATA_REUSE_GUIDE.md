@@ -11,9 +11,10 @@
   - P: **H/process-kit/cardrag-conveyor**
   - D: **H/data-kit/cardrag-conveyor-data**
 - 사실 기준: [레거시 프로젝트 분석 기록](../LEGACY_PROJECT_ANALYSIS.md)
-- 현재 작업 범위: 분류·이전 절차 구현과 5문서 read-only pilot 검증
-- 현재 수행하지 않는 작업: 레거시 원본의 이동·삭제, 전체 9.51 GiB 이관·장시간 재처리와 전체
-  legacy generation 게시
+- 현재 작업 범위: 5문서 read-only pilot에 더해 1,592문서 deterministic bundle/import 구현과
+  실제 master manifest 전수 dry-run 검증
+- 현재 수행하지 않는 작업: 레거시 원본의 이동·삭제, 디스크 안전 기준을 넘긴 개발 host에서의
+  1.26GB bundle 전체 쓰기, 실제 provider를 쓰는 장시간 재처리와 production generation 게시
 
 이 문서에서 “재사용”은 레거시 디렉터리를 신규 서비스에 그대로 마운트한다는 뜻이 아니다. 검증된 내용을 신규 데이터 계약으로 받아들이는 것을 뜻한다.
 
@@ -151,48 +152,47 @@ rendered PNG와 보고서를 레거시 source에서 삭제하라는 뜻은 아�
 
 ## 6. 목표 데이터 디렉터리
 
-아래는 구현된 외부 volume의 논리 구조다. v1은 content-addressed object, PostgreSQL catalog/state와
-불변 generation을 사용하며 실제 host root만 배포 환경에서 설정한다. **CARDRAG_DATA_ROOT**는
-source checkout과 Docker image 밖에 둔다.
+0.2는 레거시 원본, normalized import bundle과 운영 runtime을 서로 다른 root로 분리한다.
+원본을 in-place rename하지 않으며, bundle은 사람이 읽는 이름 대신 content hash와 안전한
+document key를 사용한다. 운영 runtime의 object store는 유형별 확장자를 쓰지 않는 generic CAS다.
+상세 운영 절차는 [레거시 Import·호스트 영속 저장·서버 이전 운영서](09_LEGACY_IMPORT_AND_PORTABLE_STATE.md)에 있다.
 
 ~~~text
-CARDRAG_DATA_ROOT/
-├── objects/
-│   ├── pdf/sha256/<prefix>/<pdf_sha256>.pdf
-│   └── ocr/sha256/<prefix>/<ocr_sha256>.md
-├── catalog/
-│   ├── source-snapshots/<snapshot_id>/manifest.json
-│   └── documents/<issuer>/<product_code>/<effective_date>/v<version>/record.json
-├── build/
-│   └── <run_id>/                       # 게시 전 작업공간
+/read-only/legacy-source/                 # 원본 9.51 GiB, 변경 금지
+
+/srv/cardrag/imports/bundle-<digest12>/
+├── objects/{pdf,ocr,metadata}/sha256/<prefix>/<hash>.<ext>
+├── records/<issuer>/<product>/<type>/<date>/<version>/record.json
+├── manifests/{documents,source-files,exceptions}.jsonl
+├── bundle-manifest.json
+├── checksums.sha256
+└── READY
+
+/srv/cardrag/runtime/
+├── objects/sha256/<prefix>/<hash>        # PDF/OCR/구조/checkpoint 공용 CAS
 ├── generations/
-│   └── <generation_id>/
-│       ├── generation-manifest.json
-│       ├── checksums.sha256
-│       ├── inventory/
-│       ├── lexical-index/
-│       ├── structured/
-│       ├── vector-index/
-│       └── READY
-├── state/
-│   ├── jobs/
-│   └── migration/
-├── quarantine/
-│   ├── unresolved-pdf/
-│   ├── ocr-mismatch/
-│   └── metadata-invalid/
-└── current.json                        # 게시된 generation 포인터
+│   ├── generations/<generation_id>/{manifest.json,READY,...}
+│   ├── current.json
+│   └── publication-history.jsonl
+├── build/                                # 재생성 가능한 작업공간
+└── page-cache/                           # 7일 후 제거 가능한 PNG
+
+cardrag-postgres-v1                       # catalog/job/OCR text/evidence/vector/Keycloak
+cardrag-codex-auth-v1                     # corpus와 분리, 새 host에서 기본 재로그인
 ~~~
 
 설계 원칙은 다음과 같다.
 
-- PDF와 OCR은 hash 기반 불변 object로 저장하여 같은 내용의 중복을 공유한다.
-- 사람이 읽기 쉬운 문서 경로의 record가 issuer·상품·버전과 object hash를 연결한다.
-- generation은 inventory, lexical, structured, vector가 같은 입력 snapshot을 가리키는 배포 단위다.
+- bundle의 PDF와 OCR은 유형별 hash object로 중복 제거하고 record가 issuer·상품·버전과 연결한다.
+- import는 bundle bytes를 검증한 뒤 운영 generic CAS에 atomic/deduplicated copy한다.
+- 실제 OCR page text, evidence, FTS/vector와 durable state는 PostgreSQL에 있으며 generation
+  filesystem만 복사해서는 복구되지 않는다.
+- generation은 DB evidence와 file manifest/pointer가 같은 input snapshot을 가리키는 배포 단위다.
 - build는 writable, 게시된 generations는 immutable, 온라인 MCP mount는 read-only다.
 - current pointer는 완전히 검증된 generation만 가리키며 임시 파일 작성 후 atomic replace한다.
-- quarantine은 오류를 숨기지 않고 정식 generation에서 제외한 채 조사할 수 있게 한다.
-- backup·restore 경로는 v1 구현에 포함하지 않고 추후 개선 과제에서 별도 failure domain과 함께 설계한다.
+- 예외는 bundle ledger에 남기고 알려진 2건만 재-OCR한다.
+- PostgreSQL 두 DB, 전체 runtime CAS와 generation root는 같은 export ID의 portable package로
+  묶어 별도 failure domain에 보존한다.
 
 ## 7. PDF 연결과 중복 처리 규칙
 
@@ -259,17 +259,17 @@ canonical OCR record에는 최소 다음이 필요하다.
 
 레거시 DB의 **PRAGMA integrity_check=ok**는 파일 구조가 읽힌다는 뜻이지 신규 검색 계약과 품질이 적합하다는 뜻은 아니다.
 
-## 10. 구현된 이전 절차와 실제 전체 이전
+## 10. Normalized bundle과 durable import 절차
 
-아래 절차는 `cardrag legacy pilot`과 `cardrag legacy rollback`으로 구현했다. 현재
-개발 환경에서는 5문서 read-only pilot을 실행해 hash lookup, OCR hash, target object와
-source 무변경을 검증했다. 전체 9.51 GiB 이전은 장시간 실제 BULK에 해당하므로 운영
-preflight 후 같은 명령으로 수행하며, 개발 완료를 위해 이미 수행한 것으로 표시하지 않는다.
+5문서 pilot은 보존하되, 0.2의 운영 경로는 `legacy prepare/import/status/resume/cancel/finalize`다.
+실제 master manifest 전체 dry-run은 document 1,592건, unique PDF 1,369개, unique OCR
+1,573개, 채택 OCR 1,590건, 재-OCR 2건과 payload 1,262,879,104 bytes를 재현했다. 전체
+payload copy와 provider 호출을 포함한 운영 import는 host disk gate와 이용조건 확인 후 수행한다.
 
 ### 단계 A — 이전 기준 고정
 
-- 레거시 source를 read-only로 mount하고 source snapshot ID를 발급한다.
-- source 전체 file inventory와 가능한 SHA-256을 별도 ledger에 기록한다.
+- 레거시 source를 read-only로 열고 deterministic bundle ID를 계산한다.
+- source 전체 file inventory와 사용 object SHA-256을 bundle ledger에 기록한다.
 - 신규 canonical schema와 라이선스·보존정책을 확정한다. 기본 조회는 latest, 과거본은 명시적 version/as-of 조회라는 범위 정책을 적용한다.
 - 대상 volume의 여유 공간을 확인한다.
 
@@ -277,10 +277,10 @@ preflight 후 같은 명령으로 수행하며, 개발 완료를 위해 이미 �
 
 ### 단계 B — 불변 원본 copy
 
-- PDF를 직접 경로 또는 hash lookup으로 staging object store에 copy한다.
-- OCR을 재계산 hash 기준으로 staging에 copy한다.
+- PDF를 직접 경로 또는 hash lookup으로 normalized bundle에 copy한다.
+- OCR과 metadata를 재계산 hash 기준으로 bundle에 copy한다.
 - 중복 object는 hash로 합치고 document catalog record는 별도로 유지한다.
-- 불일치·미해결 항목은 quarantine ledger에 남긴다.
+- 불일치·미해결 항목은 exception ledger에 남기고 `READY` 이전에 checksum을 검증한다.
 
 완료조건: copy 대상마다 source/target hash가 같고 1,592개 문서의 mapping 결과가 성공·격리·제외 중 하나로 빠짐없이 집계된다.
 
@@ -294,7 +294,9 @@ preflight 후 같은 명령으로 수행하며, 개발 완료를 위해 이미 �
 
 ### 단계 D — 구조화·재색인
 
-- 승인된 OCR만 사용해 structured/evidence 데이터를 새로 만든다.
+- 검증된 1,590 OCR은 adoption ledger와 PDF/OCR hash를 결속해 provider 호출을 생략하고,
+  알려진 2건은 OCR부터 실행한다.
+- 모든 문서의 structured/evidence/embedding은 현재 processing contract로 새로 만든다.
 - lexical/vector index를 별도 build 경로에 생성한다.
 - current text hash와 embedding coverage를 검증한다.
 
@@ -302,6 +304,7 @@ preflight 후 같은 명령으로 수행하며, 개발 완료를 위해 이미 �
 
 ### 단계 E — 검증과 게시
 
+- 우리·KB current와 신한 history live discovery를 같은 candidate에서 대사한다.
 - generation manifest와 전체 checksum을 만들고 DB/index 무결성을 확인한다.
 - 표본 문서에 대해 PDF→OCR→section→검색 근거를 역추적한다.
 - 온라인 smoke test는 read-only candidate mount로 수행한다.
@@ -352,7 +355,9 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
   1,536차원+PostgreSQL FTS/pgvector로 확정했다.
 - 기술적으로는 승인된 `source_pdf` scope 사용자의 명시적 요청에 exact version·hash의 보존 원본 PDF 전체를 streaming file로 제공한다. 100 MB 상한과 HTTP Range를 적용하고 다운로드 감사 metadata를 90일 보존한다. 페이지 OCR text는 `search`, 요청 시 생성해 7일 cache하는 PNG는 `source_pdf` scope를 사용하고 분할 PDF는 생성하지 않는다.
 - 카드사 공시 PDF의 저장·재배포·서비스 이용 조건과 허용 사용자 범위는 공개 운영 전 별도 확인하는 외부 gate다.
-- 성공한 검색 generation은 최근 3개, 실패 candidate는 7일 보존한다. 수동 pin한 generation은 명시적 unpin 전까지 보존하며 backup은 v1 후속 개선 과제다.
+- 성공한 검색 generation은 최근 3개, 실패 candidate는 7일 보존한다. 수동 pin한 generation은
+  명시적 unpin 전까지 보존하며 portable state package는 최근 검증본 3개를 별도 failure
+  domain에 둔다.
 
 ## 14. 이 문서 작성 시점의 상태
 
@@ -360,12 +365,14 @@ rollback 후에는 실패 generation ID, 원인, 영향 문서, pointer 변경�
 |---|---|
 | 레거시 자산 읽기 전용 조사 | 검증 완료 |
 | 재사용 분류와 목표 구조 문서화 | 문서화 완료 |
-| source snapshot/checksum ledger | 구현·5문서 pilot 검증 완료 |
-| PDF/OCR content-addressed copy | 구현·5문서 pilot 검증 완료 |
-| manifest/metadata 변환 | 구현·fixture/pilot 검증 완료 |
+| source snapshot/checksum ledger | 5문서 pilot+1,592건 deterministic dry-run 검증 |
+| normalized PDF/OCR bundle | 구현·fixture 검증, 전체 dry-run 1,592건 대사 |
+| manifest/metadata 변환 | 구현·fixture 및 실제 manifest dry-run 검증 |
 | structure·embedding·index 재생성 | 신규 pipeline fixture 검증 완료; 전체 corpus 실행은 실환경 검증 대기 |
 | exception 분류 | hash mismatch quarantine·counter drift 경고 자동 검증 완료; 실제 1건 수동 판정은 운영 인계 |
 | generation 검증·게시 | fixture generation 검증 완료; 전체 legacy generation 게시 전 실환경 gate 필요 |
 
-증거는 `reports/legacy-pilot-20260812.json`, `tests/unit/test_legacy_migration.py`다.
+증거는 `reports/legacy-pilot-20260812.json`,
+`reports/legacy/legacy-prepare-dry-run-20260813.json`, `tests/unit/test_legacy_migration.py`,
+`tests/unit/test_legacy_bundle.py`, `tests/integration/test_legacy_import.py`다.
 이 문서만으로 전체 corpus가 이미 신규 시스템에 이전되었다고 판단해서는 안 된다.

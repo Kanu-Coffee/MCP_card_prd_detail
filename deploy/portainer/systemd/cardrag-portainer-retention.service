@@ -1,0 +1,15 @@
+[Unit]
+Description=Run CardRAG owner-only retention through the installed Portainer Stack
+Documentation=file:/opt/cardrag/deploy/portainer/RUNBOOK.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=cardrag
+Group=docker
+WorkingDirectory=/opt/cardrag
+ExecStart=/usr/bin/docker compose --project-name cardrag --env-file /etc/cardrag/stack.env --file /opt/cardrag/deploy/portainer/cardrag-stack.yaml --profile ops run --rm --no-deps --pull never -T --env CARDRAG_ADMIN_OPERATION_ENABLED=true --env CARDRAG_ADMIN_OPERATION=retention-prune admin
+TimeoutStartSec=30min
+TimeoutStopSec=180
+UMask=0077

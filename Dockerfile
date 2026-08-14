@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG PYTHON_IMAGE=python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2
+ARG POSTGRES_CLIENT_IMAGE=pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
 ARG CODEX_VERSION=0.147.0
 ARG CODEX_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36
 
@@ -33,6 +34,12 @@ RUN /opt/cardrag/bin/python scripts/check_dependency_licenses.py \
       --release \
       --notice-output-root /tmp/cardrag-license-notices \
       --output /tmp/cardrag-license-report.json
+
+
+# Use the exact PostgreSQL major and package build deployed by Compose.  Only
+# the owner-only admin target receives these clients; MCP and worker images do
+# not need database backup authority or binaries.
+FROM ${POSTGRES_CLIENT_IMAGE} AS postgres_client
 
 
 FROM ${PYTHON_IMAGE} AS runtime
@@ -110,5 +117,21 @@ CMD ["cardrag-worker"]
 
 FROM runtime AS admin
 ENV CARDRAG_CONTAINER_ROLE=admin
+USER root
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends libpq5=15.18-0+deb12u1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    install --directory --owner=root --group=root --mode=0755 /usr/local/lib/cardrag-pg17 \
+      /usr/share/licenses/cardrag/postgresql-client-17
+COPY --from=postgres_client /usr/lib/postgresql/17/bin/pg_dump /usr/local/bin/pg_dump
+COPY --from=postgres_client /usr/lib/postgresql/17/bin/pg_restore /usr/local/bin/pg_restore
+COPY --from=postgres_client /usr/lib/postgresql/17/bin/psql /usr/local/bin/psql
+COPY --from=postgres_client /usr/lib/x86_64-linux-gnu/libpq.so.5.18 \
+  /usr/local/lib/cardrag-pg17/libpq.so.5.18
+COPY --from=postgres_client /usr/share/doc/postgresql-client-17/copyright \
+  /usr/share/licenses/cardrag/postgresql-client-17/COPYRIGHT
+ENV LD_LIBRARY_PATH=/usr/local/lib/cardrag-pg17
+RUN ln -s libpq.so.5.18 /usr/local/lib/cardrag-pg17/libpq.so.5 && \
+    python -c 'import subprocess; commands=("pg_dump", "pg_restore", "psql"); assert all(subprocess.check_output((command, "--version"), text=True).split()[2].startswith("17.") for command in commands)'
 USER 10001:10001
 CMD ["cardrag", "--help"]

@@ -314,6 +314,35 @@ class GenerationStore:
             ) from history_error
         return pointer
 
+    def deactivate_locked(self, expected_generation_id: str) -> CurrentPointer:
+        """Remove the serving pointer while the caller holds publication authority.
+
+        This is the fail-closed rollback for a first-ever publication, where no
+        previous generation exists.  The expected ID prevents an operator from
+        deactivating a generation that advanced after they inspected it.
+        """
+
+        self._validate_id(expected_generation_id)
+        pointer = self.current()
+        if pointer.generation_id != expected_generation_id:
+            raise GenerationVerificationError("current generation changed before deactivation")
+        self.current_path.unlink()
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return pointer
+
+    def restore_pointer_locked(self, pointer: CurrentPointer) -> None:
+        """Restore a previously verified pointer during DB compensation."""
+
+        self.verify_path(
+            self.generations / pointer.generation_id,
+            expected_generation_id=pointer.generation_id,
+        )
+        _atomic_json(self.current_path, pointer)
+
     def rollback(self, generation_id: str | None = None) -> CurrentPointer:
         current = self.current()
         target = generation_id or current.previous_generation_id

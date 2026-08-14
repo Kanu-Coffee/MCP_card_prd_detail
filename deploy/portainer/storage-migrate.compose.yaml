@@ -1,0 +1,91 @@
+services:
+  storage-migrate:
+    image: ${CARDRAG_ADMIN_IMAGE:?CARDRAG_ADMIN_IMAGE_required}
+    pull_policy: always
+    restart: "no"
+    init: true
+    user: "0:0"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    network_mode: none
+    entrypoint:
+      - /opt/cardrag-portainer/storage-preflight.sh
+      - /var/lib/cardrag/objects
+      - /var/lib/cardrag/generations
+      - --
+      - /bin/sh
+      - /opt/cardrag-portainer/storage-migrate.sh
+    environment:
+      CARDRAG_LEGACY_OBJECTS_VOLUME: ${CARDRAG_LEGACY_OBJECTS_VOLUME:?run discover-legacy-volumes.sh}
+      CARDRAG_LEGACY_GENERATIONS_VOLUME: ${CARDRAG_LEGACY_GENERATIONS_VOLUME:?run discover-legacy-volumes.sh}
+      CARDRAG_STORAGE_MIGRATION_ID: ${CARDRAG_STORAGE_MIGRATION_ID:-}
+      CARDRAG_STORAGE_MIGRATION_RESUME: ${CARDRAG_STORAGE_MIGRATION_RESUME:-false}
+      CARDRAG_MINIMUM_FREE_GIB: ${CARDRAG_MINIMUM_FREE_GIB:-50}
+      CARDRAG_MINIMUM_FREE_PERCENT: ${CARDRAG_MINIMUM_FREE_PERCENT:-20}
+      CARDRAG_MAXIMUM_USED_PERCENT: ${CARDRAG_MAXIMUM_USED_PERCENT:-85}
+      CARDRAG_WARNING_USED_PERCENT: ${CARDRAG_WARNING_USED_PERCENT:-70}
+    volumes:
+      - type: volume
+        source: legacy_objects
+        target: /mnt/cardrag-source/objects
+        read_only: true
+      - type: volume
+        source: legacy_generations
+        target: /mnt/cardrag-source/generations
+        read_only: true
+      - type: bind
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}/objects
+        target: /var/lib/cardrag/objects
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}/generations
+        target: /var/lib/cardrag/generations
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_MIGRATION_REPORT_ROOT:-/srv/cardrag/migration/reports}
+        target: /var/lib/cardrag-migration-reports
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/portainer/storage-migrate.sh
+        target: /opt/cardrag-portainer/storage-migrate.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/portainer/verify-runtime-storage.py
+        target: /opt/cardrag-portainer/verify-runtime-storage.py
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+      - type: bind
+        source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/portainer/storage-preflight.sh
+        target: /opt/cardrag-portainer/storage-preflight.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+volumes:
+  legacy_objects:
+    name: ${CARDRAG_LEGACY_OBJECTS_VOLUME:?run discover-legacy-volumes.sh}
+    external: true
+  legacy_generations:
+    name: ${CARDRAG_LEGACY_GENERATIONS_VOLUME:?run discover-legacy-volumes.sh}
+    external: true

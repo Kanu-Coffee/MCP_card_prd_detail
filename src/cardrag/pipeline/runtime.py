@@ -643,35 +643,46 @@ class OfflinePipeline:
                     d.ocr_object_key AS reusable_ocr_object_key,
                     d.ocr_sha256 AS reusable_ocr_sha256,
                     d.ocr_sha256 IS NOT NULL
-                    AND d.ocr_manifest->'attempt'->>'prompt_version'=%s
-                    AND d.ocr_manifest->'attempt'->>'renderer'=%s
-                    AND (
-                        d.ocr_manifest->'attempt'->>'provider'<>'codex-exec'
-                        OR d.ocr_manifest->'attempt'->>'reasoning_effort'=%s
+                    AND cardrag_ocr_manifest_reusable(
+                        d.ocr_manifest, d.pdf_sha256, d.ocr_sha256,
+                        %s, %s, %s, %s, %s, %s, %s
                     )
-                    AND (d.ocr_manifest->'attempt'->>'render_scale')::double precision=%s
-                    AND (d.ocr_manifest->'attempt'->>'chunk_pages')::integer=%s
                     AND (
-                        (d.ocr_manifest->'attempt'->>'provider'='codex-exec'
-                         AND d.ocr_manifest->'attempt'->>'model'=%s)
-                        OR
-                        (d.ocr_manifest->'attempt'->>'provider'='openrouter'
-                         AND d.ocr_manifest->'attempt'->>'model'=%s)
+                        d.ocr_manifest->>'schema_version' IS DISTINCT FROM 'cardrag.legacy-ocr-adoption.v1'
+                        OR cardrag_legacy_adoption_bound(
+                            d.ocr_manifest, d.document_id, d.pdf_sha256, d.ocr_sha256,
+                            ARRAY['processing','finalizing','succeeded']::text[]
+                        )
                     ) AS reusable_ocr,
                     d.structure_schema_version=%s
                     AND d.chunk_policy=%s
                     AND d.embedding_provider='openrouter'
                     AND d.embedding_model=target_generation.embedding_model
                     AND d.embedding_dimension=target_generation.embedding_dimension
+                    AND d.generation_id<>target_generation.generation_id
                     AND EXISTS (
                         SELECT 1 FROM evidence e
-                        WHERE e.generation_id=a.generation_id AND e.document_id=d.document_id
+                        WHERE e.generation_id=d.generation_id AND e.document_id=d.document_id
                           AND e.embedding IS NOT NULL
                     ) AS reusable_evidence
-                FROM active_generation a
-                JOIN generations target_generation ON target_generation.generation_id=%s
-                JOIN generation_documents d
-                  ON d.generation_id=a.generation_id AND d.document_id=%s
+                FROM generations target_generation
+                JOIN LATERAL (
+                    SELECT candidate.*
+                    FROM generation_documents candidate
+                    WHERE candidate.document_id=%s
+                      AND (
+                          candidate.generation_id=target_generation.generation_id
+                          OR candidate.generation_id=(
+                              SELECT generation_id FROM active_generation WHERE singleton=true
+                          )
+                      )
+                    -- Prefer the published source so its evidence can be
+                    -- materialized. The target row is only the legacy-import
+                    -- fallback when no active document exists.
+                    ORDER BY (candidate.generation_id=target_generation.generation_id) ASC
+                    LIMIT 1
+                ) d ON true
+                WHERE target_generation.generation_id=%s
                 """,
                 (
                     OCR_PROMPT_VERSION,
@@ -683,8 +694,8 @@ class OfflinePipeline:
                     self.settings.ocr_fallback_model,
                     STRUCTURE_SCHEMA_VERSION,
                     CHUNK_POLICY_VERSION,
-                    target_generation,
                     final_document_id,
+                    target_generation,
                 ),
             )
             compatibility = cursor.fetchone()
@@ -1356,20 +1367,16 @@ class OfflinePipeline:
                   AND old.embedding_model=target.embedding_model
                   AND old.embedding_dimension=target.embedding_dimension
                   AND d.structure_schema_version=%s AND d.chunk_policy=%s
-                  AND d.ocr_manifest->'attempt'->>'prompt_version'=%s
-                  AND d.ocr_manifest->'attempt'->>'renderer'=%s
-                  AND (
-                      d.ocr_manifest->'attempt'->>'provider'<>'codex-exec'
-                      OR d.ocr_manifest->'attempt'->>'reasoning_effort'=%s
+                  AND cardrag_ocr_manifest_reusable(
+                      d.ocr_manifest, d.pdf_sha256, d.ocr_sha256,
+                      %s, %s, %s, %s, %s, %s, %s
                   )
-                  AND (d.ocr_manifest->'attempt'->>'render_scale')::double precision=%s
-                  AND (d.ocr_manifest->'attempt'->>'chunk_pages')::integer=%s
                   AND (
-                      (d.ocr_manifest->'attempt'->>'provider'='codex-exec'
-                       AND d.ocr_manifest->'attempt'->>'model'=%s)
-                      OR
-                      (d.ocr_manifest->'attempt'->>'provider'='openrouter'
-                       AND d.ocr_manifest->'attempt'->>'model'=%s)
+                      d.ocr_manifest->>'schema_version' IS DISTINCT FROM 'cardrag.legacy-ocr-adoption.v1'
+                      OR cardrag_legacy_adoption_bound(
+                          d.ocr_manifest, d.document_id, d.pdf_sha256, d.ocr_sha256,
+                          ARRAY['processing','finalizing','succeeded']::text[]
+                      )
                   )
                 FOR SHARE OF source, old, target, d
                 """,

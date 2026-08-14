@@ -165,6 +165,7 @@ class CoverageReport(TypedDict):
     current_materialized: int
     latest_failed: int
     historical_quarantine: int
+    invalid_legacy_adoption: int
 
 
 class GenerationBuilder:
@@ -202,6 +203,8 @@ class GenerationBuilder:
             raise ValueError("candidate has no latest documents")
         if report["current_materialized"] != report["current_expected"]:
             raise ValueError("one or more current discovery records were not materialized")
+        if report["invalid_legacy_adoption"]:
+            raise ValueError("legacy OCR adoption is not bound to a trusted import ledger")
         stage_counts = (
             report["latest_pdf"],
             report["latest_ocr"],
@@ -264,7 +267,9 @@ class GenerationBuilder:
             with self.database.connection() as connection, connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE generations SET state='ready', manifest_sha256=%s, root_uri=%s,
+                    UPDATE generations SET state='ready', manifest_sha256=%s,
+                        root_uri='generations/' || generation_id,
+                        root_key='generations/' || generation_id,
                         embedding_provider=%s, embedding_model=%s, embedding_dimension=%s,
                         latest_document_count=%s, latest_covered_count=%s,
                         historical_quarantine_count=%s
@@ -273,7 +278,6 @@ class GenerationBuilder:
                     """,
                     (
                         manifest.sha256,
-                        sealed.as_posix(),
                         embedding_provider,
                         embedding_model,
                         dimension,
@@ -691,6 +695,8 @@ class GenerationBuilder:
             raise ValueError("one or more current discovery records were not materialized")
         if report["latest_failed"]:
             raise ValueError("latest document jobs contain terminal processing failures")
+        if report["invalid_legacy_adoption"]:
+            raise ValueError("legacy OCR adoption is not bound to a trusted import ledger")
         unchanged = self._is_no_change(
             generation_id,
             embedding_provider=embedding_provider,
@@ -736,6 +742,7 @@ class GenerationBuilder:
             )
             != (expected, expected, expected, expected, expected)
             or report["latest_failed"]
+            or report["invalid_legacy_adoption"]
         ):
             raise ValueError("ready generation database provenance no longer matches its manifest")
         self._publish(generation_id)
@@ -749,6 +756,96 @@ class GenerationBuilder:
             raise ValueError("rollback target is already current")
         self._publish(target)
         return target
+
+    def deactivate(self, expected_generation_id: str) -> str:
+        """Fail closed when the first published generation has no rollback target."""
+
+        with self.store.publication_lock():
+            file_pointer = self.store.current() if self.store.current_path.exists() else None
+            database_changed = False
+            previous_fencing_token = 0
+            with self.database.connection() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext('cardrag-generation-publish'))")
+                cursor.execute(
+                    """
+                    SELECT a.generation_id, a.fencing_token, g.state
+                    FROM active_generation a JOIN generations g USING (generation_id)
+                    WHERE a.singleton=true FOR UPDATE OF a, g
+                    """
+                )
+                active = cursor.fetchone()
+                if active is None:
+                    cursor.execute(
+                        "SELECT state FROM generations WHERE generation_id=%s",
+                        (expected_generation_id,),
+                    )
+                    generation = cursor.fetchone()
+                    if generation is None or generation["state"] != "retired":
+                        connection.rollback()
+                        raise ValueError("expected generation is not the deactivated generation")
+                    connection.rollback()
+                else:
+                    database_id = str(active["generation_id"])
+                    file_id = file_pointer.generation_id if file_pointer is not None else None
+                    if database_id != expected_generation_id or file_id != expected_generation_id:
+                        connection.rollback()
+                        raise RuntimeError("database and filesystem active generations differ")
+                    if active["state"] != "published":
+                        connection.rollback()
+                        raise ValueError("expected generation is not published")
+                    previous_fencing_token = int(active["fencing_token"])
+                    cursor.execute("DELETE FROM active_generation WHERE singleton=true")
+                    cursor.execute(
+                        """
+                        UPDATE generations SET state='retired', retired_at=now()
+                        WHERE generation_id=%s AND state='published'
+                        """,
+                        (expected_generation_id,),
+                    )
+                    connection.commit()
+                    database_changed = True
+
+            if file_pointer is None:
+                return expected_generation_id
+            try:
+                self.store.deactivate_locked(expected_generation_id)
+            except Exception as deactivate_error:
+                # Restore the file authority first.  If that fails, keep the DB
+                # inactive so readiness remains 503 rather than serving a split
+                # corpus.  A subsequent expected-ID invocation can recover it.
+                self.store.restore_pointer_locked(file_pointer)
+                if database_changed:
+                    with self.database.connection() as connection, connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext('cardrag-generation-publish'))"
+                        )
+                        cursor.execute(
+                            "SELECT generation_id FROM active_generation WHERE singleton=true FOR UPDATE"
+                        )
+                        if cursor.fetchone() is not None:
+                            connection.rollback()
+                            raise RuntimeError(
+                                "another publisher advanced during deactivation compensation"
+                            ) from deactivate_error
+                        cursor.execute(
+                            """
+                            UPDATE generations SET state='published', retired_at=NULL
+                            WHERE generation_id=%s AND state='retired'
+                            """,
+                            (expected_generation_id,),
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO active_generation(singleton, generation_id, fencing_token)
+                            VALUES (true, %s, %s)
+                            """,
+                            (expected_generation_id, previous_fencing_token + 1),
+                        )
+                        connection.commit()
+                raise RuntimeError(
+                    "filesystem deactivation failed; database was compensated"
+                ) from deactivate_error
+            return expected_generation_id
 
     def prune(self) -> list[str]:
         """Apply the shared FS/DB retention policy without touching active or pinned data."""
@@ -1012,7 +1109,22 @@ class GenerationBuilder:
                        )::int AS latest_pdf,
                        count(*) FILTER (
                            WHERE d.is_latest AND d.ocr_sha256 IS NOT NULL
-                             AND d.ocr_manifest->'attempt'->>'renderer'=%s
+                             AND (
+                                 d.ocr_manifest->'attempt'->>'renderer'=%s
+                                 OR (
+                                     d.ocr_manifest->>'schema_version'
+                                         ='cardrag.legacy-ocr-adoption.v1'
+                                     AND d.ocr_manifest->>'adoption_policy'
+                                         ='cardrag.legacy-ocr-adoption.v1'
+                                     AND d.ocr_manifest->>'status'='adopted'
+                                     AND d.ocr_manifest->>'pdf_sha256'=d.pdf_sha256
+                                     AND d.ocr_manifest->>'ocr_sha256'=d.ocr_sha256
+                                     AND cardrag_legacy_adoption_bound(
+                                         d.ocr_manifest, d.document_id, d.pdf_sha256, d.ocr_sha256,
+                                         ARRAY['finalizing','succeeded']::text[]
+                                     )
+                                 )
+                             )
                              AND jsonb_array_length(d.ocr_pages)=d.pdf_page_count
                              AND EXISTS (
                                  SELECT 1 FROM generation_artifacts a
@@ -1061,7 +1173,14 @@ class GenerationBuilder:
                                  WHERE a.generation_id=d.generation_id AND a.document_id=d.document_id
                                    AND a.artifact_type='vector_index'
                              )
-                       )::int AS latest_index
+                       )::int AS latest_index,
+                       count(*) FILTER (
+                           WHERE d.ocr_manifest->>'schema_version'='cardrag.legacy-ocr-adoption.v1'
+                             AND NOT cardrag_legacy_adoption_bound(
+                                 d.ocr_manifest, d.document_id, d.pdf_sha256, d.ocr_sha256,
+                                 ARRAY['finalizing','succeeded']::text[]
+                             )
+                       )::int AS invalid_legacy_adoption
                 FROM generation_documents d WHERE d.generation_id=%s
                 """,
                 (
@@ -1155,6 +1274,7 @@ class GenerationBuilder:
             "current_materialized": int(expectations["materialized"]),
             "latest_failed": int(failures["latest_failed"]),
             "historical_quarantine": int(failures["historical_quarantine"]),
+            "invalid_legacy_adoption": int(counts["invalid_legacy_adoption"]),
         }
 
     def _is_no_change(
@@ -1229,10 +1349,16 @@ class GenerationBuilder:
                            WHERE d.generation_id=%s AND (
                                d.structure_schema_version IS DISTINCT FROM %s
                                OR d.chunk_policy IS DISTINCT FROM %s
-                               OR d.ocr_manifest->'attempt'->>'prompt_version'
-                                    IS DISTINCT FROM %s
-                               OR d.ocr_manifest->'attempt'->>'renderer'
-                                    IS DISTINCT FROM %s
+                               OR (
+                                   d.ocr_manifest->>'schema_version'
+                                       IS DISTINCT FROM 'cardrag.legacy-ocr-adoption.v1'
+                                   AND (
+                                       d.ocr_manifest->'attempt'->>'prompt_version'
+                                           IS DISTINCT FROM %s
+                                       OR d.ocr_manifest->'attempt'->>'renderer'
+                                           IS DISTINCT FROM %s
+                                   )
+                               )
                            )
                        ) AS same_documents
                 FROM active_generation a JOIN generations g USING (generation_id)

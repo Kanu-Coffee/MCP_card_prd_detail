@@ -1,5 +1,10 @@
 # Daily pipeline and retention systemd timer hand-off
 
+> These units are for the base Compose named-volume deployment only. A
+> Portainer host-bind deployment must use the checked
+> `deploy/portainer/systemd/cardrag-portainer-*` units and installation steps in
+> `deploy/portainer/RUNBOOK.md`; mixing them can target the wrong storage.
+
 The scheduler is deliberately a host timer plus a one-shot Compose admin job,
 not another long-running scheduler inside Compose. `Persistent=true` catches up
 after host downtime, and systemd will not start a second copy while the prior

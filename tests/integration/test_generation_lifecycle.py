@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -466,6 +467,57 @@ def test_daily_scheduler_refuses_to_reuse_legacy_renderer_manifest(
         )
 
 
+def test_unbound_legacy_ocr_self_attestation_cannot_pass_seal(
+    clean_database: Postgres,
+    tmp_path: Path,
+) -> None:
+    generation_id = new_generation_id(
+        datetime(2026, 8, 12, 0, 30, tzinfo=UTC),
+        "f" * 12,
+    )
+    _new_candidate(clean_database, generation_id)
+    snapshots = _snapshots(clean_database, generation_id, "unbound-legacy")
+    _insert_complete_document(
+        clean_database,
+        generation_id,
+        document_id="doc-unbound-legacy",
+        version="v1",
+        pdf_seed="unbound-legacy",
+        snapshot_id=snapshots["woori"],
+        latest=True,
+    )
+    with clean_database.connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE generation_documents SET ocr_manifest=jsonb_build_object(
+                'schema_version', 'cardrag.legacy-ocr-adoption.v1',
+                'adoption_policy', 'cardrag.legacy-ocr-adoption.v1',
+                'status', 'adopted',
+                'import_id', %s::text,
+                'bundle_id', 'bundle-aaaaaaaaaaaa',
+                'bundle_sha256', repeat('a', 64),
+                'pdf_sha256', pdf_sha256,
+                'ocr_sha256', ocr_sha256
+            ) WHERE generation_id=%s AND document_id='doc-unbound-legacy'
+            """,
+            (str(uuid.UUID(int=1)), generation_id),
+        )
+        connection.commit()
+    builder = GenerationBuilder(
+        clean_database,
+        GenerationStore(tmp_path / "published", tmp_path / "build"),
+    )
+    quality, retrieval = builder.evaluate(generation_id)
+
+    with pytest.raises(ValueError, match="trusted import ledger"):
+        builder.seal(
+            generation_id,
+            embedding_provider="openrouter",
+            embedding_model="openai/text-embedding-3-small",
+            dimension=1536,
+            quality_report=quality,
+            retrieval_report=retrieval,
+        )
 def test_daily_contract_change_requires_bulk_to_preserve_history(
     clean_database: Postgres,
     tmp_path: Path,
@@ -530,6 +582,48 @@ def test_daily_contract_change_requires_bulk_to_preserve_history(
             (bulk_generation,),
         )
         assert cursor.fetchone() == {"n": 0}
+
+
+def test_first_generation_can_be_deactivated_fail_closed(
+    clean_database: Postgres,
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "published", tmp_path / "build")
+    builder = GenerationBuilder(clean_database, store)
+    generation_id = new_generation_id(datetime(2026, 8, 12, 1, 0, tzinfo=UTC), "e" * 12)
+    _new_candidate(clean_database, generation_id)
+    snapshots = _snapshots(clean_database, generation_id, "first-deactivation")
+    _insert_complete_document(
+        clean_database,
+        generation_id,
+        document_id="doc-first-deactivation",
+        version="v1",
+        pdf_seed="first-deactivation",
+        snapshot_id=snapshots["woori"],
+        latest=True,
+    )
+    quality, retrieval = builder.evaluate(generation_id)
+    builder.seal(
+        generation_id,
+        embedding_provider="openrouter",
+        embedding_model="openai/text-embedding-3-small",
+        dimension=1536,
+        quality_report=quality,
+        retrieval_report=retrieval,
+    )
+    builder.publish(generation_id)
+
+    assert builder.deactivate(generation_id) == generation_id
+    assert not store.current_path.exists()
+    # Recovery/operator retries are idempotent after the DB-first transition.
+    assert builder.deactivate(generation_id) == generation_id
+    with clean_database.connection() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*)::int AS count FROM active_generation")
+        active = cursor.fetchone()
+        cursor.execute("SELECT state FROM generations WHERE generation_id=%s", (generation_id,))
+        generation = cursor.fetchone()
+    assert active == {"count": 0}
+    assert generation == {"state": "retired"}
 
 
 def test_generation_materialization_no_change_publish_and_compensation(

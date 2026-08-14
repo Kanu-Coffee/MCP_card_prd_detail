@@ -2,7 +2,7 @@
 
 ## 1. 판정 원칙과 현재 결론
 
-이 문서는 CardRAG MCP v1의 완료 상태를 추적하는 단일 장부다. 계획 문서의 존재만으로
+이 문서는 CardRAG MCP v1과 v0.2 portable-state 확장의 완료 상태를 추적하는 단일 장부다. 계획 문서의 존재만으로
 완료 처리하지 않고, 코드·설정과 재현 가능한 자동 검증을 함께 요구한다.
 
 - `[x] [검증 완료]`: 현재 개발 환경에서 구현과 자동 검증 증거가 모두 존재한다.
@@ -12,12 +12,12 @@
   막지 않는다.
 - `[x] [범위 제외]`: 사용자가 v1에서 명시적으로 제외했거나 후속 과제로 보류했다.
 
-기준일: 2026-08-12
+기준일: 2026-08-14
 
-**현재 개발 환경에서 구현·자동 검증할 수 있는 v1 항목은 완료됐다.** 실제 카드사와
-provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus 실행만 남았으며 이를
-완료로 가장하지 않는다. 최종 회귀 결과와 source revision은 이 문서와
-`reports/deployment/pdfium-release-candidate-verification.json`에 함께 기록한다. 이전
+**v1 기준선과 v0.2 코드 구현·자동 검증은 완료됐다.** 실제 카드사와 provider 계정,
+NAS/Portainer 운영 host, public 0.2 image 승인, 전체 corpus import와 다른 실제 서버의
+restore drill은 운영 인수시험으로 남았으며 이를 완료로 가장하지 않는다. 최종 회귀 결과는
+이 문서와 `reports/deployment/v020-implementation-verification.json`에 기록한다. 이전
 `dev-environment-verification.json`은 PyMuPDF 교체 전의 historical evidence로만 보존한다.
 
 ## 2. 기준 문서와 기술 결정
@@ -59,7 +59,7 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
 - [x] [검증 완료] PDF/OCR object는 SHA-256 content address로 불변 저장하며 경로 탈출,
   absolute path, NUL과 symlink escape를 거부한다.
   증거: `src/cardrag/storage/`, `tests/unit/test_storage.py`
-- [x] [검증 완료] PostgreSQL migration 1~13의 checksum drift를 fail closed로 검사하고
+- [x] [검증 완료] PostgreSQL migration 1~14의 checksum drift를 fail closed로 검사하고
   generation·artifact·evidence 불변성과 역할 권한을 DB에서도 강제한다.
   증거: `src/cardrag/db/`, `tests/integration/test_database_roles.py`,
   `tests/integration/test_generation_lifecycle.py`
@@ -226,6 +226,17 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
 - [ ] [실환경 검증 대기] 전체 9.51 GiB 파일별 inventory·migration과 수일 BULK를 실제 volume
   용량 아래 수행한다.
   인계: `docs/REAL_ENV_HANDOFF.md` 4절
+- [x] [검증 완료] 실제 master manifest 1,592건을 deterministic bundle로 정규화하고
+  전체 bundle을 독립 재검증해 document 1,592, PDF 1,369, OCR 1,573을 대사했다.
+  1,590건의 legacy OCR은 provider 호출 없이 채택하며, hash/page 문제가 있는 2건만 재-OCR한다.
+  증거: `src/cardrag/legacy/bundle.py`, `src/cardrag/legacy/importer.py`,
+  `tests/unit/test_legacy_bundle.py`, `tests/integration/test_legacy_import.py`,
+  `reports/legacy/legacy-prepare-dry-run-20260813.json`,
+  `reports/legacy/legacy-prepare-full-20260814.json`
+- [x] [검증 완료] Portainer runtime object/generation을 명시적 host bind에 저장하고,
+  PostgreSQL 두 DB·전체 CAS·generation을 같은 export ID로 묶어 빈 다른 root에 복원한다.
+  증거: `deploy/portainer/`, `src/cardrag/state_transfer.py`,
+  `tests/unit/test_state_transfer.py`, `docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md`
 
 ## 9. Docker, 운영, 관측성과 release
 
@@ -241,7 +252,8 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
   volume과 Docker secret을 사용한다. Keycloak bootstrap secret은 1회 overlay 뒤 base
   Compose에서 제거된다.
   증거: `.dockerignore`, `.gitignore`, `deploy/secrets/README.md`,
-  `deploy/keycloak/bootstrap.compose.yaml`
+  `deploy/keycloak/bootstrap.compose.yaml`,
+  `deploy/portainer/cardrag-bootstrap-stack.yaml`
 - [x] [검증 완료] Keycloak realm은 self-registration/DCR off, PKCE·Client Credentials,
   audience/scope, offline refresh rotation/reuse rejection/revoke와 90일 idle policy를 갖는다.
   증거: `deploy/keycloak/cardrag-realm.json`,
@@ -252,7 +264,9 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
   `reports/deployment/pdfium-release-candidate-verification.json`
 - [x] [검증 완료] 매일 03:00 KST 우리→KB→신한, issuer 사이 10분 대기·실패 격리와 04:00
   retention one-shot을 CLI/systemd로 제공하고 scheduler lease heartbeat로 중복 실행을 막는다.
-  증거: `src/cardrag/scheduler.py`, `deploy/systemd/`, `tests/unit/test_scheduler.py`
+  Portainer unit은 checked host-bind Stack과 allow-list operation만 사용한다.
+  증거: `src/cardrag/scheduler.py`, `deploy/systemd/`, `deploy/portainer/systemd/`,
+  `deploy/portainer/tests/test-systemd.sh`, `tests/unit/test_scheduler.py`
 - [x] [검증 완료] allow-list JSON log, request/run/job/generation correlation, loopback metrics,
   queue·진행·ETA·retry/DLQ와 alert/runbook을 구현했다. query/token/body는 저장하지 않는다.
   증거: `src/cardrag/observability.py`, `deploy/monitoring/`,
@@ -292,25 +306,28 @@ provider 계정, 운영 host, public image 승인 및 수일짜리 전체 corpus
 - [x] [검증 완료] unit test가 identity, manifest, path, adapter, download, OCR, structure,
   chunk, embedding, hybrid, generation, auth, MCP, scheduler와 observability를 검증한다.
   증거: `tests/unit/`
-- [x] [검증 완료] 깨끗한 PostgreSQL에서 migration 1~13, 원자 claim/lease, pgvector,
+- [x] [검증 완료] 깨끗한 PostgreSQL 17.10/pgvector 0.8.2에서 migration 1~14와 재실행
+  idempotence, 원자 claim/lease, pgvector,
   generation lifecycle, 역할 권한, observability와 3 issuer full pipeline E2E가 통과한다.
-  증거: `tests/integration/`
+  증거: `tests/integration/` 전체 43 passed
 - [x] [검증 완료] E2E는 parser→download→fake Codex OCR→structure→embedding/index→worker
   restart/resume→seal/publish→authenticated HTTP MCP와 다음 세대 materialize까지 실행한다.
   증거: `tests/integration/test_offline_pipeline_e2e.py`
 - [x] [검증 완료] gold quality, 합성 load, prompt/tool injection, SSRF/path, JWT 권한,
   secret redaction, image content와 sandbox 회귀를 CI gate에 포함했다.
   증거: `scripts/run_fixture_quality.py`, `tests/load/`, `.github/workflows/ci.yml`
-- [x] [범위 제외] backup·restore/RPO·RTO 구현은 사용자 결정에 따라 v1 후속 과제다.
+- [x] [검증 완료] maintenance-window portable export/verify/empty-target restore, 권한 회전,
+  동일 package 재시도와 source→target1→target2 연쇄 이전을 실제 PostgreSQL 17 client/server와
+  자동 검증했다. 실제 NAS·두 번째 운영 host의 RPO/RTO drill은 운영 인계로 남긴다.
 - [x] [범위 제외] Nginx Proxy Manager container와 public TLS 설정은 별도 hosting 과제다.
 - [x] [범위 제외] ARM64 image, public admin API/web UI, 신한 법인·선불과 추가 카드사는 v1
   범위가 아니다.
 
 ### Goal 판정
 
-개발 환경에서 구현하거나 fixture/mock/자동 통합시험으로 검증할 수 있는 체크리스트는 모두
-완료했다. 남은 항목은 실제 계정·운영 host·법적 확인·장시간 corpus·수동 public release뿐이며,
+v1과 v0.2 legacy/state의 코드 구현·자동 검증은 완료했다. 남는 항목은 실제 계정·운영 host,
+법적 확인, 전체 9.51 GiB corpus import, 실제 NAS/별도 서버 restore drill과 수동 public
+0.2 release이며,
 각 항목의 불가 이유, 대체 검증, 실행 절차, 성공 조건과 실패 진단은
-`docs/REAL_ENV_HANDOFF.md`에 기록했다. 따라서 이 목록 때문에 자동 작업을 반복하거나 실제 기기를
-기다리지 않으며, 최종 회귀와 private GitHub source 게시가 성공하면 개발 Goal을 달성한 것으로
-처리한다.
+`docs/REAL_ENV_HANDOFF.md`와 `docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md`에 기록했다.
+운영 전환은 해당 인수시험이 성공한 뒤에만 수행하며, 개발 완료를 운영 배포 완료로 표현하지 않는다.

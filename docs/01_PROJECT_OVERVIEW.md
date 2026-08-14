@@ -88,7 +88,8 @@
 - 카드상품 검색, 상품 상세, 혜택 조건, 전월실적, 제외조건과 원문 근거를 제공하는 읽기 전용 MCP 역할
 - 명시적 사용자 요청에 대한 보존 원본 PDF 파일 제공과 페이지 단위 OCR·근거 조회
 - 독립적인 오프라인 작업과 상시 실행 온라인 서비스
-- Docker 기반 실행, 외부 볼륨, 비밀정보 주입과 상태 점검. backup·restore 구현은 v1 이후 과제다.
+- Docker 기반 실행, 명시적 host bind, 외부 볼륨, 비밀정보 주입과 상태 점검, PostgreSQL·전체
+  CAS·generation을 한 epoch로 묶는 portable export/restore
 
 ### 5.2 이번 개발의 범위
 
@@ -111,10 +112,11 @@
 - 전체 9.51 GiB 레거시 이관과 수일짜리 운영 BULK
 - 운영 host의 Nginx Proxy Manager·TLS·systemd 설치
 - `vX.Y.Z` 수동 승인 후 public Docker Hub push·Cosign 검증
-- backup·restore, RPO/RTO, ARM64, public admin API·웹 UI
+- 실제 NAS와 두 번째 운영 host를 사용하는 restore drill·RPO/RTO 확정, ARM64, public admin API·웹 UI
 
-앞의 다섯 항목은 [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)에 절차를 남겼고, 마지막 항목은
-사용자 결정에 따른 v1 범위 밖이다.
+실제 계정·외부 host가 필요한 항목은 [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)에 절차를
+남긴다. portable state 기능 자체와 격리된 개발환경 restore는 0.2 범위이며, 실제 RPO/RTO 수치는
+운영 NAS와 두 번째 host drill에서 확정한다.
 
 ### 6.2 신규 공개 MCP 서비스에서 제외할 영역
 
@@ -207,7 +209,8 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 - 원본 PDF는 승인 사용자에게만 제공하고 100 MB 상한, HTTP Range와 90일 감사 metadata 보존을 적용한다.
 - 일일 수집은 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행하고 각 카드사 job 종료 후 10분 대기하며 issuer 실패를 격리한다.
 - 최신 문서 처리 실패 또는 누락은 generation 게시를 차단한다. 과거 이력 실패는 quarantine·보고 후 최신 coverage가 100%일 때 게시를 허용한다.
-- backup·restore 구현은 현재 v1 개발 범위에서 제외하고 추후 개선 과제로 보류한다.
+- 0.2는 Portainer runtime을 명시적 host bind로 배치하고, PostgreSQL 두 DB·전체 CAS·generation
+  authority를 같은 maintenance epoch의 portable package로 export/restore한다.
 - 접근·권한·PDF 감사 metadata는 90일, 비식별 집계 metric은 1년 보존하고 질의 원문은 기본 저장하지 않는다.
 - 관리자 기능은 운영 CLI와 scheduled job으로 제한하고 공개 관리자 API·웹 UI는 만들지 않는다.
 - public Docker Hub repository `ymtop59/mcp-card-prd-detail`을 생성했다. v1은 `linux/amd64`만 build한다. 일반 `main`·tag push에는 공개 image를 push하지 않고 `vX.Y.Z` tag를 대상으로 exact confirmation을 입력한 수동 release workflow를 통과한 digest만 공개한다. GitHub Actions OIDC keyless Cosign으로 서명하며 transparency log에 private repository·workflow identity가 드러날 수 있음을 승인한다.
@@ -227,7 +230,7 @@ OCR·구조 분석·임베딩 엔진, 모델, prompt·설정 버전과 실행 �
 | 온라인 query embedding | 결정 완료 | configurable OpenRouter, cache·retry·circuit, opt-in lexical-only |
 | 원문·PDF 이용 조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 재배포·상업적 이용 조건은 별도 확인 |
 | 보존·삭제·감사 정책 | 결정 완료 | PDF/OCR 전 버전, 성공 generation 최근 3개, 실패 candidate 7일, pin은 해제 시까지, 감사 90일·metric 1년, PNG cache 7일 |
-| backup·restore | v1 범위 밖 | 추후 개선 과제로 별도 설계·구현 |
+| portable state·서버 이전 | 0.2 구현 | 점검시간 export/empty-target restore; 실제 NAS RPO/RTO는 운영 drill에서 확정 |
 
 공시자료 이용조건과 실제 provider·전체 corpus 성능은 공개 운영 범위를 넓히기 전 확인하는 외부
 gate다. 나머지 개발환경 항목은 ADR과 자동 검증 증거로 완료했다.

@@ -5,6 +5,7 @@
 .env.*
 !.env.example
 .venv
+.task-tools
 __pycache__
 *.py[cod]
 .pytest_cache
