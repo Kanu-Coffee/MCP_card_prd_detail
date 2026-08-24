@@ -144,11 +144,13 @@ jobs:
 
           POSTGRES_IMAGE=$(jq -er \
             '.scope.image.reference' security/pgvector-image-vex.json)
-          POSTGRES_DIGEST=$(jq -er \
-            '.scope.image.digest' security/pgvector-image-vex.json)
+          POSTGRES_CANONICAL=$(jq -er \
+            '.scope.image.canonical_digest_reference' \
+            security/pgvector-image-vex.json)
           docker pull --platform linux/amd64 "$POSTGRES_IMAGE"
-          test "$(docker image inspect "$POSTGRES_IMAGE" --format '{{.Id}}')" = \
-            "$POSTGRES_DIGEST"
+          docker image inspect "$POSTGRES_IMAGE" | jq -e \
+            --arg expected "$POSTGRES_CANONICAL" \
+            'length == 1 and (.[0].RepoDigests | index($expected) != null)'
           test "$(docker image inspect "$POSTGRES_IMAGE" --format '{{.Architecture}}')" = \
             amd64
           read -r GOSU_SHA GOSU_PATH < <(
