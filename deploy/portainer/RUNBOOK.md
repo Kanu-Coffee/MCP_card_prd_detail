@@ -1,5 +1,12 @@
 # Portainer host storage and server migration
 
+For a fresh Docker Standalone host, the guided installer in
+[`QUICKSTART.ko.md`](QUICKSTART.ko.md) prepares the same storage, secret, image,
+and bootstrap contracts with fewer manual steps. Use this full runbook for an
+existing installation, NAS export/restore, server migration, timers, or incident
+recovery. Legacy PDF/OCR transfer has a shorter companion guide in
+[`LEGACY_IMPORT_QUICKSTART.ko.md`](LEGACY_IMPORT_QUICKSTART.ko.md).
+
 The production Stack stores durable files on the Docker host, not inside a
 container or a Stack-scoped volume:
 
@@ -27,11 +34,11 @@ Swarm or Kubernetes Stack. Install the exact reviewed release checkout at
 ## Download and verify release evidence
 
 The three images must come from one successful `Public image release` run for
-the exact `v0.2.0` tag. With an authenticated GitHub CLI, download its integrated
+the exact `v0.2.1` tag. With an authenticated GitHub CLI, download its integrated
 artifact instead of copying role digests from a web page:
 
 ```sh
-export RELEASE_VERSION=0.2.0
+export RELEASE_VERSION=0.2.1
 export RELEASE_GIT_SHA=$(git -C /opt/cardrag rev-parse "v${RELEASE_VERSION}^{commit}")
 test "$(git -C /opt/cardrag rev-parse HEAD)" = "$RELEASE_GIT_SHA"
 release_run_id=$(gh run list \
@@ -170,7 +177,11 @@ On an empty PostgreSQL volume, create a Stack named `cardrag-bootstrap` from
 `/etc/cardrag/stack.env`. It contains only PostgreSQL and Keycloak. Once both
 are healthy, sign in with `KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME` and the value in
 `keycloak_admin_password.txt`. Create a named permanent administrator, sign
-out, and prove that account works in a fresh private browser session.
+out, and prove that account works in a fresh private browser session. Using the
+permanent account, disable/delete the bootstrap administrator or rotate its
+credential, then prove that the original bootstrap credential can no longer
+sign in. Removing the password file alone does not revoke the account already
+stored in Keycloak.
 
 The public TLS proxy and certificate for `KEYCLOAK_PUBLIC_URL` must already be
 working. A host proxy uses `127.0.0.1:8080`. A containerized proxy must be

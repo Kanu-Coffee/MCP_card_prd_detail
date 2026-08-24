@@ -1,0 +1,28 @@
+# CardRAG Portainer quick-setup configuration.
+# This file must contain selectors and paths only. Never place a password,
+# API key, token, database URL, or other credential here.
+
+CARDRAG_STATE_ROOT=/srv/cardrag
+CARDRAG_DATA_ROOT=/srv/cardrag/runtime
+CARDRAG_IMPORT_ROOT=/srv/cardrag/imports
+CARDRAG_ARCHIVE_ROOT=/mnt/cardrag-backup/cardrag
+CARDRAG_ARCHIVE_EXPECTED_SOURCE=
+CARDRAG_CONFIG_ROOT=/srv/cardrag/config
+CARDRAG_SECRETS_DIR=/srv/cardrag/secrets
+CARDRAG_DEPLOYMENT_ROOT=/srv/cardrag/config/deployment
+
+CARDRAG_POSTGRES_VOLUME=cardrag-postgres-v1
+CARDRAG_CODEX_AUTH_VOLUME=cardrag-codex-auth-v1
+
+# Replace this reserved value with the public HTTPS origin before running.
+KEYCLOAK_PUBLIC_URL=https://auth.cardrag.invalid
+KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME=cardrag-bootstrap
+
+# The key itself stays in this owner-only file; it is never copied into this config.
+CARDRAG_OPENROUTER_KEY_FILE=/root/cardrag-install/openrouter-api-key.txt
+
+# Download and verify the integrated release artifact as described in RUNBOOK.md.
+CARDRAG_RELEASE_MANIFEST=/root/cardrag-install/release-manifest.json
+
+# Portainer loads this generated, non-secret file when creating the Stacks.
+CARDRAG_STACK_ENV_FILE=/etc/cardrag/stack.env

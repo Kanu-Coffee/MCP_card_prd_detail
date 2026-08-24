@@ -126,7 +126,7 @@ fixture/mock 통합시험과 정적 배포 검증이 완료된 뒤에는 개발 
   fail-closed한다. Cosign digest signature/attestation tag는 재서명을 위해 regex 밖에 둔다.
 
   ```bash
-  export RELEASE_VERSION=0.2.0
+  export RELEASE_VERSION=0.2.1
   export RELEASE_GIT_SHA=REPLACE_WITH_RELEASE_GIT_SHA
   cosign verify \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \

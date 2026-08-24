@@ -1,5 +1,12 @@
 # 레거시 Import·호스트 영속 저장·서버 이전 운영서
 
+새 Docker Standalone 서버의 초기 설치는
+[`deploy/portainer/QUICKSTART.ko.md`](../deploy/portainer/QUICKSTART.ko.md), 기존
+PDF/OCR의 bundle 준비와 one-shot import는
+[`deploy/portainer/LEGACY_IMPORT_QUICKSTART.ko.md`](../deploy/portainer/LEGACY_IMPORT_QUICKSTART.ko.md)의
+간편 절차를 먼저 사용할 수 있다. 이 문서는 기존 volume 전환, portable state와 서버
+이전까지 포함한 전체 운영 계약이다.
+
 이 문서는 CardRAG `0.2.x`에서 레거시 PDF/OCR을 현재 처리 계약으로 재색인하고,
 Portainer Stack의 운영 데이터를 Docker host에 영속화하며, 다른 서버로 일관되게
 이전하는 절차의 기준이다. 원본 레거시 디렉터리를 application volume에 직접 복사하는
