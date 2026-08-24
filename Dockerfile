@@ -119,7 +119,7 @@ FROM runtime AS admin
 ENV CARDRAG_CONTAINER_ROLE=admin
 USER root
 RUN apt-get update && \
-    apt-get install --yes --no-install-recommends libpq5=15.18-0+deb12u1 && \
+    apt-get install --yes --no-install-recommends libpq5=15.19-0+deb12u1 && \
     rm -rf /var/lib/apt/lists/* && \
     install --directory --owner=root --group=root --mode=0755 /usr/local/lib/cardrag-pg17 \
       /usr/share/licenses/cardrag/postgresql-client-17
