@@ -357,7 +357,8 @@ jobs:
           )
           assert validation["name"] == "cardrag-validation"
           assert set(validation["services"]) == {
-              "postgres", "keycloak", "volume-init", "migrate", "admin", "mcp"
+              "postgres", "postgres-extension-upgrade", "keycloak", "volume-init",
+              "migrate", "admin", "mcp"
           }
           assert "worker" not in validation["services"]
           assert validation["services"]["admin"]["environment"][
