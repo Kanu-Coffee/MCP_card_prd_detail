@@ -123,11 +123,9 @@ services:
           --no-align --command "SELECT count(*) FROM pg_roles WHERE rolname IN ('cardrag','cardrag_worker','cardrag_mcp','keycloak')")"
           = 4 && test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"
           --tuples-only --no-align --command "SELECT count(*) FROM pg_database WHERE
-          datname IN ('cardrag','keycloak')")" = 2 && test "$$(psql --username "$$POSTGRES_USER"
-          --dbname cardrag --tuples-only --no-align --command "SELECT count(*) FROM
-          pg_extension WHERE extname='vector'")" = 1
+          datname IN ('cardrag','keycloak')")" = 2
       timeout: 5s
-    image: pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     mem_limit: ${CARDRAG_POSTGRES_MEMORY:-4g}
     networks:
       backend: null

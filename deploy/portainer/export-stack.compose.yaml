@@ -5,7 +5,7 @@ name: cardrag-export
 # scheduler, retention, or admin service.
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     platform: linux/amd64
     restart: "no"
     shm_size: 256m

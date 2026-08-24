@@ -88,7 +88,8 @@ psql_cardrag_as_admin() {
         --set ON_ERROR_STOP=1 "$@"
 }
 
-client_major=$(pg_dump --version | sed -n 's/^pg_dump (PostgreSQL) \([0-9][0-9]*\).*/\1/p')
+client_version=$(pg_dump --version | sed -n \
+    's/^pg_dump (PostgreSQL) \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
 server_number=$(psql_admin --tuples-only --no-align --command 'SHOW server_version_num')
 case "$server_number" in
     ''|*[!0-9]*)
@@ -96,9 +97,8 @@ case "$server_number" in
         exit 70
         ;;
 esac
-server_major=$((server_number / 10000))
-if [ "$client_major" != 17 ] || [ "$server_major" -ne 17 ]; then
-    echo "schema transition requires PostgreSQL 17 client and server" >&2
+if [ "$client_version" != 17.11 ] || [ "$server_number" != 170011 ]; then
+    echo "schema transition requires exact PostgreSQL 17.11 client and server" >&2
     exit 65
 fi
 
@@ -137,13 +137,75 @@ database_inventory() {
         >"$output"
 }
 
+database_identity() {
+    output=$1
+    system_identifier=$(psql_admin --tuples-only --no-align --command \
+        'SELECT system_identifier::text FROM pg_control_system()')
+    case "$system_identifier" in
+        ''|*[!0-9]*)
+            echo "PostgreSQL system identifier could not be determined" >&2
+            exit 70
+            ;;
+    esac
+    tab=$(printf '\t')
+    {
+        printf 'system_identifier\t%s\n' "$system_identifier"
+        psql_admin --tuples-only --no-align --field-separator="$tab" --command \
+            "SELECT datname, oid::text FROM pg_database
+             WHERE datname IN ('cardrag', 'keycloak') ORDER BY datname"
+    } >"$output"
+    if [ "$(sed -n '2p' "$output" | cut -f1)" != cardrag ] || \
+       [ "$(sed -n '3p' "$output" | cut -f1)" != keycloak ] || \
+       [ "$(wc -l <"$output" | tr -d ' ')" != 3 ]; then
+        echo "CardRAG/Keycloak database identity could not be determined" >&2
+        exit 70
+    fi
+}
+
+package_identity() {
+    manifest=$1
+    output=$2
+    python3 - "$manifest" "$output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+identity = manifest.get("source_identity")
+if not isinstance(identity, dict) or set(identity) != {"system_identifier", "databases"}:
+    raise SystemExit("legacy safety source identity is invalid")
+system_identifier = identity["system_identifier"]
+databases = identity["databases"]
+if (
+    not isinstance(system_identifier, str)
+    or not system_identifier.isdigit()
+    or int(system_identifier) <= 0
+    or not isinstance(databases, list)
+    or [item.get("name") for item in databases if isinstance(item, dict)]
+       != ["cardrag", "keycloak"]
+):
+    raise SystemExit("legacy safety source identity is invalid")
+for item in databases:
+    if set(item) != {"name", "oid"} or not isinstance(item["oid"], int) or item["oid"] <= 0:
+        raise SystemExit("legacy safety database identity is invalid")
+Path(sys.argv[2]).write_text(
+    "system_identifier\t" + system_identifier + "\n"
+    + "".join(f'{item["name"]}\t{item["oid"]}\n' for item in databases)
+)
+PY
+}
+
 work=/tmp/cardrag-schema13-transition.$$
 install -d -m 0700 "$work"
 expected13=$work/expected13.tsv
 expected14=$work/expected14.tsv
+expected15=$work/expected15.tsv
 actual=$work/actual.tsv
+live_identity=$work/live-identity.tsv
+sealed_identity=$work/sealed-identity.tsv
 expected_inventory 13 "$expected13"
 expected_inventory 14 "$expected14"
+expected_inventory 15 "$expected15"
 
 require_schema_inventory() {
     expected=$1
@@ -224,6 +286,21 @@ for path in (root, *root.rglob("*")):
         raise SystemExit("schema-13 safety package mode differs")
 manifest_path = root / "transition-manifest.json"
 manifest = json.loads(manifest_path.read_text())
+source_identity = manifest.get("source_identity")
+if (
+    not isinstance(source_identity, dict)
+    or set(source_identity) != {"system_identifier", "databases"}
+    or not isinstance(source_identity.get("system_identifier"), str)
+    or not source_identity["system_identifier"].isdigit()
+    or int(source_identity["system_identifier"]) <= 0
+    or not isinstance(source_identity.get("databases"), list)
+    or [item.get("name") for item in source_identity["databases"] if isinstance(item, dict)]
+       != ["cardrag", "keycloak"]
+):
+    raise SystemExit("legacy safety source identity is invalid")
+for item in source_identity["databases"]:
+    if set(item) != {"name", "oid"} or not isinstance(item["oid"], int) or item["oid"] <= 0:
+        raise SystemExit("legacy safety database identity is invalid")
 expected_files = []
 for relative in (
     "database/cardrag.dump", "database/keycloak.dump", "schema-migrations.tsv"
@@ -240,11 +317,19 @@ for relative in (
         "sha256": digest.hexdigest(),
         "size_bytes": size,
     })
+inventory_rows = (root / "schema-migrations.tsv").read_text().splitlines()
+try:
+    source_schema_max = int(inventory_rows[-1].split("\t", 1)[0])
+except (IndexError, ValueError) as exc:
+    raise SystemExit("legacy safety migration inventory is invalid") from exc
+if source_schema_max not in (13, 14):
+    raise SystemExit("legacy safety source schema must be 13 or 14")
 expected_manifest = {
-    "schema_version": "cardrag-schema13-safety.v1",
+    "schema_version": "cardrag-schema13-safety.v2",
     "transition_id": transition_id,
     "postgres_major": 17,
-    "source_schema_max": 13,
+    "source_schema_max": source_schema_max,
+    "source_identity": source_identity,
     "databases": ["cardrag", "keycloak"],
     "files": expected_files,
 }
@@ -253,7 +338,7 @@ if manifest != expected_manifest:
 manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 ready = json.loads((root / "READY").read_text())
 if ready != {
-    "schema_version": "cardrag-schema13-safety-ready.v1",
+    "schema_version": "cardrag-schema13-safety-ready.v2",
     "transition_id": transition_id,
     "manifest_sha256": manifest_sha,
 }:
@@ -262,8 +347,9 @@ PY
     (CDPATH= cd -- "$package" && sha256sum --check --strict checksums.sha256 >/dev/null)
     pg_restore --list "$package/database/cardrag.dump" >/dev/null
     pg_restore --list "$package/database/keycloak.dump" >/dev/null
-    if ! cmp -s "$expected13" "$package/schema-migrations.tsv"; then
-        echo "schema-13 safety package migration inventory differs" >&2
+    if ! cmp -s "$expected13" "$package/schema-migrations.tsv" && \
+       ! cmp -s "$expected14" "$package/schema-migrations.tsv"; then
+        echo "legacy safety package migration inventory differs" >&2
         exit 74
     fi
 }
@@ -271,20 +357,45 @@ PY
 if [ "$operation" = backup ]; then
     if [ -e "$package" ] || [ -L "$package" ]; then
         verify_package
+        package_identity "$package/transition-manifest.json" "$sealed_identity"
         if [ -e "$owner" ] || [ -L "$owner" ]; then
             verify_owner
             rm -f -- "$owner"
             fsync_archive_root
         fi
         database_inventory "$actual"
-        if ! cmp -s "$expected13" "$actual" && ! cmp -s "$expected14" "$actual"; then
-            echo "sealed schema-13 backup exists but live schema is neither 13 nor 14" >&2
+        if cmp -s "$expected15" "$actual"; then
+            database_identity "$live_identity"
+            if ! cmp -s "$sealed_identity" "$live_identity"; then
+                echo "sealed legacy backup does not match the live database identity" >&2
+                exit 65
+            fi
+        elif { cmp -s "$expected13" "$actual" || cmp -s "$expected14" "$actual"; } && \
+             cmp -s "$package/schema-migrations.tsv" "$actual"; then
+            database_identity "$live_identity"
+            if ! cmp -s "$sealed_identity" "$live_identity"; then
+                echo "sealed legacy backup does not match the live database identity" >&2
+                exit 65
+            fi
+        else
+            echo "sealed legacy backup does not match the live pre-upgrade schema" >&2
             exit 65
         fi
         echo "schema-13 safety backup already verified: $transition_id"
         exit 0
     fi
-    require_schema_inventory "$expected13" 'migrations 1 through 13'
+    database_inventory "$actual"
+    if cmp -s "$expected13" "$actual"; then
+        source_inventory=$expected13
+        source_schema_max=13
+    elif cmp -s "$expected14" "$actual"; then
+        source_inventory=$expected14
+        source_schema_max=14
+    else
+        echo "legacy safety backup requires exactly migrations 1 through 13 or 14" >&2
+        exit 65
+    fi
+    database_identity "$live_identity"
     if [ -e "$incoming" ] || [ -L "$incoming" ]; then
         if [ ! -d "$incoming" ] || [ -L "$incoming" ] || \
            [ ! -f "$owner" ] || [ -L "$owner" ]; then
@@ -340,7 +451,7 @@ PY
         fsync_archive_root
     fi
     install -d -m 0750 "$incoming/database"
-    cp "$expected13" "$incoming/schema-migrations.tsv"
+    cp "$source_inventory" "$incoming/schema-migrations.tsv"
     pg_dump --no-password --host "$postgres_host" --port "$postgres_port" \
         --username "$postgres_user" --dbname cardrag --format custom \
         --file "$incoming/database/cardrag.dump"
@@ -354,12 +465,19 @@ PY
         echo "database writer appeared during schema-13 safety backup" >&2
         exit 75
     fi
-    require_schema_inventory "$expected13" 'migrations 1 through 13'
-    python3 - "$incoming/transition-manifest.json" "$incoming" "$transition_id" <<'PY'
+    require_schema_inventory "$source_inventory" "migrations 1 through $source_schema_max"
+    database_identity "$sealed_identity"
+    if ! cmp -s "$live_identity" "$sealed_identity"; then
+        echo "database identity changed during schema-13 safety backup" >&2
+        exit 75
+    fi
+    python3 - "$incoming/transition-manifest.json" "$incoming" "$transition_id" \
+        "$source_schema_max" "$live_identity" <<'PY'
 import hashlib
 import json
 import os
 import sys
+from pathlib import Path
 path = sys.argv[1]
 root = sys.argv[2]
 files = []
@@ -378,10 +496,17 @@ for relative in (
         "size_bytes": size,
     })
 payload = {
-    "schema_version": "cardrag-schema13-safety.v1",
+    "schema_version": "cardrag-schema13-safety.v2",
     "transition_id": sys.argv[3],
     "postgres_major": 17,
-    "source_schema_max": 13,
+    "source_schema_max": int(sys.argv[4]),
+    "source_identity": {
+        "system_identifier": Path(sys.argv[5]).read_text().splitlines()[0].split("\t")[1],
+        "databases": [
+            {"name": line.split("\t")[0], "oid": int(line.split("\t")[1])}
+            for line in Path(sys.argv[5]).read_text().splitlines()[1:]
+        ],
+    },
     "databases": ["cardrag", "keycloak"],
     "files": files,
 }
@@ -405,7 +530,7 @@ import json
 import os
 import sys
 payload = {
-    "schema_version": "cardrag-schema13-safety-ready.v1",
+    "schema_version": "cardrag-schema13-safety-ready.v2",
     "transition_id": sys.argv[2],
     "manifest_sha256": sys.argv[3],
 }
@@ -467,17 +592,44 @@ PY
 fi
 
 verify_package
+package_identity "$package/transition-manifest.json" "$sealed_identity"
 database_inventory "$actual"
-if cmp -s "$expected14" "$actual"; then
-    echo "migration 014 is already verified: $transition_id"
+if cmp -s "$expected15" "$actual"; then
+    database_identity "$live_identity"
+    if ! cmp -s "$sealed_identity" "$live_identity"; then
+        echo "sealed legacy backup does not match the live database identity" >&2
+        exit 65
+    fi
+    vector_version=$(psql_cardrag_as_admin --tuples-only --no-align --command \
+        "SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+    if [ "$vector_version" != 0.8.6 ]; then
+        echo "schema 15 database has unexpected pgvector version: $vector_version" >&2
+        exit 74
+    fi
+    echo "migrations 014 and 015 are already verified: $transition_id"
     exit 0
 fi
-if ! cmp -s "$expected13" "$actual"; then
-    echo "controlled upgrade requires exactly migrations 1 through 13" >&2
+if cmp -s "$expected13" "$actual"; then
+    source_schema_max=13
+elif cmp -s "$expected14" "$actual"; then
+    source_schema_max=14
+else
+    echo "controlled upgrade requires exactly migrations 1 through 13 or 14" >&2
+    exit 65
+fi
+if ! cmp -s "$package/schema-migrations.tsv" "$actual"; then
+    echo "sealed legacy backup does not match the live pre-upgrade schema" >&2
+    exit 65
+fi
+database_identity "$live_identity"
+if ! cmp -s "$sealed_identity" "$live_identity"; then
+    echo "sealed legacy backup does not match the live database identity" >&2
     exit 65
 fi
 migration14=$migration_root/014_legacy_import_and_portability.sql
 migration14_sha=$(sha256sum "$migration14" | awk '{print $1}')
+migration15=$migration_root/015_pgvector_086.sql
+migration15_sha=$(sha256sum "$migration15" | awk '{print $1}')
 {
     printf "%s\n" "SELECT pg_advisory_xact_lock(hashtext('cardrag-schema-migration'));"
     cat <<'SQL'
@@ -488,18 +640,56 @@ BEGIN
         WHERE datname IN ('cardrag', 'keycloak')
           AND pid <> pg_backend_pid()
     ) THEN
-        RAISE EXCEPTION 'database session appeared before migration 014';
+        RAISE EXCEPTION 'database session appeared before migrations 014 and 015';
+    END IF;
+END $$;
+DO $$
+DECLARE
+    installed_version text;
+    extension_owner text;
+BEGIN
+    SELECT extversion, pg_get_userbyid(extowner)
+      INTO installed_version, extension_owner
+      FROM pg_extension
+     WHERE extname = 'vector';
+    IF installed_version IS NULL THEN
+        RAISE EXCEPTION 'vector extension is not installed';
+    END IF;
+    IF extension_owner <> current_user THEN
+        RAISE EXCEPTION 'vector extension owner % differs from transition role %',
+            extension_owner, current_user;
+    END IF;
+    IF installed_version NOT IN ('0.8.2', '0.8.3', '0.8.4', '0.8.5', '0.8.6') THEN
+        RAISE EXCEPTION 'unsupported vector extension upgrade source: %', installed_version;
+    END IF;
+    IF installed_version <> '0.8.6' THEN
+        EXECUTE 'ALTER EXTENSION vector UPDATE TO ''0.8.6''';
+        IF to_regclass('public.evidence_vector_idx') IS NOT NULL THEN
+            EXECUTE 'REINDEX INDEX public.evidence_vector_idx';
+        END IF;
     END IF;
 END $$;
 SET ROLE cardrag;
 SQL
-    cat "$migration14"
+    if [ "$source_schema_max" -eq 13 ]; then
+        cat "$migration14"
+        printf "%s\n" \
+            "INSERT INTO schema_migrations(version, name, checksum) VALUES" \
+            "(14, '014_legacy_import_and_portability.sql', '$migration14_sha');"
+    fi
+    cat "$migration15"
     printf "%s\n" \
         "INSERT INTO schema_migrations(version, name, checksum) VALUES" \
-        "(14, '014_legacy_import_and_portability.sql', '$migration14_sha');"
+        "(15, '015_pgvector_086.sql', '$migration15_sha');"
 } | psql_cardrag_as_admin \
     --single-transaction >/dev/null
-require_schema_inventory "$expected14" 'migrations 1 through 14'
+require_schema_inventory "$expected15" 'migrations 1 through 15'
+vector_version=$(psql_cardrag_as_admin --tuples-only --no-align --command \
+    "SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+if [ "$vector_version" != 0.8.6 ]; then
+    echo "migration 015 did not verify pgvector 0.8.6" >&2
+    exit 74
+fi
 portable_roots=$(psql_cardrag_as_admin --tuples-only --no-align --command \
     "SELECT count(*) FROM generations
      WHERE root_key = 'generations/' || generation_id AND root_uri = root_key")
@@ -509,4 +699,4 @@ if [ "$portable_roots" != "$generation_count" ]; then
     echo "migration 014 did not canonicalize every generation root" >&2
     exit 74
 fi
-echo "controlled schema 13 to 14 upgrade complete: $transition_id"
+echo "controlled schema $source_schema_max to 15 and pgvector 0.8.6 upgrade complete: $transition_id"

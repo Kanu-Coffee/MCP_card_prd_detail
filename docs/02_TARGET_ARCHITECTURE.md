@@ -246,7 +246,7 @@ issuer·version/as-of·section filter는 두 후보 SQL에 동일하게 적용�
 | generation 식별자 | 온라인 응답이 사용한 corpus snapshot 확인 |
 | stable evidence 식별자 | 검색 결과에서 전체 원문·출처로 재조회 |
 
-식별 문자열과 schema는 ADR-0002 및 migration 1~14로 versioning했다. product dedupe, 검색 filter와
+식별 문자열과 schema는 ADR-0002 및 migration 1~15로 versioning했다. product dedupe, 검색 filter와
 응답 조립에서 카드사를 제거하지 않으며 검색 순위나 generation처럼 바뀌는 값을 stable evidence ID의
 재료로 사용하지 않는다.
 
@@ -265,7 +265,7 @@ issuer·version/as-of·section filter는 두 후보 SQL에 동일하게 적용�
 
 원본 PDF·OCR·published generation은 단일 Linux host의 외부 불변 file volume에 둔다. durable 작업 상태와 catalog는 PostgreSQL에 저장한다. 하나의 공유 쓰기 볼륨을 모든 컨테이너에 마운트하지 않고 온라인 서비스에는 게시된 generation과 승인된 source artifact view만 read-only로 제공한다.
 
-저장 경계는 SHA-256 content-addressed PDF/OCR object, PostgreSQL 17 schema·migration 1~14,
+저장 경계는 SHA-256 content-addressed PDF/OCR object, PostgreSQL 17.11 schema·migration 1~15,
 PostgreSQL FTS+pgvector HNSW와 불변 file generation으로 구현했다. 실제 전체 corpus의 index size와
 host resource 한도는 실환경 BULK에서 측정·보정한다. 0.2 운영 배치는 object/generation을
 명시적 host bind로 두고 PostgreSQL 두 DB, 전체 CAS와 generation pointer를 같은 maintenance
@@ -384,7 +384,7 @@ OCR 일반 실행의 OpenRouter 페일오버와 구조 분석 provider는 품질
 | vector/lexical 검색 엔진 | 결정 완료 | 1,536차원 vector와 prefilter; Python BLOB full scan 금지 |
 | 구조 분석 엔진 | 결정 완료 | canonical OCR 불변, 결정론적 rule baseline+exact span validator; LLM 보강 기본 off |
 | scheduled job 세부 구현 | 결정 완료 | host systemd one-shot, DB lease heartbeat, 03:00/04:00 KST |
-| file layout·PostgreSQL 운영 방식 | 결정 완료 | content-addressed object, immutable generation, migration 1~14, host bind+portable state |
+| file layout·PostgreSQL 운영 방식 | 결정 완료 | content-addressed object, immutable generation, migration 1~15, host bind+portable state |
 | generation 전환 방식 | 결정 완료 | DB/file 대사, request pinning, compensation 가능한 publish/rollback |
 | 원본 PDF 이용조건 | 일부 결정 | 승인 사용자·100 MB·Range·감사 90일은 확정, 저작권·재배포 조건은 별도 확인 |
 | generation 부분 실패 | 결정 완료 | 최신 문서 실패는 게시 차단, 과거 실패는 격리·보고하고 최신 coverage 100%일 때만 게시 |

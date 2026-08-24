@@ -19,6 +19,7 @@ services:
   legacy-import: !reset null
   state-export: !reset null
   state-restore: !reset null
+  postgres-extension-upgrade: !reset null
   migrate: !reset null
   worker: !reset null
   mcp: !reset null

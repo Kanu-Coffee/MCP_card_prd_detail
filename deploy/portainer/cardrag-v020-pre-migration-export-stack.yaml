@@ -1,15 +1,15 @@
-name: cardrag-export-schema13
+name: cardrag-schema-transition
 networks:
   backend:
     internal: true
-    name: cardrag-export-schema13_backend
+    name: cardrag-schema-transition_backend
 secrets:
   cardrag_database_url:
     file: ${CARDRAG_SECRETS_DIR:-/srv/cardrag/secrets}/cardrag_database_url.txt
-    name: cardrag-export-schema13_cardrag_database_url
+    name: cardrag-schema-transition_cardrag_database_url
   postgres_admin_password:
     file: ${CARDRAG_SECRETS_DIR:-/srv/cardrag/secrets}/postgres_admin_password.txt
-    name: cardrag-export-schema13_postgres_admin_password
+    name: cardrag-schema-transition_postgres_admin_password
 services:
   postgres:
     cpus: ${CARDRAG_POSTGRES_CPUS:-2.0}
@@ -302,14 +302,20 @@ services:
       - /var/lib/cardrag-home:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=10001,gid=10001
     user: 10001:10001
     volumes:
-      - read_only: true
-        source: legacy_objects
+      - bind:
+          create_host_path: false
+          propagation: rprivate
+        read_only: true
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}/objects
         target: /var/lib/cardrag/objects
-        type: volume
-      - read_only: true
-        source: legacy_generations
+        type: bind
+      - bind:
+          create_host_path: false
+          propagation: rprivate
+        read_only: true
+        source: ${CARDRAG_DATA_ROOT:-/srv/cardrag/runtime}/generations
         target: /var/lib/cardrag/generations
-        type: volume
+        type: bind
       - bind:
           create_host_path: false
           propagation: rprivate
@@ -345,12 +351,6 @@ services:
         target: /opt/cardrag-portainer/archive-preflight.sh
         type: bind
 volumes:
-  legacy_generations:
-    external: true
-    name: ${CARDRAG_LEGACY_GENERATIONS_VOLUME:?run_discover-legacy-volumes.sh}
-  legacy_objects:
-    external: true
-    name: ${CARDRAG_LEGACY_OBJECTS_VOLUME:?run_discover-legacy-volumes.sh}
   postgres_data:
     external: true
     name: ${CARDRAG_POSTGRES_VOLUME:-cardrag-postgres-v1}

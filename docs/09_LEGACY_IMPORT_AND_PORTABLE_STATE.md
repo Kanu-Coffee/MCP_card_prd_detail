@@ -203,7 +203,7 @@ cardrag state export --destination /mnt/cardrag-archive --self-contained
 cardrag state verify --source /mnt/cardrag-archive/cardrag-state-...
 ```
 
-admin image에는 배포 PostgreSQL과 같은 major 17의 `pg_dump`, `pg_restore`, `psql`만
+admin image에는 배포 PostgreSQL과 같은 정확한 17.11의 `pg_dump`, `pg_restore`, `psql`만
 포함한다. password는 file-backed secret에서 child process 환경으로만 전달하며 argv와
 로그에 넣지 않는다. export는 두 database를 custom format으로 dump한 뒤 전체 CAS와
 전체 generation root를 복사한다. `.incoming`, `.publish.lock`, build, page cache, Codex

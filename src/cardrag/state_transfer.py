@@ -53,7 +53,9 @@ ARCHIVE_SENTINEL_CONTENT = "cardrag-archive-v1"
 ARCHIVE_SOURCE_NAME = ".cardrag-archive-mount-source"
 STAGING_MARKER_NAME = "reports/export-operation.json"
 RESTORE_STAGING_MARKER_SUFFIX = "restore-owner.json"
-POSTGRES_MAJOR = 17
+POSTGRES_VERSION = "17.11"
+POSTGRES_SERVER_VERSION_NUM = "170011"
+PGVECTOR_VERSION = "0.8.6"
 
 _COPY_CHUNK_SIZE = 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -633,7 +635,7 @@ class _ValidatedRolePasswords:
 
 
 class PostgresToolRunner:
-    """Fixed-argument PostgreSQL 17 subprocess contract.
+    """Fixed-argument PostgreSQL 17.11 subprocess contract.
 
     The password is read immediately before a child process is started and is
     passed only as ``PGPASSWORD``.  It is never put in argv or an exception.
@@ -656,16 +658,14 @@ class PostgresToolRunner:
         ):
             result = self._run((command, "--version"), needs_password=False)
             version_text = f"{result.stdout}\n{result.stderr}"
-            match = re.search(r"\b(\d+)(?:\.\d+)?\b", version_text)
-            if match is None or int(match.group(1)) != POSTGRES_MAJOR:
-                raise PostgresToolError(f"PostgreSQL client must be major {POSTGRES_MAJOR}: {command}")
+            match = re.search(r"\b(\d+\.\d+)\b", version_text)
+            if match is None or match.group(1) != POSTGRES_VERSION:
+                raise PostgresToolError(
+                    f"PostgreSQL client must be exactly {POSTGRES_VERSION}: {command}"
+                )
         version = self.query_scalar(self.config.maintenance_database, "SHOW server_version_num")
-        try:
-            major = int(version) // 10_000
-        except ValueError as exc:
-            raise PostgresToolError("PostgreSQL server returned an invalid version") from exc
-        if major != POSTGRES_MAJOR:
-            raise PostgresToolError(f"PostgreSQL server must be major {POSTGRES_MAJOR}")
+        if version != POSTGRES_SERVER_VERSION_NUM:
+            raise PostgresToolError(f"PostgreSQL server must be exactly {POSTGRES_VERSION}")
 
     def validate_export_sources(self) -> None:
         """Require both source databases before a state export starts."""
@@ -1454,6 +1454,7 @@ class PortableStateService:
             )
             if verification.manifest.export_id != export_id:
                 raise StateIntegrityError("existing package belongs to another export")
+            _require_current_database_release(verification.manifest.database_state)
             operation_progress.lifecycle(
                 "completed",
                 entries=verification.manifest.files,
@@ -1468,6 +1469,7 @@ class PortableStateService:
         first_quiescence = self.inspector.quiescence(database_names=database_names)
         _require_quiescent(first_quiescence)
         first_database_state = self.inspector.snapshot()
+        _require_current_database_release(first_database_state)
         self.postgres_tools.validate()
         self.postgres_tools.validate_export_sources()
 
@@ -1691,8 +1693,7 @@ class PortableStateService:
         if manifest.export_id != operation_id:
             raise StateIntegrityError("state package identity changed during restore verification")
         _require_compatible_runtime(manifest.compatibility, request.expected_compatibility)
-        if manifest.database_state.schema_migrations != current_schema_migrations():
-            raise StateIntegrityError("state package schema migrations differ from this release")
+        _require_current_database_release(manifest.database_state)
         object_root = _absolute_path(request.object_root, "object restore target")
         generation_root = _absolute_path(request.generation_root, "generation restore target")
         _require_disjoint_roots(
@@ -1822,8 +1823,7 @@ class PortableStateService:
         if manifest.export_id != operation_id:
             raise StateIntegrityError("state package identity changed during restored verification")
         _require_compatible_runtime(manifest.compatibility, request.expected_compatibility)
-        if manifest.database_state.schema_migrations != current_schema_migrations():
-            raise StateIntegrityError("state package schema migrations differ from this release")
+        _require_current_database_release(manifest.database_state)
         object_entries = tuple(item for item in manifest.files if item.category == "object")
         generation_entries = tuple(item for item in manifest.files if item.category == "generation")
         operation_progress.begin_phase(
@@ -2110,6 +2110,16 @@ def current_schema_migrations() -> tuple[tuple[int, str], ...]:
         checksum = _sha256_bytes(resource.read_text(encoding="utf-8").encode("utf-8"))
         migrations.append((version, checksum))
     return tuple(migrations)
+
+
+def _require_current_database_release(database_state: DatabaseStateSnapshot) -> None:
+    if database_state.schema_migrations != current_schema_migrations():
+        raise StateIntegrityError("database schema migrations differ from this release")
+    if database_state.pgvector_version != PGVECTOR_VERSION:
+        raise StateIntegrityError(
+            f"database pgvector version must be {PGVECTOR_VERSION} "
+            f"(found {database_state.pgvector_version or 'missing'})"
+        )
 
 
 def _require_compatible_runtime(

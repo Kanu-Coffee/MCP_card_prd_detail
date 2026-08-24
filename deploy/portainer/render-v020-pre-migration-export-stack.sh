@@ -2,7 +2,7 @@
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-output=${1:-$repository_root/deploy/portainer/cardrag-pre-migration-export-stack.yaml}
+output=${1:-$repository_root/deploy/portainer/cardrag-v020-pre-migration-export-stack.yaml}
 
 case "$output" in
     /*) ;;
@@ -28,7 +28,7 @@ case "$digest" in
         ;;
 esac
 if ! command -v docker >/dev/null 2>&1; then
-    echo "Docker Compose is required to render the pre-migration export Stack" >&2
+    echo "Docker Compose is required to render the v0.2.0 transition Stack" >&2
     exit 69
 fi
 
@@ -38,9 +38,8 @@ docker compose \
     --project-directory "$repository_root" \
     -f "$repository_root/deploy/portainer/export-stack.compose.yaml" \
     -f "$repository_root/deploy/portainer/schema-transition.compose.yaml" \
-    -f "$repository_root/deploy/portainer/legacy-export-storage.compose.yaml" \
     config --no-interpolate --no-path-resolution --output "$temporary"
 chmod 0444 "$temporary"
 mv -f "$temporary" "$output"
 trap - EXIT HUP INT TERM
-echo "rendered pre-migration Portainer export Stack: $output"
+echo "rendered v0.2.0 host-bind transition Stack: $output"

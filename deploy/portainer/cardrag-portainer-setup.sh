@@ -559,6 +559,7 @@ git -C "$script_root" diff --quiet HEAD -- \
     deploy/portainer/install-deployment-metadata.sh \
     deploy/portainer/scripts \
     deploy/postgres/init-databases.sh \
+    deploy/postgres/upgrade-vector.sh \
     deploy/keycloak/cardrag-realm.json \
     deploy/keycloak/entrypoint.sh \
     src/cardrag/db/migrations ||
@@ -572,6 +573,7 @@ critical_untracked=$(git -C "$script_root" ls-files --others --exclude-standard 
     deploy/portainer/install-deployment-metadata.sh \
     deploy/portainer/scripts \
     deploy/postgres/init-databases.sh \
+    deploy/postgres/upgrade-vector.sh \
     deploy/keycloak/cardrag-realm.json \
     deploy/keycloak/entrypoint.sh \
     src/cardrag/db/migrations)
@@ -1239,7 +1241,10 @@ if {item.name for item in data_root.iterdir()} != {
     raise SystemExit("runtime root inventory differs from quick-setup contract")
 if {item.name for item in root.iterdir()} != {"postgres", "keycloak", "portainer", "deployment"}:
     raise SystemExit("configuration root inventory differs from quick-setup contract")
-if {item.name for item in (root / "postgres").iterdir()} != {"init-databases.sh"}:
+if {item.name for item in (root / "postgres").iterdir()} != {
+    "init-databases.sh",
+    "upgrade-vector.sh",
+}:
     raise SystemExit("PostgreSQL configuration inventory differs from quick-setup contract")
 if {item.name for item in (root / "keycloak").iterdir()} != {
     "cardrag-realm.json",
@@ -1259,7 +1264,7 @@ if {item.name for item in (root / "portainer").iterdir()} != expected_portainer:
     raise SystemExit("Portainer configuration inventory differs from quick-setup contract")
 expected_migrations = {item.name for item in source_migrations.glob("[0-9][0-9][0-9]_*.sql")}
 installed_migrations = {item.name for item in (root / "portainer" / "migrations").iterdir()}
-if len(expected_migrations) != 14 or installed_migrations != expected_migrations:
+if len(expected_migrations) != 15 or installed_migrations != expected_migrations:
     raise SystemExit("installed migration inventory differs from exact release inventory")
 PY
 
@@ -1267,6 +1272,10 @@ PY
     cmp -s "$script_root/deploy/postgres/init-databases.sh" \
         "$config_root/postgres/init-databases.sh" ||
         die "installed PostgreSQL initializer differs from the release checkout"
+    assert_host_metadata "$config_root/postgres/upgrade-vector.sh" 555 0:0
+    cmp -s "$script_root/deploy/postgres/upgrade-vector.sh" \
+        "$config_root/postgres/upgrade-vector.sh" ||
+        die "installed PostgreSQL extension upgrade helper differs from the release checkout"
     assert_host_metadata "$config_root/keycloak/cardrag-realm.json" 444 0:0
     cmp -s "$script_root/deploy/keycloak/cardrag-realm.json" \
         "$config_root/keycloak/cardrag-realm.json" ||
@@ -1286,10 +1295,10 @@ PY
     done
     migration_count=$(find "$config_root/portainer/migrations" -mindepth 1 \
         -maxdepth 1 -type f -name '*.sql' | wc -l)
-    [ "$migration_count" -eq 14 ] ||
-        die "installed migration inventory must contain exactly 001 through 014"
+    [ "$migration_count" -eq 15 ] ||
+        die "installed migration inventory must contain exactly 001 through 015"
     migration_version=1
-    while [ "$migration_version" -le 14 ]; do
+    while [ "$migration_version" -le 15 ]; do
         migration_prefix=$(printf '%03d_' "$migration_version")
         set -- "$script_root/src/cardrag/db/migrations/$migration_prefix"*.sql
         [ "$#" -eq 1 ] && [ -f "$1" ] ||
@@ -1558,6 +1567,8 @@ CARDRAG_STATE_PACKAGE_PATH=/mnt/cardrag-archive/READY-NOT-SET
 CARDRAG_SCHEMA13_TRANSITION_ENABLED=false
 CARDRAG_SCHEMA13_TRANSITION_ID=READY-NOT-SET
 CARDRAG_SCHEMA13_TRANSITION_RESUME=false
+CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED=false
+CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID=READY-NOT-SET
 CARDRAG_VALIDATION_ROLLBACK_ENABLED=false
 CARDRAG_VALIDATION_ROLLBACK_GENERATION_ID=
 CARDRAG_MINIMUM_FREE_GIB=50

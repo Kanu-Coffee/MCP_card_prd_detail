@@ -20,6 +20,36 @@ def _runtime_url(name: str) -> str:
 
 
 @pytest.mark.integration
+def test_schema_15_requires_pgvector_086_and_preserves_runtime_schema_boundary(
+    migrated_database: Postgres,
+) -> None:
+    with migrated_database.connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+        )
+        assert cursor.fetchone() == {"extversion": "0.8.6"}
+        cursor.execute(
+            "SELECT name FROM schema_migrations WHERE version = 15"
+        )
+        assert cursor.fetchone() == {"name": "015_pgvector_086.sql"}
+        cursor.execute(
+            """
+            SELECT
+                has_schema_privilege('cardrag_worker', 'public', 'USAGE') AS worker_usage,
+                has_schema_privilege('cardrag_worker', 'public', 'CREATE') AS worker_create,
+                has_schema_privilege('cardrag_mcp', 'public', 'USAGE') AS mcp_usage,
+                has_schema_privilege('cardrag_mcp', 'public', 'CREATE') AS mcp_create
+            """
+        )
+        assert cursor.fetchone() == {
+            "worker_usage": True,
+            "worker_create": False,
+            "mcp_usage": True,
+            "mcp_create": False,
+        }
+
+
+@pytest.mark.integration
 def test_legacy_policy_functions_are_not_publicly_executable(
     migrated_database: Postgres,
 ) -> None:

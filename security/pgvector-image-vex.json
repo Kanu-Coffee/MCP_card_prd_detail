@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "kind": "cardrag-bounded-vulnerability-exception",
+  "scope": {
+    "image": {
+      "reference": "pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f",
+      "canonical_digest_reference": "pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f",
+      "digest": "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f",
+      "artifact_type": "container_image"
+    },
+    "binary": {
+      "target": "usr/local/bin/gosu",
+      "container_path": "/usr/local/bin/gosu",
+      "sha256": "52c8749d0142edd234e9d6bd5237dff2d81e71f43537e2f4f66f75dd4b243dd0",
+      "component": "stdlib",
+      "installed_version": "v1.24.6",
+      "gosu_version": "1.19",
+      "platform": "linux/amd64",
+      "result_class": "lang-pkgs",
+      "result_type": "gobinary"
+    },
+    "scanner": {
+      "name": "Trivy",
+      "report_schema_version": 2,
+      "ignore_unfixed": true,
+      "severity_filter": [
+        "HIGH",
+        "CRITICAL"
+      ]
+    }
+  },
+  "assessment": {
+    "vex_status": "not_affected",
+    "justification": "vulnerable_code_not_in_execute_path",
+    "method": "manual_static_reachability_review",
+    "reviewed_on": "2026-08-24",
+    "expires_on": "2026-09-30",
+    "impact_statement": "This gate evaluates only HIGH/CRITICAL findings returned by Trivy with --ignore-unfixed; it does not evaluate affected, fix_deferred, or will_not_fix findings. This record does not assert that the image has zero vulnerabilities. It permits only the enumerated fixed scanner findings for this exact immutable image and gosu binary until the stated expiry date.",
+    "reachability_rationale": [
+      "The exact gosu binary is invoked by the upstream PostgreSQL entrypoint only to resolve a local UID/GID, change process credentials, and exec PostgreSQL.",
+      "The reviewed execution path does not accept or process TLS certificates, URLs, HTTP/2 frames, email, MIME, ASN.1, XML, HTML templates, or os.Root paths implicated by the enumerated findings.",
+      "The Windows-only network finding is not reachable on the policy-bound linux/amd64 image.",
+      "Any image, binary, package version, scanner scope, severity, or finding-set change invalidates this exception and requires a new review."
+    ],
+    "required_action": "Treat this as a fixed-finding release gate only, track non-fixed findings independently, and replace the upstream image or renew this bounded assessment before expiry; newly reported or changed fixed findings are release blockers."
+  },
+  "findings": [
+    {
+      "id": "CVE-2025-68121",
+      "severity": "CRITICAL",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2025-61726",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2025-61729",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-25679",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-27145",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-32280",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-32281",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-32283",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-33811",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-33814",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-33818",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-39820",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-39821",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-39822",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-39836",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-42499",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-42504",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-56853",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-56858",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-56859",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-56860",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    },
+    {
+      "id": "CVE-2026-56862",
+      "severity": "HIGH",
+      "scanner_status": "fixed"
+    }
+  ]
+}

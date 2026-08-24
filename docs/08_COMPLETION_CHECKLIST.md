@@ -59,7 +59,7 @@ restore drill은 운영 인수시험으로 남았으며 이를 완료로 가장�
 - [x] [검증 완료] PDF/OCR object는 SHA-256 content address로 불변 저장하며 경로 탈출,
   absolute path, NUL과 symlink escape를 거부한다.
   증거: `src/cardrag/storage/`, `tests/unit/test_storage.py`
-- [x] [검증 완료] PostgreSQL migration 1~14의 checksum drift를 fail closed로 검사하고
+- [x] [검증 완료] PostgreSQL migration 1~15의 checksum drift를 fail closed로 검사하고
   generation·artifact·evidence 불변성과 역할 권한을 DB에서도 강제한다.
   증거: `src/cardrag/db/`, `tests/integration/test_database_roles.py`,
   `tests/integration/test_generation_lifecycle.py`
@@ -306,10 +306,10 @@ restore drill은 운영 인수시험으로 남았으며 이를 완료로 가장�
 - [x] [검증 완료] unit test가 identity, manifest, path, adapter, download, OCR, structure,
   chunk, embedding, hybrid, generation, auth, MCP, scheduler와 observability를 검증한다.
   증거: `tests/unit/`
-- [x] [검증 완료] 깨끗한 PostgreSQL 17.10/pgvector 0.8.2에서 migration 1~14와 재실행
+- [x] [검증 완료] 깨끗한 PostgreSQL 17.11/pgvector 0.8.6에서 migration 1~15와 재실행
   idempotence, 원자 claim/lease, pgvector,
   generation lifecycle, 역할 권한, observability와 3 issuer full pipeline E2E가 통과한다.
-  증거: `tests/integration/` 전체 43 passed
+  증거: `tests/integration/` 전체 44 passed
 - [x] [검증 완료] E2E는 parser→download→fake Codex OCR→structure→embedding/index→worker
   restart/resume→seal/publish→authenticated HTTP MCP와 다음 세대 materialize까지 실행한다.
   증거: `tests/integration/test_offline_pipeline_e2e.py`

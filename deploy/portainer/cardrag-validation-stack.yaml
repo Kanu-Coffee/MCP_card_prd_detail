@@ -308,6 +308,9 @@ services:
       postgres:
         condition: service_healthy
         required: true
+      postgres-extension-upgrade:
+        condition: service_completed_successfully
+        required: true
     environment:
       CARDRAG_BUILD_ROOT: /var/lib/cardrag-build
       CARDRAG_DATABASE_URL_FILE: /run/secrets/cardrag_database_url
@@ -362,11 +365,9 @@ services:
           --no-align --command "SELECT count(*) FROM pg_roles WHERE rolname IN ('cardrag','cardrag_worker','cardrag_mcp','keycloak')")"
           = 4 && test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"
           --tuples-only --no-align --command "SELECT count(*) FROM pg_database WHERE
-          datname IN ('cardrag','keycloak')")" = 2 && test "$$(psql --username "$$POSTGRES_USER"
-          --dbname cardrag --tuples-only --no-align --command "SELECT count(*) FROM
-          pg_extension WHERE extname='vector'")" = 1
+          datname IN ('cardrag','keycloak')")" = 2
       timeout: 5s
-    image: pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     mem_limit: ${CARDRAG_POSTGRES_MEMORY:-4g}
     networks:
       backend: null
@@ -398,6 +399,47 @@ services:
         read_only: true
         source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/postgres/init-databases.sh
         target: /docker-entrypoint-initdb.d/10-cardrag-databases.sh
+        type: bind
+  postgres-extension-upgrade:
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: true
+    entrypoint:
+      - /opt/cardrag-postgres/upgrade-vector.sh
+    environment:
+      CARDRAG_POSTGRES_ADMIN_HOST: postgres
+      CARDRAG_POSTGRES_ADMIN_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      CARDRAG_POSTGRES_ADMIN_PORT: "5432"
+      CARDRAG_POSTGRES_ADMIN_USER: postgres
+      CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED: ${CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED:-false}
+      CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID: ${CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID:-READY-NOT-SET}
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    init: true
+    networks:
+      backend: null
+    pids_limit: 64
+    platform: linux/amd64
+    read_only: true
+    restart: 'no'
+    secrets:
+      - source: postgres_admin_password
+        target: postgres_admin_password
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=999,gid=999
+    user: 999:999
+    volumes:
+      - bind:
+          create_host_path: false
+          propagation: rprivate
+        read_only: true
+        source: ${CARDRAG_CONFIG_ROOT:-/srv/cardrag/config}/postgres/upgrade-vector.sh
+        target: /opt/cardrag-postgres/upgrade-vector.sh
         type: bind
   volume-init:
     cap_add:
