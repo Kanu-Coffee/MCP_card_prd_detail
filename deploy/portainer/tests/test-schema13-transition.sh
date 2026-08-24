@@ -17,8 +17,11 @@ for required_contract in \
     'pg_restore --list "$package/database/cardrag.dump"' \
     'pg_restore --list "$package/database/keycloak.dump"' \
     '014_legacy_import_and_portability.sql' \
+    '015_pgvector_086.sql' \
+    "ALTER EXTENSION vector UPDATE TO ''0.8.6''" \
+    'REINDEX INDEX public.evidence_vector_idx' \
     '--single-transaction' \
-    'require_schema_inventory "$expected14"' \
+    'require_schema_inventory "$expected15"' \
     'mv "$incoming" "$package"'
 do
     if ! grep -Fq -- "$required_contract" "$transition_script"; then
@@ -45,7 +48,7 @@ if ! docker image inspect "$transition_image" >/dev/null 2>&1; then
     exit 1
 fi
 
-postgres_image=${CARDRAG_TRANSITION_TEST_POSTGRES_IMAGE:-pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966}
+postgres_image=${CARDRAG_TRANSITION_TEST_POSTGRES_IMAGE:-pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}
 if ! docker image inspect "$postgres_image" >/dev/null 2>&1; then
     docker pull "$postgres_image" >/dev/null
 fi
@@ -58,7 +61,8 @@ archive_root=$temporary_root/archive
 secret_root=$temporary_root/secrets
 transition_fixture=$temporary_root/schema13-transition.sh
 transition_migration_root=$temporary_root/migrations
-package_name=schema13-safety-integration-$suffix
+transition_id=integration-$suffix
+package_name=schema13-safety-$transition_id
 package=$archive_root/$package_name
 admin_password=admin-transition-fixture
 cardrag_password=cardrag-transition-fixture
@@ -126,7 +130,9 @@ GRANT CONNECT ON DATABASE cardrag TO cardrag_worker, cardrag_mcp;
 SQL
 docker exec "$postgres_container" \
     psql --username postgres --dbname cardrag --set ON_ERROR_STOP=1 \
-    --command 'CREATE EXTENSION IF NOT EXISTS vector' >/dev/null
+    --command "CREATE EXTENSION vector;
+               UPDATE pg_extension SET extversion='0.8.2' WHERE extname='vector'" \
+    >/dev/null
 docker exec "$postgres_container" \
     psql --username postgres --dbname cardrag --set ON_ERROR_STOP=1 \
     --command 'GRANT USAGE, CREATE ON SCHEMA public TO cardrag' >/dev/null
@@ -188,6 +194,8 @@ if [ "$(query_cardrag "SELECT count(*) FROM information_schema.columns WHERE tab
     echo "schema-13 fixture unexpectedly has generations.root_key" >&2
     exit 1
 fi
+pre_upgrade_index_node=$(query_cardrag \
+    "SELECT relfilenode FROM pg_class WHERE oid='public.evidence_vector_idx'::regclass")
 
 run_transition() {
     operation=$1
@@ -199,7 +207,7 @@ run_transition() {
         --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
         --env CARDRAG_ARCHIVE_ROOT=/mnt/cardrag-archive \
         --env CARDRAG_TRANSITION_MIGRATION_ROOT=/opt/cardrag-transition/migrations \
-        --env CARDRAG_SCHEMA13_TRANSITION_ID="integration-$suffix" \
+        --env CARDRAG_SCHEMA13_TRANSITION_ID="$transition_id" \
         --env CARDRAG_SCHEMA13_TRANSITION_RESUME=false \
         --env CARDRAG_POSTGRES_ADMIN_HOST="$postgres_container" \
         --env CARDRAG_POSTGRES_ADMIN_PORT=5432 \
@@ -231,11 +239,14 @@ docker run --rm --user 10001:10001 \
 p=pathlib.Path("/package")
 m=json.loads((p/"transition-manifest.json").read_text())
 r=json.loads((p/"READY").read_text())
-assert m["schema_version"] == "cardrag-schema13-safety.v1"
+assert m["schema_version"] == "cardrag-schema13-safety.v2"
 assert m["source_schema_max"] == 13
 assert m["databases"] == ["cardrag", "keycloak"]
+assert m["source_identity"]["system_identifier"].isdigit()
+assert [item["name"] for item in m["source_identity"]["databases"]] == ["cardrag", "keycloak"]
+assert all(item["oid"] > 0 for item in m["source_identity"]["databases"])
 assert r == {
-    "schema_version": "cardrag-schema13-safety-ready.v1",
+    "schema_version": "cardrag-schema13-safety-ready.v2",
     "transition_id": m["transition_id"],
     "manifest_sha256": hashlib.sha256((p/"transition-manifest.json").read_bytes()).hexdigest(),
 }'
@@ -300,10 +311,28 @@ for p in sorted(x for x in pathlib.Path("/package").rglob("*") if x.is_file()):
 print(h.hexdigest())')
 
 run_transition upgrade >/dev/null
-expected14=$(seq -s, 1 14)
-actual14=$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")
-if [ "$actual14" != "$expected14" ]; then
-    echo "controlled upgrade did not produce the exact 1 through 14 inventory" >&2
+expected15=$(seq -s, 1 15)
+actual15=$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")
+if [ "$actual15" != "$expected15" ]; then
+    echo "controlled upgrade did not produce the exact 1 through 15 inventory" >&2
+    exit 1
+fi
+expected_migration15_checksum=$(sha256sum \
+    "$migration_root/015_pgvector_086.sql" | awk '{print $1}')
+actual_migration15_checksum=$(query_cardrag \
+    'SELECT checksum FROM schema_migrations WHERE version=15')
+if [ "$actual_migration15_checksum" != "$expected_migration15_checksum" ]; then
+    echo "migration 015 checksum differs from the trusted migration file" >&2
+    exit 1
+fi
+if [ "$(query_cardrag "SELECT extversion FROM pg_extension WHERE extname='vector'")" != 0.8.6 ]; then
+    echo "controlled upgrade did not install pgvector 0.8.6" >&2
+    exit 1
+fi
+post_upgrade_index_node=$(query_cardrag \
+    "SELECT relfilenode FROM pg_class WHERE oid='public.evidence_vector_idx'::regclass")
+if [ "$post_upgrade_index_node" = "$pre_upgrade_index_node" ]; then
+    echo "controlled upgrade did not rebuild the HNSW index" >&2
     exit 1
 fi
 expected_migration14_checksum=$(sha256sum \
@@ -336,9 +365,128 @@ if [ "$package_fingerprint_after" != "$package_fingerprint_before" ]; then
     echo "verified transition rerun mutated the sealed schema-13 safety package" >&2
     exit 1
 fi
-if [ "$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")" != "$expected14" ]; then
+if [ "$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")" != "$expected15" ]; then
     echo "transition rerun changed the exact migration inventory" >&2
     exit 1
 fi
 
-echo "schema-13 to 14 transition integration passed"
+# Rebuild a schema-14 source from the sealed pre-upgrade dump and prove the
+# same bridge backs it up before applying only vector 0.8.6/migration 015.
+schema13_package=$package
+docker exec "$postgres_container" psql --username postgres --dbname postgres \
+    --set ON_ERROR_STOP=1 --command \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+      WHERE datname='cardrag' AND pid <> pg_backend_pid()" >/dev/null
+docker exec "$postgres_container" psql --username postgres --dbname postgres \
+    --set ON_ERROR_STOP=1 --command 'DROP DATABASE cardrag' >/dev/null
+docker exec "$postgres_container" psql --username postgres --dbname postgres \
+    --set ON_ERROR_STOP=1 --command 'CREATE DATABASE cardrag OWNER cardrag' >/dev/null
+docker run --rm --user 10001:10001 --network "$network" \
+    --env PGPASSWORD="$admin_password" --volume "$schema13_package:/package:ro" \
+    --entrypoint pg_restore "$transition_image" --no-password \
+    --host "$postgres_container" --port 5432 --username postgres \
+    --dbname cardrag /package/database/cardrag.dump >/dev/null
+docker exec "$postgres_container" psql --username postgres --dbname cardrag \
+    --set ON_ERROR_STOP=1 --command \
+    "UPDATE pg_extension SET extversion='0.8.2' WHERE extname='vector'" >/dev/null
+migration14=$migration_root/014_legacy_import_and_portability.sql
+migration14_checksum=$(sha256sum "$migration14" | awk '{print $1}')
+docker exec --interactive --env PGPASSWORD="$cardrag_password" \
+    "$postgres_container" psql --no-password --no-psqlrc \
+    --username cardrag --dbname cardrag --set ON_ERROR_STOP=1 \
+    >/dev/null <"$migration14"
+docker exec --env PGPASSWORD="$cardrag_password" "$postgres_container" \
+    psql --no-password --no-psqlrc --username cardrag --dbname cardrag \
+    --set ON_ERROR_STOP=1 --command \
+    "INSERT INTO schema_migrations(version, name, checksum) VALUES
+     (14, '014_legacy_import_and_portability.sql', '$migration14_checksum')" \
+    >/dev/null
+expected14=$(seq -s, 1 14)
+test "$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")" = \
+    "$expected14"
+
+# The original transition ID is sealed with a schema-13 dump. It must never be
+# reused to authorize mutation of this schema-14 source.
+if run_transition backup >"$temporary_root/mismatched-backup.log" 2>&1; then
+    echo "schema-13 package was reused for a schema-14 backup" >&2
+    exit 1
+fi
+grep -F 'does not match the live pre-upgrade schema' \
+    "$temporary_root/mismatched-backup.log" >/dev/null
+if run_transition upgrade >"$temporary_root/mismatched-upgrade.log" 2>&1; then
+    echo "schema-13 package authorized a schema-14 upgrade" >&2
+    exit 1
+fi
+grep -F 'does not match the live pre-upgrade schema' \
+    "$temporary_root/mismatched-upgrade.log" >/dev/null
+test "$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")" = \
+    "$expected14"
+test "$(query_cardrag "SELECT extversion FROM pg_extension WHERE extname='vector'")" = 0.8.2
+
+transition_id=schema14-integration-$suffix
+package_name=schema13-safety-$transition_id
+package=$archive_root/$package_name
+run_transition backup >/dev/null
+docker run --rm --user 10001:10001 --volume "$package:/package:ro" \
+    --entrypoint python3 "$transition_image" -c \
+    'import json,pathlib; assert json.loads(pathlib.Path("/package/transition-manifest.json").read_text())["source_schema_max"] == 14'
+
+# Restore the same schema-14 dump into a newly created CardRAG database. The
+# schema and contents match, but the DB OID changes, so the sealed transition ID
+# must not authorize either backup reuse or mutation of this replacement DB.
+schema14_package=$package
+original_cardrag_oid=$(docker exec "$postgres_container" psql --username postgres \
+    --dbname postgres --tuples-only --no-align --command \
+    "SELECT oid FROM pg_database WHERE datname='cardrag'")
+docker exec "$postgres_container" psql --username postgres --dbname postgres \
+    --set ON_ERROR_STOP=1 --command \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+      WHERE datname='cardrag' AND pid <> pg_backend_pid()" >/dev/null
+docker exec "$postgres_container" psql --username postgres --dbname postgres \
+    --set ON_ERROR_STOP=1 --command 'DROP DATABASE cardrag' >/dev/null
+docker exec "$postgres_container" psql --username postgres --dbname postgres \
+    --set ON_ERROR_STOP=1 --command 'CREATE DATABASE cardrag OWNER cardrag' >/dev/null
+docker run --rm --user 10001:10001 --network "$network" \
+    --env PGPASSWORD="$admin_password" --volume "$schema14_package:/package:ro" \
+    --entrypoint pg_restore "$transition_image" --no-password \
+    --host "$postgres_container" --port 5432 --username postgres \
+    --dbname cardrag /package/database/cardrag.dump >/dev/null
+docker exec "$postgres_container" psql --username postgres --dbname cardrag \
+    --set ON_ERROR_STOP=1 --command \
+    "UPDATE pg_extension SET extversion='0.8.2' WHERE extname='vector'" >/dev/null
+replacement_cardrag_oid=$(docker exec "$postgres_container" psql --username postgres \
+    --dbname postgres --tuples-only --no-align --command \
+    "SELECT oid FROM pg_database WHERE datname='cardrag'")
+test "$replacement_cardrag_oid" != "$original_cardrag_oid"
+test "$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")" = \
+    "$expected14"
+if run_transition backup >"$temporary_root/mismatched-identity-backup.log" 2>&1; then
+    echo "schema-14 package was reused for a replacement database" >&2
+    exit 1
+fi
+grep -F 'does not match the live database identity' \
+    "$temporary_root/mismatched-identity-backup.log" >/dev/null
+if run_transition upgrade >"$temporary_root/mismatched-identity-upgrade.log" 2>&1; then
+    echo "schema-14 package authorized a replacement database upgrade" >&2
+    exit 1
+fi
+grep -F 'does not match the live database identity' \
+    "$temporary_root/mismatched-identity-upgrade.log" >/dev/null
+test "$(query_cardrag "SELECT extversion FROM pg_extension WHERE extname='vector'")" = 0.8.2
+
+transition_id=schema14-replacement-integration-$suffix
+package_name=schema13-safety-$transition_id
+package=$archive_root/$package_name
+pre_upgrade_index_node=$(query_cardrag \
+    "SELECT relfilenode FROM pg_class WHERE oid='public.evidence_vector_idx'::regclass")
+run_transition backup >/dev/null
+run_transition upgrade >/dev/null
+test "$(query_cardrag "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations")" = \
+    "$expected15"
+test "$(query_cardrag "SELECT extversion FROM pg_extension WHERE extname='vector'")" = 0.8.6
+post_upgrade_index_node=$(query_cardrag \
+    "SELECT relfilenode FROM pg_class WHERE oid='public.evidence_vector_idx'::regclass")
+test "$post_upgrade_index_node" != "$pre_upgrade_index_node"
+run_transition backup >/dev/null
+
+echo "schema-13/schema-14 to 15 and pgvector 0.8.6 transition integration passed"

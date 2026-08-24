@@ -1,5 +1,12 @@
 # Portainer host storage and server migration
 
+For a fresh Docker Standalone host, the guided installer in
+[`QUICKSTART.ko.md`](QUICKSTART.ko.md) prepares the same storage, secret, image,
+and bootstrap contracts with fewer manual steps. Use this full runbook for an
+existing installation, NAS export/restore, server migration, timers, or incident
+recovery. Legacy PDF/OCR transfer has a shorter companion guide in
+[`LEGACY_IMPORT_QUICKSTART.ko.md`](LEGACY_IMPORT_QUICKSTART.ko.md).
+
 The production Stack stores durable files on the Docker host, not inside a
 container or a Stack-scoped volume:
 
@@ -16,6 +23,48 @@ PostgreSQL and Codex login state use explicit external volumes. Stack removal
 does not delete them, but they are not a server backup. Move PostgreSQL with
 `cardrag state export/restore`; log Codex in again on the new server.
 
+## Existing v0.2.0 database upgrade
+
+Do not silently mutate an existing schema-14 database during an ordinary Stack
+redeploy. Stop every writer and deploy
+`cardrag-v020-pre-migration-export-stack.yaml`. This Stack reads the existing
+`${CARDRAG_DATA_ROOT}/objects` and `generations` host binds and never declares
+legacy object/generation volumes. Do not use the schema-13
+`cardrag-pre-migration-export-stack.yaml` against a v0.2.0 host. The v0.2.0
+Stack accepts an exact schema-14 source, seals PostgreSQL 17.11
+raw dumps of both databases first, upgrades to schema 15/pgvector 0.8.6, rebuilds
+the HNSW index, and only then creates the v0.2.1 portable package. A package
+previously exported by v0.2.0 remains useful rollback evidence, but its exact
+schema-14 compatibility contract means it must be restored with v0.2.0 first,
+not directly by v0.2.1.
+
+Never restart a v0.2.0 image against the original PGDATA after that PGDATA has
+reached schema 15/pgvector 0.8.6, and never try to downgrade that PGDATA in
+place. Rollback means restoring the retained v0.2.0 package with the exact
+v0.2.0 image and PostgreSQL client into a separate empty PostgreSQL 17 volume,
+verifying schema 001..014 and pgvector 0.8.2 there, stopping both environments,
+and then swapping the verified volume during the maintenance window. Keep the
+schema-15 volume detached and intact until the rollback is accepted.
+
+If an operator already has equivalent verified same-epoch raw backups and uses
+the normal Stack instead of that bridge, leave writers stopped, use one unique
+maintenance ID, and enable the privileged extension gate for exactly one
+v0.2.1 deployment:
+
+```sh
+CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED=true
+CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID=prod-20260824-pgvector086
+```
+
+`postgres-extension-upgrade` receives only `postgres_admin_password`, requires
+the exact PostgreSQL 17.11 client/server, refuses any non-admin CardRAG database
+session, upgrades only pgvector 0.8.2 through 0.8.5 to 0.8.6, and rebuilds
+`evidence_vector_idx` while writers remain stopped. Migration 015 then verifies
+0.8.6 again under the unprivileged `cardrag` role and reasserts the runtime
+schema boundary. After migration and readiness succeed, set
+`CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED=false` and redeploy. The gate remains
+as an idempotent 0.8.6 verifier on later starts.
+
 ## Supported Portainer environment
 
 These Stacks target a **Docker Standalone** Portainer environment with Docker
@@ -27,11 +76,11 @@ Swarm or Kubernetes Stack. Install the exact reviewed release checkout at
 ## Download and verify release evidence
 
 The three images must come from one successful `Public image release` run for
-the exact `v0.2.0` tag. With an authenticated GitHub CLI, download its integrated
+the exact `v0.2.1` tag. With an authenticated GitHub CLI, download its integrated
 artifact instead of copying role digests from a web page:
 
 ```sh
-export RELEASE_VERSION=0.2.0
+export RELEASE_VERSION=0.2.1
 export RELEASE_GIT_SHA=$(git -C /opt/cardrag rev-parse "v${RELEASE_VERSION}^{commit}")
 test "$(git -C /opt/cardrag rev-parse HEAD)" = "$RELEASE_GIT_SHA"
 release_run_id=$(gh run list \
@@ -137,8 +186,8 @@ sudo chmod 0444 "$CARDRAG_SECRETS_DIR/openrouter_api_key.txt"
 sudo test -s "$CARDRAG_SECRETS_DIR/openrouter_api_key.txt"
 ```
 
-Prepare the host roots and render all checked Stacks. The pre-migration Stack
-is needed only for an existing v0.1.2 installation.
+Prepare the host roots and render all checked Stacks. The two pre-migration
+Stacks are storage-layout-specific and are needed only for upgrades.
 
 ```sh
 cd /opt/cardrag
@@ -149,6 +198,8 @@ deploy/portainer/render-export-stack.sh
 deploy/portainer/render-restore-stack.sh
 # Existing v0.1.2 only:
 deploy/portainer/render-pre-migration-export-stack.sh
+# Existing v0.2.0 only:
+deploy/portainer/render-v020-pre-migration-export-stack.sh
 sudo env \
   CARDRAG_DEPLOYMENT_ROOT="$CARDRAG_DEPLOYMENT_ROOT" \
   CARDRAG_ADMIN_IMAGE="$CARDRAG_ADMIN_IMAGE" \
@@ -170,7 +221,11 @@ On an empty PostgreSQL volume, create a Stack named `cardrag-bootstrap` from
 `/etc/cardrag/stack.env`. It contains only PostgreSQL and Keycloak. Once both
 are healthy, sign in with `KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME` and the value in
 `keycloak_admin_password.txt`. Create a named permanent administrator, sign
-out, and prove that account works in a fresh private browser session.
+out, and prove that account works in a fresh private browser session. Using the
+permanent account, disable/delete the bootstrap administrator or rotate its
+credential, then prove that the original bootstrap credential can no longer
+sign in. Removing the password file alone does not revoke the account already
+stored in Keycloak.
 
 The public TLS proxy and certificate for `KEYCLOAK_PUBLIC_URL` must already be
 working. A host proxy uses `127.0.0.1:8080`. A containerized proxy must be
@@ -368,10 +423,13 @@ the maintenance Stack is created. Containers independently verify the two
 0440 archive identity files; they never receive the Docker socket or host mount
 namespace.
 
-The v0.1.2 database ends at schema 13, while the v0.2 portable exporter requires
-the relative generation root added by migration 014. Do not run `state export`
-directly against schema 13. Set a unique maintenance-window transition ID and
-enable the bridge only in the generated pre-migration Stack:
+This named-volume workflow accepts only an exact v0.1.2 schema-13 source. The
+same database bridge is used by the separate v0.2.0 host-bind Stack described
+above, but its object/generation mounts are intentionally different. The
+v0.2.1 portable exporter requires both the relative generation root from
+migration 014 and pgvector 0.8.6/migration 015. Do not run the v0.2.1
+`state export` directly against schema 13 or 14. Set a unique maintenance-window
+transition ID and enable the bridge only in the generated pre-migration Stack:
 
 ```sh
 export CARDRAG_SCHEMA13_TRANSITION_ID=prod-20260813-a
@@ -379,33 +437,43 @@ export CARDRAG_SCHEMA13_TRANSITION_ENABLED=true
 export CARDRAG_SCHEMA13_TRANSITION_RESUME=false
 ```
 
-Deploy `cardrag-pre-migration-export-stack.yaml`. Its exact service set is
-PostgreSQL, `schema13-safety-backup`, `schema14-upgrade`, and `state-export`.
+For this schema-13 named-volume workflow, deploy
+`cardrag-pre-migration-export-stack.yaml`. Its exact service set is
+PostgreSQL, `schema13-safety-backup`, `schema15-upgrade`, and `state-export`.
 Dependencies enforce this order:
 
-1. Verify PostgreSQL 17, zero CardRAG/Keycloak sessions, and the exact trusted
-   migration 001..013 checksums.
+1. Verify PostgreSQL 17.11, zero CardRAG/Keycloak sessions, and exact trusted
+   migration 001..013 checksums. The v0.2.0 host-bind Stack instead requires
+   exact migration 001..014.
 2. Write custom-format raw dumps of both `cardrag` and `keycloak` to
    `schema13-safety-<transition-id>`, verify both dump catalogs and checksums,
-   and seal `READY` last.
-3. Re-verify that sealed package and apply only migration 014 in one transaction
-   under the `cardrag` role and an advisory lock.
-4. Verify exact migration 001..014 and portable generation roots, then run the
-   ordinary schema-14 portable exporter with both legacy volumes read-only.
+   and seal `READY` last. The manifest binds the backup to the PostgreSQL system
+   identifier and the sorted CardRAG/Keycloak database OIDs, so the same
+   transition ID cannot authorize another PGDATA or replacement database.
+3. Re-verify that sealed package, upgrade pgvector to 0.8.6 as its PostgreSQL
+   owner, rebuild the HNSW evidence index, and apply the missing migrations
+   through 015 in one transaction with an advisory lock. Application SQL runs
+   under `cardrag`.
+4. Verify exact migration 001..015, pgvector 0.8.6, and portable generation
+   roots, then run the schema-15 portable exporter with both legacy volumes
+   read-only.
 
 Only the PostgreSQL admin secret is given to the bridge jobs; `SET ROLE`
-preserves CardRAG object ownership for migration 014. The bridge is disabled by
+preserves CardRAG object ownership for migrations 014 and 015. The bridge is disabled by
 default. A missing transition ID, incomplete raw dump, changed migration, wrong
-PostgreSQL major, active DB session, or checksum failure stops downstream work.
+PostgreSQL 17.11 patch, database-identity mismatch, active DB session, or
+checksum failure stops downstream work.
 On a same-ID retry after the raw backup sealed, set
 `CARDRAG_SCHEMA13_TRANSITION_RESUME=true`; the package is verified and reused.
 
-Migration 014 changes the live database. If portable export fails afterward,
-fix the v0.2 exporter and redeploy the same bridge; do not restart v0.1.2 against
-schema 14. To return to v0.1.2, remove this Stack and restore both raw dumps into
-a separately prepared empty PostgreSQL 17 volume, verify schema 001..013, and
-switch volumes during the maintenance window. Never overwrite the only database
-copy in place.
+Migrations 014/015 and the extension upgrade change the live database. If
+portable export fails afterward, fix the v0.2.1 exporter and redeploy the same
+bridge; do not restart v0.1.2 against schema 15. To return to v0.1.2, remove this
+Stack and use the exact prior v0.1.2 image and pinned PostgreSQL client to
+restore both raw dumps into a separately prepared empty PostgreSQL 17 volume.
+Verify schema 001..013 there, stop both environments, and switch volumes during
+the maintenance window. Never overwrite or downgrade the only database copy in
+place.
 
 After both raw and portable packages verify, remove the pre-migration Stack,
 set `CARDRAG_SCHEMA13_TRANSITION_ENABLED=false`, run the exclusivity check again,

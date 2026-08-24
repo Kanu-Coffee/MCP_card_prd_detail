@@ -53,6 +53,9 @@ CARDRAG_ADMIN_IMAGE=cardrag-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     "$repository_root/deploy/portainer/render-pre-migration-export-stack.sh" \
     "$temporary_root/rendered-pre-export.yaml" >/dev/null
 CARDRAG_ADMIN_IMAGE=cardrag-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "$repository_root/deploy/portainer/render-v020-pre-migration-export-stack.sh" \
+    "$temporary_root/rendered-v020-pre-export.yaml" >/dev/null
+CARDRAG_ADMIN_IMAGE=cardrag-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
 CARDRAG_WORKER_IMAGE=cardrag-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
 CARDRAG_MCP_IMAGE=cardrag-mcp@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
     "$repository_root/deploy/portainer/render-validation-stack.sh" \
@@ -119,6 +122,7 @@ for pair in \
     "rendered-export.yaml:cardrag-export-stack.yaml" \
     "rendered-restore.yaml:cardrag-restore-stack.yaml" \
     "rendered-pre-export.yaml:cardrag-pre-migration-export-stack.yaml" \
+    "rendered-v020-pre-export.yaml:cardrag-v020-pre-migration-export-stack.yaml" \
     "rendered-validation.yaml:cardrag-validation-stack.yaml" \
     "rendered-bootstrap.yaml:cardrag-bootstrap-stack.yaml"
 do
@@ -172,8 +176,16 @@ CARDRAG_LEGACY_OBJECTS_VOLUME=fixture-objects \
 CARDRAG_LEGACY_GENERATIONS_VOLUME=fixture-generations \
 docker compose \
     -f "$repository_root/deploy/portainer/export-stack.compose.yaml" \
+    -f "$repository_root/deploy/portainer/schema-transition.compose.yaml" \
     -f "$repository_root/deploy/portainer/legacy-export-storage.compose.yaml" \
     config --format json >"$temporary_root/pre-migration-export-config.json"
+
+CARDRAG_ADMIN_IMAGE=cardrag-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+CARDRAG_ARCHIVE_EXPECTED_SOURCE=nas.example:/cardrag \
+docker compose \
+    -f "$repository_root/deploy/portainer/export-stack.compose.yaml" \
+    -f "$repository_root/deploy/portainer/schema-transition.compose.yaml" \
+    config --format json >"$temporary_root/v020-pre-migration-export-config.json"
 
 # Base Compose remains compatible with systemd/direct admin command overrides;
 # the Portainer-only overlay owns the fail-closed operation allow-list.
@@ -186,7 +198,8 @@ python3 - "$temporary_root/config.json" "$temporary_root/restore-config.json" \
     "$temporary_root/rendered-main.json" \
     "$temporary_root/rendered-validation.json" \
     "$temporary_root/base-config.json" \
-    "$temporary_root/rendered-bootstrap.json" <<'PY'
+    "$temporary_root/rendered-bootstrap.json" \
+    "$temporary_root/v020-pre-migration-export-config.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -223,6 +236,29 @@ assert volumes("mcp")["/var/lib/cardrag/generations"]["read_only"] is True
 assert "/var/lib/cardrag-build" not in volumes("mcp")
 assert volumes("postgres")["/docker-entrypoint-initdb.d/10-cardrag-databases.sh"]["source"] == \
     "/srv/cardrag/config/postgres/init-databases.sh"
+assert "--dbname cardrag" not in " ".join(services["postgres"]["healthcheck"]["test"])
+extension_upgrade = services["postgres-extension-upgrade"]
+extension_upgrade_volumes = volumes("postgres-extension-upgrade")
+assert extension_upgrade_volumes["/opt/cardrag-postgres/upgrade-vector.sh"]["source"] == \
+    "/srv/cardrag/config/postgres/upgrade-vector.sh"
+assert extension_upgrade_volumes["/opt/cardrag-postgres/upgrade-vector.sh"][
+    "read_only"
+] is True
+assert extension_upgrade["read_only"] is True
+assert extension_upgrade["user"] == "999:999"
+assert extension_upgrade["cap_drop"] == ["ALL"]
+assert extension_upgrade["environment"][
+    "CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED"
+] == "false"
+assert extension_upgrade["environment"][
+    "CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID"
+] == "READY-NOT-SET"
+assert {item["source"] for item in extension_upgrade["secrets"]} == {
+    "postgres_admin_password"
+}
+assert set(services["migrate"]["depends_on"]) == {
+    "postgres", "postgres-extension-upgrade"
+}
 assert volumes("keycloak")["/opt/keycloak/data/import/cardrag-realm.json"]["source"] == \
     "/srv/cardrag/config/keycloak/cardrag-realm.json"
 
@@ -335,17 +371,17 @@ assert all(
 
 pre_migration_export = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
 assert set(pre_migration_export["services"]) == {
-    "postgres", "schema13-safety-backup", "schema14-upgrade", "state-export"
+    "postgres", "schema13-safety-backup", "schema15-upgrade", "state-export"
 }
 backup = pre_migration_export["services"]["schema13-safety-backup"]
-upgrade = pre_migration_export["services"]["schema14-upgrade"]
+upgrade = pre_migration_export["services"]["schema15-upgrade"]
 assert backup["restart"] == "no" and upgrade["restart"] == "no"
 assert backup["environment"]["CARDRAG_SCHEMA13_TRANSITION_ENABLED"] == "false"
 assert backup["environment"]["CARDRAG_SCHEMA13_TRANSITION_ID"] == "READY-NOT-SET"
 assert set(backup["depends_on"]) == {"postgres"}
 assert set(upgrade["depends_on"]) == {"postgres", "schema13-safety-backup"}
 assert set(pre_migration_export["services"]["state-export"]["depends_on"]) == {
-    "postgres", "schema14-upgrade"
+    "postgres", "schema15-upgrade"
 }
 assert pre_migration_export["services"]["state-export"]["environment"][
     "CARDRAG_STATE_EXPORT_ENABLED"
@@ -383,6 +419,27 @@ assert pre_migration_export["volumes"]["legacy_generations"] == {
     "name": "fixture-generations", "external": True
 }
 
+v020_pre_migration_export = json.loads(Path(sys.argv[9]).read_text(encoding="utf-8"))
+assert set(v020_pre_migration_export["services"]) == {
+    "postgres", "schema13-safety-backup", "schema15-upgrade", "state-export"
+}
+v020_export_volumes = {
+    item["target"]: item
+    for item in v020_pre_migration_export["services"]["state-export"]["volumes"]
+}
+for target, source in {
+    "/var/lib/cardrag/objects": "/srv/cardrag/runtime/objects",
+    "/var/lib/cardrag/generations": "/srv/cardrag/runtime/generations",
+}.items():
+    assert v020_export_volumes[target]["type"] == "bind"
+    assert v020_export_volumes[target]["source"] == source
+    assert v020_export_volumes[target]["read_only"] is True
+    assert v020_export_volumes[target].get("bind", {}).get(
+        "create_host_path", False
+    ) is False
+assert "legacy_objects" not in v020_pre_migration_export.get("volumes", {})
+assert "legacy_generations" not in v020_pre_migration_export.get("volumes", {})
+
 rendered_main = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
 assert "state-export" not in rendered_main["services"]
 assert "state-restore" not in rendered_main["services"]
@@ -392,7 +449,8 @@ for service in ("volume-init", "admin", "legacy-import", "migrate", "worker", "m
 validation = json.loads(Path(sys.argv[6]).read_text(encoding="utf-8"))
 assert validation["name"] == "cardrag-validation"
 assert set(validation["services"]) == {
-    "postgres", "keycloak", "volume-init", "migrate", "admin", "mcp"
+    "postgres", "postgres-extension-upgrade", "keycloak", "volume-init",
+    "migrate", "admin", "mcp"
 }
 assert "worker" not in validation["services"]
 assert "legacy-import" not in validation["services"]

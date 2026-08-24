@@ -113,7 +113,7 @@
 
 ## 개발 중 결정 결과와 외부 보정
 
-PostgreSQL 17 migration 1~14, FTS+pgvector hybrid, Codex `gpt-5.4`, 결정론적 구조 분석,
+PostgreSQL 17.11 migration 1~15와 pgvector 0.8.6, FTS+pgvector hybrid, Codex `gpt-5.4`, 결정론적 구조 분석,
 OpenRouter `text-embedding-3-small` 1,536차원, chunk/retry/lease와 DB+file generation protocol은
 ADR 0001~0005와 fixture·integration·load 결과로 확정했다.
 

@@ -50,3 +50,9 @@ storage, and maintenance-window state export/restore.  Do not copy legacy files
 into a running admin container or treat a Docker volume as a backup.  The
 required host layout, one-shot jobs, migration order, and rollback checks are in
 [`docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md`](docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md).
+
+For a new Docker Standalone host, start with the Korean
+[`Portainer quick-install guide`](deploy/portainer/QUICKSTART.ko.md).  It wraps
+volume mapping, file-backed secret generation, release image pinning, and the
+one-time Keycloak hand-off.  Existing PDF/OCR archives then follow the separate
+[`legacy import quickstart`](deploy/portainer/LEGACY_IMPORT_QUICKSTART.ko.md).

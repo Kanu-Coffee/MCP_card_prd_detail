@@ -31,7 +31,7 @@ x-app-common: &app-common
     TZ: Asia/Seoul
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg17-bookworm@sha256:feb68f4f15446397d8cac7f4fe48fe4586de83160d1fc48b46283312d1a33966
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     platform: linux/amd64
     restart: unless-stopped
     shm_size: 256m
@@ -75,15 +75,53 @@ services:
           test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" --tuples-only --no-align
           --command "SELECT count(*) FROM pg_roles WHERE rolname IN ('cardrag','cardrag_worker','cardrag_mcp','keycloak')")" = 4 &&
           test "$$(psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" --tuples-only --no-align
-          --command "SELECT count(*) FROM pg_database WHERE datname IN ('cardrag','keycloak')")" = 2 &&
-          test "$$(psql --username "$$POSTGRES_USER" --dbname cardrag --tuples-only --no-align
-          --command "SELECT count(*) FROM pg_extension WHERE extname='vector'")" = 1
+          --command "SELECT count(*) FROM pg_database WHERE datname IN ('cardrag','keycloak')")" = 2
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 15s
     security_opt:
       - no-new-privileges:true
+
+  postgres-extension-upgrade:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    platform: linux/amd64
+    restart: "no"
+    init: true
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=999,gid=999
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    stop_grace_period: 30s
+    entrypoint: ["/opt/cardrag-postgres/upgrade-vector.sh"]
+    environment:
+      CARDRAG_POSTGRES_ADMIN_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      CARDRAG_POSTGRES_ADMIN_HOST: postgres
+      CARDRAG_POSTGRES_ADMIN_PORT: "5432"
+      CARDRAG_POSTGRES_ADMIN_USER: postgres
+      CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED: ${CARDRAG_POSTGRES_EXTENSION_UPGRADE_ENABLED:-false}
+      CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID: ${CARDRAG_POSTGRES_EXTENSION_UPGRADE_ID:-READY-NOT-SET}
+    secrets:
+      - source: postgres_admin_password
+        target: postgres_admin_password
+    volumes:
+      - type: bind
+        source: ./deploy/postgres/upgrade-vector.sh
+        target: /opt/cardrag-postgres/upgrade-vector.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          propagation: rprivate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.4.7@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
@@ -527,6 +565,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-extension-upgrade:
+        condition: service_completed_successfully
 
   worker:
     <<: *app-common

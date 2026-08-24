@@ -58,6 +58,48 @@ def _reseal_deployment(root: Path) -> None:
     (root / "deployment-set.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _reseal_package_database_state(
+    package: Path,
+    database_state: DatabaseStateSnapshot,
+) -> StateManifest:
+    package.chmod(0o750)
+    for path in package.rglob("*"):
+        path.chmod(0o750 if path.is_dir() else 0o640)
+
+    manifest_path = package / "state-manifest.json"
+    manifest = StateManifest.model_validate_json(manifest_path.read_bytes())
+    reference_path = package / "reports/reference-check.json"
+    reference = state_transfer.ReferenceCheckReport.model_validate_json(
+        reference_path.read_bytes()
+    ).model_copy(update={"database_epoch_sha256": database_state.epoch_sha256})
+    reference_path.write_bytes(state_transfer.canonical_json_bytes(reference) + b"\n")
+    reference_entry = state_transfer._file_entry(reference_path, package, "report")
+    files = tuple(
+        reference_entry if item.path == reference_entry.path else item
+        for item in manifest.files
+    )
+    manifest = manifest.model_copy(
+        update={
+            "database_epoch_sha256": database_state.epoch_sha256,
+            "database_state": database_state,
+            "files": files,
+        }
+    )
+    manifest_path.write_bytes(manifest.canonical_bytes())
+    checksum_body = state_transfer._checksum_body(
+        files + (state_transfer._file_entry(manifest_path, package, "report"),)
+    )
+    (package / "checksums.sha256").write_bytes(checksum_body)
+    ready = state_transfer.StateReady(
+        export_id=manifest.export_id,
+        state_manifest_sha256=_sha(manifest_path.read_bytes()),
+        checksums_sha256=_sha(checksum_body),
+    )
+    (package / "READY").write_bytes(ready.canonical_bytes())
+    state_transfer._seal_tree(package)
+    return manifest
+
+
 @dataclass
 class FakeInspector:
     states: list[DatabaseStateSnapshot]
@@ -84,7 +126,8 @@ class FakeInspector:
 
 @dataclass
 class FakeExecutor:
-    version: int = 17
+    version: str = "17.11"
+    server_version_num: str = "170011"
     databases_empty: bool = True
     fail_dump_count: int = 0
     dump_delay_seconds: float = 0.0
@@ -106,13 +149,13 @@ class FakeExecutor:
         self.inputs.append(input_bytes)
         executable = Path(command[0]).name
         if "--version" in command:
-            return ProcessResult(0, f"{executable} (PostgreSQL) {self.version}.3\n", "")
+            return ProcessResult(0, f"{executable} (PostgreSQL) {self.version}\n", "")
         if executable == "psql":
             if "--command" not in command:
                 return ProcessResult(0)
             statement = command[command.index("--command") + 1]
             if statement == "SHOW server_version_num":
-                return ProcessResult(0, f"{self.version}0003\n", "")
+                return ProcessResult(0, f"{self.server_version_num}\n", "")
             if "FROM pg_database WHERE datname=" in statement:
                 return ProcessResult(0, "1\n", "")
             return ProcessResult(0, "0\n" if self.databases_empty else "1\n", "")
@@ -298,7 +341,7 @@ def _service(
 ) -> tuple[PortableStateService, FakeInspector, FakeExecutor]:
     database_state = DatabaseStateSnapshot(
         schema_migrations=current_schema_migrations(),
-        pgvector_version="0.8.2",
+        pgvector_version="0.8.6",
         object_keys=(fixture.object_key,),
     )
     inspector = FakeInspector(states or [database_state])
@@ -394,6 +437,42 @@ def test_export_rejects_active_work_and_nonempty_incoming(tmp_path: Path) -> Non
     assert quiet_fake.commands == []
 
 
+@pytest.mark.parametrize(
+    ("database_state", "message"),
+    (
+        (
+            DatabaseStateSnapshot(
+                schema_migrations=current_schema_migrations()[:-1],
+                pgvector_version="0.8.6",
+            ),
+            "schema migrations differ",
+        ),
+        (
+            DatabaseStateSnapshot(
+                schema_migrations=current_schema_migrations(),
+                pgvector_version="0.8.2",
+            ),
+            "pgvector version must be 0.8.6",
+        ),
+    ),
+)
+def test_export_rejects_database_from_another_release_before_dumping(
+    tmp_path: Path,
+    database_state: DatabaseStateSnapshot,
+    message: str,
+) -> None:
+    fixture = _fixture(tmp_path)
+    state = database_state.model_copy(update={"object_keys": (fixture.object_key,)})
+    service, _, fake = _service(fixture, states=[state])
+
+    with pytest.raises(StateIntegrityError, match=message):
+        service.export(_request(fixture))
+
+    assert fake.commands == []
+    assert not any(fixture.archive.rglob("*.dump"))
+    assert not any(fixture.archive.rglob("READY"))
+
+
 def test_export_rejects_symlink_and_database_epoch_change(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     outside = tmp_path / "outside"
@@ -404,8 +483,16 @@ def test_export_rejects_symlink_and_database_epoch_change(tmp_path: Path) -> Non
         service.export(_request(fixture))
 
     (fixture.generations / "escaped").unlink()
-    first = DatabaseStateSnapshot(object_keys=(fixture.object_key,))
-    second = DatabaseStateSnapshot(object_keys=())
+    first = DatabaseStateSnapshot(
+        schema_migrations=current_schema_migrations(),
+        pgvector_version="0.8.6",
+        object_keys=(fixture.object_key,),
+    )
+    second = DatabaseStateSnapshot(
+        schema_migrations=current_schema_migrations(),
+        pgvector_version="0.8.6",
+        object_keys=(),
+    )
     changed_service, _, _ = _service(fixture, states=[first, second])
     with pytest.raises(StateQuiescenceError, match="changed during export"):
         changed_service.export(_request(fixture))
@@ -540,7 +627,7 @@ def test_progress_payload_is_path_and_secret_free(tmp_path: Path) -> None:
         [
             DatabaseStateSnapshot(
                 schema_migrations=current_schema_migrations(),
-                pgvector_version="0.8.2",
+                pgvector_version="0.8.6",
                 object_keys=(fixture.object_key,),
             )
         ]
@@ -568,7 +655,7 @@ def test_database_dump_phase_keeps_a_bounded_heartbeat(
         [
             DatabaseStateSnapshot(
                 schema_migrations=current_schema_migrations(),
-                pgvector_version="0.8.2",
+                pgvector_version="0.8.6",
                 object_keys=(fixture.object_key,),
             )
         ]
@@ -608,7 +695,7 @@ def test_copy_progress_is_emitted_each_100_files_with_rate_and_eta(tmp_path: Pat
         [
             DatabaseStateSnapshot(
                 schema_migrations=current_schema_migrations(),
-                pgvector_version="0.8.2",
+                pgvector_version="0.8.6",
                 object_keys=(fixture.object_key,),
             )
         ]
@@ -638,7 +725,7 @@ def test_copy_progress_is_emitted_after_30_seconds_within_one_file(tmp_path: Pat
         [
             DatabaseStateSnapshot(
                 schema_migrations=current_schema_migrations(),
-                pgvector_version="0.8.2",
+                pgvector_version="0.8.6",
                 object_keys=(fixture.object_key,),
             )
         ]
@@ -706,6 +793,48 @@ def test_restore_started_is_emitted_before_a_full_package_verification_failure(
     assert "not-logged" not in payload
 
 
+@pytest.mark.parametrize(
+    ("database_update", "message"),
+    (
+        ({"schema_migrations": current_schema_migrations()[:-1]}, "schema migrations differ"),
+        ({"pgvector_version": "0.8.2"}, "pgvector version must be 0.8.6"),
+    ),
+)
+def test_restore_rejects_another_database_release_before_any_target_mutation(
+    tmp_path: Path,
+    database_update: dict[str, object],
+    message: str,
+) -> None:
+    fixture, verification, _, _ = _export(tmp_path / "source")
+    bad_state = verification.manifest.database_state.model_copy(update=database_update)
+    manifest = _reseal_package_database_state(verification.package_path, bad_state)
+    target = tmp_path / "target"
+    objects = target / "objects"
+    generations = target / "generations"
+    objects.mkdir(parents=True)
+    generations.mkdir()
+    tools, fake = _tools(fixture)
+    restorer = FakeDatabaseRestorer()
+    service = PortableStateService(None, tools, database_restorer=restorer)
+
+    with pytest.raises(StateIntegrityError, match=message):
+        service.restore(
+            RestoreRequest(
+                archive_root=fixture.archive,
+                package_path=verification.package_path,
+                object_root=objects.resolve(),
+                generation_root=generations.resolve(),
+                expected_compatibility=manifest.compatibility,
+                role_password_secrets=_role_secrets(fixture),
+            )
+        )
+
+    assert list(objects.iterdir()) == []
+    assert list(generations.iterdir()) == []
+    assert restorer.calls == 0
+    assert fake.commands == []
+
+
 def test_standalone_package_verify_emits_bounded_progress(tmp_path: Path) -> None:
     fixture, verification, _, _ = _export(tmp_path)
     progress: list[StateProgress] = []
@@ -749,13 +878,18 @@ def test_verification_rejects_tampered_or_untracked_bytes(tmp_path: Path) -> Non
         verify_state_package(second_fixture.archive, second_verification.package_path)
 
 
-def test_postgres_runner_enforces_major_17_and_uses_password_only_in_environment(
+def test_postgres_runner_enforces_exact_1711_and_uses_password_only_in_environment(
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path)
-    incompatible = FakeExecutor(version=16)
+    incompatible = FakeExecutor(version="17.10")
     runner, _ = _tools(fixture, incompatible)
-    with pytest.raises(PostgresToolError, match="major 17"):
+    with pytest.raises(PostgresToolError, match="exactly 17.11"):
+        runner.validate()
+
+    incompatible_server = FakeExecutor(server_version_num="170010")
+    runner, _ = _tools(fixture, incompatible_server)
+    with pytest.raises(PostgresToolError, match="server must be exactly 17.11"):
         runner.validate()
 
     fake = FakeExecutor()
@@ -892,7 +1026,7 @@ class FakeRestartSafeDatabaseTools:
 
     def pgvector_version(self, database: str) -> str:
         del database
-        return "0.8.2"
+        return "0.8.6"
 
     def stamp_restore_provenance(self, database: str, *, export_id: str, dump_sha256: str) -> None:
         self.provenance[database] = (export_id, dump_sha256)
@@ -1190,7 +1324,7 @@ def _add_active_generation(fixture: Fixture) -> DatabaseStateSnapshot:
         active_manifest_sha256=manifest.sha256,
         active_root_key=f"generations/{generation_id}",
         schema_migrations=current_schema_migrations(),
-        pgvector_version="0.8.2",
+        pgvector_version="0.8.6",
         object_keys=(fixture.object_key,),
     )
 
@@ -1463,6 +1597,8 @@ def test_active_generation_is_bound_to_db_pointer_manifest_and_portable_root_key
         active_generation_id=generation_id,
         active_manifest_sha256=manifest.sha256,
         active_root_key=f"generations/{generation_id}",
+        schema_migrations=current_schema_migrations(),
+        pgvector_version="0.8.6",
         object_keys=(fixture.object_key,),
     )
     service, _, _ = _service(fixture, states=[state])

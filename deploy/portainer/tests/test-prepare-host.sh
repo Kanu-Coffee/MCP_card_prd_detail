@@ -40,9 +40,11 @@ test "$(stat -c '%a' "$temporary_root/state/imports")" = 750
 test "$(stat -c '%a' "$temporary_root/state/migration/reports")" = 750
 test "$(stat -c '%a' "$temporary_root/state/config/portainer/archive-preflight.sh")" = 555
 test "$(stat -c '%a' "$temporary_root/state/config/portainer/schema13-transition.sh")" = 555
+test "$(stat -c '%a' "$temporary_root/state/config/postgres/upgrade-vector.sh")" = 555
 test "$(find "$temporary_root/state/config/portainer/migrations" -maxdepth 1 \
-    -type f -name '*.sql' | wc -l)" = 14
+    -type f -name '*.sql' | wc -l)" = 15
 test "$(stat -c '%a' "$temporary_root/state/config/portainer/migrations/014_legacy_import_and_portability.sql")" = 444
+test "$(stat -c '%a' "$temporary_root/state/config/portainer/migrations/015_pgvector_086.sql")" = 444
 test -d "$temporary_root/state/config/deployment"
 test -z "$(find "$temporary_root/state/config/deployment" -mindepth 1 -print -quit)"
 if [ "$(id -u)" = 10001 ] && [ "$(id -g)" = 10001 ]; then

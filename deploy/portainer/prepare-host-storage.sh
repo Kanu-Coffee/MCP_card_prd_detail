@@ -88,6 +88,9 @@ script_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 install -o root -g root -m 0555 \
     "$script_root/deploy/postgres/init-databases.sh" \
     "$config_root/postgres/init-databases.sh"
+install -o root -g root -m 0555 \
+    "$script_root/deploy/postgres/upgrade-vector.sh" \
+    "$config_root/postgres/upgrade-vector.sh"
 install -o root -g root -m 0444 \
     "$script_root/deploy/keycloak/cardrag-realm.json" \
     "$config_root/keycloak/cardrag-realm.json"
@@ -103,11 +106,11 @@ install -o root -g root -m 0555 \
     "$script_root/deploy/portainer/scripts/verify-runtime-storage.py" \
     "$config_root/portainer/"
 
-# The schema-13 bridge validates an exact trusted 001..014 inventory before it
+# The schema-13 bridge validates an exact trusted 001..015 inventory before it
 # takes either dump or migration action. Install only that bounded set; a future
 # release must deliberately update this bridge instead of silently adding SQL.
 version=1
-while [ "$version" -le 14 ]; do
+while [ "$version" -le 15 ]; do
     prefix=$(printf '%03d_' "$version")
     set -- "$script_root/src/cardrag/db/migrations/$prefix"*.sql
     if [ "$#" -ne 1 ] || [ ! -f "$1" ] || [ -L "$1" ]; then

@@ -62,7 +62,8 @@ jobs:
         run: |
           set -euo pipefail
           sh -n scripts/entrypoint.sh scripts/init-volumes.sh \
-            deploy/postgres/init-databases.sh deploy/keycloak/entrypoint.sh
+            deploy/postgres/init-databases.sh deploy/postgres/upgrade-vector.sh \
+            deploy/keycloak/entrypoint.sh
           systemd-analyze verify \
             deploy/systemd/cardrag-daily.service \
             deploy/systemd/cardrag-daily.timer \
@@ -89,6 +90,98 @@ jobs:
               mapper = scope["protocolMappers"][0]
               assert mapper["config"]["included.client.audience"] == "cardrag-mcp"
           PY
+
+      - name: Gate the pinned PostgreSQL dependency image
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          policy = json.loads(
+              Path("security/pgvector-image-vex.json").read_text(encoding="utf-8")
+          )
+          expected = policy["scope"]["image"]["reference"]
+          dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+          match = re.search(
+              r"^ARG POSTGRES_CLIENT_IMAGE=(\S+)$",
+              dockerfile,
+              flags=re.MULTILINE,
+          )
+          assert match is not None and match.group(1) == expected, (
+              match.group(1) if match else None,
+              expected,
+          )
+
+          paths = [Path("compose.yaml")]
+          paths.extend(sorted(Path("deploy/portainer").glob("*.compose.yaml")))
+          paths.extend(sorted(Path("deploy/portainer").glob("cardrag*-stack.yaml")))
+          image_pattern = re.compile(
+              r"^\s*image:\s*(pgvector/pgvector[^\s#]*)",
+              flags=re.MULTILINE,
+          )
+          checked = []
+          for path in paths:
+              references = image_pattern.findall(path.read_text(encoding="utf-8"))
+              if references:
+                  assert set(references) == {expected}, (path, references, expected)
+                  checked.append(path.as_posix())
+          required = {
+              "compose.yaml",
+              "deploy/portainer/export-stack.compose.yaml",
+              "deploy/portainer/restore-stack.compose.yaml",
+              "deploy/portainer/cardrag-stack.yaml",
+              "deploy/portainer/cardrag-bootstrap-stack.yaml",
+              "deploy/portainer/cardrag-export-stack.yaml",
+              "deploy/portainer/cardrag-pre-migration-export-stack.yaml",
+              "deploy/portainer/cardrag-restore-stack.yaml",
+              "deploy/portainer/cardrag-v020-pre-migration-export-stack.yaml",
+              "deploy/portainer/cardrag-validation-stack.yaml",
+          }
+          assert set(checked) == required, (checked, sorted(required))
+          PY
+
+          POSTGRES_IMAGE=$(jq -er \
+            '.scope.image.reference' security/pgvector-image-vex.json)
+          POSTGRES_CANONICAL=$(jq -er \
+            '.scope.image.canonical_digest_reference' \
+            security/pgvector-image-vex.json)
+          docker pull --platform linux/amd64 "$POSTGRES_IMAGE"
+          docker image inspect "$POSTGRES_IMAGE" | jq -e \
+            --arg expected "$POSTGRES_CANONICAL" \
+            'length == 1 and (.[0].RepoDigests | index($expected) != null)'
+          test "$(docker image inspect "$POSTGRES_IMAGE" --format '{{.Architecture}}')" = \
+            amd64
+          read -r GOSU_SHA GOSU_PATH < <(
+            docker run --rm --platform linux/amd64 --entrypoint sha256sum \
+              "$POSTGRES_IMAGE" /usr/local/bin/gosu
+          )
+          [[ "$GOSU_SHA" =~ ^[0-9a-f]{64}$ ]]
+          test "$GOSU_PATH" = /usr/local/bin/gosu
+
+          GATE_ROOT="$RUNNER_TEMP/pgvector-vulnerability-gate"
+          test ! -e "$GATE_ROOT"
+          mkdir -p "$GATE_ROOT/cache" "$GATE_ROOT/reports"
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$GATE_ROOT/cache:/root/.cache/trivy" \
+            --volume "$GATE_ROOT/reports:/reports" \
+            ghcr.io/aquasecurity/trivy:0.67.2@sha256:e2b22eac59c02003d8749f5b8d9bd073b62e30fefaef5b7c8371204e0a4b0c08 \
+            image \
+            --scanners vuln \
+            --format json \
+            --output /reports/pgvector.json \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            "$POSTGRES_IMAGE"
+          test -s "$GATE_ROOT/cache/db/metadata.json"
+          test -s "$GATE_ROOT/cache/db/trivy.db"
+          uv run --no-sync python scripts/check_postgres_image_vulnerabilities.py \
+            --report "$GATE_ROOT/reports/pgvector.json" \
+            --binary-sha256 "$GOSU_SHA" \
+            --output "$GATE_ROOT/reports/vex-result.json"
 
       - name: Validate Compose rendering
         run: |
@@ -147,8 +240,13 @@ jobs:
           CARDRAG_LEGACY_GENERATIONS_VOLUME=fixture-generations \
           docker compose \
             -f deploy/portainer/export-stack.compose.yaml \
+            -f deploy/portainer/schema-transition.compose.yaml \
             -f deploy/portainer/legacy-export-storage.compose.yaml \
             config --format json > /tmp/cardrag-portainer-pre-export-compose.json
+          CARDRAG_SECRETS_DIR="$secret_dir" docker compose \
+            -f deploy/portainer/export-stack.compose.yaml \
+            -f deploy/portainer/schema-transition.compose.yaml \
+            config --format json > /tmp/cardrag-portainer-v020-pre-export-compose.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -259,7 +357,8 @@ jobs:
           )
           assert validation["name"] == "cardrag-validation"
           assert set(validation["services"]) == {
-              "postgres", "keycloak", "volume-init", "migrate", "admin", "mcp"
+              "postgres", "postgres-extension-upgrade", "keycloak", "volume-init",
+              "migrate", "admin", "mcp"
           }
           assert "worker" not in validation["services"]
           assert validation["services"]["admin"]["environment"][
@@ -321,13 +420,13 @@ jobs:
               Path("/tmp/cardrag-portainer-pre-export-compose.json").read_text()
           )
           assert set(pre_export_stack["services"]) == {
-              "postgres", "schema13-safety-backup", "schema14-upgrade", "state-export"
+              "postgres", "schema13-safety-backup", "schema15-upgrade", "state-export"
           }
-          assert set(pre_export_stack["services"]["schema14-upgrade"]["depends_on"]) == {
+          assert set(pre_export_stack["services"]["schema15-upgrade"]["depends_on"]) == {
               "postgres", "schema13-safety-backup"
           }
           assert set(pre_export_stack["services"]["state-export"]["depends_on"]) == {
-              "postgres", "schema14-upgrade"
+              "postgres", "schema15-upgrade"
           }
           pre_export_mounts = {
               item["target"]: item
@@ -337,6 +436,20 @@ jobs:
           assert pre_export_mounts["/var/lib/cardrag/objects"]["read_only"] is True
           assert pre_export_mounts["/var/lib/cardrag/generations"]["type"] == "volume"
           assert pre_export_mounts["/var/lib/cardrag/generations"]["read_only"] is True
+
+          v020_pre_export = json.loads(
+              Path("/tmp/cardrag-portainer-v020-pre-export-compose.json").read_text()
+          )
+          v020_mounts = {
+              item["target"]: item
+              for item in v020_pre_export["services"]["state-export"]["volumes"]
+          }
+          assert v020_mounts["/var/lib/cardrag/objects"]["type"] == "bind"
+          assert v020_mounts["/var/lib/cardrag/objects"]["source"] == \
+              "/srv/cardrag/runtime/objects"
+          assert v020_mounts["/var/lib/cardrag/generations"]["type"] == "bind"
+          assert v020_mounts["/var/lib/cardrag/generations"]["source"] == \
+              "/srv/cardrag/runtime/generations"
           PY
 
           for test_script in deploy/portainer/tests/*.sh; do
@@ -482,7 +595,7 @@ jobs:
             APP_VERSION=ci-${{ github.run_id }}
             VCS_REF=${{ github.sha }}
 
-      - name: Prove schema 13 to 14 transition bridge
+      - name: Prove schema 13 and 14 to 15 transition bridge
         if: matrix.target == 'admin'
         env:
           CARDRAG_TRANSITION_TEST_IMAGE: cardrag-ci:admin
@@ -710,9 +823,13 @@ jobs:
             admin)
               docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag --help
               test "$(docker run --rm --entrypoint pg_dump "cardrag-ci:${TARGET}" --version \
-                | awk '{print $3}' | tr -d ')')" = 17.10
+                | awk '{print $3}' | tr -d ')')" = 17.11
               test "$(docker run --rm --entrypoint pg_restore "cardrag-ci:${TARGET}" --version \
-                | awk '{print $3}' | tr -d ')')" = 17.10
+                | awk '{print $3}' | tr -d ')')" = 17.11
+              test "$(docker run --rm --entrypoint psql "cardrag-ci:${TARGET}" --version \
+                | awk '{print $3}' | tr -d ')')" = 17.11
+              docker run --rm --entrypoint python "cardrag-ci:${TARGET}" -c \
+                'import ctypes; libpq=ctypes.CDLL("libpq.so.5"); libpq.PQlibVersion.restype=ctypes.c_int; assert libpq.PQlibVersion() == 180006'
               if docker run "${common[@]}" "cardrag-ci:${TARGET}" cardrag-worker --help; then
                 echo "admin image accepted a worker command" >&2
                 exit 1

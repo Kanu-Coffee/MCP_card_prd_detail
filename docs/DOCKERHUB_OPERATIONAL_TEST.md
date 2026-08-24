@@ -7,11 +7,11 @@ digest를 그대로 사용한다.
 ## 1. 이미지 선택
 
 이 저장소의 v0.2 기능 운영 테스트는 서명과 통합 release manifest까지 성공한
-`0.2.0` 공개 릴리스가 생성된 뒤에만 수행한다. 예상 역할 태그는 아래와 같다.
+`0.2.1` 공개 릴리스가 생성된 뒤에만 수행한다. 예상 역할 태그는 아래와 같다.
 
-- `ymtop59/mcp-card-prd-detail:0.2.0-mcp`
-- `ymtop59/mcp-card-prd-detail:0.2.0-worker`
-- `ymtop59/mcp-card-prd-detail:0.2.0-admin`
+- `ymtop59/mcp-card-prd-detail:0.2.1-mcp`
+- `ymtop59/mcp-card-prd-detail:0.2.1-worker`
+- `ymtop59/mcp-card-prd-detail:0.2.1-admin`
 
 `0.1.0`과 `0.1.1`은 공개 과정에서 image push 뒤 통합 release manifest 생성 전에 중단된
 부분 release다. 운영 테스트에는 사용하지 않고, OCI signature와 통합 release manifest까지

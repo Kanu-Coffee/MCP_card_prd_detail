@@ -82,7 +82,7 @@
 
 - 동시 요청 5, request timeout 45초, 초기 검색 P95 30초와 Compose resource 개발 기본값;
   실제 BULK 이후 QPS·가용성·host sizing 보정
-- PostgreSQL 17 schema·migration 1~14, content-addressed file layout와 FTS+pgvector/RRF
+- PostgreSQL 17.11 schema·migration 1~15와 pgvector 0.8.6, content-addressed file layout와 FTS+pgvector/RRF
 - Codex `gpt-5.4`, 결정론적 구조 baseline, OpenRouter `text-embedding-3-small` 1,536차원;
   실제 모델 비용·quota·품질 재측정
 - 문자 99.5%+, critical/page/source-span 100%, Recall@10 95%+, critical Recall/filter 100%,
