@@ -36,6 +36,7 @@ class Policy:
     image_reference: str
     canonical_digest_reference: str
     image_digest: str
+    linux_amd64_config_digest: str
     artifact_type: str
     binary_target: str
     binary_sha256: str
@@ -120,7 +121,13 @@ def _parse_policy(raw: dict[str, Any]) -> Policy:
     image = _object(scope["image"], "policy.scope.image")
     _exact_keys(
         image,
-        {"reference", "canonical_digest_reference", "digest", "artifact_type"},
+        {
+            "reference",
+            "canonical_digest_reference",
+            "digest",
+            "linux_amd64_config_digest",
+            "artifact_type",
+        },
         "policy.scope.image",
     )
     image_reference = _string(image["reference"], "policy.scope.image.reference")
@@ -135,6 +142,16 @@ def _parse_policy(raw: dict[str, Any]) -> Policy:
         raise ValidationError("policy image reference is not bound to its digest")
     if not canonical_reference.endswith(f"@{image_digest}"):
         raise ValidationError("policy canonical image reference is not bound to its digest")
+    linux_amd64_config_digest = _string(
+        image["linux_amd64_config_digest"],
+        "policy.scope.image.linux_amd64_config_digest",
+    )
+    if _DIGEST_RE.fullmatch(linux_amd64_config_digest) is None:
+        raise ValidationError(
+            "policy.scope.image.linux_amd64_config_digest must be a lowercase sha256 digest"
+        )
+    if linux_amd64_config_digest == image_digest:
+        raise ValidationError("policy image index and linux/amd64 config digests must be distinct")
     artifact_type = _string(image["artifact_type"], "policy.scope.image.artifact_type")
     if artifact_type != "container_image":
         raise ValidationError("policy.scope.image.artifact_type must be container_image")
@@ -260,6 +277,7 @@ def _parse_policy(raw: dict[str, Any]) -> Policy:
         image_reference=image_reference,
         canonical_digest_reference=canonical_reference,
         image_digest=image_digest,
+        linux_amd64_config_digest=linux_amd64_config_digest,
         artifact_type=artifact_type,
         binary_target=binary_target,
         binary_sha256=binary_sha256,
@@ -289,8 +307,14 @@ def _validate_report(raw: dict[str, Any], policy: Policy) -> None:
 
     metadata = _object(raw.get("Metadata"), "report.Metadata")
     image_id = _string(metadata.get("ImageID"), "report.Metadata.ImageID")
-    if image_id != policy.image_digest:
-        raise ValidationError(f"report image digest changed: {image_id} != {policy.image_digest}")
+    # With Docker's classic image store Trivy reports the linux/amd64 OCI
+    # config digest here; with the containerd image store it reports the OCI
+    # index digest. Both immutable digests are bound explicitly by the policy.
+    accepted_image_ids = {policy.image_digest, policy.linux_amd64_config_digest}
+    if image_id not in accepted_image_ids:
+        raise ValidationError(
+            f"report image digest changed: {image_id} not in {sorted(accepted_image_ids)}"
+        )
     # Trivy 0.67.2 omits Metadata.Reference for some Docker-socket scans. When
     # emitted it remains useful corroborating evidence and must match exactly;
     # identity is always bound below through ArtifactName, ImageID, and
