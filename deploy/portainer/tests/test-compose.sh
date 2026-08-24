@@ -434,7 +434,9 @@ for target, source in {
     assert v020_export_volumes[target]["type"] == "bind"
     assert v020_export_volumes[target]["source"] == source
     assert v020_export_volumes[target]["read_only"] is True
-    assert v020_export_volumes[target]["bind"]["create_host_path"] is False
+    assert v020_export_volumes[target].get("bind", {}).get(
+        "create_host_path", False
+    ) is False
 assert "legacy_objects" not in v020_pre_migration_export.get("volumes", {})
 assert "legacy_generations" not in v020_pre_migration_export.get("volumes", {})
 
