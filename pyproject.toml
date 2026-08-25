@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cardrag-mcp"
+name = "cardrag-legacy"
 version = "0.2.1"
-description = "Evidence-first CardRAG ingestion pipeline and read-only HTTP MCP server"
+description = "Read-only v0.2.1 compatibility package retained during the v1 shadow cutover"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 license = {text = "Proprietary"}
@@ -44,9 +44,16 @@ dev = [
 ]
 
 [project.scripts]
-cardrag = "cardrag.cli:app"
-cardrag-mcp = "cardrag.app:main"
-cardrag-worker = "cardrag.worker:main"
+cardrag-legacy = "cardrag.cli:app"
+cardrag-legacy-mcp = "cardrag.app:main"
+cardrag-legacy-worker = "cardrag.worker:main"
+
+[tool.uv.workspace]
+members = [
+  "packages/cardrag-core",
+  "apps/cardrag-worker",
+  "apps/cardrag-mcp",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cardrag"]

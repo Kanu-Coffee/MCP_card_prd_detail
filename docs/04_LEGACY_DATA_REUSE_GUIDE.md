@@ -63,6 +63,9 @@
 5. master manifest의 **ocr_chars**는 1,537건만 일치하며 KB 55건은 최대 147자 차이가 난다. 이는 OCR 본문 손상으로 단정할 근거가 아니라 manifest counter drift다.
 6. metadata의 **ocr_md_sha256**은 1,591건이 실제 파일과 일치한다. imported 우리카드 문서 1건은 불일치하므로 별도 검토 대상이다.
 7. raw PDF 외 PNG·OCR·DB·보고서를 포괄하는 릴리스 전체 checksum 목록은 없다.
+8. v1 strict OCR bytes 계약으로 최신 1,567건을 실제 재검증하면 727건만 그대로
+   채택 가능하다. 840건은 원문 수정 없이 격리된다(비정규 page join 831,
+   20자 미만 page 9). Short-page 9건 중 3건은 marker만 있는 빈 페이지를 포함한다.
 
 이 예외는 이전 과정에서 자동 보정해 사라지게 해서는 안 된다. 원래 선언값, 재계산값, 판정과 처리자를 함께 기록한다.
 
@@ -260,6 +263,21 @@ canonical OCR record에는 최소 다음이 필요하다.
 레거시 DB의 **PRAGMA integrity_check=ok**는 파일 구조가 읽힌다는 뜻이지 신규 검색 계약과 품질이 적합하다는 뜻은 아니다.
 
 ## 10. Normalized bundle과 durable import 절차
+
+v1 cutover에서 normalized bundle과 old DB import를 새로 만들지 않는 read-only
+경로는 다음 명령이다. 결과 JSONL은 Worker `--legacy-inventory`에 직접 전달하고,
+rejected JSONL의 문서는 정상 Worker OCR 대상으로 남긴다.
+
+```bash
+cardrag-legacy legacy export-data-kit-inventory \
+  --source /absolute/read-only/cardrag-conveyor-data \
+  --output /archive/cardrag-cutover/legacy-data-kit.jsonl \
+  --rejected-output /archive/cardrag-cutover/legacy-data-kit-rejected.jsonl
+```
+
+이 snapshot identity는 data-pack/master/SQLite SHA를 묶지만 release 자체에 서명된
+전체 checksum manifest가 없으므로 제3자 authenticity까지 증명하지는 않는다.
+원본 archive의 read-only 보존과 별도 승인 기록이 신뢰 전제다.
 
 5문서 pilot은 보존하되, 0.2의 운영 경로는 `legacy prepare/import/status/resume/cancel/finalize`다.
 실제 master manifest 전체 dry-run은 document 1,592건, unique PDF 1,369개, unique OCR

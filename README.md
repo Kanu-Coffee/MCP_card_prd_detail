@@ -1,58 +1,61 @@
-# CardRAG MCP
+# CardRAG
 
-Card-product disclosure PDFs are acquired, OCR'd and converted into versioned,
-evidence-addressable search generations by an offline worker.  A separate,
-read-only MCP process exposes only sealed generations over Streamable HTTP.
+CardRAG has two runtime images and no online database:
 
-The authoritative product and acceptance requirements are in
-[`docs/README.md`](docs/README.md).  This source tree is deliberately separate
-from the read-only legacy hatch directory.
+- `cardrag-worker` runs once, downloads the current issuer PDFs, reuses or produces OCR,
+  builds embeddings and an immutable SQLite generation, and publishes it to WebDAV.
+- `cardrag-mcp` continuously serves the last verified local generation. It checks WebDAV
+  in the background, downloads a complete generation and every referenced PDF, then
+  switches atomically.
 
-## Local development
+Shared hashes, manifests, OCR validation, and the WebDAV protocol live in the
+`cardrag-core` workspace package. PostgreSQL, pgvector, Keycloak, and an admin service
+are not dependencies of the new runtime.
 
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest
+```text
+packages/cardrag-core   immutable artifact and OCR contracts
+apps/cardrag-worker     issuer adapters and one-shot publisher
+apps/cardrag-mcp        local SQLite MCP server
 ```
 
-For the Compose stack, first create the file-backed secrets exactly as described
-in [`deploy/secrets/README.md`](deploy/secrets/README.md) and export its absolute
-directory as `CARDRAG_SECRETS_DIR`.  `.env.example` documents setting names; it is
-not a ready-to-run credential file.  The first Keycloak start uses the one-time
-bootstrap overlay:
+## Development
+
+Python 3.12 and `uv` are required.
 
 ```bash
-docker compose \
-  -f compose.yaml \
-  -f deploy/keycloak/bootstrap.compose.yaml \
-  up -d --wait postgres keycloak
-docker compose run --rm migrate
+uv sync --all-packages --all-extras
+uv run --all-packages pytest \
+  packages/cardrag-core/tests \
+  apps/cardrag-worker/tests \
+  apps/cardrag-mcp/tests
 ```
 
-Create and verify the permanent Keycloak administrator, revoke the bootstrap
-account, remove `keycloak_admin_password.txt`, then recreate Keycloak from base
-Compose as specified in the secret guide.  Start the loopback-only application
-hand-off with `docker compose up -d mcp`; it is published only at
-`127.0.0.1:8000`.  Do not put credentials or corpus files in the image or Git.
-The remaining real-account and host checks are in
-[`docs/REAL_ENV_HANDOFF.md`](docs/REAL_ENV_HANDOFF.md).
+The v0.2.1 package under `src/cardrag` and its PostgreSQL deployment files are retained
+only as a read-only rollback and migration source during the seven-run shadow window.
+They are not copied into either new image.
 
-## Docker Hub operational test
+## Deployment
 
-Published role images are consumed through
-[`deploy/dockerhub.compose.yaml`](deploy/dockerhub.compose.yaml). The pull,
-digest-pinning, bootstrap, MCP, and worker commands are documented in
-[`docs/DOCKERHUB_OPERATIONAL_TEST.md`](docs/DOCKERHUB_OPERATIONAL_TEST.md).
+Build exactly the two runtime images:
 
-CardRAG 0.2 adds deterministic legacy PDF/OCR import, explicit Portainer host
-storage, and maintenance-window state export/restore.  Do not copy legacy files
-into a running admin container or treat a Docker volume as a backup.  The
-required host layout, one-shot jobs, migration order, and rollback checks are in
-[`docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md`](docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md).
+```bash
+docker build --target worker -t cardrag-worker:local .
+docker build --target mcp -t cardrag-mcp:local .
+```
 
-For a new Docker Standalone host, start with the Korean
-[`Portainer quick-install guide`](deploy/portainer/QUICKSTART.ko.md).  It wraps
-volume mapping, file-backed secret generation, release image pinning, and the
-one-time Keycloak hand-off.  Existing PDF/OCR archives then follow the separate
-[`legacy import quickstart`](deploy/portainer/LEGACY_IMPORT_QUICKSTART.ko.md).
+Use [`deploy/worker/compose.yaml`](deploy/worker/compose.yaml) for the one-shot Worker
+and [`deploy/mcp/compose.yaml`](deploy/mcp/compose.yaml) for the always-on MCP service.
+File-backed Docker secrets are provided by each directory's `compose.secrets.yaml`
+overlay. Full setup, WebDAV preflight, migration, shadow, and rollback instructions are
+in [`docs/SIMPLE_RUNTIME.md`](docs/SIMPLE_RUNTIME.md).
+
+The root [`compose.yaml`](compose.yaml) is a local convenience include and also resolves
+to exactly the `worker` and `mcp` services. Production operators should use the two
+independent Compose projects above so a one-shot Worker lifecycle cannot affect MCP.
+
+MCP is published to `127.0.0.1:8000` by default. Put a TLS reverse proxy in front of it
+and protect every MCP/resource/PDF/metrics request with the configured Bearer token.
+Only `/health/live` and the detail-free `/health/ready` are unauthenticated.
+
+The read-only v0.2.1 current-inventory exporter used during OCR adoption is documented
+in [`docs/V1_CURRENT_INVENTORY_EXPORT.md`](docs/V1_CURRENT_INVENTORY_EXPORT.md).

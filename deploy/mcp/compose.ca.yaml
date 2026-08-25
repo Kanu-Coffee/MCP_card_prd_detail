@@ -1,0 +1,10 @@
+services:
+  mcp:
+    environment:
+      CARDRAG_WEBDAV_CA_FILE: /run/secrets/webdav_ca
+    secrets:
+      - webdav_ca
+
+secrets:
+  webdav_ca:
+    file: ${CARDRAG_WEBDAV_CA_SECRET_FILE:?set CARDRAG_WEBDAV_CA_SECRET_FILE}

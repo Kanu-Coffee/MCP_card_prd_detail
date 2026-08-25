@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from cardrag_worker.state import AlreadyRunning, WorkerState, worker_lock
+
+
+def test_state_uses_wal_and_resume_resets_attempts_and_refreshes_discovery(tmp_path: Path) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        assert state.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        run_id = state.start_run(run_id="run-1")
+        state.ensure_stage(run_id, "doc", "ocr", max_attempts=1)
+        state.ensure_stage(run_id, "issuer-kb", "discovery", max_attempts=1)
+        assert state.stage_started(run_id, "issuer-kb", "discovery") == 1
+        state.stage_succeeded(run_id, "issuer-kb", "discovery")
+        assert state.stage_started(run_id, "doc", "ocr") == 1
+        assert state.stage_failed(run_id, "doc", "ocr", RuntimeError("boom"), delay_seconds=0) == "failed"
+        artifact = tmp_path / "chunk.md"
+        artifact.write_text("checkpoint", encoding="utf-8")
+        state.save_checkpoint(
+            run_id=run_id,
+            document_id="doc",
+            stage_name="ocr",
+            chunk_index=0,
+            input_sha256="1" * 64,
+            output_sha256="2" * 64,
+            artifact_path=artifact,
+        )
+        state.finish_run(run_id, "failed", error="boom")
+        state.assert_resumable(run_id)
+        resumed = state.get_stage(run_id, "doc", "ocr")
+        assert resumed is not None
+        assert (resumed.status, resumed.attempt_count) == ("retry", 0)
+        discovery = state.get_stage(run_id, "issuer-kb", "discovery")
+        assert discovery is not None
+        assert (discovery.status, discovery.attempt_count) == ("retry", 0)
+        assert state.checkpoint(run_id, "doc", "ocr", 0) is not None
+        assert state.stage_started(run_id, "doc", "ocr") == 1
+
+
+def test_worker_lock_is_nonblocking_and_recoverable(tmp_path: Path) -> None:
+    lock = tmp_path / "worker.lock"
+    with worker_lock(lock), pytest.raises(AlreadyRunning), worker_lock(lock):
+        pass
+    with worker_lock(lock):
+        pass
+
+
+def test_discovery_baseline_ignores_failed_runs(tmp_path: Path) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        failed = state.start_run(run_id="failed")
+        state.record_snapshot(
+            run_id=failed,
+            snapshot_id="a" * 64,
+            issuer="kb",
+            source_sha256="a" * 64,
+            record_count=100,
+            payload={"records": []},
+        )
+        state.finish_run(failed, "failed")
+        assert state.last_successful_snapshot_count("kb") is None
+
+        good = state.start_run(run_id="good")
+        state.record_snapshot(
+            run_id=good,
+            snapshot_id="b" * 64,
+            issuer="kb",
+            source_sha256="b" * 64,
+            record_count=20,
+            payload={"records": []},
+        )
+        state.finish_run(good, "no_change")
+        assert state.last_successful_snapshot_count("kb") == 20
+
+
+def test_incomplete_run_retention_is_bounded(tmp_path: Path) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        for index in range(12):
+            run_id = state.start_run(run_id=f"failed-{index:02d}")
+            state.finish_run(run_id, "failed")
+        prunable = state.prunable_incomplete_run_ids(keep=10)
+        assert set(prunable) == {"failed-00", "failed-01"}

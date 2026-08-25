@@ -26,7 +26,18 @@ from cardrag.generation_builder import (
     RetrievalGateReport,
 )
 from cardrag.jobs import JobRepository
-from cardrag.legacy import LegacyBundlePreparer, LegacyImportService, LegacyMigrator, verify_bundle
+from cardrag.legacy import (
+    LegacyBundlePreparer,
+    LegacyImportService,
+    LegacyMigrator,
+    export_adoption_ledger,
+    export_current_inventory,
+    export_data_kit_inventory,
+    verify_bundle,
+    write_adoption_ledger,
+    write_current_inventory,
+    write_data_kit_inventory,
+)
 from cardrag.observability import prune_database_retention
 from cardrag.scheduler import DailyScheduler
 from cardrag.state_transfer import (
@@ -692,6 +703,131 @@ def legacy_inventory(
         json.dumps(inventory.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     typer.echo(json.dumps({"files": len(inventory.files), "output": str(output)}))
+
+
+@legacy_app.command("export-current-inventory")
+def legacy_export_current_inventory(
+    output: Annotated[
+        Path,
+        typer.Option(
+            dir_okay=False,
+            resolve_path=True,
+            help="new JSONL path outside CARDRAG_STORAGE_ROOT",
+        ),
+    ],
+) -> None:
+    """Export the published latest PDF/OCR ledger without modifying v0.2.1 state."""
+
+    settings = _settings()
+    database = _database(settings)
+    try:
+        rows = export_current_inventory(database, settings.storage_root)
+        written = write_current_inventory(rows, output, protected_root=settings.storage_root)
+        typer.echo(
+            json.dumps(
+                {"documents": len(rows), "output": str(written)},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    finally:
+        database.close()
+
+
+@legacy_app.command("export-adoption-ledger")
+def legacy_export_adoption_ledger(
+    output: Annotated[
+        Path,
+        typer.Option(
+            dir_okay=False,
+            help="new absolute JSONL path outside CARDRAG_STORAGE_ROOT",
+        ),
+    ],
+    import_id: Annotated[
+        uuid.UUID | None,
+        typer.Option(
+            "--import-id",
+            help="required when more than one succeeded legacy import exists",
+        ),
+    ] = None,
+) -> None:
+    """Export the DB-bound succeeded legacy-adoption ledger without mutation."""
+
+    settings = _settings()
+    database = _database(settings)
+    try:
+        rows = export_adoption_ledger(database, import_id=import_id)
+        written = write_adoption_ledger(
+            rows,
+            output,
+            protected_root=settings.storage_root,
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "documents": len(rows),
+                    "import_id": rows[0]["import_id"],
+                    "output": str(written),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    finally:
+        database.close()
+
+
+@legacy_app.command("export-data-kit-inventory")
+def legacy_export_data_kit_inventory(
+    source: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=False,
+            help="absolute read-only cardrag-conveyor-data directory",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            dir_okay=False,
+            help="new absolute Worker-compatible JSONL path outside the data-kit",
+        ),
+    ],
+    rejected_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--rejected-output",
+            dir_okay=False,
+            help="new absolute rejection JSONL; defaults to OUTPUT.rejected.jsonl",
+        ),
+    ] = None,
+) -> None:
+    """Validate a raw data-kit read-only and export reusable latest OCR rows."""
+
+    result = export_data_kit_inventory(source.absolute())
+    inventory_path, rejected_path = write_data_kit_inventory(
+        result,
+        output,
+        source_root=source.absolute(),
+        rejected_output=rejected_output,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "accepted": len(result.rows),
+                "output": str(inventory_path),
+                "rejected": len(result.rejected),
+                "rejected_output": str(rejected_path),
+                "selected": result.selected_documents,
+                "source_bundle_id": result.source_bundle_id,
+                "source_bundle_sha256": result.source_bundle_sha256,
+                "source_database_id": result.source_database_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 @legacy_app.command("prepare")
