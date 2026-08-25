@@ -1,0 +1,56 @@
+name: cardrag-mcp
+
+services:
+  mcp:
+    image: ${CARDRAG_MCP_IMAGE:-cardrag-mcp:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: mcp
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    environment:
+      - CARDRAG_ENVIRONMENT=${CARDRAG_ENVIRONMENT:-production}
+      - CARDRAG_MCP_STATE_DIR=/var/lib/cardrag-mcp
+      - CARDRAG_MCP_HOST=0.0.0.0
+      - CARDRAG_MCP_PORT=8000
+      - CARDRAG_MCP_PUBLIC_BASE_URL=${CARDRAG_MCP_PUBLIC_BASE_URL:?CARDRAG_MCP_PUBLIC_BASE_URL is required}
+      - CARDRAG_MCP_BEARER_TOKEN
+      - CARDRAG_MCP_BEARER_TOKEN_FILE
+      - CARDRAG_MCP_UPDATE_INTERVAL_SECONDS=${CARDRAG_MCP_UPDATE_INTERVAL_SECONDS:-300}
+      - CARDRAG_MCP_MAX_VECTOR_BYTES=${CARDRAG_MCP_MAX_VECTOR_BYTES:-1073741824}
+      - CARDRAG_MCP_RETAIN_GENERATIONS=${CARDRAG_MCP_RETAIN_GENERATIONS:-3}
+      - CARDRAG_MAXIMUM_CANDIDATE_COUNT=${CARDRAG_MAXIMUM_CANDIDATE_COUNT:-250}
+      - CARDRAG_MAXIMUM_PDF_BYTES=${CARDRAG_MAXIMUM_PDF_BYTES:-104857600}
+      - CARDRAG_EMBEDDING_TIMEOUT_SECONDS=${CARDRAG_EMBEDDING_TIMEOUT_SECONDS:-60}
+      - CARDRAG_WEBDAV_BASE_URL=${CARDRAG_WEBDAV_BASE_URL:?CARDRAG_WEBDAV_BASE_URL is required}
+      - CARDRAG_WEBDAV_USERNAME
+      - CARDRAG_WEBDAV_USERNAME_FILE
+      - CARDRAG_WEBDAV_PASSWORD
+      - CARDRAG_WEBDAV_PASSWORD_FILE
+      - CARDRAG_WEBDAV_CA_FILE
+      - CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS=${CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS:-10}
+      - CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS=${CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS:-600}
+      - CARDRAG_OPENROUTER_BASE_URL=${CARDRAG_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - CARDRAG_OPENROUTER_API_KEY
+      - CARDRAG_OPENROUTER_API_KEY_FILE
+    volumes:
+      - mcp-state:/var/lib/cardrag-mcp
+    ports:
+      - "${CARDRAG_MCP_BIND_ADDRESS:-127.0.0.1}:${CARDRAG_MCP_PUBLISHED_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  mcp-state:

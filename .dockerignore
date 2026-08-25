@@ -12,9 +12,8 @@ __pycache__
 .ruff_cache
 .mypy_cache
 
-# The legacy hatch, card documents, indexes, credentials, and mutable runtime
-# data must never become image layers.
-cardrag-conveyor-hatch-*
+# Card documents, indexes, credentials, and mutable runtime data must never
+# become image layers.
 artifacts
 backups
 build
@@ -44,4 +43,3 @@ oauth*.json
 # Development-only files are not needed by any runtime target.
 tests
 docs
-LEGACY_PROJECT_ANALYSIS.md

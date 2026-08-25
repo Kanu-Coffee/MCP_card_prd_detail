@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CardRAG Worker daily at 03:00 Asia/Seoul
+Documentation=file:/opt/cardrag/docs/SIMPLE_RUNTIME.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=cardrag-worker.service
+
+[Install]
+WantedBy=timers.target

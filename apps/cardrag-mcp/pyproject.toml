@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cardrag-mcp"
+version = "1.0.0"
+description = "Read-only CardRAG serving database MCP"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "cardrag-core",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "mcp==2.0.0",
+  "numpy>=2.2,<3",
+  "prometheus-client>=0.22,<1",
+  "pydantic>=2.12,<3",
+  "pydantic-settings>=2.10,<3",
+  "uvicorn>=0.35,<1",
+]
+
+[project.scripts]
+cardrag-mcp = "cardrag_mcp.main:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cardrag_mcp"]
+
+[tool.uv.sources]
+cardrag-core = { workspace = true }
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S", "B", "UP", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**/*.py" = ["S101", "S106", "ASYNC240"]
+"**/tests/*.py" = ["S101", "S106", "ASYNC240"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

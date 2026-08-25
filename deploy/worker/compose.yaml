@@ -1,0 +1,55 @@
+name: cardrag-worker
+
+services:
+  worker:
+    image: ${CARDRAG_WORKER_IMAGE:-cardrag-worker:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: worker
+    restart: "no"
+    init: true
+    user: "10001:10001"
+    environment:
+      - CARDRAG_ENVIRONMENT=${CARDRAG_ENVIRONMENT:-production}
+      - CARDRAG_WORKER_STATE_DIR=/var/lib/cardrag-worker
+      - CARDRAG_ENABLED_ISSUERS=${CARDRAG_ENABLED_ISSUERS:-woori,kb,shinhan}
+      - CARDRAG_WEBDAV_BASE_URL=${CARDRAG_WEBDAV_BASE_URL:?CARDRAG_WEBDAV_BASE_URL is required}
+      - CARDRAG_WEBDAV_USERNAME
+      - CARDRAG_WEBDAV_USERNAME_FILE
+      - CARDRAG_WEBDAV_PASSWORD
+      - CARDRAG_WEBDAV_PASSWORD_FILE
+      - CARDRAG_WEBDAV_CA_FILE
+      - CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS=${CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS:-10}
+      - CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS=${CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS:-600}
+      - CARDRAG_OPENROUTER_BASE_URL=${CARDRAG_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - CARDRAG_OPENROUTER_API_KEY
+      - CARDRAG_OPENROUTER_API_KEY_FILE
+      - CARDRAG_EMBEDDING_MODEL=${CARDRAG_EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      - CARDRAG_EMBEDDING_DIMENSION=1536
+      - CARDRAG_OCR_PROVIDER=${CARDRAG_OCR_PROVIDER:-codex-exec}
+      - CARDRAG_OCR_MODEL=${CARDRAG_OCR_MODEL:-gpt-5.4}
+      - CARDRAG_OCR_FALLBACK_PROVIDER
+      - CARDRAG_OCR_FALLBACK_MODEL
+      - CARDRAG_OCR_REASONING_EFFORT=${CARDRAG_OCR_REASONING_EFFORT:-high}
+      - CARDRAG_OCR_CACHE_EPOCH=${CARDRAG_OCR_CACHE_EPOCH:-0}
+      - CARDRAG_OCR_PROMPT_VERSION=${CARDRAG_OCR_PROMPT_VERSION:-cardrag-ocr.ko.v1}
+      - CARDRAG_OCR_CHUNK_PAGES=${CARDRAG_OCR_CHUNK_PAGES:-2}
+      - CARDRAG_STAGE_MAX_ATTEMPTS=${CARDRAG_STAGE_MAX_ATTEMPTS:-4}
+      - CARDRAG_RETRY_CAP_SECONDS=${CARDRAG_RETRY_CAP_SECONDS:-30}
+      - CARDRAG_CODEX_EXECUTABLE=/usr/local/bin/codex
+      - CARDRAG_CODEX_AUTH_ROOT=/var/lib/cardrag-worker/codex
+      - CODEX_HOME=/var/lib/cardrag-worker/codex
+      - HOME=/var/lib/cardrag-worker/home
+    volumes:
+      - worker-state:/var/lib/cardrag-worker
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command: ["run"]
+
+volumes:
+  worker-state:

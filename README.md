@@ -1,58 +1,52 @@
-# CardRAG MCP
+# CardRAG v1.0.0
 
-Card-product disclosure PDFs are acquired, OCR'd and converted into versioned,
-evidence-addressable search generations by an offline worker.  A separate,
-read-only MCP process exposes only sealed generations over Streamable HTTP.
+CardRAG는 카드사 상품설명서 PDF를 검색 가능한 형태로 만드는 두 프로세스
+서비스입니다. 운영 런타임은 다음 흐름만 사용합니다.
 
-The authoritative product and acceptance requirements are in
-[`docs/README.md`](docs/README.md).  This source tree is deliberately separate
-from the read-only legacy hatch directory.
-
-## Local development
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest
+```text
+one-shot Worker -> immutable WebDAV artifacts -> always-on MCP
 ```
 
-For the Compose stack, first create the file-backed secrets exactly as described
-in [`deploy/secrets/README.md`](deploy/secrets/README.md) and export its absolute
-directory as `CARDRAG_SECRETS_DIR`.  `.env.example` documents setting names; it is
-not a ready-to-run credential file.  The first Keycloak start uses the one-time
-bootstrap overlay:
+- Worker는 카드사 PDF를 수집하고 OCR과 임베딩을 수행한 뒤, SQLite 검색 세대와
+  PDF/OCR 객체를 WebDAV에 게시합니다.
+- MCP는 WebDAV를 주기적으로 확인하고 세대 전체를 로컬에 내려받아 검증한 뒤
+  원자적으로 활성화합니다.
+- Worker만 WebDAV에 씁니다. MCP 요청 처리는 검증된 로컬 파일만 사용합니다.
 
-```bash
-docker compose \
-  -f compose.yaml \
-  -f deploy/keycloak/bootstrap.compose.yaml \
-  up -d --wait postgres keycloak
-docker compose run --rm migrate
+## 운영 이미지
+
+v1.0.0 운영 배포에는 다음 두 고정 태그를 사용합니다.
+
+```text
+ymtop59/mcp-card-prd-detail:1.0.0-worker
+ymtop59/mcp-card-prd-detail:1.0.0-mcp
 ```
 
-Create and verify the permanent Keycloak administrator, revoke the bootstrap
-account, remove `keycloak_admin_password.txt`, then recreate Keycloak from base
-Compose as specified in the secret guide.  Start the loopback-only application
-hand-off with `docker compose up -d mcp`; it is published only at
-`127.0.0.1:8000`.  Do not put credentials or corpus files in the image or Git.
-The remaining real-account and host checks are in
-[`docs/REAL_ENV_HANDOFF.md`](docs/REAL_ENV_HANDOFF.md).
+Worker는 실행이 끝나면 종료되는 배치이고, MCP는 계속 실행되는 HTTP/MCP
+서비스입니다. 두 역할을 각각 독립된 Compose 프로젝트로 운영해야 합니다.
 
-## Docker Hub operational test
+## 운영 시작 순서
 
-Published role images are consumed through
-[`deploy/dockerhub.compose.yaml`](deploy/dockerhub.compose.yaml). The pull,
-digest-pinning, bootstrap, MCP, and worker commands are documented in
-[`docs/DOCKERHUB_OPERATIONAL_TEST.md`](docs/DOCKERHUB_OPERATIONAL_TEST.md).
+1. `/opt/cardrag`에 v1.0.0 배포 파일을 준비합니다.
+2. `/etc/cardrag/worker.env`, `/etc/cardrag/mcp.env`, 파일 기반 비밀값을
+   준비합니다.
+3. Worker 컨테이너에서 Codex 로그인을 완료합니다.
+4. `webdav-check`가 모든 필수 WebDAV 동작을 통과하는지 확인합니다.
+5. Worker를 한 번 실행해 첫 검색 세대를 게시합니다.
+6. MCP를 시작하고 `/health/ready`가 HTTP 200인지 확인합니다.
+7. Worker systemd timer를 활성화해 매일 03:00 Asia/Seoul에 실행합니다.
 
-CardRAG 0.2 adds deterministic legacy PDF/OCR import, explicit Portainer host
-storage, and maintenance-window state export/restore.  Do not copy legacy files
-into a running admin container or treat a Docker volume as a backup.  The
-required host layout, one-shot jobs, migration order, and rollback checks are in
-[`docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md`](docs/09_LEGACY_IMPORT_AND_PORTABLE_STATE.md).
+초보자용 명령과 성공 판정 기준은
+[실운영 가이드](docs/SIMPLE_RUNTIME.md)에 순서대로 정리되어 있습니다.
 
-For a new Docker Standalone host, start with the Korean
-[`Portainer quick-install guide`](deploy/portainer/QUICKSTART.ko.md).  It wraps
-volume mapping, file-backed secret generation, release image pinning, and the
-one-time Keycloak hand-off.  Existing PDF/OCR archives then follow the separate
-[`legacy import quickstart`](deploy/portainer/LEGACY_IMPORT_QUICKSTART.ko.md).
+## 배포 파일
+
+- [배포 파일 안내](deploy/README.md)
+- [Worker Compose](deploy/worker/compose.yaml)
+- [MCP Compose](deploy/mcp/compose.yaml)
+- [환경변수 예제](deploy/simple.env.example)
+- [운영 문서 색인](docs/README.md)
+
+MCP는 기본적으로 호스트의 `127.0.0.1:8000`에만 게시됩니다. 외부 공개 시에는
+같은 호스트의 TLS 리버스 프록시를 사용하고, `/health/live`와
+`/health/ready`를 제외한 모든 요청에 Bearer 토큰을 전달해야 합니다.

@@ -1,5 +1,5 @@
-name: Public image release
-run-name: Publish v${{ inputs.version }} role images
+name: Publish Worker and MCP images
+run-name: Publish CardRAG v${{ inputs.version }}
 
 on:
   workflow_dispatch:
@@ -14,7 +14,6 @@ on:
         type: string
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
@@ -28,6 +27,9 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       short_sha: ${{ steps.version.outputs.short_sha }}
@@ -36,124 +38,70 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate immutable SemVer release tag
+      - name: Validate immutable release source
         id: version
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
-        shell: bash
         run: |
           set -euo pipefail
           version=$REQUESTED_VERSION
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "version input must be exactly X.Y.Z" >&2
-            exit 1
-          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
+          test "$GITHUB_REF" = "refs/tags/v$version"
           test "$RELEASE_CONFIRMATION" = "PUBLISH-v$version"
-          project_version=$(python3 - <<'PY'
+          python - "$version" <<'PY'
+          import sys
           import tomllib
+          from pathlib import Path
 
-          with open("pyproject.toml", "rb") as stream:
-              print(tomllib.load(stream)["project"]["version"])
-          PY
+          expected = sys.argv[1]
+          paths = (
+              Path("packages/cardrag-core/pyproject.toml"),
+              Path("apps/cardrag-worker/pyproject.toml"),
+              Path("apps/cardrag-mcp/pyproject.toml"),
           )
-          if [[ "$project_version" != "$version" ]]; then
-            echo "pyproject.toml version $project_version does not match release $version" >&2
-            exit 1
+          versions = {tomllib.loads(path.read_text())["project"]["version"] for path in paths}
+          assert versions == {expected}, (versions, expected)
+          PY
+          test "$(git rev-parse "refs/tags/v${version}^{commit}")" = "$GITHUB_SHA"
+          remote_tag_commit=$(git ls-remote origin "refs/tags/v${version}^{}" | awk 'NR == 1 {print $1}')
+          if [[ -z "$remote_tag_commit" ]]; then
+            remote_tag_commit=$(git ls-remote origin "refs/tags/v${version}" | awk 'NR == 1 {print $1}')
           fi
+          test "$remote_tag_commit" = "$GITHUB_SHA"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "short_sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
-      - name: Require successful full CI for the exact release commit
+      - name: Require successful CI for this commit
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
           set -euo pipefail
           runs=$(gh api --method GET \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-            -f head_sha="$GITHUB_SHA" \
-            -f status=completed \
-            -f per_page=100)
-          if ! jq -e --arg sha "$GITHUB_SHA" \
+            -f head_sha="$GITHUB_SHA" -f status=completed -f per_page=100)
+          jq -e --arg sha "$GITHUB_SHA" \
             '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")] | length > 0' \
-            <<<"$runs" >/dev/null; then
-            echo "the exact release commit has no successful full CI workflow run" >&2
-            exit 1
-          fi
+            <<<"$runs" >/dev/null
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Test release source
-        run: |
-          python -m pip install --disable-pip-version-check uv==0.8.17
-          uv lock --check
-          uv sync --frozen --extra dev
-          uv run --no-sync ruff check .
-          uv run --no-sync mypy src/cardrag
-          uv run --no-sync pytest -m "not integration and not live and not load"
-          uv run --no-sync python scripts/run_fixture_quality.py \
-            --output /tmp/cardrag-fixture-quality.json
-          uv run --no-sync pytest -m load
-          uv run --no-sync python scripts/run_local_load.py \
-            --output /tmp/cardrag-local-load.json
-          docker run --rm --entrypoint promtool \
-            -v "$PWD/deploy/monitoring:/monitoring:ro" \
-            prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
-            check rules /monitoring/cardrag-alerts.yml
-
-  release-approval:
+  registry-preflight:
     runs-on: ubuntu-24.04
     needs: validate
     environment: dockerhub-public
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-
-      - name: Revalidate exact dependency licenses after manual release authorization
-        run: |
-          python -m pip install --disable-pip-version-check uv==0.8.17
-          uv sync --frozen --extra dev
-          uv run --no-sync python scripts/check_dependency_licenses.py \
-            --release \
-            --output release-dependency-licenses.json
-          jq -e \
-            '.status == "passed"
-             and .manual_review_required == []
-             and ([.manual_review_resolved[].name] | sort)
-                 == (["certifi", "psycopg", "psycopg-binary", "psycopg-pool", "pypdfium2"] | sort)' \
-            release-dependency-licenses.json >/dev/null
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-license-${{ needs.validate.outputs.version }}
-          path: release-dependency-licenses.json
-          if-no-files-found: error
-
-  registry-preflight:
-    runs-on: ubuntu-24.04
-    needs: [validate, release-approval]
-    environment: dockerhub-public
-    steps:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Authenticate for an all-role immutable-tag preflight
+      - name: Authenticate for immutable-tag preflight
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Reject any existing role tag from another source revision
+      - name: Validate Docker Hub policy and every existing role alias
         env:
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
@@ -187,17 +135,28 @@ jobs:
             echo "registry image did not become pullable for ${reference}" >&2
             return 1
           }
+          validate_image() {
+            local reference=$1 role=$2 revision version entrypoint expected_entrypoint
+            pull_linux_amd64 "$reference"
+            revision=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            version=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
+            entrypoint=$(docker image inspect "$reference" --format '{{ json .Config.Entrypoint }}')
+            expected_entrypoint="[\"cardrag-${role}\"]"
+            test "$revision" = "$GITHUB_SHA"
+            test "$version" = "$VERSION"
+            test "$entrypoint" = "$expected_entrypoint"
+          }
+
           repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
             "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
-          if ! jq -e \
-            --arg rule "$IMMUTABLE_TAG_RULE" \
+          jq -e --arg rule "$IMMUTABLE_TAG_RULE" \
             '.immutable_tags_settings.enabled == true
              and .immutable_tags_settings.rules == [$rule]' \
-            <<<"$repository" >/dev/null; then
-            echo "Docker Hub SemVer role-tag immutability does not match policy" >&2
-            exit 1
-          fi
-          for role in mcp worker admin; do
+            <<<"$repository" >/dev/null
+
+          for role in worker mcp; do
             digest=""
             for tag in "$VERSION-$role" "$VERSION-$role-sha-$SHORT_SHA"; do
               reference="${IMAGE_NAME}:${tag}"
@@ -213,15 +172,9 @@ jobs:
                   ;;
               esac
               observed=$(resolve_digest "$reference")
-              pull_linux_amd64 "$reference"
-              revision=$(docker image inspect "$reference" \
-                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-              if [[ "$revision" != "$GITHUB_SHA" ]]; then
-                echo "refusing to overwrite ${reference}; it belongs to ${revision:-unknown}" >&2
-                exit 1
-              fi
+              validate_image "$reference" "$role"
               if [[ -n "$digest" && "$digest" != "$observed" ]]; then
-                echo "role tags disagree for ${role}: ${digest} != ${observed}" >&2
+                echo "immutable aliases disagree for ${role}: ${digest} != ${observed}" >&2
                 exit 1
               fi
               digest=$observed
@@ -230,31 +183,27 @@ jobs:
 
   publish:
     runs-on: ubuntu-24.04
-    needs: [validate, release-approval, registry-preflight]
+    needs: [validate, registry-preflight]
     environment: dockerhub-public
     strategy:
       fail-fast: false
       matrix:
-        target: [mcp, worker, admin]
+        target: [worker, mcp]
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
       - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
         with:
           cosign-release: v3.1.3
-
-      - name: Authenticate to Docker Hub after environment approval
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Reuse only an immutable partial release from this exact commit
+      - name: Reuse only an interrupted release from this exact tag and commit
         id: existing
         env:
           TARGET: ${{ matrix.target }}
@@ -290,6 +239,7 @@ jobs:
             echo "registry image did not become pullable for ${reference}" >&2
             return 1
           }
+
           digest=""
           for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
             reference="${IMAGE_NAME}:${tag}"
@@ -308,12 +258,14 @@ jobs:
             pull_linux_amd64 "$reference"
             revision=$(docker image inspect "$reference" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-            if [[ "$revision" != "$GITHUB_SHA" ]]; then
-              echo "refusing to overwrite ${reference}; it belongs to ${revision:-unknown}" >&2
-              exit 1
-            fi
+            image_version=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
+            entrypoint=$(docker image inspect "$reference" --format '{{ json .Config.Entrypoint }}')
+            test "$revision" = "$GITHUB_SHA"
+            test "$image_version" = "$VERSION"
+            test "$entrypoint" = "[\"cardrag-${TARGET}\"]"
             if [[ -n "$digest" && "$digest" != "$observed" ]]; then
-              echo "role tags disagree: ${digest} != ${observed}" >&2
+              echo "immutable aliases disagree for ${TARGET}: ${digest} != ${observed}" >&2
               exit 1
             fi
             digest=$observed
@@ -325,12 +277,13 @@ jobs:
             echo "reuse=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build and push public linux/amd64 role image
+      - name: Build and push role image
         id: build
         if: steps.existing.outputs.reuse != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: Dockerfile
           target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
@@ -340,14 +293,13 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ needs.validate.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=CardRAG ${{ matrix.target }}
           build-args: |
             APP_VERSION=${{ needs.validate.outputs.version }}
             VCS_REF=${{ github.sha }}
           provenance: mode=max
           sbom: true
 
-      - name: Restore a missing alias after an interrupted matching release
+      - name: Restore a missing immutable alias after an interrupted run
         if: steps.existing.outputs.reuse == 'true'
         env:
           DIGEST: ${{ steps.existing.outputs.digest }}
@@ -364,9 +316,7 @@ jobs:
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
             case "$status" in
               404)
-              docker buildx imagetools create \
-                --tag "$reference" \
-                "${IMAGE_NAME}@${DIGEST}"
+                docker buildx imagetools create --tag "$reference" "${IMAGE_NAME}@${DIGEST}"
                 ;;
               200) ;;
               *)
@@ -376,12 +326,15 @@ jobs:
             esac
           done
 
-      - name: Resolve the immutable role digest
+      - name: Resolve and verify both immutable aliases
         id: resolved
         env:
           BUILT_DIGEST: ${{ steps.build.outputs.digest }}
           EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
           REUSED: ${{ steps.existing.outputs.reuse }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -391,101 +344,35 @@ jobs:
             digest=$BUILT_DIGEST
           fi
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Verify both immutable role aliases resolve to the selected digest
-        env:
-          DIGEST: ${{ steps.resolved.outputs.digest }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          resolve_digest() {
-            local reference=$1 observed="" _attempt
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            observed=""
             for _attempt in $(seq 1 24); do
-              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
-                  | awk '$1 == "Digest:" {print $2; exit}'); then
-                if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                  printf '%s\n' "$observed"
-                  return 0
-                fi
+              observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                | awk '$1 == "Digest:" {print $2; exit}') || true
+              if [[ "$observed" == "$digest" ]]; then
+                break
               fi
               sleep 5
             done
-            echo "registry digest did not become readable for ${reference}" >&2
-            cat /tmp/imagetools-error >&2 || true
-            return 1
-          }
-          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
-            reference="${IMAGE_NAME}:${tag}"
-            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
-              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
-              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
-            test "$status" = 200
-            observed=$(resolve_digest "$reference")
-            if [[ "$observed" != "$DIGEST" ]]; then
+            if [[ "$observed" != "$digest" ]]; then
               echo "immutable alias mismatch for ${reference}: ${observed:-missing}" >&2
+              cat /tmp/imagetools-error >&2 || true
               exit 1
             fi
           done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Validate the dependency-license record embedded in the role image
-        id: image_license
-        env:
-          DIGEST: ${{ steps.resolved.outputs.digest }}
-          TARGET: ${{ matrix.target }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          reference="${IMAGE_NAME}@${DIGEST}"
-          pulled=false
-          for _attempt in $(seq 1 24); do
-            if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
-              pulled=true
-              break
-            fi
-            sleep 5
-          done
-          if [[ "$pulled" != true ]]; then
-            echo "registry image did not become pullable for ${reference}" >&2
-            exit 1
-          fi
-          revision=$(docker image inspect "$reference" \
-            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-          test "$revision" = "$GITHUB_SHA"
-          container=$(docker create --platform linux/amd64 "$reference")
-          trap 'docker rm "$container" >/dev/null 2>&1 || true' EXIT
-          docker cp \
-            "$container:/usr/share/licenses/cardrag/dependency-license-manifest.json" \
-            "image-license-${TARGET}.json"
-          jq -e \
-            '.status == "passed"
-             and .mode == "release-notices-only"
-             and .manual_review_required == []
-             and ([.manual_review_resolved[].name] | sort)
-                 == (["certifi", "psycopg", "psycopg-binary", "psycopg-pool", "pypdfium2"] | sort)
-             and ([.license_payloads[] | select(.name == "pypdfium2") | .files | length] == [19])' \
-            "image-license-${TARGET}.json" >/dev/null
-          echo "sha256=$(sha256sum "image-license-${TARGET}.json" | cut -d' ' -f1)" \
-            >> "$GITHUB_OUTPUT"
-
-      - name: Ensure and verify keyless OCI signature with GitHub Actions OIDC
+      - name: Ensure and verify exact-source keyless signature
         id: signature
         env:
-          COSIGN_VERSION: v3.1.3
           DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.validate.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           reference="${IMAGE_NAME}@${DIGEST}"
-          verified_subject="index.docker.io/${IMAGE_NAME}@${DIGEST}"
-          evidence="cosign-${TARGET}.verification.json"
           expected_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
-          test "$(cosign version --json | jq -er '.gitVersion')" = "$COSIGN_VERSION"
           verify_signature() {
             cosign verify \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -496,15 +383,15 @@ jobs:
               --output json \
               "$reference"
           }
-          if ! verify_signature > /tmp/cosign-verification.json \
+          if ! verify_signature >/tmp/cosign-verification.json \
               2>/tmp/cosign-verification-error; then
             if ! cosign sign --yes --timeout 30s "$reference"; then
-              echo "cosign sign returned nonzero; checking the registry for a completed signature" >&2
+              echo "cosign sign returned nonzero; checking for a completed signature" >&2
             fi
           fi
           verified=false
           for _attempt in $(seq 1 12); do
-            if verify_signature > /tmp/cosign-verification.json \
+            if verify_signature >/tmp/cosign-verification.json \
                 2>/tmp/cosign-verification-error; then
               verified=true
               break
@@ -515,64 +402,59 @@ jobs:
             cat /tmp/cosign-verification-error >&2 || true
             exit 1
           fi
+          verified_subject="index.docker.io/${IMAGE_NAME}@${DIGEST}"
           jq -e --arg digest "$DIGEST" --arg subject "$verified_subject" '
             type == "array"
             and length > 0
             and all(.[];
               .critical.identity["docker-reference"] == $subject
-              and
-              .critical.image["docker-manifest-digest"] == $digest
+              and .critical.image["docker-manifest-digest"] == $digest
               and .critical.type == "https://sigstore.dev/cosign/sign/v1"
             )
           ' /tmp/cosign-verification.json >/dev/null
-          jq -S . /tmp/cosign-verification.json > "$evidence"
-          echo "sha256=$(sha256sum "$evidence" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          jq -S . /tmp/cosign-verification.json > "cosign-${TARGET}.json"
+          echo "sha256=$(sha256sum "cosign-${TARGET}.json" | cut -d' ' -f1)" \
+            >> "$GITHUB_OUTPUT"
 
-      - name: Record immutable release manifest
+      - name: Record role digest
         env:
           DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
-          IMAGE_LICENSE_SHA256: ${{ steps.image_license.outputs.sha256 }}
-          SIGNATURE_EVIDENCE_SHA256: ${{ steps.signature.outputs.sha256 }}
-          COSIGN_VERSION: v3.1.3
+          SIGNATURE_SHA256: ${{ steps.signature.outputs.sha256 }}
         run: |
           python - <<'PY'
           import json
           import os
           from pathlib import Path
 
+          role = os.environ["TARGET"]
+          digest = os.environ["DIGEST"]
           manifest = {
-              "schema": "cardrag.container-release-part.v3",
-              "role": os.environ["TARGET"],
-              "image": os.environ["IMAGE_NAME"],
-              "digest": os.environ["DIGEST"],
+              "schema": "cardrag.container-release-part.v4",
+              "role": role,
               "version": os.environ["VERSION"],
               "git_sha": os.environ["GITHUB_SHA"],
+              "image": os.environ["IMAGE_NAME"],
+              "digest": digest,
               "platforms": ["linux/amd64"],
               "tags": [
-                  f'{os.environ["VERSION"]}-{os.environ["TARGET"]}',
-                  f'{os.environ["VERSION"]}-{os.environ["TARGET"]}-sha-{os.environ["SHORT_SHA"]}',
+                  f'{os.environ["VERSION"]}-{role}',
+                  f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
               ],
-              "signature": "github-actions-oidc-keyless-cosign",
-              "signature_evidence": {
-                  "path": f'cosign-{os.environ["TARGET"]}.verification.json',
-                  "sha256": os.environ["SIGNATURE_EVIDENCE_SHA256"],
-                  "subject": f'index.docker.io/{os.environ["IMAGE_NAME"]}@{os.environ["DIGEST"]}',
+              "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "signature": {
+                  "kind": "github-actions-oidc-keyless-cosign",
+                  "evidence_path": f"cosign-{role}.json",
+                  "evidence_sha256": os.environ["SIGNATURE_SHA256"],
+                  "subject": f'index.docker.io/{os.environ["IMAGE_NAME"]}@{digest}',
                   "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
                   "certificate_identity": f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}',
                   "github_workflow_sha": os.environ["GITHUB_SHA"],
-                  "cosign_version": os.environ["COSIGN_VERSION"],
-                  "check_claims": True,
               },
-              "embedded_dependency_license_manifest": {
-                  "path": f'image-license-{os.environ["TARGET"]}.json',
-                  "sha256": os.environ["IMAGE_LICENSE_SHA256"],
-              },
-              "workflow": os.environ["GITHUB_WORKFLOW_REF"],
           }
-          Path(f'release-manifest-{os.environ["TARGET"]}.json').write_text(
+          Path(f"release-{role}.json").write_text(
               json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
@@ -580,142 +462,202 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-part-${{ needs.validate.outputs.version }}-${{ matrix.target }}
+          name: release-${{ needs.validate.outputs.version }}-${{ matrix.target }}
           path: |
-            release-manifest-${{ matrix.target }}.json
-            cosign-${{ matrix.target }}.verification.json
-            image-license-${{ matrix.target }}.json
+            release-${{ matrix.target }}.json
+            cosign-${{ matrix.target }}.json
           if-no-files-found: error
+          overwrite: true
 
-  publish-manifest:
+  release:
     runs-on: ubuntu-24.04
     needs: [validate, publish]
     permissions:
-      contents: read
+      actions: read
+      contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: release-part-${{ needs.validate.outputs.version }}-*
+          pattern: release-${{ needs.validate.outputs.version }}-*
           path: release-parts
           merge-multiple: true
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-license-${{ needs.validate.outputs.version }}
-          path: release-license
-
-      - name: Assemble all role digests and signature evidence
+      - name: Revalidate tag and assemble deterministic release metadata
         env:
-          COSIGN_VERSION: v3.1.3
-          GIT_SHA: ${{ github.sha }}
           VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
         run: |
+          set -euo pipefail
+          test "$(git rev-parse "refs/tags/v${VERSION}^{commit}")" = "$GITHUB_SHA"
+          remote_tag_commit=$(git ls-remote origin "refs/tags/v${VERSION}^{}" | awk 'NR == 1 {print $1}')
+          if [[ -z "$remote_tag_commit" ]]; then
+            remote_tag_commit=$(git ls-remote origin "refs/tags/v${VERSION}" | awk 'NR == 1 {print $1}')
+          fi
+          test "$remote_tag_commit" = "$GITHUB_SHA"
+
           python - <<'PY'
           import hashlib
           import json
           import os
           from pathlib import Path
 
-          root = Path("release-parts")
-          parts = [
-              json.loads(path.read_text(encoding="utf-8"))
-              for path in sorted(root.glob("release-manifest-*.json"))
-          ]
+          source = Path("release-parts")
+          role_paths = sorted(source.glob("release-*.json"))
+          parts = [json.loads(path.read_text(encoding="utf-8")) for path in role_paths]
           roles = {part["role"]: part for part in parts}
-          assert len(parts) == 3, parts
-          assert set(roles) == {"mcp", "worker", "admin"}, roles
-          assert all(part["schema"] == "cardrag.container-release-part.v3" for part in parts)
-          assert all(part["image"] == os.environ["IMAGE_NAME"] for part in parts)
+          expected_roles = {"worker", "mcp"}
+          assert len(parts) == 2, role_paths
+          assert set(roles) == expected_roles, roles
+          assert all(part["schema"] == "cardrag.container-release-part.v4" for part in parts)
           assert all(part["version"] == os.environ["VERSION"] for part in parts)
-          assert all(part["git_sha"] == os.environ["GIT_SHA"] for part in parts)
+          assert all(part["git_sha"] == os.environ["GITHUB_SHA"] for part in parts)
+          assert all(part["image"] == os.environ["IMAGE_NAME"] for part in parts)
           assert all(part["workflow"] == os.environ["GITHUB_WORKFLOW_REF"] for part in parts)
-          assert len({part["digest"] for part in parts}) == 3
+          assert len({part["digest"] for part in parts}) == 2
+
+          assets = Path("release-assets")
+          assets.mkdir()
           for role, part in roles.items():
-              assert part["platforms"] == ["linux/amd64"]
+              assert part["platforms"] == ["linux/amd64"], role
               assert part["tags"] == [
                   f'{os.environ["VERSION"]}-{role}',
-                  f'{os.environ["VERSION"]}-{role}-sha-{os.environ["GIT_SHA"][:12]}',
+                  f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
               ], role
-              expected_subject = f'index.docker.io/{os.environ["IMAGE_NAME"]}@{part["digest"]}'
-              expected_identity = f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}'
-              assert part["signature_evidence"]["subject"] == expected_subject, role
-              assert part["signature_evidence"]["certificate_oidc_issuer"] == (
+              signature = part["signature"]
+              assert signature["kind"] == "github-actions-oidc-keyless-cosign", role
+              assert signature["github_workflow_sha"] == os.environ["GITHUB_SHA"], role
+              assert signature["certificate_oidc_issuer"] == (
                   "https://token.actions.githubusercontent.com"
               ), role
-              assert part["signature_evidence"]["certificate_identity"] == expected_identity, role
-              assert part["signature_evidence"]["github_workflow_sha"] == os.environ["GIT_SHA"], role
-              assert part["signature_evidence"]["cosign_version"] == os.environ["COSIGN_VERSION"], role
-              assert part["signature_evidence"]["check_claims"] is True, role
-              signature_evidence = root / part["signature_evidence"]["path"]
-              assert signature_evidence.is_file(), role
-              assert hashlib.sha256(signature_evidence.read_bytes()).hexdigest() == (
-                  part["signature_evidence"]["sha256"]
+              assert signature["certificate_identity"] == (
+                  f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}'
               ), role
-              verified_signatures = json.loads(signature_evidence.read_text(encoding="utf-8"))
-              assert isinstance(verified_signatures, list) and verified_signatures, role
+              assert signature["subject"] == (
+                  f'index.docker.io/{os.environ["IMAGE_NAME"]}@{part["digest"]}'
+              ), role
+              evidence = source / signature["evidence_path"]
+              assert evidence.is_file(), role
+              assert hashlib.sha256(evidence.read_bytes()).hexdigest() == (
+                  signature["evidence_sha256"]
+              ), role
+              verified = json.loads(evidence.read_text(encoding="utf-8"))
+              assert isinstance(verified, list) and verified, role
               assert all(
-                  signature["critical"]["identity"]["docker-reference"] == expected_subject
-                  and
-                  signature["critical"]["image"]["docker-manifest-digest"] == part["digest"]
-                  and signature["critical"]["type"] == "https://sigstore.dev/cosign/sign/v1"
-                  for signature in verified_signatures
+                  item["critical"]["identity"]["docker-reference"] == signature["subject"]
+                  and item["critical"]["image"]["docker-manifest-digest"] == part["digest"]
+                  and item["critical"]["type"] == "https://sigstore.dev/cosign/sign/v1"
+                  for item in verified
               ), role
-              image_license = root / part["embedded_dependency_license_manifest"]["path"]
-              assert image_license.is_file(), role
-              assert hashlib.sha256(image_license.read_bytes()).hexdigest() == (
-                  part["embedded_dependency_license_manifest"]["sha256"]
-              ), role
-              embedded = json.loads(image_license.read_text(encoding="utf-8"))
-              assert embedded["status"] == "passed", role
-              assert embedded["manual_review_required"] == [], role
-              assert {item["name"] for item in embedded["manual_review_resolved"]} == {
-                  "certifi",
-                  "psycopg",
-                  "psycopg-binary",
-                  "psycopg-pool",
-                  "pypdfium2",
-              }, role
-
-          license_path = Path("release-license/release-dependency-licenses.json")
-          license_report = json.loads(license_path.read_text(encoding="utf-8"))
-          assert license_report["status"] == "passed"
-          assert license_report["manual_review_required"] == []
-          assert {item["name"] for item in license_report["manual_review_resolved"]} == {
-              "certifi",
-              "psycopg",
-              "psycopg-binary",
-              "psycopg-pool",
-              "pypdfium2",
-          }
+              (assets / f"release-{role}.json").write_bytes(
+                  (source / f"release-{role}.json").read_bytes()
+              )
+              (assets / f"cosign-{role}.json").write_bytes(evidence.read_bytes())
 
           manifest = {
-              "schema": "cardrag.container-release.v3",
-              "image": os.environ["IMAGE_NAME"],
+              "schema": "cardrag.container-release.v4",
               "version": os.environ["VERSION"],
-              "git_sha": parts[0]["git_sha"],
-              "workflow": parts[0]["workflow"],
-              "dependency_license_report": {
-                  "path": "release-dependency-licenses.json",
-                  "sha256": hashlib.sha256(license_path.read_bytes()).hexdigest(),
-                  "resolved_reviews": sorted(
-                      item["name"]
-                      for item in license_report["manual_review_resolved"]
-                  ),
-              },
-              "roles": {role: roles[role] for role in ("mcp", "worker", "admin")},
+              "git_sha": os.environ["GITHUB_SHA"],
+              "image": os.environ["IMAGE_NAME"],
+              "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "roles": {role: roles[role] for role in ("worker", "mcp")},
           }
-          Path("release-manifest.json").write_text(
+          (assets / "release-manifest.json").write_text(
               json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
+          notes = [
+              f"CardRAG v{os.environ['VERSION']} Worker/MCP 단순화 런타임 릴리스입니다.",
+              "",
+              "이미지(immutable digest):",
+              "",
+          ]
+          for role in ("worker", "mcp"):
+              notes.append(f"- {role}: `{os.environ['IMAGE_NAME']}@{roles[role]['digest']}`")
+          notes.extend(
+              [
+                  "",
+                  f"Git commit: `{os.environ['GITHUB_SHA']}`",
+                  "",
+                  "첨부된 `release-manifest.json`, 역할별 manifest, Cosign 검증 결과와 "
+                  "`SHA256SUMS`에서 게시 증거를 확인할 수 있습니다.",
+              ]
+          )
+          Path("release-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
           PY
+
+          (
+            cd release-assets
+            sha256sum \
+              cosign-mcp.json \
+              cosign-worker.json \
+              release-manifest.json \
+              release-mcp.json \
+              release-worker.json > SHA256SUMS
+          )
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-manifest-${{ needs.validate.outputs.version }}
-          path: |
-            release-manifest.json
-            release-parts/cosign-*.verification.json
-            release-parts/image-license-*.json
-            release-license/release-dependency-licenses.json
+          name: release-${{ needs.validate.outputs.version }}-manifest
+          path: release-assets
           if-no-files-found: error
+          overwrite: true
+
+      - name: Create or repair the GitHub Release for this immutable tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          assets=(
+            release-assets/release-manifest.json
+            release-assets/release-worker.json
+            release-assets/release-mcp.json
+            release-assets/cosign-worker.json
+            release-assets/cosign-mcp.json
+            release-assets/SHA256SUMS
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            test "$(gh release view "$tag" --json tagName --jq .tagName)" = "$tag"
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" \
+              --verify-tag \
+              --title "CardRAG ${tag}" \
+              --notes-file release-notes.md \
+              --draft=false \
+              --prerelease=false \
+              --latest
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --verify-tag \
+              --latest \
+              --title "CardRAG ${tag}" \
+              --notes-file release-notes.md
+          fi
+
+      - name: Verify published GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release view "v${VERSION}" --json assets,isDraft,isPrerelease,tagName \
+            | jq -e --arg tag "v${VERSION}" '
+                .tagName == $tag
+                and .isDraft == false
+                and .isPrerelease == false
+                and ([.assets[].name] | sort)
+                    == ([
+                      "SHA256SUMS",
+                      "cosign-mcp.json",
+                      "cosign-worker.json",
+                      "release-manifest.json",
+                      "release-mcp.json",
+                      "release-worker.json"
+                    ] | sort)
+              ' >/dev/null

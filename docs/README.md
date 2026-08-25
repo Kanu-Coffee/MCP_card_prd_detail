@@ -1,132 +1,31 @@
-# CardRAG MCP 개발 문서 하네스
+# CardRAG v1.0.0 운영 문서
 
-## 문서세트의 목적
+CardRAG v1.0.0의 지원 운영 구조는 다음과 같습니다.
 
-이 디렉터리는 카드상품안내장 PDF를 수집하고, 원문 충실도 중심으로 OCR·구조화·색인한 뒤, 외부 LLM이 근거와 출처를 포함해 조회할 수 있는 MCP 시스템을 구현하기 위한 개발 기준을 제공한다.
+```text
+cardrag-worker -> WebDAV -> cardrag-mcp
+```
 
-현재 산출물은 **설계·개발·운영 가이드와 그 계약을 구현한 v1 개발 하네스**다. 실제 외부 계정·운영 host에서만 가능한 검증은 완료로 가장하지 않고 [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)에 분리한다.
+Worker는 필요할 때 한 번 실행되는 유일한 게시자이고, MCP는 검증된 로컬 검색
+세대를 계속 서비스합니다. 두 프로세스 사이에 온라인 요청 경로는 없으며,
+WebDAV의 불변 객체와 세대 포인터만 공유합니다.
 
-기준이 되는 레거시 조사 결과는 [LEGACY_PROJECT_ANALYSIS.md](../LEGACY_PROJECT_ANALYSIS.md)다. 레거시는 약 9.51 GiB의 배치형 CardRAG 데이터 패키지이며, 신규 시스템은 이를 그대로 이전하거나 컨테이너 이미지에 포함하지 않는다.
+## 처음 읽는 순서
 
-## 프로젝트 목표
+1. [프로젝트 README](../README.md)에서 전체 구조와 운영 이미지를 확인합니다.
+2. [배포 파일 안내](../deploy/README.md)에서 Compose와 secret overlay의 역할을
+   확인합니다.
+3. [실운영 가이드](SIMPLE_RUNTIME.md)를 위에서 아래로 실행합니다.
 
-- 카드사별 상품코드를 기준으로 최신 카드상품안내장과 변경 이력을 수집한다.
-- PDF 원문 구조와 문구를 최대한 보존한 OCR Markdown을 만든다.
-- 혜택, 조건, 전월실적, 제외조건, 유의사항의 관계를 잃지 않도록 구조화한다.
-- 초기 전체 처리와 일일 신규·변경 문서의 증분 처리를 모두 지원한다.
-- 검증된 색인 세대만 상시 실행되는 읽기 전용 MCP 서비스에 게시한다.
-- 검색 결과에 카드사, 상품코드, 문서 버전·기준일, 관련 섹션과 원문 근거를 포함한다.
-- 장기 작업의 중단·재개, 중복 방지, 실패 재처리와 rollback이 가능하도록 한다.
+## 운영 완료 기준
 
-## 현재 상태
+- Worker 컨테이너의 Codex 로그인이 완료되어 있습니다.
+- `webdav-check`가 종료 코드 0과 `"reachable": true`를 반환합니다.
+- 첫 Worker 실행 결과가 `succeeded` 또는 이미 같은 세대가 있을 때
+  `no_change`입니다.
+- MCP의 `/health/live`와 `/health/ready`가 모두 HTTP 200입니다.
+- `cardrag-worker.timer`의 다음 실행 시각이 03:00 Asia/Seoul로 표시됩니다.
+- MCP 외부 주소는 HTTPS이고 컨테이너 포트는 인터넷에 직접 노출되지 않습니다.
 
-기준일: 2026-08-12
-
-| 영역 | 상태 | 설명 |
-|---|---|---|
-| 레거시 조사 | 검증 완료 | 코드·manifest·주요 SQLite와 데이터 규모를 읽기 전용으로 분석 |
-| 목표 아키텍처 | 문서화 완료 | 오프라인 처리와 온라인 MCP 분리 원칙 수립 |
-| 구성요소 개발 가이드 | 문서화 완료 | 입력·출력·실패 처리·완료조건 정의 |
-| 레거시 데이터 재사용 계획 | 문서화 완료 | 원본을 변경하지 않는 분류·이전·검증 방향 정의 |
-| 신규 시스템 구현 | 개발 검증 완료 | 3 issuer adapter, durable pipeline, generation, HTTP MCP와 DB schema 구현 |
-| OCR·구조 분석·임베딩 | fixture 검증 완료 | fake provider 전 구간 및 품질 gate 완료; 실제 Codex/OpenRouter 호출은 실환경 검증 대기 |
-| Docker Hub repository | 생성 완료 | public `ymtop59/mcp-card-prd-detail`, 아직 image 없음 |
-| Docker 빌드·배포 | 개발 검증 완료 | MCP/worker/admin `linux/amd64` local build·보안검사 완료; public push는 운영 인계 |
-| 개발 목표 | 개발환경 검증 완료 | 실제 계정·host·public release만 운영 인계; 상세 기준은 완료 체크리스트 |
-
-상세 상태의 단일 기준은 [08_COMPLETION_CHECKLIST.md](08_COMPLETION_CHECKLIST.md)다. 실제 파일·코드·시험 증거가 없는 항목은 완료로 표시하지 않는다.
-
-## 문서 목차
-
-1. [프로젝트 개요](01_PROJECT_OVERVIEW.md)
-   배경, 레거시 요약, 범위·비범위, 핵심 설계 원칙
-2. [목표 아키텍처](02_TARGET_ARCHITECTURE.md)
-   오프라인/온라인 경계, 전체 데이터 흐름, 저장소와 장애 경계
-3. [구성요소 개발 가이드](03_COMPONENT_DEVELOPMENT_GUIDE.md)
-   수집기, OCR, 구조 분석, 임베딩·색인, MCP 서비스의 개발 기준
-4. [레거시 데이터 재사용 가이드](04_LEGACY_DATA_REUSE_GUIDE.md)
-   자산 분류, 목표 디렉터리, 복사·변환·검증 방향
-5. [LLM 및 데이터 품질 정책](05_LLM_AND_DATA_QUALITY_POLICY.md)
-   Codex exec/OpenRouter 역할, 품질 gate, 손실·환각 방지
-6. [운영 및 배포 가이드](06_OPERATIONS_AND_DEPLOYMENT_GUIDE.md)
-   초기 대량·일일 증분 처리, 재시작, Docker·볼륨·인증·백업 계획
-7. [구현 로드맵](07_IMPLEMENTATION_ROADMAP.md)
-   개발 순서, 의존관계, 단계별 산출물과 인수 기준
-8. [완료 체크리스트](08_COMPLETION_CHECKLIST.md)
-   영역·카드사별 검증 완료/실환경 검증 대기/운영 인계 상태
-9. [레거시 Import·호스트 영속 저장·서버 이전 운영서](09_LEGACY_IMPORT_AND_PORTABLE_STATE.md)
-   Portainer host bind, normalized bundle, portable state export/restore와 서버 cutover 절차
-
-## 권장 읽기 순서
-
-처음 참여하는 개발자는 다음 순서로 읽는다.
-
-1. 이 문서에서 현재 상태와 용어를 확인한다.
-2. 프로젝트 개요와 목표 아키텍처로 시스템 경계를 이해한다.
-3. 구성요소 개발 가이드와 품질 정책으로 구현 기준을 확인한다.
-4. 레거시 데이터를 다룰 때만 재사용 가이드를 함께 적용한다.
-5. 운영·배포 가이드에서 장기 작업, 인증, 볼륨과 복구 조건을 확인한다.
-6. 로드맵에서 현재 단계의 선행조건과 인수 기준을 확인한다.
-7. 작업 시작·종료 시 완료 체크리스트를 증거와 함께 갱신한다.
-
-## 확정된 공통 원칙
-
-- 원본 PDF와 canonical OCR은 불변 자산으로 보존한다.
-- 카드사와 상품코드를 모든 식별자·검색 필터·근거에 유지한다.
-- 오프라인 데이터 처리와 온라인 MCP 서비스의 프로세스·권한·저장소를 분리한다.
-- 단계별 산출물은 입력 hash, 설정·모델 식별자, 처리 상태와 연결한다.
-- 색인은 별도 경로에서 완성·검증한 뒤 세대 단위로 게시한다.
-- 온라인 MCP는 게시된 세대를 읽기 전용으로 사용하며 수집·OCR을 직접 실행하지 않는다.
-- 대용량 데이터와 인증정보는 Git과 Docker 이미지에 포함하지 않는다.
-- 정보 부족, 버전 충돌, 근거 불일치는 숨기지 않고 응답에 표시한다.
-
-## 사전 결정 기록 (2026-08-12)
-
-- 1차 지원 대상은 우리카드와 KB국민카드다. 신한카드는 개인 신용·체크카드 상품안내장의 현재본과 과거 이력을 신규 adapter로 수집해 BULK 처리 시험에 포함한다. 법인·선불카드는 1차 신한 범위에서 제외한다.
-- 기본 검색은 최신 문서를 대상으로 한다. 과거 버전은 모두 보존하고 사용자가 버전 또는 기준일을 명시한 경우에만 조회한다.
-- 운영 MCP는 HTTP 기반으로 제공한다. 접속 정보는 endpoint URL과 OAuth token이며, 운영에서는 HTTPS와 `Authorization` header를 사용한다. token을 URL query·path·log에 넣지 않는다. client별 `search`·`source_pdf` scope를 분리한다.
-- 최초 승인 후에는 client가 짧은 수명의 access token을 자동 갱신하고 refresh token을 회전해, 정상적으로 계속 사용하는 동안 별도 token 재입력 없이 연결을 유지한다. 90일은 고정 접속 만료가 아니라 비활성 만료 기준이다. refresh token 폐기·분실, 보안사고 또는 client 미지원 시에는 재인증이 필요하다.
-- 별도 기존 OAuth/OIDC provider는 없으므로 v1 authorization server는 self-hosted Keycloak 단일 tenant로 구성한다. Keycloak은 같은 Compose의 별도 service로 두고 PostgreSQL server는 공유하되 별도 database·user를 사용한다. realm은 `cardrag`로 하며 사용자 self-registration과 dynamic client registration은 끄고 승인 client만 수동 사전등록한다. 사람용 client는 Authorization Code+PKCE, service client는 Client Credentials를 사용한다. 초기 admin credential은 Docker secret으로 1회 bootstrap한 뒤 회전·제거한다. `search`·`source_pdf` scope를 분리하며 애플리케이션 운영 권한은 local CLI로 유지한다.
-- 사용자가 명시적으로 요청하면 보존된 전체 원본 PDF를 streaming file로 제공한다. 페이지 조회는 OCR text와 요청 시 생성한 렌더 PNG를 제공하고, PNG는 7일 cache 후 제거하며 영구 보존하지 않는다. 별도 분할 PDF와 임의 외부 URL 다운로드 기능은 제공하지 않는다.
-- 검색은 PostgreSQL FTS와 pgvector HNSW 후보를 공통 stable evidence key로 RRF 결합한다.
-  issuer/version/as-of/section은 후보 SQL에 적용하고 query embedding은 한 번만 생성한다.
-- GitHub 저장소는 private, Docker Hub image repository는 public으로 운영한다. 공개 image에는 corpus·secret·인증 상태를 포함하지 않으며, image에 포함된 애플리케이션 코드와 dependency metadata는 외부에서 열람 가능하다는 점을 전제로 한다.
-- Gmail·이메일 Agent는 신규 범위에서 제외한다. 원본 PDF와 OCR 버전은 모두 보존한다. 성공한 검색 generation은 최근 3개를 보존하고 실패 candidate는 7일 뒤 정리하되, 수동 pin한 generation은 명시적으로 해제할 때까지 보존한다.
-- 초기 온라인 동시 요청은 5개, request timeout은 45초, 개발 검색 P95 경고 기준은 30초다.
-  품질을 우선하며 실제 corpus·provider 결과로 후속 ADR에서 조정한다.
-- v1 image platform은 `linux/amd64`로 한정한다. MCP/worker/admin 역할별 image tag는 버전과 Git SHA를 포함하고, 실제 배포와 rollback은 역할별 image digest를 기준으로 한다.
-- 최초 배포는 단일 Linux host의 Docker Compose로 운영하며 online MCP와 offline worker를 별도 컨테이너로 분리한다.
-- PDF·OCR·generation은 외부 불변 file volume에 두고, durable 작업 상태와 catalog·FTS·vector는
-  PostgreSQL 17에 저장한다.
-- query embedding 또는 vector 검색 장애 시 lexical-only 결과는 caller가 `allow_degraded=true`로 명시한 경우에만 `degraded` 상태로 반환한다. 그렇지 않으면 품질 저하를 숨기지 않고 요청을 실패시킨다.
-- reverse proxy와 TLS는 개발 완료 후 별도 Nginx Proxy Manager에서 운영자가 연결하는 hosting 과제로 두며 이 Compose stack에는 포함하지 않는다. 현재 개발은 MCP application이 container 내부 `0.0.0.0:8000`에서 수신하고 Docker가 host의 `127.0.0.1:8000`에만 publish하는 데까지 책임진다.
-- 원본 PDF는 이용조건 검토 전까지 승인 사용자에게만 제공하고 파일당 100 MB, HTTP Range, 다운로드 감사 metadata 90일 보존을 적용한다.
-- 일일 수집은 03:00 KST에 우리카드 → KB국민카드 → 신한카드 순으로 실행하고 각 카드사 job 종료 후 10분 대기한다. 한 카드사 실패는 다음 카드사 실행을 막지 않는다.
-- 최신 문서의 OCR·구조·색인 누락 또는 실패가 있으면 candidate generation 게시를 차단하고 이전 generation을 계속 서비스한다. 과거 이력 실패는 quarantine과 보고서에 명시한 뒤 최신 문서 coverage가 100%일 때만 게시를 허용한다.
-- v1에서는 제외했던 backup·restore를 0.2 범위로 승격한다. PostgreSQL 두 DB, 전체 CAS와
-  generation authority를 같은 maintenance epoch의 portable package로 묶고, 다른 빈 host의
-  restore drill을 운영 완료 조건으로 삼는다.
-- 접근·권한·PDF 감사 metadata는 90일 보존하고 질의 원문은 기본 저장하지 않는다. 비식별 집계 metric은 1년 보존한다.
-- 1차 관리자 표면은 운영 CLI와 scheduled job만 제공하며 공개 관리자 API·웹 UI는 만들지 않는다.
-- public Docker Hub repository는 `ymtop59/mcp-card-prd-detail`로 생성했다. 일반 `main`·tag push는 공개 push를 수행하지 않으며, `vX.Y.Z` tag를 대상으로 `PUBLISH-vX.Y.Z`를 입력한 수동 release workflow를 통과한 digest만 이 경로에 push·promotion한다. image는 GitHub Actions OIDC 기반 keyless Cosign으로 서명하고 private GitHub repository·workflow URI가 공개 transparency log에 나타날 수 있음을 승인한다.
-- OCR·구조 분석에서 provider 또는 model을 전환해야 하면 한 문서 안의 결과를 혼합하지 않는다. 부분 성공이 있더라도 전체 문서를 새 attempt로 재처리하고 실제 provider·model·prompt·입출력 hash를 보존한다.
-
-## 개발 중 결정 결과와 외부 보정
-
-PostgreSQL 17.11 migration 1~15와 pgvector 0.8.6, FTS+pgvector hybrid, Codex `gpt-5.4`, 결정론적 구조 분석,
-OpenRouter `text-embedding-3-small` 1,536차원, chunk/retry/lease와 DB+file generation protocol은
-ADR 0001~0005와 fixture·integration·load 결과로 확정했다.
-
-실제 카드사 layout·이용조건, Codex/OpenRouter 계정 품질·quota, 전체 corpus의 QPS·latency·host
-resource만 [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md) 후 보정한다. 제품 범위 확대,
-외부 공개·과금·법적 권한, secret 전달 또는 파괴적 데이터 변경은 사용자 승인 없이 확대하지
-않는다.
-
-## 문서 변경 규칙
-
-- 설계가 바뀌면 관련 가이드와 체크리스트를 같은 변경에서 갱신한다.
-- 완료 상태에는 파일 경로, 시험 결과, image digest 등 재검증 가능한 증거를 남긴다.
-- 가정은 `가정`, 외부 승인이 필요한 사항은 `결정 필요`, 개발자가 실측해 정할 사항은 `구현 중 결정`, 기술 지원 여부는 `검토 필요`로 표시한다.
-- 레거시 자산을 조사하더라도 원본 파일과 DB는 수정하지 않는다.
-- 운영 명령과 구체 API schema는 `src/cardrag/`, `deploy/`와
-  [실환경 검증 및 운영 인계](REAL_ENV_HANDOFF.md)에서 코드 변경과 함께 관리한다.
+상태 확인, 실패 실행 재개, MCP 재동기화, 이미지 업그레이드 절차도
+[실운영 가이드](SIMPLE_RUNTIME.md)에 포함되어 있습니다.

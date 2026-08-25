@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cardrag-core"
+version = "1.0.0"
+description = "Shared immutable artifact contracts for CardRAG workers and MCP readers"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = {text = "Proprietary"}
+authors = [{name = "CardRAG maintainers"}]
+dependencies = [
+  "httpx>=0.28,<1",
+  "pydantic>=2.12,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cardrag_core"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101"]
