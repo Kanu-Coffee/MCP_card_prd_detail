@@ -1,5 +1,4 @@
-# Legacy hatch package and large runtime data
-/cardrag-conveyor-hatch-*/
+# Local artifacts and mutable runtime data
 /artifacts/
 /corpus/
 /data/

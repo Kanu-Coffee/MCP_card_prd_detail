@@ -22,6 +22,7 @@ concurrency:
 
 env:
   IMAGE_NAME: ymtop59/mcp-card-prd-detail
+  IMMUTABLE_TAG_RULE: '^[0-9]+\.[0-9]+\.[0-9]+-(mcp|worker|admin)(-sha-[0-9a-f]{12})?$'
 
 jobs:
   validate:
@@ -48,6 +49,7 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
+          test "$GITHUB_REF" = "refs/tags/v$version"
           test "$RELEASE_CONFIRMATION" = "PUBLISH-v$version"
           python - "$version" <<'PY'
           import sys
@@ -63,6 +65,12 @@ jobs:
           versions = {tomllib.loads(path.read_text())["project"]["version"] for path in paths}
           assert versions == {expected}, (versions, expected)
           PY
+          test "$(git rev-parse "refs/tags/v${version}^{commit}")" = "$GITHUB_SHA"
+          remote_tag_commit=$(git ls-remote origin "refs/tags/v${version}^{}" | awk 'NR == 1 {print $1}')
+          if [[ -z "$remote_tag_commit" ]]; then
+            remote_tag_commit=$(git ls-remote origin "refs/tags/v${version}" | awk 'NR == 1 {print $1}')
+          fi
+          test "$remote_tag_commit" = "$GITHUB_SHA"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -80,9 +88,102 @@ jobs:
             '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")] | length > 0' \
             <<<"$runs" >/dev/null
 
-  publish:
+  registry-preflight:
     runs-on: ubuntu-24.04
     needs: validate
+    environment: dockerhub-public
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Authenticate for immutable-tag preflight
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Validate Docker Hub policy and every existing role alias
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_digest() {
+            local reference=$1 observed="" _attempt
+            for _attempt in $(seq 1 24); do
+              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                  | awk '$1 == "Digest:" {print $2; exit}'); then
+                if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  printf '%s\n' "$observed"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "registry digest did not become readable for ${reference}" >&2
+            cat /tmp/imagetools-error >&2 || true
+            return 1
+          }
+          pull_linux_amd64() {
+            local reference=$1 _attempt
+            for _attempt in $(seq 1 24); do
+              if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "registry image did not become pullable for ${reference}" >&2
+            return 1
+          }
+          validate_image() {
+            local reference=$1 role=$2 revision version entrypoint expected_entrypoint
+            pull_linux_amd64 "$reference"
+            revision=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            version=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
+            entrypoint=$(docker image inspect "$reference" --format '{{ json .Config.Entrypoint }}')
+            expected_entrypoint="[\"cardrag-${role}\"]"
+            test "$revision" = "$GITHUB_SHA"
+            test "$version" = "$VERSION"
+            test "$entrypoint" = "$expected_entrypoint"
+          }
+
+          repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
+            "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
+          jq -e --arg rule "$IMMUTABLE_TAG_RULE" \
+            '.immutable_tags_settings.enabled == true
+             and .immutable_tags_settings.rules == [$rule]' \
+            <<<"$repository" >/dev/null
+
+          for role in worker mcp; do
+            digest=""
+            for tag in "$VERSION-$role" "$VERSION-$role-sha-$SHORT_SHA"; do
+              reference="${IMAGE_NAME}:${tag}"
+              status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+                --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+                "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+              case "$status" in
+                404) continue ;;
+                200) ;;
+                *)
+                  echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
+                  exit 1
+                  ;;
+              esac
+              observed=$(resolve_digest "$reference")
+              validate_image "$reference" "$role"
+              if [[ -n "$digest" && "$digest" != "$observed" ]]; then
+                echo "immutable aliases disagree for ${role}: ${digest} != ${observed}" >&2
+                exit 1
+              fi
+              digest=$observed
+            done
+          done
+
+  publish:
+    runs-on: ubuntu-24.04
+    needs: [validate, registry-preflight]
     environment: dockerhub-public
     strategy:
       fail-fast: false
@@ -102,19 +203,83 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Reject an existing immutable role tag
+      - name: Reuse only an interrupted release from this exact tag and commit
+        id: existing
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
         run: |
           set -euo pipefail
-          status=$(curl --silent --show-error --retry 3 --retry-all-errors \
-            --output /tmp/tag.json --write-out '%{http_code}' \
-            "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${VERSION}-${TARGET}")
-          test "$status" = 404
+          resolve_digest() {
+            local reference=$1 observed="" _attempt
+            for _attempt in $(seq 1 24); do
+              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                  | awk '$1 == "Digest:" {print $2; exit}'); then
+                if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  printf '%s\n' "$observed"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "registry digest did not become readable for ${reference}" >&2
+            cat /tmp/imagetools-error >&2 || true
+            return 1
+          }
+          pull_linux_amd64() {
+            local reference=$1 _attempt
+            for _attempt in $(seq 1 24); do
+              if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "registry image did not become pullable for ${reference}" >&2
+            return 1
+          }
+
+          digest=""
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+            case "$status" in
+              404) continue ;;
+              200) ;;
+              *)
+                echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
+                exit 1
+                ;;
+            esac
+            observed=$(resolve_digest "$reference")
+            pull_linux_amd64 "$reference"
+            revision=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            image_version=$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
+            entrypoint=$(docker image inspect "$reference" --format '{{ json .Config.Entrypoint }}')
+            test "$revision" = "$GITHUB_SHA"
+            test "$image_version" = "$VERSION"
+            test "$entrypoint" = "[\"cardrag-${TARGET}\"]"
+            if [[ -n "$digest" && "$digest" != "$observed" ]]; then
+              echo "immutable aliases disagree for ${TARGET}: ${digest} != ${observed}" >&2
+              exit 1
+            fi
+            digest=$observed
+          done
+          if [[ -n "$digest" ]]; then
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push role image
         id: build
+        if: steps.existing.outputs.reuse != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -134,31 +299,166 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Sign and verify immutable digest
+      - name: Restore a missing immutable alias after an interrupted run
+        if: steps.existing.outputs.reuse == 'true'
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.existing.outputs.digest }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
         run: |
           set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
+              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
+            case "$status" in
+              404)
+                docker buildx imagetools create --tag "$reference" "${IMAGE_NAME}@${DIGEST}"
+                ;;
+              200) ;;
+              *)
+                echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Resolve and verify both immutable aliases
+        id: resolved
+        env:
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          REUSED: ${{ steps.existing.outputs.reuse }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REUSED" = true ]]; then
+            digest=$EXISTING_DIGEST
+          else
+            digest=$BUILT_DIGEST
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
+            reference="${IMAGE_NAME}:${tag}"
+            observed=""
+            for _attempt in $(seq 1 24); do
+              observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
+                | awk '$1 == "Digest:" {print $2; exit}') || true
+              if [[ "$observed" == "$digest" ]]; then
+                break
+              fi
+              sleep 5
+            done
+            if [[ "$observed" != "$digest" ]]; then
+              echo "immutable alias mismatch for ${reference}: ${observed:-missing}" >&2
+              cat /tmp/imagetools-error >&2 || true
+              exit 1
+            fi
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure and verify exact-source keyless signature
+        id: signature
+        env:
+          DIGEST: ${{ steps.resolved.outputs.digest }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
           reference="${IMAGE_NAME}@${DIGEST}"
-          cosign sign --yes "$reference"
-          cosign verify \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
-            --certificate-github-workflow-sha "$GITHUB_SHA" \
-            "$reference" > "cosign-${{ matrix.target }}.json"
+          expected_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          verify_signature() {
+            cosign verify \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "$expected_identity" \
+              --certificate-github-workflow-sha "$GITHUB_SHA" \
+              --check-claims=true \
+              --timeout 15s \
+              --output json \
+              "$reference"
+          }
+          if ! verify_signature >/tmp/cosign-verification.json \
+              2>/tmp/cosign-verification-error; then
+            if ! cosign sign --yes --timeout 30s "$reference"; then
+              echo "cosign sign returned nonzero; checking for a completed signature" >&2
+            fi
+          fi
+          verified=false
+          for _attempt in $(seq 1 12); do
+            if verify_signature >/tmp/cosign-verification.json \
+                2>/tmp/cosign-verification-error; then
+              verified=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$verified" != true ]]; then
+            cat /tmp/cosign-verification-error >&2 || true
+            exit 1
+          fi
+          verified_subject="index.docker.io/${IMAGE_NAME}@${DIGEST}"
+          jq -e --arg digest "$DIGEST" --arg subject "$verified_subject" '
+            type == "array"
+            and length > 0
+            and all(.[];
+              .critical.identity["docker-reference"] == $subject
+              and .critical.image["docker-manifest-digest"] == $digest
+              and .critical.type == "https://sigstore.dev/cosign/sign/v1"
+            )
+          ' /tmp/cosign-verification.json >/dev/null
+          jq -S . /tmp/cosign-verification.json > "cosign-${TARGET}.json"
+          echo "sha256=$(sha256sum "cosign-${TARGET}.json" | cut -d' ' -f1)" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Record role digest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.resolved.outputs.digest }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          SIGNATURE_SHA256: ${{ steps.signature.outputs.sha256 }}
         run: |
-          jq -n \
-            --arg role "$TARGET" --arg version "$VERSION" --arg git_sha "$GITHUB_SHA" \
-            --arg image "$IMAGE_NAME" --arg digest "$DIGEST" \
-            '{schema:"cardrag.container-release-part.v4",role:$role,version:$version,git_sha:$git_sha,image:$image,digest:$digest}' \
-            > "release-${TARGET}.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          role = os.environ["TARGET"]
+          digest = os.environ["DIGEST"]
+          manifest = {
+              "schema": "cardrag.container-release-part.v4",
+              "role": role,
+              "version": os.environ["VERSION"],
+              "git_sha": os.environ["GITHUB_SHA"],
+              "image": os.environ["IMAGE_NAME"],
+              "digest": digest,
+              "platforms": ["linux/amd64"],
+              "tags": [
+                  f'{os.environ["VERSION"]}-{role}',
+                  f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
+              ],
+              "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "signature": {
+                  "kind": "github-actions-oidc-keyless-cosign",
+                  "evidence_path": f"cosign-{role}.json",
+                  "evidence_sha256": os.environ["SIGNATURE_SHA256"],
+                  "subject": f'index.docker.io/{os.environ["IMAGE_NAME"]}@{digest}',
+                  "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+                  "certificate_identity": f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}',
+                  "github_workflow_sha": os.environ["GITHUB_SHA"],
+              },
+          }
+          Path(f"release-{role}.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -167,3 +467,197 @@ jobs:
             release-${{ matrix.target }}.json
             cosign-${{ matrix.target }}.json
           if-no-files-found: error
+          overwrite: true
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: [validate, publish]
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-${{ needs.validate.outputs.version }}-*
+          path: release-parts
+          merge-multiple: true
+
+      - name: Revalidate tag and assemble deterministic release metadata
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "refs/tags/v${VERSION}^{commit}")" = "$GITHUB_SHA"
+          remote_tag_commit=$(git ls-remote origin "refs/tags/v${VERSION}^{}" | awk 'NR == 1 {print $1}')
+          if [[ -z "$remote_tag_commit" ]]; then
+            remote_tag_commit=$(git ls-remote origin "refs/tags/v${VERSION}" | awk 'NR == 1 {print $1}')
+          fi
+          test "$remote_tag_commit" = "$GITHUB_SHA"
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          source = Path("release-parts")
+          role_paths = sorted(source.glob("release-*.json"))
+          parts = [json.loads(path.read_text(encoding="utf-8")) for path in role_paths]
+          roles = {part["role"]: part for part in parts}
+          expected_roles = {"worker", "mcp"}
+          assert len(parts) == 2, role_paths
+          assert set(roles) == expected_roles, roles
+          assert all(part["schema"] == "cardrag.container-release-part.v4" for part in parts)
+          assert all(part["version"] == os.environ["VERSION"] for part in parts)
+          assert all(part["git_sha"] == os.environ["GITHUB_SHA"] for part in parts)
+          assert all(part["image"] == os.environ["IMAGE_NAME"] for part in parts)
+          assert all(part["workflow"] == os.environ["GITHUB_WORKFLOW_REF"] for part in parts)
+          assert len({part["digest"] for part in parts}) == 2
+
+          assets = Path("release-assets")
+          assets.mkdir()
+          for role, part in roles.items():
+              assert part["platforms"] == ["linux/amd64"], role
+              assert part["tags"] == [
+                  f'{os.environ["VERSION"]}-{role}',
+                  f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
+              ], role
+              signature = part["signature"]
+              assert signature["kind"] == "github-actions-oidc-keyless-cosign", role
+              assert signature["github_workflow_sha"] == os.environ["GITHUB_SHA"], role
+              assert signature["certificate_oidc_issuer"] == (
+                  "https://token.actions.githubusercontent.com"
+              ), role
+              assert signature["certificate_identity"] == (
+                  f'https://github.com/{os.environ["GITHUB_WORKFLOW_REF"]}'
+              ), role
+              assert signature["subject"] == (
+                  f'index.docker.io/{os.environ["IMAGE_NAME"]}@{part["digest"]}'
+              ), role
+              evidence = source / signature["evidence_path"]
+              assert evidence.is_file(), role
+              assert hashlib.sha256(evidence.read_bytes()).hexdigest() == (
+                  signature["evidence_sha256"]
+              ), role
+              verified = json.loads(evidence.read_text(encoding="utf-8"))
+              assert isinstance(verified, list) and verified, role
+              assert all(
+                  item["critical"]["identity"]["docker-reference"] == signature["subject"]
+                  and item["critical"]["image"]["docker-manifest-digest"] == part["digest"]
+                  and item["critical"]["type"] == "https://sigstore.dev/cosign/sign/v1"
+                  for item in verified
+              ), role
+              (assets / f"release-{role}.json").write_bytes(
+                  (source / f"release-{role}.json").read_bytes()
+              )
+              (assets / f"cosign-{role}.json").write_bytes(evidence.read_bytes())
+
+          manifest = {
+              "schema": "cardrag.container-release.v4",
+              "version": os.environ["VERSION"],
+              "git_sha": os.environ["GITHUB_SHA"],
+              "image": os.environ["IMAGE_NAME"],
+              "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "roles": {role: roles[role] for role in ("worker", "mcp")},
+          }
+          (assets / "release-manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          notes = [
+              f"CardRAG v{os.environ['VERSION']} Worker/MCP 단순화 런타임 릴리스입니다.",
+              "",
+              "이미지(immutable digest):",
+              "",
+          ]
+          for role in ("worker", "mcp"):
+              notes.append(f"- {role}: `{os.environ['IMAGE_NAME']}@{roles[role]['digest']}`")
+          notes.extend(
+              [
+                  "",
+                  f"Git commit: `{os.environ['GITHUB_SHA']}`",
+                  "",
+                  "첨부된 `release-manifest.json`, 역할별 manifest, Cosign 검증 결과와 "
+                  "`SHA256SUMS`에서 게시 증거를 확인할 수 있습니다.",
+              ]
+          )
+          Path("release-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
+          PY
+
+          (
+            cd release-assets
+            sha256sum \
+              cosign-mcp.json \
+              cosign-worker.json \
+              release-manifest.json \
+              release-mcp.json \
+              release-worker.json > SHA256SUMS
+          )
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ needs.validate.outputs.version }}-manifest
+          path: release-assets
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Create or repair the GitHub Release for this immutable tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          assets=(
+            release-assets/release-manifest.json
+            release-assets/release-worker.json
+            release-assets/release-mcp.json
+            release-assets/cosign-worker.json
+            release-assets/cosign-mcp.json
+            release-assets/SHA256SUMS
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            test "$(gh release view "$tag" --json tagName --jq .tagName)" = "$tag"
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" \
+              --verify-tag \
+              --title "CardRAG ${tag}" \
+              --notes-file release-notes.md \
+              --draft=false \
+              --prerelease=false \
+              --latest
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --verify-tag \
+              --latest \
+              --title "CardRAG ${tag}" \
+              --notes-file release-notes.md
+          fi
+
+      - name: Verify published GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release view "v${VERSION}" --json assets,isDraft,isPrerelease,tagName \
+            | jq -e --arg tag "v${VERSION}" '
+                .tagName == $tag
+                and .isDraft == false
+                and .isPrerelease == false
+                and ([.assets[].name] | sort)
+                    == ([
+                      "SHA256SUMS",
+                      "cosign-mcp.json",
+                      "cosign-worker.json",
+                      "release-manifest.json",
+                      "release-mcp.json",
+                      "release-worker.json"
+                    ] | sort)
+              ' >/dev/null

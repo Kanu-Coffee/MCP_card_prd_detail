@@ -50,8 +50,11 @@ ENV PATH="/opt/cardrag/bin:${PATH}" \
 RUN groupadd --gid 10001 cardrag && \
     useradd --uid 10001 --gid cardrag --no-create-home --home-dir /nonexistent \
       --shell /usr/sbin/nologin cardrag && \
+    install --directory --owner=root --group=root --mode=0755 /usr/share/doc/cardrag && \
     install --directory --owner=10001 --group=10001 --mode=0700 \
       /var/lib/cardrag-worker /var/lib/cardrag-mcp
+
+COPY --chmod=0444 THIRD_PARTY_NOTICES.md /usr/share/doc/cardrag/THIRD_PARTY_NOTICES.md
 
 WORKDIR /app
 USER 10001:10001

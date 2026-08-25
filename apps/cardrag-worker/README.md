@@ -12,8 +12,6 @@ downloads the stable generation's `index.sqlite3` and opens it read-only.
 cardrag-worker webdav-check
 cardrag-worker run
 cardrag-worker resume <run-id>
-cardrag-worker adopt --current-inventory ./current.jsonl --legacy-inventory ./legacy.jsonl \
-  --receipts ./receipts.jsonl --conflicts ./conflicts.json
 cardrag-worker gc                    # dry-run
 cardrag-worker gc --apply
 ```

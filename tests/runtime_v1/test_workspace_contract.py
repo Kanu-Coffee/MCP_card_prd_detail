@@ -13,6 +13,7 @@ def _project(path: str) -> dict[str, object]:
 
 def test_workspace_has_three_independent_packages_at_one_version() -> None:
     root = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "project" not in root
     assert root["tool"]["uv"]["workspace"]["members"] == [
         "packages/cardrag-core",
         "apps/cardrag-worker",
@@ -83,3 +84,31 @@ def test_removed_mcp_contract_is_absent_from_new_package() -> None:
         "keycloak",
     ):
         assert removed not in source.casefold()
+
+
+def test_retired_runtime_and_operations_tree_is_absent() -> None:
+    removed_paths = (
+        "src/cardrag",
+        "deploy/codex",
+        "deploy/keycloak",
+        "deploy/monitoring",
+        "deploy/portainer",
+        "deploy/postgres",
+        "deploy/secrets",
+        "deploy/systemd",
+        "docs/adr",
+        "reports",
+        "scripts",
+        "security",
+        "tests/integration",
+        "tests/load",
+        "tests/unit",
+    )
+    assert all(not (ROOT / path).exists() for path in removed_paths)
+
+    root_project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lockfile = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert "cardrag-legacy" not in root_project
+    assert 'name = "cardrag-legacy"' not in lockfile
+    assert "psycopg" not in root_project
+    assert "pgvector" not in root_project

@@ -36,31 +36,16 @@ jobs:
             packages/cardrag-core \
             apps/cardrag-worker \
             apps/cardrag-mcp \
-            tests/runtime_v1 \
-            src/cardrag/legacy/current_inventory.py \
-            src/cardrag/legacy/adoption_ledger.py \
-            src/cardrag/legacy/data_kit_inventory.py \
-            tests/unit/test_current_inventory_export.py \
-            tests/unit/test_legacy_adoption_ledger.py \
-            tests/unit/test_data_kit_inventory_export.py
+            tests/runtime_v1
           uv run --all-packages ruff format --check \
             packages/cardrag-core \
             apps/cardrag-worker \
             apps/cardrag-mcp \
-            tests/runtime_v1 \
-            src/cardrag/legacy/current_inventory.py \
-            src/cardrag/legacy/adoption_ledger.py \
-            src/cardrag/legacy/data_kit_inventory.py \
-            tests/unit/test_current_inventory_export.py \
-            tests/unit/test_legacy_adoption_ledger.py \
-            tests/unit/test_data_kit_inventory_export.py
+            tests/runtime_v1
           uv run --all-packages mypy \
             packages/cardrag-core/src \
             apps/cardrag-worker/src \
-            apps/cardrag-mcp/src \
-            src/cardrag/legacy/current_inventory.py \
-            src/cardrag/legacy/adoption_ledger.py \
-            src/cardrag/legacy/data_kit_inventory.py
+            apps/cardrag-mcp/src
 
       - name: Run runtime tests
         run: |
@@ -69,9 +54,6 @@ jobs:
             apps/cardrag-worker/tests \
             apps/cardrag-mcp/tests \
             tests/runtime_v1
-
-      - name: Keep the v0.2.1 migration source testable
-        run: uv run --package cardrag-legacy pytest tests/unit
 
       - name: Validate the two-service deployment
         env:
