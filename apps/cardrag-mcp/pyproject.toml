@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cardrag-mcp"
-version = "1.0.7"
+version = "1.0.8"
 description = "Read-only CardRAG serving database MCP"
 requires-python = ">=3.12,<3.15"
 dependencies = [

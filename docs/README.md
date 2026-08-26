@@ -1,6 +1,6 @@
-# CardRAG v1.0.7 운영 문서
+# CardRAG v1.0.8 운영 문서
 
-CardRAG v1.0.7의 지원 운영 구조는 다음과 같습니다.
+CardRAG v1.0.8의 지원 운영 구조는 다음과 같습니다.
 
 ```text
 cardrag-worker -> WebDAV -> cardrag-mcp
@@ -29,7 +29,7 @@ WebDAV의 불변 객체와 세대 포인터만 공유합니다.
 - `cardrag-worker.timer`의 다음 실행 시각이 03:00 Asia/Seoul로 표시됩니다.
 - MCP 외부 주소는 HTTPS이고 컨테이너 포트는 인터넷에 직접 노출되지 않습니다.
 
-상태 확인, 실패 실행 재개, MCP 재동기화, 이미지 업그레이드 절차도
+상태 확인, OCR 실패 후 새 실행, MCP 재동기화, 이미지 업그레이드 절차도
 [실운영 가이드](SIMPLE_RUNTIME.md)에 포함되어 있습니다.
 
 v1.0.2에서 v1.0.4 이상으로 올릴 때는 v2/v3를 함께 읽는 MCP를 먼저 배포하고,
