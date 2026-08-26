@@ -14,9 +14,10 @@ from typing import Any, Literal, Protocol
 import httpx
 from cardrag_core import issuer_code
 
-SERVING_SCHEMA_ID = "cardrag.serving-db.v1"
-GENERATION_SCHEMA_ID = "cardrag.generation.v1"
+SERVING_SCHEMA_ID = "cardrag.serving-db.v2"
+GENERATION_SCHEMA_ID = "cardrag.generation.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
 
 
 def utc_now() -> datetime:
@@ -24,7 +25,13 @@ def utc_now() -> datetime:
 
 
 def canonical_json_bytes(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def canonical_sha256(value: object) -> str:
@@ -33,6 +40,41 @@ def canonical_sha256(value: object) -> str:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedSourceAllowance:
+    source_id: str
+    product_code: str
+    source_version: str
+    source_url: str
+    sha256: str
+    size_bytes: int
+    magic: Literal["SCDSA002", "SCDSA004"]
+
+    def __post_init__(self) -> None:
+        if (
+            not _SOURCE_ID.fullmatch(self.source_id)
+            or not self.product_code
+            or self.product_code != self.product_code.strip()
+            or not self.source_version
+            or not self.source_url.startswith("https://")
+            or not _SHA256.fullmatch(self.sha256)
+            or self.size_bytes < 1
+        ):
+            raise ValueError("protected source allowance requires an exact source and byte identity")
+
+    @property
+    def contract_payload(self) -> dict[str, Any]:
+        return {
+            "magic": self.magic,
+            "product_code": self.product_code,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+            "source_id": self.source_id,
+            "source_url": self.source_url,
+            "source_version": self.source_version,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +89,7 @@ class IssuerSpec:
     retry_base_seconds: float = 1.0
     maximum_retries: int = 4
     minimum_retention_ratio: float = 0.5
+    protected_source_allowances: tuple[ProtectedSourceAllowance, ...] = ()
 
     def __post_init__(self) -> None:
         issuer_code(self.code)
@@ -59,6 +102,8 @@ class IssuerSpec:
             or self.minimum_interval_seconds < 0
             or not math.isfinite(self.retry_base_seconds)
             or self.retry_base_seconds <= 0
+            or len({item.source_id for item in self.protected_source_allowances})
+            != len(self.protected_source_allowances)
         ):
             raise ValueError("issuer spec requires a code, hosts, and a positive minimum")
 
@@ -121,6 +166,34 @@ class SourceRecord:
                 "version": self.source_version,
             }
         )
+
+
+@dataclass(frozen=True, slots=True)
+class UnsupportedProductRecord:
+    source: SourceRecord
+    protected_sha256: str
+    protected_size_bytes: int
+    protected_magic: Literal["SCDSA002", "SCDSA004"]
+    disposition: Literal["unsupported_drm"] = "unsupported_drm"
+
+    def __post_init__(self) -> None:
+        if not _SHA256.fullmatch(self.protected_sha256) or self.protected_size_bytes < 1:
+            raise ValueError("unsupported product requires an exact protected byte identity")
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return {
+            "disposition": self.disposition,
+            "protected_magic": self.protected_magic,
+            "protected_sha256": self.protected_sha256,
+            "protected_size_bytes": self.protected_size_bytes,
+            "source": self.source.discovery_payload,
+            "source_id": self.source.source_id,
+        }
+
+    @property
+    def source_payload_json(self) -> str:
+        return canonical_json_bytes(self.source.discovery_payload).decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)

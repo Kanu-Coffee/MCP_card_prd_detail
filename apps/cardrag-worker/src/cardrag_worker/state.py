@@ -187,7 +187,7 @@ class WorkerState:
             # downloaded files and chunk checkpoints.
             connection.execute(
                 """UPDATE stage SET status='retry',attempt_count=0,available_at=?,updated_at=?
-                   WHERE run_id=? AND status IN ('failed','retry','running')""",
+                   WHERE run_id=? AND status IN ('failed','retry','running','skipped')""",
                 (now, now, run_id),
             )
             # Latest-only serving requires every explicit resume to refresh
@@ -284,10 +284,31 @@ class WorkerState:
 
     def stage_succeeded(self, run_id: str, document_id: str, stage_name: str) -> None:
         self.connection.execute(
-            """UPDATE stage SET status='succeeded',updated_at=?
+            """UPDATE stage SET status='succeeded',last_error=NULL,updated_at=?
                WHERE run_id=? AND document_id=? AND stage_name=?""",
             (_now().isoformat(), run_id, document_id, stage_name),
         )
+
+    def stage_skipped(
+        self,
+        run_id: str,
+        document_id: str,
+        stage_name: str,
+        reason: str,
+    ) -> None:
+        self.connection.execute(
+            """UPDATE stage SET status='skipped',last_error=?,updated_at=?
+               WHERE run_id=? AND document_id=? AND stage_name=?""",
+            (reason[:4000], _now().isoformat(), run_id, document_id, stage_name),
+        )
+
+    def stage_status_count(self, run_id: str, stage_name: str, status: StageStatus) -> int:
+        row = self.connection.execute(
+            """SELECT count(*) FROM stage
+               WHERE run_id=? AND stage_name=? AND status=?""",
+            (run_id, stage_name, status),
+        ).fetchone()
+        return int(row[0])
 
     def stage_failed(
         self,

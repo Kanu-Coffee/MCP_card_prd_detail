@@ -1,4 +1,4 @@
-# CardRAG v1.0.1
+# CardRAG v1.0.2
 
 CardRAG는 카드사 상품설명서 PDF를 검색 가능한 형태로 만드는 두 프로세스
 서비스입니다. 운영 런타임은 다음 흐름만 사용합니다.
@@ -12,14 +12,17 @@ one-shot Worker -> immutable WebDAV artifacts -> always-on MCP
 - MCP는 WebDAV를 주기적으로 확인하고 세대 전체를 로컬에 내려받아 검증한 뒤
   원자적으로 활성화합니다.
 - Worker만 WebDAV에 씁니다. MCP 요청 처리는 검증된 로컬 파일만 사용합니다.
+- 카드사가 최신 파일을 PDF 대신 승인된 DRM 컨테이너로 제공하면 과거 PDF로
+  대체하지 않습니다. 정확한 원본 지문이 일치하는 항목만 `unsupported_drm`으로
+  명시하고 MCP 상품 조회에 그대로 노출합니다.
 
 ## 운영 이미지
 
-v1.0.1 운영 배포에는 다음 두 고정 태그를 사용합니다.
+v1.0.2 운영 배포에는 다음 두 고정 태그를 사용합니다.
 
 ```text
-ymtop59/mcp-card-prd-detail:1.0.1-worker
-ymtop59/mcp-card-prd-detail:1.0.1-mcp
+ymtop59/mcp-card-prd-detail:1.0.2-worker
+ymtop59/mcp-card-prd-detail:1.0.2-mcp
 ```
 
 Worker는 실행이 끝나면 종료되는 배치이고, MCP는 계속 실행되는 HTTP/MCP
@@ -27,7 +30,7 @@ Worker는 실행이 끝나면 종료되는 배치이고, MCP는 계속 실행되
 
 ## 운영 시작 순서
 
-1. `/opt/cardrag`에 v1.0.1 배포 파일을 준비합니다.
+1. `/opt/cardrag`에 v1.0.2 배포 파일을 준비합니다.
 2. `/etc/cardrag/worker.env`, `/etc/cardrag/mcp.env`, 파일 기반 비밀값을
    준비합니다.
 3. Worker 컨테이너에서 Codex 로그인을 완료합니다.

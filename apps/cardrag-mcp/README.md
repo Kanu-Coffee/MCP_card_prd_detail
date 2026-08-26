@@ -1,7 +1,7 @@
 # cardrag-mcp
 
 Read-only FastAPI and Streamable HTTP MCP service for immutable
-`cardrag.serving-db.v1` generations.  A background WebDAV updater verifies a
+`cardrag.serving-db.v2` generations.  A background WebDAV updater verifies a
 complete SQLite generation and every referenced PDF CAS object before an
 atomic local activation.  Request handlers pin the selected generation, so an
 activation never mixes data within a request.

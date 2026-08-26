@@ -95,6 +95,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 "corpus_sha256": result.corpus_sha256,
                 "contract_sha256": result.contract_sha256,
                 "documents": result.document_count,
+                "unsupported_documents": result.unsupported_document_count,
                 "evidence": result.evidence_count,
                 "gc_status": result.gc_status,
                 "gc_deleted": result.gc_deleted,

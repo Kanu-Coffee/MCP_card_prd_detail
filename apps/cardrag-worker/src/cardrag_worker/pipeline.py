@@ -43,10 +43,18 @@ from .contracts import (
     EvidenceRecord,
     IssuerAdapter,
     PageRecord,
+    ProtectedSourceAllowance,
     SourceRecord,
     SourceSnapshot,
+    UnsupportedProductRecord,
 )
-from .downloader import DownloadedPDF, DownloadPolicy, SecurePDFDownloader, validate_pdf
+from .downloader import (
+    DownloadedPDF,
+    DownloadPolicy,
+    ProtectedDocumentError,
+    SecurePDFDownloader,
+    validate_pdf,
+)
 from .exporter import ServingDatabaseExporter, encode_embedding
 from .ocr import OCRResolver, OCRResult, page_records
 from .providers import EmbeddingProvider
@@ -71,6 +79,7 @@ class PipelineResult:
     generation_id: str | None
     document_count: int
     evidence_count: int
+    unsupported_document_count: int = 0
     gc_status: str | None = None
     gc_deleted: int = 0
     gc_error: str | None = None
@@ -292,7 +301,7 @@ class WorkerPipeline:
     def contract_sha256(self) -> str:
         return canonical_sha256(
             {
-                "schema_version": "cardrag.worker-contract.v1",
+                "schema_version": "cardrag.worker-contract.v2",
                 "serving_schema": SERVING_SCHEMA_ID,
                 "issuer_adapters": [
                     {
@@ -307,10 +316,14 @@ class WorkerPipeline:
                         "retry_base_seconds": adapter.spec.retry_base_seconds,
                         "maximum_retries": adapter.spec.maximum_retries,
                         "minimum_retention_ratio": adapter.spec.minimum_retention_ratio,
+                        "protected_source_allowances": sorted(
+                            (item.contract_payload for item in adapter.spec.protected_source_allowances),
+                            key=canonical_json_bytes,
+                        ),
                     }
                     for adapter in self.adapters
                 ],
-                "download_contract": "cardrag.secure-pdf-download.v1",
+                "download_contract": "cardrag.secure-pdf-download.v2",
                 "ocr_contract": self.ocr.contract,
                 "adoption_policy_version": self.ocr.adoption_policy_version,
                 "chunk_contract": {
@@ -338,6 +351,7 @@ class WorkerPipeline:
         operation: Callable[[], Awaitable[T]],
         maximum_attempts: int | None = None,
         retry_base_seconds: float = 1.0,
+        non_retryable_predicate: Callable[[Exception], bool] | None = None,
     ) -> T:
         maximum = maximum_attempts or self.maximum_attempts
         self.state.ensure_stage(run_id, document_id, name, max_attempts=maximum)
@@ -349,6 +363,8 @@ class WorkerPipeline:
             try:
                 result = await operation()
             except Exception as exc:
+                if non_retryable_predicate is not None and non_retryable_predicate(exc):
+                    raise
                 delay = retry_delay(
                     attempt,
                     base_seconds=retry_base_seconds,
@@ -400,6 +416,7 @@ class WorkerPipeline:
             self._cleanup_local_runs(exclude_run_id=run_id)
             return replace(
                 result,
+                unsupported_document_count=self.state.stage_status_count(run_id, "download", "skipped"),
                 gc_status=gc_status,
                 gc_deleted=gc_deleted,
                 gc_error=gc_error,
@@ -509,6 +526,7 @@ class WorkerPipeline:
         # Current PDF bytes are part of corpus identity. Discovery-only hashes are
         # insufficient because issuer URLs are sometimes reused for changed files.
         acquired: list[_AcquiredDocument] = []
+        unsupported: list[UnsupportedProductRecord] = []
         async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
             for source in records:
                 adapter = next(item for item in self.adapters if item.spec.code == source.issuer)
@@ -529,18 +547,67 @@ class WorkerPipeline:
                     downloader = SecurePDFDownloader(DownloadPolicy(allowed_hosts=adapter.spec.allowed_hosts))
                     return await downloader.download(current_client, request, destination)  # type: ignore[arg-type]
 
-                pdf = await self._finite_stage(
-                    run_id=run_id,
-                    document_id=source_key,
-                    name="download",
-                    operation=acquire,
-                    maximum_attempts=adapter.spec.maximum_retries,
-                    retry_base_seconds=adapter.spec.retry_base_seconds,
+                allowance = next(
+                    (
+                        item
+                        for item in adapter.spec.protected_source_allowances
+                        if item.source_id == source_key
+                    ),
+                    None,
                 )
+
+                def expected_protected(
+                    exc: Exception,
+                    current_source: SourceRecord = source,
+                    current_allowance: ProtectedSourceAllowance | None = allowance,
+                ) -> bool:
+                    return (
+                        isinstance(exc, ProtectedDocumentError)
+                        and current_allowance is not None
+                        and current_allowance.product_code == current_source.product_code
+                        and current_allowance.source_version == current_source.source_version
+                        and current_allowance.source_url == current_source.source_url
+                        and current_allowance.magic == exc.magic
+                        and current_allowance.sha256 == exc.sha256
+                        and current_allowance.size_bytes == exc.size_bytes
+                    )
+
+                try:
+                    pdf = await self._finite_stage(
+                        run_id=run_id,
+                        document_id=source_key,
+                        name="download",
+                        operation=acquire,
+                        maximum_attempts=adapter.spec.maximum_retries,
+                        retry_base_seconds=adapter.spec.retry_base_seconds,
+                        non_retryable_predicate=expected_protected if allowance is not None else None,
+                    )
+                except ProtectedDocumentError as exc:
+                    if not expected_protected(exc):
+                        raise
+                    self.state.stage_skipped(
+                        run_id,
+                        source_key,
+                        "download",
+                        f"unsupported_drm {source.issuer}/{source.product_code}: {exc}",
+                    )
+                    unsupported.append(
+                        UnsupportedProductRecord(
+                            source=source,
+                            protected_sha256=exc.sha256,
+                            protected_size_bytes=exc.size_bytes,
+                            protected_magic=exc.magic,
+                        )
+                    )
+                    continue
                 acquired.append(_AcquiredDocument(source, pdf))
+        unsupported_payload = sorted(
+            (item.payload for item in unsupported),
+            key=canonical_json_bytes,
+        )
         corpus_sha256 = canonical_sha256(
             {
-                "schema_version": "cardrag.current-corpus.v1",
+                "schema_version": "cardrag.current-corpus.v2",
                 "documents": [
                     {
                         "source": item.source.discovery_payload,
@@ -550,6 +617,7 @@ class WorkerPipeline:
                     }
                     for item in acquired
                 ],
+                "unsupported_documents": unsupported_payload,
             }
         )
         if deferred_seal is not None:
@@ -585,7 +653,7 @@ class WorkerPipeline:
                 corpus_sha256,
                 contract_sha256,
                 current_remote.generation_id,
-                len(records),
+                len(acquired),
                 0,
             )
         if current_remote is None and stable_body is not None:
@@ -618,7 +686,7 @@ class WorkerPipeline:
                 corpus_sha256,
                 contract_sha256,
                 generation_id,
-                len(records),
+                len(acquired),
                 0,
             )
         # A different fully valid stable generation wins. Rebuild a new
@@ -854,7 +922,10 @@ class WorkerPipeline:
             issuers=[adapter.spec for adapter in self.adapters],
             documents=[document.record for document in processed],
             evidence=evidence,
-            extra_metadata={"contract_sha256": contract_sha256},
+            unsupported_products=unsupported,
+            extra_metadata={
+                "contract_sha256": contract_sha256,
+            },
         )
         current_remote = await self.webdav.validated_current_generation()
         if current_remote is None and await self.webdav.get_bytes(STABLE_POINTER_PATH) is not None:

@@ -8,7 +8,7 @@ import pytest
 from conftest import FakeEmbedder, create_database, unit_vector
 
 from cardrag_mcp.embeddings import EmbeddingUnavailable
-from cardrag_mcp.models import SearchFilters, SearchRequest
+from cardrag_mcp.models import Product, SearchFilters, SearchRequest, UnsupportedProduct
 from cardrag_mcp.schema import ServingDatabaseError
 from cardrag_mcp.store import GenerationStore, load_generation_handle
 
@@ -79,6 +79,63 @@ def test_promotion_rejects_incompatible_query_embedding_policy(tmp_path: Path) -
         )
 
 
+@pytest.mark.parametrize(
+    ("tamper", "expected_error"),
+    (
+        ("count", "count differs"),
+        ("hash", "hash differs"),
+        ("noncanonical_source", "not canonical JSON"),
+        ("source_id", "source_id does not bind"),
+        ("source_version", "columns do not bind"),
+        ("overlap", "both available and unsupported"),
+        ("promotion_limit", "promotion limit"),
+    ),
+)
+def test_promotion_rejects_tampered_unsupported_product_contract(
+    tmp_path: Path,
+    tamper: str,
+    expected_error: str,
+) -> None:
+    directory = tmp_path / f"gen-unsupported-{tamper}"
+    database = directory / "index.sqlite3"
+    create_database(database, directory.name)
+    with sqlite3.connect(database) as connection:
+        if tamper == "count":
+            connection.execute(
+                "UPDATE metadata SET value='0' WHERE key='unsupported_document_count'"
+            )
+        elif tamper == "hash":
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='unsupported_documents_sha256'",
+                ("0" * 64,),
+            )
+        elif tamper == "noncanonical_source":
+            connection.execute(
+                "UPDATE unsupported_products SET source_payload_json=source_payload_json || ' '"
+            )
+        elif tamper == "source_id":
+            connection.execute(
+                "UPDATE unsupported_products SET source_id=?",
+                ("source_" + "0" * 64,),
+            )
+        elif tamper == "source_version":
+            connection.execute("UPDATE unsupported_products SET source_version='changed'")
+        elif tamper == "overlap":
+            connection.execute("UPDATE unsupported_products SET product_code='P1'")
+        else:
+            connection.execute(
+                "UPDATE metadata SET value='101' WHERE key='unsupported_document_count'"
+            )
+        connection.commit()
+
+    with pytest.raises(ServingDatabaseError, match=expected_error):
+        load_generation_handle(
+            directory,
+            tmp_path / "objects",
+            maximum_vector_bytes=1024 * 1024,
+        )
+
+
 @pytest.mark.asyncio
 async def test_hybrid_filter_rrf_and_bound_cursor(active_runtime) -> None:
     _, repository, embedder, _ = active_runtime
@@ -142,13 +199,34 @@ async def test_evidence_adjacency_product_and_page_queries(active_runtime) -> No
     assert second.next_cursor is None
 
     product = await repository.get_product("woori", "P1")
-    assert product is not None
+    assert isinstance(product, Product)
+    assert product.availability == "available"
     assert product.document.document_id == "doc-a"
+    unsupported = await repository.get_product("woori", "P-DRM")
+    assert isinstance(unsupported, UnsupportedProduct)
+    assert unsupported.model_dump(mode="json") == {
+        "issuer": "woori",
+        "product_code": "P-DRM",
+        "name": "Protected Card",
+        "availability": "unsupported_drm",
+        "source_id": unsupported.source_id,
+        "source_version": "20260826",
+        "source_url": "https://example.com/protected.pdf",
+        "protected_magic": "SCDSA002",
+        "protected_source_sha256": unsupported.protected_source_sha256,
+        "protected_source_size_bytes": len(b"SCDSA002fixture-protected-source"),
+    }
     page = await repository.get_source_page("doc-a", 1)
     assert page is not None
     assert page.page_count == 1
     assert [item.page for item in await repository.list_pages("doc-a")] == [1]
     assert await repository.list_pages("missing") == ()
     assert len(await repository.list_issuers()) == 2
-    assert len(await repository.list_products()) == 2
+    products = await repository.list_products()
+    assert len(products) == 3
+    assert {item.availability for item in products} == {"available", "unsupported_drm"}
+    assert [item.product_code for item in await repository.list_products("woori")] == [
+        "P-DRM",
+        "P1",
+    ]
     assert len(await repository.list_documents()) == 2

@@ -4,6 +4,7 @@ import math
 import sqlite3
 import struct
 from dataclasses import replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,15 @@ from cardrag_core import (
     QUERY_EMBEDDING_PREFIX,
 )
 
-from cardrag_worker.contracts import DocumentRecord, EvidenceRecord, IssuerSpec, PageRecord
+from cardrag_worker.contracts import (
+    DocumentRecord,
+    EvidenceRecord,
+    IssuerSpec,
+    PageRecord,
+    SourceRecord,
+    UnsupportedProductRecord,
+    canonical_sha256,
+)
 from cardrag_worker.exporter import ServingDatabaseError, ServingDatabaseExporter
 
 
@@ -72,7 +81,8 @@ def test_exporter_builds_vacuumed_exact_schema_and_normalized_vectors(tmp_path: 
     connection = sqlite3.connect(f"{target.as_uri()}?mode=ro&immutable=1", uri=True)
     try:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
-        assert metadata["schema_id"] == "cardrag.serving-db.v1"
+        assert metadata["schema_id"] == "cardrag.serving-db.v2"
+        assert metadata["unsupported_document_count"] == "0"
         assert metadata["embedding_input_policy_version"] == EMBEDDING_POLICY_VERSION
         assert metadata["embedding_document_prefix"] == DOCUMENT_EMBEDDING_PREFIX
         assert metadata["embedding_query_prefix"] == QUERY_EMBEDDING_PREFIX
@@ -92,6 +102,101 @@ def test_exporter_builds_vacuumed_exact_schema_and_normalized_vectors(tmp_path: 
         assert hits == [("evidence_001",)]
     finally:
         connection.close()
+
+
+def test_exporter_binds_explicit_unsupported_product_audit_payload(tmp_path: Path) -> None:
+    issuer, document, evidence = fixture_rows()
+    source = SourceRecord(
+        issuer="kb",
+        product_code="protected-1",
+        product_name="보호 문서 카드",
+        effective_date=date(2026, 2, 4),
+        source_version="20260204",
+        source_url="https://kb.example/protected.pdf",
+        source_post_id="post-1",
+        file_name="protected.pdf",
+        category="credit",
+        discovered_at=datetime.now(UTC),
+    )
+    unsupported = UnsupportedProductRecord(
+        source=source,
+        protected_sha256="d" * 64,
+        protected_size_bytes=545_086,
+        protected_magic="SCDSA002",
+    )
+    target = tmp_path / "index.sqlite3"
+    result = ServingDatabaseExporter().export(
+        target,
+        generation_id="g-test",
+        corpus_sha256="b" * 64,
+        embedding_provider="openrouter",
+        embedding_model="openai/text-embedding-3-small",
+        issuers=[issuer],
+        documents=[document],
+        evidence=[evidence],
+        unsupported_products=[unsupported],
+    )
+    assert result.unsupported_product_count == 1
+    connection = sqlite3.connect(f"{target.as_uri()}?mode=ro&immutable=1", uri=True)
+    try:
+        metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+        assert metadata["unsupported_document_count"] == "1"
+        assert metadata["unsupported_documents_sha256"] == canonical_sha256(
+            {
+                "schema_version": "cardrag.unsupported-documents.v1",
+                "documents": [unsupported.payload],
+            }
+        )
+        row = connection.execute(
+            """SELECT issuer,product_code,disposition,source_id,protected_sha256,
+                      protected_size_bytes,source_payload_json
+               FROM unsupported_products"""
+        ).fetchone()
+        assert row == (
+            "kb",
+            "protected-1",
+            "unsupported_drm",
+            source.source_id,
+            "d" * 64,
+            545_086,
+            unsupported.source_payload_json,
+        )
+    finally:
+        connection.close()
+
+
+def test_exporter_rejects_product_served_and_unsupported_at_once(tmp_path: Path) -> None:
+    issuer, document, evidence = fixture_rows()
+    source = SourceRecord(
+        issuer="kb",
+        product_code=document.product_code,
+        product_name=document.product_name,
+        effective_date=date(2026, 2, 4),
+        source_version="20260204",
+        source_url="https://kb.example/protected.pdf",
+        source_post_id="post-1",
+        file_name="protected.pdf",
+        category="credit",
+        discovered_at=datetime.now(UTC),
+    )
+    unsupported = UnsupportedProductRecord(
+        source=source,
+        protected_sha256="d" * 64,
+        protected_size_bytes=1,
+        protected_magic="SCDSA002",
+    )
+    with pytest.raises(ServingDatabaseError, match="both served and unsupported"):
+        ServingDatabaseExporter().export(
+            tmp_path / "bad.sqlite3",
+            generation_id="g-test",
+            corpus_sha256="b" * 64,
+            embedding_provider="openrouter",
+            embedding_model="model",
+            issuers=[issuer],
+            documents=[document],
+            evidence=[evidence],
+            unsupported_products=[unsupported],
+        )
 
 
 @pytest.mark.parametrize(

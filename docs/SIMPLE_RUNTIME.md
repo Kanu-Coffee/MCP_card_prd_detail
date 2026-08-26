@@ -1,11 +1,11 @@
-# CardRAG v1.0.1 실운영 가이드
+# CardRAG v1.0.2 실운영 가이드
 
 이 문서는 처음 운영 서버를 준비하는 사람을 위한 순서형 안내서입니다. 명령은
 별도 표시가 없으면 `/opt/cardrag`에서 실행합니다.
 
 ## 1. 운영 구조 이해하기
 
-CardRAG v1.0.1은 Worker 하나와 MCP 하나로 동작합니다.
+CardRAG v1.0.2는 Worker 하나와 MCP 하나로 동작합니다.
 
 ```text
 카드사 PDF
@@ -44,6 +44,22 @@ MCP는 계속 실행됩니다. 백그라운드에서 WebDAV를 확인하고, SQL
 Worker만 WebDAV에 씁니다. Worker와 MCP는 같은 WebDAV Basic Auth 계정을
 사용하지만 MCP 애플리케이션은 읽기 동작만 노출합니다.
 
+### 처리 불가능한 최신 DRM 문서
+
+일부 카드사는 `application/pdf`라고 응답하면서 실제로는 PDF가 아닌 암호화된
+컨테이너를 게시할 수 있습니다. CardRAG는 이를 복호화하거나 과거 PDF로 바꾸지
+않습니다. 운영자가 코드에 승인한 `source_id`, 상품코드, 버전, URL, magic,
+SHA-256, 크기가 모두 일치하는 현재 원본만 `unsupported_drm`으로 분류합니다.
+
+- 해당 상품은 검색 evidence와 PDF 다운로드가 없지만 `get_product` 및 상품 목록에
+  `availability: "unsupported_drm"`과 원본 감사 지문이 표시됩니다.
+- 승인된 바이트나 URL이 바뀌거나 새로운 DRM 상품이 나타나면 Worker는 재시도 후
+  실패하고 새 세대를 게시하지 않습니다.
+- 카드사가 정상 PDF로 다시 게시하면 그 최신 PDF를 일반 문서처럼 처리합니다.
+
+따라서 `unsupported_drm`은 조용한 누락이나 성공으로 위장한 과거 문서가 아니라,
+현재 공식 원본을 안전하게 처리할 수 없다는 명시적 서비스 상태입니다.
+
 ## 2. 시작 전 준비물
 
 다음을 모두 준비한 뒤 진행합니다.
@@ -55,7 +71,7 @@ Worker만 WebDAV에 씁니다. Worker와 MCP는 같은 WebDAV Basic Auth 계정�
 - HTTPS WebDAV 주소, 사용자 이름, 비밀번호
 - OpenRouter API 키
 - MCP가 외부에서 사용할 HTTPS 주소와 TLS 리버스 프록시
-- `/opt/cardrag`에 배치한 v1.0.1 저장소 파일
+- `/opt/cardrag`에 배치한 v1.0.2 저장소 파일
 
 WebDAV 계정에는 `PROPFIND`, `MKCOL`, `PUT`, `GET`, `HEAD`, `MOVE`, `DELETE`
 권한이 필요합니다. `MOVE`의 `Overwrite:F` 요청도 올바르게 거부해야 합니다.
@@ -63,8 +79,8 @@ WebDAV 계정에는 `PROPFIND`, `MKCOL`, `PUT`, `GET`, `HEAD`, `MOVE`, `DELETE`
 운영 이미지는 다음 두 태그로 고정합니다.
 
 ```text
-ymtop59/mcp-card-prd-detail:1.0.1-worker
-ymtop59/mcp-card-prd-detail:1.0.1-mcp
+ymtop59/mcp-card-prd-detail:1.0.2-worker
+ymtop59/mcp-card-prd-detail:1.0.2-mcp
 ```
 
 서버에서 배포 파일 위치를 확인합니다.
@@ -193,7 +209,7 @@ sudoedit /etc/cardrag/worker.env
 
 ```dotenv
 CARDRAG_ENVIRONMENT=production
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.1-worker
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.2-worker
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
@@ -229,7 +245,7 @@ sudoedit /etc/cardrag/mcp.env
 
 ```dotenv
 CARDRAG_ENVIRONMENT=production
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.1-mcp
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.2-mcp
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
 CARDRAG_WEBDAV_USERNAME_SECRET_FILE=/etc/cardrag/secrets/webdav_username
@@ -300,11 +316,11 @@ CARDRAG_WORKER_COMPOSE_OVERLAYS=--file deploy/worker/compose.ca.yaml
 
 ## 5. 이미지와 Compose 설정 확인
 
-v1.0.1 이미지를 미리 내려받습니다.
+v1.0.2 이미지를 미리 내려받습니다.
 
 ```bash
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.1-worker
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.1-mcp
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.2-worker
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.2-mcp
 ```
 
 Worker 설정을 실제 systemd 실행 사용자로 검증합니다.
@@ -639,7 +655,7 @@ Worker 볼륨에는 Codex 인증과 재개 checkpoint가 있고, MCP 볼륨에�
 
 ## 13. 이미지 업그레이드
 
-현재 설치값은 두 `1.0.1` 역할 태그입니다. 이후 승인된 버전으로 업그레이드할
+현재 설치값은 두 `1.0.2` 역할 태그입니다. 이후 승인된 버전으로 업그레이드할
 때도 Worker와 MCP 역할 태그를 함께 준비하고 `latest`는 사용하지 않습니다.
 
 1. 새 배포 파일을 `/opt/cardrag`에 반영합니다.
@@ -647,8 +663,15 @@ Worker 볼륨에는 Codex 인증과 재개 checkpoint가 있고, MCP 볼륨에�
    `CARDRAG_MCP_IMAGE`를 승인된 고정 역할 태그로 바꿉니다.
 3. 새 이미지를 pull하고 두 Compose 설정을 다시 검증합니다.
 4. `webdav-check`를 실행합니다.
-5. 새 Worker를 먼저 실행하고 성공 결과를 확인합니다.
-6. MCP를 새 이미지로 교체하고 두 health endpoint를 확인합니다.
+5. 새 Worker를 먼저 실행하고 성공 결과를 확인합니다. 기존 MCP는 그동안 마지막
+   정상 세대를 계속 서비스합니다.
+6. 새 세대가 WebDAV에 완전히 게시된 뒤 MCP 이미지를 교체합니다.
+7. MCP가 새 세대를 활성화했는지 두 health endpoint와 로그에서 확인합니다.
+
+v1.0.2는 `cardrag.generation.v2`와 `cardrag.serving-db.v2`로 올라가는 호환성
+경계입니다. 따라서 v1.0.1 MCP를 먼저 중지하지 말고, 반드시 v1.0.2 Worker가 새
+세대를 게시한 다음 MCP를 교체하십시오. 새 MCP는 검증된 v2 세대를 내려받아
+활성화할 때까지 readiness를 성공으로 표시하지 않습니다.
 
 env 수정 후 이미지를 내려받습니다.
 
@@ -698,9 +721,10 @@ curl --fail http://127.0.0.1:8000/health/ready
 systemctl list-timers cardrag-worker.timer
 ```
 
-모든 확인이 끝날 때까지 Worker와 MCP 상태 볼륨을 유지합니다. 새 MCP가 세대를
-검증하지 못하면 기존 검증 세대를 유지하므로, 로그 원인을 수정한 뒤 다시
-`up -d --wait`를 실행합니다.
+모든 확인이 끝날 때까지 Worker와 MCP 상태 볼륨을 유지합니다. 같은 스키마 내
+업그레이드에서는 새 MCP가 기존 검증 세대를 유지합니다. v1.0.1에서 v1.0.2로
+처음 넘어갈 때 새 MCP가 v2 세대를 활성화하지 못하면 볼륨을 삭제하지 말고 MCP
+이미지 참조만 v1.0.1로 되돌려 `up -d --wait`를 실행한 뒤 원인을 확인하십시오.
 
 ## 14. 자주 하는 실수
 

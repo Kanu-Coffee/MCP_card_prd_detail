@@ -82,10 +82,10 @@ class GenerationDocument(StrictFrozenModel):
 
 
 class GenerationManifest(StrictFrozenModel):
-    schema_version: Literal["cardrag.generation.v1"] = "cardrag.generation.v1"
+    schema_version: Literal["cardrag.generation.v1", "cardrag.generation.v2"] = "cardrag.generation.v2"
     generation_id: str
     created_at: AwareDatetime
-    serving_schema: Literal["cardrag.serving-db.v1"] = "cardrag.serving-db.v1"
+    serving_schema: Literal["cardrag.serving-db.v1", "cardrag.serving-db.v2"] = "cardrag.serving-db.v2"
     serving_database: ArtifactRef
     corpus_sha256: Sha256Hex
     contract_sha256: Sha256Hex
@@ -130,6 +130,12 @@ class GenerationManifest(StrictFrozenModel):
 
     @model_validator(mode="after")
     def bundle_is_self_consistent(self) -> Self:
+        expected_serving_schema = {
+            "cardrag.generation.v1": "cardrag.serving-db.v1",
+            "cardrag.generation.v2": "cardrag.serving-db.v2",
+        }[self.schema_version]
+        if self.serving_schema != expected_serving_schema:
+            raise ValueError("generation and serving database schema versions must match")
         if PurePosixPath(self.serving_database.path) != generation_database_path(self.generation_id):
             raise ValueError("serving database path does not match generation_id")
         if self.serving_database.media_type != "application/vnd.sqlite3":

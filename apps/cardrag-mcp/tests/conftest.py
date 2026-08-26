@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,21 @@ CREATE TABLE products (
   product_code TEXT NOT NULL,
   name TEXT NOT NULL,
   document_id TEXT NOT NULL REFERENCES documents(document_id),
+  PRIMARY KEY (issuer, product_code),
+  FOREIGN KEY (issuer) REFERENCES issuers(code)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE unsupported_products (
+  issuer TEXT NOT NULL,
+  product_code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  disposition TEXT NOT NULL CHECK(disposition='unsupported_drm'),
+  source_id TEXT NOT NULL,
+  source_version TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  protected_magic TEXT NOT NULL CHECK(protected_magic IN ('SCDSA002','SCDSA004')),
+  protected_sha256 TEXT NOT NULL CHECK(length(protected_sha256)=64),
+  protected_size_bytes INTEGER NOT NULL CHECK(protected_size_bytes > 0),
+  source_payload_json TEXT NOT NULL,
   PRIMARY KEY (issuer, product_code),
   FOREIGN KEY (issuer) REFERENCES issuers(code)
 ) STRICT, WITHOUT ROWID;
@@ -90,6 +106,16 @@ def unit_vector(index: int) -> np.ndarray:
     return value
 
 
+def canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class GenerationFixture:
     generation_id: str
@@ -126,8 +152,41 @@ def create_database(
         doc_one: "airport lounge benefit\nairport lounge condition",
         doc_two: "mileage reward",
     }
+    protected_bytes = b"SCDSA002fixture-protected-source"
+    protected_sha256 = hashlib.sha256(protected_bytes).hexdigest()
+    unsupported_source = {
+        "category": "credit",
+        "document_type": "product_description",
+        "effective_date": "2026-08-26",
+        "file_name": "protected.pdf",
+        "issuer": "woori",
+        "metadata": {"fixture": True},
+        "product_code": "P-DRM",
+        "product_name": "Protected Card",
+        "source_post_id": "post-drm",
+        "source_url": "https://example.com/protected.pdf",
+        "source_version": "20260826",
+    }
+    unsupported_source_bytes = canonical_json_bytes(unsupported_source)
+    unsupported_source_id = "source_" + hashlib.sha256(unsupported_source_bytes).hexdigest()
+    unsupported_payload = {
+        "disposition": "unsupported_drm",
+        "protected_magic": "SCDSA002",
+        "protected_sha256": protected_sha256,
+        "protected_size_bytes": len(protected_bytes),
+        "source": unsupported_source,
+        "source_id": unsupported_source_id,
+    }
+    unsupported_sha256 = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "documents": [unsupported_payload],
+                "schema_version": "cardrag.unsupported-documents.v1",
+            }
+        )
+    ).hexdigest()
     metadata = {
-        "schema_id": "cardrag.serving-db.v1",
+        "schema_id": "cardrag.serving-db.v2",
         "generation_id": generation_id,
         "corpus_sha256": hashlib.sha256(generation_id.encode()).hexdigest(),
         "embedding_provider": "openrouter",
@@ -137,6 +196,8 @@ def create_database(
         "embedding_query_prefix": QUERY_EMBEDDING_PREFIX,
         "embedding_dimension": "1536",
         "embedding_count": str(len(evidence)),
+        "unsupported_document_count": "1",
+        "unsupported_documents_sha256": unsupported_sha256,
     }
     connection = sqlite3.connect(target)
     try:
@@ -164,6 +225,22 @@ def create_database(
                 "INSERT INTO pages VALUES(?,?,?,?)",
                 (document_id, 1, page_text, hashlib.sha256(page_text.encode()).hexdigest()),
             )
+        connection.execute(
+            "INSERT INTO unsupported_products VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "woori",
+                "P-DRM",
+                "Protected Card",
+                "unsupported_drm",
+                unsupported_source_id,
+                "20260826",
+                "https://example.com/protected.pdf",
+                "SCDSA002",
+                protected_sha256,
+                len(protected_bytes),
+                unsupported_source_bytes.decode("utf-8"),
+            ),
+        )
         for evidence_id, document_id, section, text, vector in evidence:
             source_start = page_text_by_document[document_id].index(text)
             connection.execute(

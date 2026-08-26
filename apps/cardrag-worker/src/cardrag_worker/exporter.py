@@ -26,6 +26,9 @@ from .contracts import (
     EvidenceRecord,
     IssuerSpec,
     PageRecord,
+    UnsupportedProductRecord,
+    canonical_json_bytes,
+    canonical_sha256,
 )
 
 
@@ -65,6 +68,22 @@ CREATE TABLE products (
   product_code TEXT NOT NULL,
   name TEXT NOT NULL,
   document_id TEXT NOT NULL REFERENCES documents(document_id),
+  PRIMARY KEY (issuer, product_code),
+  FOREIGN KEY (issuer) REFERENCES issuers(code)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE unsupported_products (
+  issuer TEXT NOT NULL,
+  product_code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  disposition TEXT NOT NULL CHECK(disposition='unsupported_drm'),
+  source_id TEXT NOT NULL CHECK(length(source_id)=71),
+  source_version TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  protected_magic TEXT NOT NULL CHECK(protected_magic IN ('SCDSA002','SCDSA004')),
+  protected_sha256 TEXT NOT NULL CHECK(length(protected_sha256)=64),
+  protected_size_bytes INTEGER NOT NULL CHECK(protected_size_bytes > 0),
+  source_payload_json TEXT NOT NULL,
   PRIMARY KEY (issuer, product_code),
   FOREIGN KEY (issuer) REFERENCES issuers(code)
 ) STRICT, WITHOUT ROWID;
@@ -109,6 +128,7 @@ class ServingExport:
     size_bytes: int
     issuer_count: int
     document_count: int
+    unsupported_product_count: int
     page_count: int
     evidence_count: int
 
@@ -138,7 +158,10 @@ def _validate_inputs(
     issuers: Sequence[IssuerSpec],
     documents: Sequence[DocumentRecord],
     evidence: Sequence[EvidenceRecord],
+    unsupported_products: Sequence[UnsupportedProductRecord],
 ) -> None:
+    if len(unsupported_products) > 100:
+        raise ServingDatabaseError("unsupported product count exceeds the v2 promotion limit")
     issuer_codes = [row.code for row in issuers]
     if len(set(issuer_codes)) != len(issuer_codes):
         raise ServingDatabaseError("duplicate issuer code")
@@ -148,6 +171,17 @@ def _validate_inputs(
     products = [(row.issuer, row.product_code) for row in documents]
     if len(set(products)) != len(products):
         raise ServingDatabaseError("latest corpus contains multiple documents for one product")
+    unsupported_identities = [(row.source.issuer, row.source.product_code) for row in unsupported_products]
+    if len(set(unsupported_identities)) != len(unsupported_identities):
+        raise ServingDatabaseError("latest corpus contains duplicate unsupported products")
+    overlap = set(products).intersection(unsupported_identities)
+    if overlap:
+        raise ServingDatabaseError("a current product cannot be both served and unsupported")
+    for row in unsupported_products:
+        if row.source.issuer not in issuer_codes:
+            raise ServingDatabaseError("unsupported product references an unknown issuer")
+        if row.source_payload_json != canonical_json_bytes(row.source.discovery_payload).decode("utf-8"):
+            raise ServingDatabaseError("unsupported product source payload is not canonical")
     evidence_ids = [row.evidence_id for row in evidence]
     if len(set(evidence_ids)) != len(evidence_ids):
         raise ServingDatabaseError("duplicate evidence_id")
@@ -187,6 +221,7 @@ def _verify_database(
     *,
     issuer_count: int,
     document_count: int,
+    unsupported_product_count: int,
     page_count: int,
     evidence_count: int,
 ) -> None:
@@ -200,6 +235,11 @@ def _verify_database(
         ("issuers", "SELECT count(*) FROM issuers", issuer_count),
         ("documents", "SELECT count(*) FROM documents", document_count),
         ("products", "SELECT count(*) FROM products", document_count),
+        (
+            "unsupported_products",
+            "SELECT count(*) FROM unsupported_products",
+            unsupported_product_count,
+        ),
         ("pages", "SELECT count(*) FROM pages", page_count),
         ("evidence", "SELECT count(*) FROM evidence", evidence_count),
         ("evidence_fts", "SELECT count(*) FROM evidence_fts", evidence_count),
@@ -273,9 +313,10 @@ class ServingDatabaseExporter:
         issuers: Sequence[IssuerSpec],
         documents: Sequence[DocumentRecord],
         evidence: Sequence[EvidenceRecord],
+        unsupported_products: Sequence[UnsupportedProductRecord] = (),
         extra_metadata: Mapping[str, str] | None = None,
     ) -> ServingExport:
-        _validate_inputs(issuers, documents, evidence)
+        _validate_inputs(issuers, documents, evidence, unsupported_products)
         target.parent.mkdir(parents=True, exist_ok=True)
         token = uuid.uuid4().hex
         working = target.parent / f".{target.name}.{token}.build"
@@ -286,6 +327,16 @@ class ServingDatabaseExporter:
         ordered_issuers = tuple(sorted(issuers, key=lambda row: (row.sort_order, row.code)))
         ordered_documents = tuple(sorted(documents, key=lambda row: row.document_id))
         ordered_evidence = tuple(sorted(evidence, key=lambda row: row.evidence_id))
+        ordered_unsupported = tuple(
+            sorted(
+                unsupported_products,
+                key=lambda row: (row.source.issuer, row.source.product_code),
+            )
+        )
+        unsupported_payload = sorted(
+            (row.payload for row in ordered_unsupported),
+            key=canonical_json_bytes,
+        )
         page_count = sum(row.page_count for row in ordered_documents)
         metadata = {
             "schema_id": SERVING_SCHEMA_ID,
@@ -298,6 +349,13 @@ class ServingDatabaseExporter:
             "embedding_input_policy_version": EMBEDDING_POLICY_VERSION,
             "embedding_document_prefix": DOCUMENT_EMBEDDING_PREFIX,
             "embedding_query_prefix": QUERY_EMBEDDING_PREFIX,
+            "unsupported_document_count": str(len(ordered_unsupported)),
+            "unsupported_documents_sha256": canonical_sha256(
+                {
+                    "schema_version": "cardrag.unsupported-documents.v1",
+                    "documents": unsupported_payload,
+                }
+            ),
         }
         if extra_metadata:
             overlap = set(metadata).intersection(extra_metadata)
@@ -341,6 +399,28 @@ class ServingDatabaseExporter:
                 ),
             )
             connection.executemany(
+                """INSERT INTO unsupported_products
+                   (issuer,product_code,name,disposition,source_id,source_version,source_url,
+                    protected_magic,protected_sha256,protected_size_bytes,source_payload_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    (
+                        row.source.issuer,
+                        row.source.product_code,
+                        row.source.product_name,
+                        row.disposition,
+                        row.source.source_id,
+                        row.source.source_version,
+                        row.source.source_url,
+                        row.protected_magic,
+                        row.protected_sha256,
+                        row.protected_size_bytes,
+                        row.source_payload_json,
+                    )
+                    for row in ordered_unsupported
+                ),
+            )
+            connection.executemany(
                 "INSERT INTO pages(document_id,page,text,text_sha256) VALUES(?,?,?,?)",
                 (
                     (page.document_id, page.page, page.text, page.text_sha256)
@@ -375,6 +455,7 @@ class ServingDatabaseExporter:
                 connection,
                 issuer_count=len(ordered_issuers),
                 document_count=len(ordered_documents),
+                unsupported_product_count=len(ordered_unsupported),
                 page_count=page_count,
                 evidence_count=len(ordered_evidence),
             )
@@ -387,6 +468,7 @@ class ServingDatabaseExporter:
                 verify,
                 issuer_count=len(ordered_issuers),
                 document_count=len(ordered_documents),
+                unsupported_product_count=len(ordered_unsupported),
                 page_count=page_count,
                 evidence_count=len(ordered_evidence),
             )
@@ -408,6 +490,7 @@ class ServingDatabaseExporter:
             size_bytes=target.stat().st_size,
             issuer_count=len(ordered_issuers),
             document_count=len(ordered_documents),
+            unsupported_product_count=len(ordered_unsupported),
             page_count=page_count,
             evidence_count=len(ordered_evidence),
         )

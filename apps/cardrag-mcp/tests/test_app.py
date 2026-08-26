@@ -37,6 +37,7 @@ def test_exactly_five_approved_mcp_tools(active_runtime) -> None:
         "cursor",
         "limit",
     }
+    assert "unsupported_drm" in (by_name["get_product"].description or "")
 
 
 def test_public_health_and_protected_resources_metrics_and_mcp(active_runtime) -> None:
@@ -57,6 +58,23 @@ def test_public_health_and_protected_resources_metrics_and_mcp(active_runtime) -
         )
         assert authorized.status_code == 200
         assert {row["code"] for row in authorized.json()} == {"woori", "kb"}
+        products = client.get(
+            "/resources/products",
+            headers={"Authorization": f"Bearer {AUTH_VALUE}"},
+        )
+        assert products.status_code == 200
+        assert {row["availability"] for row in products.json()} == {
+            "available",
+            "unsupported_drm",
+        }
+        protected = client.get(
+            "/resources/products/woori/P-DRM",
+            headers={"Authorization": f"Bearer {AUTH_VALUE}"},
+        )
+        assert protected.status_code == 200
+        assert protected.json()["availability"] == "unsupported_drm"
+        assert "document" not in protected.json()
+        assert protected.json()["protected_magic"] == "SCDSA002"
         metrics = client.get(
             "/metrics",
             headers={"Authorization": f"Bearer {AUTH_VALUE}"},
