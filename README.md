@@ -1,4 +1,4 @@
-# CardRAG v1.0.7
+# CardRAG v1.0.8
 
 CardRAG는 카드사 상품설명서 PDF를 검색 가능한 형태로 만드는 두 프로세스
 서비스입니다. 운영 런타임은 다음 흐름만 사용합니다.
@@ -16,19 +16,28 @@ one-shot Worker -> immutable WebDAV artifacts -> always-on MCP
   대체하지 않습니다. 정확한 원본 지문이 일치하는 항목만 `unsupported_drm`으로
   명시하고 MCP 상품 조회에 그대로 노출합니다.
 
-v1.0.7 Worker는 `cardrag.generation.v3`/`cardrag.serving-db.v3`를 게시하며,
+v1.0.8 Worker는 `cardrag.generation.v3`/`cardrag.serving-db.v3`를 게시하며,
 우리카드의 정확히 승인된 Fasoo DRMONE 원본도 `unsupported_drm`으로 표현합니다.
 v1.0.4 이상 MCP는 기존 v2와 새 v3 세대를 모두 읽습니다. 따라서 v1.0.2에서
 업그레이드할 때는 **MCP를 먼저 v1.0.4 이상으로 교체한 뒤 Worker를 교체**해야 합니다.
 첫 v3 세대 게시 뒤에는 v1.0.2 MCP로 내리지 말고 v1.0.4 호환 수정 버전으로
 전진 복구합니다.
 
-v1.0.7은 희소 페이지 OCR의 의미 없는 빈 줄 정규화를 유지하면서, 서로 떨어진 짧은
-가시 요소가 여러 줄인 정상 출력을 추가로 허용합니다. 이 변경은 기존에 성공한 OCR
-바이트의 의미나 검증 결과를 바꾸지 않는 additive validator 수정입니다. 애플리케이션
-버전은 1.0.7로 올리되 native OCR의 processor contract는 `cardrag-worker/1.0.4`로
-유지합니다. 따라서 v1.0.4부터 v1.0.6까지 WebDAV에 완전히 게시한 검증 완료 OCR은
-이전 실패 실행을 재개하지 않는 v1.0.7 새 실행에서도 재사용됩니다.
+v1.0.7에서 희소 페이지 OCR의 의미 없는 빈 줄 정규화를 유지하면서, 서로 떨어진 짧은
+가시 요소가 여러 줄인 정상 출력을 추가로 허용했습니다. 이 additive validator 수정은
+v1.0.8에도 그대로 유지됩니다. v1.0.8은 한 PDF의 OCR이 설정된 재시도를 모두 소진하면
+문서 식별자와 길이가 제한된 안전한 실패 이유를 실행 상태와 로그에 기록한 뒤 나머지
+PDF를 계속 처리합니다. 그동안 완전히 검증된 문서별 native OCR cache는 즉시 보존되어
+다음 새 실행에서 재사용됩니다. 단, OCR 실패가 하나라도 남으면 임베딩·세대 seal 및
+`stable.json` 게시 전에 배치 전체를 실패시키므로 부분 검색 세대는 공개되지 않습니다.
+HTTP 상태로 명확히 분류되는 인증·설정 응답, 직접 연결 실패, 로컬 파일·상태 DB·코드
+불변식처럼 한 PDF에 한정할 수 없는 오류는 반복하지 않고 첫 발생에서 안전하게 전체
+실행을 중단합니다.
+
+애플리케이션 버전은 1.0.8로 올리되 native OCR의 processor contract는
+`cardrag-worker/1.0.4`로 유지합니다. 따라서 v1.0.4부터 v1.0.7까지 WebDAV에 완전히
+게시한 검증 완료 OCR은 이전 실패 실행을 재개하지 않는 v1.0.8 새 실행에서도
+재사용됩니다.
 
 신한카드 adapter는 회전하는 다운로드 토큰을 공식 모바일 상품공시 API에서
 다운로드 직전에 다시 조회합니다. 상품코드·이름·시행일·source version을 안정적인
@@ -41,11 +50,11 @@ EUC-KR 길이 제한과 bounded current-category fallback도 유지합니다. �
 
 ## 운영 이미지
 
-v1.0.7 운영 배포에는 다음 두 고정 태그를 사용합니다.
+v1.0.8 운영 배포에는 다음 두 고정 태그를 사용합니다.
 
 ```text
-ymtop59/mcp-card-prd-detail:1.0.7-worker
-ymtop59/mcp-card-prd-detail:1.0.7-mcp
+ymtop59/mcp-card-prd-detail:1.0.8-worker
+ymtop59/mcp-card-prd-detail:1.0.8-mcp
 ```
 
 Worker는 실행이 끝나면 종료되는 배치이고, MCP는 계속 실행되는 HTTP/MCP
@@ -53,7 +62,7 @@ Worker는 실행이 끝나면 종료되는 배치이고, MCP는 계속 실행되
 
 ## 운영 시작 순서
 
-1. 기존 `/opt/cardrag`을 보존하고 `/opt/cardrag-v1.0.7`에 immutable 배포 파일을
+1. 기존 `/opt/cardrag`을 보존하고 `/opt/cardrag-v1.0.8`에 immutable 배포 파일을
    준비합니다.
 2. `/etc/cardrag/worker.env`, `/etc/cardrag/mcp.env`, 파일 기반 비밀값을
    준비합니다.

@@ -302,6 +302,29 @@ class WorkerState:
             (reason[:4000], _now().isoformat(), run_id, document_id, stage_name),
         )
 
+    def stage_terminal_failed(
+        self,
+        run_id: str,
+        document_id: str,
+        stage_name: str,
+        error: str,
+    ) -> None:
+        now = _now().isoformat()
+        cursor = self.connection.execute(
+            """UPDATE stage SET status='failed',available_at=?,last_error=?,updated_at=?
+               WHERE run_id=? AND document_id=? AND stage_name=? AND status='running'""",
+            (
+                now,
+                error[:4000],
+                now,
+                run_id,
+                document_id,
+                stage_name,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("stage was not running")
+
     def stage_status_count(self, run_id: str, stage_name: str, status: StageStatus) -> int:
         row = self.connection.execute(
             """SELECT count(*) FROM stage
@@ -315,7 +338,7 @@ class WorkerState:
         run_id: str,
         document_id: str,
         stage_name: str,
-        error: BaseException,
+        error: BaseException | str,
         *,
         delay_seconds: float,
     ) -> str:

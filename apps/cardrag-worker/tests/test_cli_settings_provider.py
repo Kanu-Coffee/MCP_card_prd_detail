@@ -11,7 +11,8 @@ from typer.testing import CliRunner
 
 import cardrag_worker.cli as cli_module
 from cardrag_worker.adoption import AdoptionError
-from cardrag_worker.providers import CodexOCRProvider
+from cardrag_worker.pipeline import OCRDocumentFailuresError, OCRFailureRecord
+from cardrag_worker.providers import CodexOCRProvider, ProviderError
 from cardrag_worker.settings import WorkerSettings, _read_secret
 from cardrag_worker.state import AlreadyRunning
 
@@ -29,6 +30,47 @@ def test_cli_already_running_is_success_and_resume_passes_exact_id(
     resumed = CliRunner().invoke(cli_module.app, ["resume", "run-123"])
     assert resumed.exit_code == 0
     assert "busy:run-123" in resumed.stdout
+
+
+def test_cli_ocr_failure_aggregate_is_safe_bounded_and_exits_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "RAW_PROVIDER_STDERR_SECRET_SENTINEL"
+    untrusted_product_name = "RAW_UNTRUSTED_PRODUCT_NAME\n<markup>"
+    failure = OCRFailureRecord(
+        issuer="kb",
+        product_code="09072",
+        product_name=untrusted_product_name,
+        file_name="test.pdf",
+        document_id="doc_" + "a" * 64,
+        pdf_sha256="b" * 64,
+        page_count=49,
+        attempts=4,
+        reason_code="provider_exit_17",
+        reason="The OCR provider process exited with code 17.",
+    )
+    aggregate = OCRDocumentFailuresError(
+        run_id="run-safe",
+        report_path=tmp_path / "ocr-failures.json",
+        failures=(failure,) * 7,
+    )
+
+    async def failed(_resume: str | None) -> dict[str, Any]:
+        raise aggregate from ProviderError(raw_sentinel)
+
+    monkeypatch.setattr(cli_module, "_run", failed)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "ocr_document_failures"
+    assert payload["ocr_failure_count"] == 7
+    assert payload["report"] == "runs/run-safe/reports/ocr-failures.json"
+    assert len(payload["sample"]) == 5
+    assert "product_name" not in payload["sample"][0]
+    assert untrusted_product_name not in result.stdout
+    assert raw_sentinel not in result.stdout
 
 
 def test_adoption_guard_cli_fails_closed_without_echoing_remote_content(

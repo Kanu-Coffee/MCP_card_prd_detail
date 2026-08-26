@@ -21,4 +21,4 @@ __all__ = [
 # Application SemVer is intentionally independent from the immutable native OCR
 # processor contract. Patch releases may retain that older contract so already
 # verified remote OCR artifacts remain reusable without resuming a failed run.
-__version__ = "1.0.7"
+__version__ = "1.0.8"
