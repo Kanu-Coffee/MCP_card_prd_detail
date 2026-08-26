@@ -9,8 +9,13 @@ import pytest
 from cardrag_worker.issuers.common import IssuerMarkupChanged
 from cardrag_worker.issuers.kb import SPEC as KB_SPEC
 from cardrag_worker.issuers.kb import KBAdapter, parse_listing
-from cardrag_worker.issuers.shinhan import ShinhanAdapter
-from cardrag_worker.issuers.woori import DETAIL_PATH, MAIN_PATH, WooriAdapter
+from cardrag_worker.issuers.shinhan import (
+    DOWNLOAD_NAME_METADATA_KEY,
+    REFRESH_MAXIMUM_PAGES,
+    ShinhanAdapter,
+)
+from cardrag_worker.issuers.woori import DETAIL_PATH, MAIN_PATH, WooriAdapter, parse_detail_records
+from cardrag_worker.issuers.woori import SPEC as WOORI_SPEC
 
 
 class Response:
@@ -101,30 +106,119 @@ class KBClient:
         return Response(text="" if self.empty else (KB_PAGE_1 if page == "1" else KB_PAGE_2))
 
 
-def shinhan_page(code: str, *, cursor: str | None = None, done: bool = False) -> str:
+def shinhan_page(
+    code: str,
+    *,
+    tokens: tuple[str, ...] | None = None,
+    download_name: str | None = None,
+    download_names: tuple[str, ...] | None = None,
+    product_name: str | None = None,
+    cursor: str | None = None,
+    done: bool = False,
+) -> str:
     marker = "<!-- DONE -->" if done else f"<!-- MORE({cursor}) -->"
+    current_tokens = tokens or (f"TOKEN-{code}",)
+    current_download_name = download_name or f"{code} 안내장"
+    current_download_names = download_names or tuple(current_download_name for _ in current_tokens)
+    if len(current_download_names) != len(current_tokens):
+        raise ValueError("test fixture token and download-name counts differ")
+    current_product_name = product_name or f"신한 {code} 카드"
+    rows = "".join(
+        f"""
+        <tr name="pdPbnRow"><td>{current_product_name}</td><td>2026.08.25</td>
+        <td onclick="fnRetrieveFile('{token}','{row_download_name}')">PDF</td>
+        <td onclick="openSvPifPop('{code}','{current_product_name}')">이력</td></tr>
+        """
+        for token, row_download_name in zip(current_tokens, current_download_names, strict=True)
+    )
     return f"""
-    <table><tr name="pdPbnRow"><td>신한 {code} 카드 2026.08.25</td>
-    <td onclick="fnRetrieveFile('TOKEN-{code}','{code}.pdf')">PDF</td>
-    <td onclick="openSvPifPop('{code}','신한 {code} 카드')">이력</td></tr></table>
+    <table>{rows}</table>
     {marker}
     """
 
 
 class ShinhanClient:
-    def __init__(self, *, empty: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        empty: bool = False,
+        initial_fil_nm_prefix: str = "FILNM",
+        refresh_code: str = "P1",
+        refresh_tokens: tuple[str, ...] = ("TOKEN-REFRESHED",),
+        refresh_download_name: str = "P1 안내장",
+    ) -> None:
         self.empty = empty
+        self.initial_fil_nm_prefix = initial_fil_nm_prefix
+        self.refresh_code = refresh_code
+        self.refresh_tokens = refresh_tokens
+        self.refresh_download_name = refresh_download_name
         self.cursors: list[str] = []
+        self.searches: list[str] = []
+        self.gets = 0
 
     async def get(self, url: str, **kwargs: Any) -> Response:
+        self.gets += 1
         return Response(text="landing")
 
     async def post(self, url: str, **kwargs: Any) -> Response:
         cursor = str(kwargs["data"]["nxtQyKey"])
+        search = str(kwargs["data"]["crdPdGuiNm"])
         self.cursors.append(cursor)
+        self.searches.append(search)
         if self.empty:
             return Response(content="<!-- DONE -->".encode("euc-kr"))
-        html = shinhan_page("P1", cursor="next") if not cursor else shinhan_page("P2", done=True)
+        if search:
+            html = shinhan_page(
+                self.refresh_code,
+                tokens=self.refresh_tokens,
+                download_name=self.refresh_download_name,
+                done=True,
+            )
+        elif not cursor:
+            html = shinhan_page(
+                "P1",
+                tokens=(f"{self.initial_fil_nm_prefix}-P1",),
+                cursor="next",
+            )
+        else:
+            html = shinhan_page(
+                "P2",
+                tokens=(f"{self.initial_fil_nm_prefix}-P2",),
+                done=True,
+            )
+        return Response(content=html.encode("euc-kr"))
+
+
+class ShinhanConflictingDiscoveryClient(ShinhanClient):
+    async def post(self, url: str, **kwargs: Any) -> Response:
+        html = shinhan_page(
+            "P1",
+            tokens=("FILNM-A", "FILNM-B"),
+            download_names=("P1 안내장", "P1 변경 안내장"),
+            done=True,
+        )
+        return Response(content=html.encode("euc-kr"))
+
+
+class ShinhanUnboundedRefreshClient:
+    def __init__(self, *, repeat_cursor: bool = False) -> None:
+        self.repeat_cursor = repeat_cursor
+        self.posts = 0
+        self.gets = 0
+
+    async def get(self, url: str, **kwargs: Any) -> Response:
+        self.gets += 1
+        return Response(text="landing")
+
+    async def post(self, url: str, **kwargs: Any) -> Response:
+        assert kwargs["data"]["crdPdGuiNm"] == "신한 P1 카드"
+        self.posts += 1
+        next_cursor = "repeat" if self.repeat_cursor else str(self.posts)
+        html = shinhan_page(
+            "P1",
+            tokens=(f"FILNM-REFRESH-{self.posts}",),
+            cursor=next_cursor,
+        )
         return Response(content=html.encode("euc-kr"))
 
 
@@ -200,6 +294,109 @@ def test_kb_protected_sources_are_exact_current_byte_identities() -> None:
     )
 
 
+def test_woori_protected_sources_are_exact_current_byte_identities() -> None:
+    assert tuple(item.contract_payload for item in WOORI_SPEC.protected_source_allowances) == (
+        {
+            "magic": "FASOO_DRMONE",
+            "product_code": "102958",
+            "sha256": "ea143c393bed26325e75ed55be266c07281678a1e37cac0fc53d6b248c3f6f46",
+            "size_bytes": 2_132_864,
+            "source_id": "source_854d1b4effb9473acc693aacc76484de24bfb658fb31df126b908d093a4e815a",
+            "source_url": (
+                "https://pc.wooricard.com/upload/cardClause/2024/3/19/"
+                "574d01a3-65d0-42f3-bec0-e82c77710f49.pdf"
+            ),
+            "source_version": "2",
+        },
+        {
+            "magic": "FASOO_DRMONE",
+            "product_code": "203988",
+            "sha256": "1fefe29375616a983941675b6394e5f8406f601cef362ffb799cd61f49c8f0e3",
+            "size_bytes": 1_097_360,
+            "source_id": "source_caa72dffbeafe404460e0a0a427467b5d99ee619c802a4b6db77719f666d0854",
+            "source_url": (
+                "https://pc.wooricard.com/upload/cardClause/2021/10/5/"
+                "be9faab5-be15-4a2a-9db1-9189aafc7852.pdf"
+            ),
+            "source_version": "11",
+        },
+        {
+            "magic": "SCDSA004",
+            "product_code": "832388",
+            "sha256": "dfba0d8a61a0ec3783f133be6e45c2e465a6bcbd83f056b6b68048a0643e5c61",
+            "size_bytes": 417_596,
+            "source_id": "source_8aea463c3fc9d8e43ae5dd894af4ca54d47686dc9a77326d1ab6576f34f074bc",
+            "source_url": (
+                "https://pc.wooricard.com/upload/cardClause/2026/8/11/"
+                "f1f9d290-30e9-43ea-abe0-6f43e947eaa5.pdf"
+            ),
+            "source_version": "11",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("product_code", "product_name", "file_path", "file_name", "begin", "version"),
+    (
+        (
+            "102958",
+            "KREAM 우리카드_메탈",
+            "/upload/cardClause/2024/3/19/574d01a3-65d0-42f3-bec0-e82c77710f49.pdf",
+            "3.상품안내장_KREAM 우리카드(메탈).pdf",
+            "20240320",
+            "2",
+        ),
+        (
+            "203988",
+            "우리V카드 Oil 100",
+            "/upload/cardClause/2021/10/5/be9faab5-be15-4a2a-9db1-9189aafc7852.pdf",
+            "203988_우리V카드 Oil 100_210909 .pdf",
+            "20210924",
+            "11",
+        ),
+        (
+            "832388",
+            "위메프 우리체크",
+            "/upload/cardClause/2026/8/11/f1f9d290-30e9-43ea-abe0-6f43e947eaa5.pdf",
+            "7.(832388)위메프 우리체크_202311.pdf",
+            "20230102",
+            "11",
+        ),
+    ),
+)
+def test_woori_current_protected_detail_rows_recalculate_allowlisted_source_ids(
+    product_code: str,
+    product_name: str,
+    file_path: str,
+    file_name: str,
+    begin: str,
+    version: str,
+) -> None:
+    records = parse_detail_records(
+        {
+            "rows": [
+                {
+                    "filePath": file_path,
+                    "fileNm": file_name,
+                    "beginDt": begin,
+                    "gdccVer": version,
+                }
+            ]
+        },
+        product_code=product_code,
+        product_name=product_name,
+        discovered_at=datetime(2026, 8, 26, tzinfo=UTC),
+    )
+    allowance = next(
+        item for item in WOORI_SPEC.protected_source_allowances if item.product_code == product_code
+    )
+
+    assert len(records) == 1
+    assert records[0].source_id == allowance.source_id
+    assert records[0].source_url == allowance.source_url
+    assert records[0].source_version == allowance.source_version
+
+
 @pytest.mark.asyncio
 async def test_shinhan_cursor_and_post_download_contract() -> None:
     adapter = ShinhanAdapter(minimum_records=1)
@@ -208,9 +405,98 @@ async def test_shinhan_cursor_and_post_download_contract() -> None:
     snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
     assert [row.product_code for row in snapshot.records] == ["P1", "P2"]
     assert client.cursors == ["", "next"]
+    assert snapshot.records[0].source_post_id == "credit:P1"
+    assert snapshot.records[0].file_name == "P1 안내장.pdf"
+    assert snapshot.records[0].metadata == {DOWNLOAD_NAME_METADATA_KEY: "P1 안내장"}
     request = await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
     assert request.method == "POST"
-    assert request.form == {"filNm": "TOKEN-P1", "pbnNm": "P1.pdf"}
+    assert request.form == {"filNm": "TOKEN-REFRESHED", "pbnNm": "P1 안내장"}
+    assert client.searches == ["", "", "신한 P1 카드"]
+    assert client.gets == 2
+
+
+@pytest.mark.asyncio
+async def test_shinhan_token_rotation_does_not_change_source_or_snapshot_identity() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    first = await adapter.discover_current(
+        ShinhanClient(initial_fil_nm_prefix="FILNM-OLD")  # type: ignore[arg-type]
+    )
+    rotated = await adapter.discover_current(
+        ShinhanClient(initial_fil_nm_prefix="FILNM-ROTATED")  # type: ignore[arg-type]
+    )
+
+    assert [row.source_id for row in first.records] == [row.source_id for row in rotated.records]
+    assert first.snapshot_id == rotated.snapshot_id
+    assert "FILNM-OLD" not in str(first.payload)
+    assert "FILNM-ROTATED" not in str(rotated.payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client",
+    [
+        ShinhanClient(refresh_download_name="P1 변경 안내장"),
+        ShinhanClient(refresh_tokens=("TOKEN-A", "TOKEN-B")),
+    ],
+    ids=("stable-source-mismatch", "duplicate-stable-source"),
+)
+async def test_shinhan_download_refresh_requires_one_exact_stable_match(client: ShinhanClient) -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
+
+    with pytest.raises(IssuerMarkupChanged, match="exactly one stable source match"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_shinhan_discovery_rejects_conflicting_stable_sources() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+
+    with pytest.raises(IssuerMarkupChanged, match="conflicting stable source"):
+        await adapter.discover_current(ShinhanConflictingDiscoveryClient())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_shinhan_download_refresh_rejects_repeated_cursor() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    snapshot = await adapter.discover_current(ShinhanClient())  # type: ignore[arg-type]
+    client = ShinhanUnboundedRefreshClient(repeat_cursor=True)
+
+    with pytest.raises(IssuerMarkupChanged, match="cursor repeated"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+    assert client.posts == 2
+
+
+@pytest.mark.asyncio
+async def test_shinhan_download_refresh_is_strictly_page_bounded() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    snapshot = await adapter.discover_current(ShinhanClient())  # type: ignore[arg-type]
+    client = ShinhanUnboundedRefreshClient()
+
+    with pytest.raises(IssuerMarkupChanged, match="page limit"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+    assert client.posts == REFRESH_MAXIMUM_PAGES
+
+
+@pytest.mark.asyncio
+async def test_shinhan_download_rejects_wrong_issuer_or_category_before_network() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    client = ShinhanClient()
+    snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
+    source = snapshot.records[0]
+    calls_before = (client.gets, len(client.cursors))
+
+    with pytest.raises(ValueError, match="issuer"):
+        await adapter.prepare_download(client, replace(source, issuer="kb"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="category"):
+        await adapter.prepare_download(client, replace(source, category="corporate"))  # type: ignore[arg-type]
+    assert (client.gets, len(client.cursors)) == calls_before
 
 
 @pytest.mark.asyncio

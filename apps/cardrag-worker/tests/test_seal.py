@@ -112,12 +112,12 @@ def build_seal(root: Path, run_id: str = "run-sealed") -> dict[str, Any]:
         database_path,
         generation_id=generation_id,
         corpus_sha256=corpus_sha,
+        contract_sha256=contract_sha,
         embedding_provider="openrouter",
         embedding_model="embed",
         issuers=[DummyAdapter.spec],
         documents=[document],
         evidence=[evidence],
-        extra_metadata={"contract_sha256": contract_sha},
     )
     manifest = GenerationManifest(
         generation_id=generation_id,

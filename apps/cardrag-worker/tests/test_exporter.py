@@ -70,18 +70,20 @@ def test_exporter_builds_vacuumed_exact_schema_and_normalized_vectors(tmp_path: 
         target,
         generation_id="g-test",
         corpus_sha256="b" * 64,
+        contract_sha256="c" * 64,
         embedding_provider="openrouter",
         embedding_model="openai/text-embedding-3-small",
         issuers=[issuer],
         documents=[document],
         evidence=[evidence],
-        extra_metadata={"contract_sha256": "c" * 64},
     )
     assert result.path == target
     connection = sqlite3.connect(f"{target.as_uri()}?mode=ro&immutable=1", uri=True)
     try:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
-        assert metadata["schema_id"] == "cardrag.serving-db.v2"
+        assert metadata["schema_id"] == "cardrag.serving-db.v3"
+        assert metadata["corpus_sha256"] == "b" * 64
+        assert metadata["contract_sha256"] == "c" * 64
         assert metadata["unsupported_document_count"] == "0"
         assert metadata["embedding_input_policy_version"] == EMBEDDING_POLICY_VERSION
         assert metadata["embedding_document_prefix"] == DOCUMENT_EMBEDDING_PREFIX
@@ -122,13 +124,14 @@ def test_exporter_binds_explicit_unsupported_product_audit_payload(tmp_path: Pat
         source=source,
         protected_sha256="d" * 64,
         protected_size_bytes=545_086,
-        protected_magic="SCDSA002",
+        protected_magic="FASOO_DRMONE",
     )
     target = tmp_path / "index.sqlite3"
     result = ServingDatabaseExporter().export(
         target,
         generation_id="g-test",
         corpus_sha256="b" * 64,
+        contract_sha256="c" * 64,
         embedding_provider="openrouter",
         embedding_model="openai/text-embedding-3-small",
         issuers=[issuer],
@@ -148,7 +151,7 @@ def test_exporter_binds_explicit_unsupported_product_audit_payload(tmp_path: Pat
             }
         )
         row = connection.execute(
-            """SELECT issuer,product_code,disposition,source_id,protected_sha256,
+            """SELECT issuer,product_code,disposition,source_id,protected_magic,protected_sha256,
                       protected_size_bytes,source_payload_json
                FROM unsupported_products"""
         ).fetchone()
@@ -157,6 +160,7 @@ def test_exporter_binds_explicit_unsupported_product_audit_payload(tmp_path: Pat
             "protected-1",
             "unsupported_drm",
             source.source_id,
+            "FASOO_DRMONE",
             "d" * 64,
             545_086,
             unsupported.source_payload_json,
@@ -190,6 +194,7 @@ def test_exporter_rejects_product_served_and_unsupported_at_once(tmp_path: Path)
             tmp_path / "bad.sqlite3",
             generation_id="g-test",
             corpus_sha256="b" * 64,
+            contract_sha256="c" * 64,
             embedding_provider="openrouter",
             embedding_model="model",
             issuers=[issuer],
@@ -217,6 +222,7 @@ def test_exporter_rejects_tampered_evidence_spans(
             tmp_path / "bad.sqlite3",
             generation_id="g-test",
             corpus_sha256="b" * 64,
+            contract_sha256="c" * 64,
             embedding_provider="openrouter",
             embedding_model="model",
             issuers=[issuer],
@@ -233,6 +239,7 @@ def test_exporter_rejects_zero_and_nonfinite_embeddings(tmp_path: Path) -> None:
                 tmp_path / ("bad-" + str(len(list(tmp_path.iterdir()))) + ".sqlite3"),
                 generation_id="g-test",
                 corpus_sha256="b" * 64,
+                contract_sha256="c" * 64,
                 embedding_provider="openrouter",
                 embedding_model="model",
                 issuers=[issuer],

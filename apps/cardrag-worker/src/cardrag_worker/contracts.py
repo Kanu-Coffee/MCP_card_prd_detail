@@ -14,8 +14,8 @@ from typing import Any, Literal, Protocol
 import httpx
 from cardrag_core import issuer_code
 
-SERVING_SCHEMA_ID = "cardrag.serving-db.v2"
-GENERATION_SCHEMA_ID = "cardrag.generation.v2"
+SERVING_SCHEMA_ID: Literal["cardrag.serving-db.v3"] = "cardrag.serving-db.v3"
+GENERATION_SCHEMA_ID: Literal["cardrag.generation.v3"] = "cardrag.generation.v3"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
 
@@ -50,7 +50,7 @@ class ProtectedSourceAllowance:
     source_url: str
     sha256: str
     size_bytes: int
-    magic: Literal["SCDSA002", "SCDSA004"]
+    magic: Literal["SCDSA002", "SCDSA004", "FASOO_DRMONE"]
 
     def __post_init__(self) -> None:
         if (
@@ -61,6 +61,7 @@ class ProtectedSourceAllowance:
             or not self.source_url.startswith("https://")
             or not _SHA256.fullmatch(self.sha256)
             or self.size_bytes < 1
+            or self.magic not in {"SCDSA002", "SCDSA004", "FASOO_DRMONE"}
         ):
             raise ValueError("protected source allowance requires an exact source and byte identity")
 
@@ -173,11 +174,15 @@ class UnsupportedProductRecord:
     source: SourceRecord
     protected_sha256: str
     protected_size_bytes: int
-    protected_magic: Literal["SCDSA002", "SCDSA004"]
+    protected_magic: Literal["SCDSA002", "SCDSA004", "FASOO_DRMONE"]
     disposition: Literal["unsupported_drm"] = "unsupported_drm"
 
     def __post_init__(self) -> None:
-        if not _SHA256.fullmatch(self.protected_sha256) or self.protected_size_bytes < 1:
+        if (
+            not _SHA256.fullmatch(self.protected_sha256)
+            or self.protected_size_bytes < 1
+            or self.protected_magic not in {"SCDSA002", "SCDSA004", "FASOO_DRMONE"}
+        ):
             raise ValueError("unsupported product requires an exact protected byte identity")
 
     @property

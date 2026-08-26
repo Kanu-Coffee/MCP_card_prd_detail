@@ -38,6 +38,7 @@ from cardrag_core import (
 )
 
 from .contracts import (
+    GENERATION_SCHEMA_ID,
     SERVING_SCHEMA_ID,
     DocumentRecord,
     EvidenceRecord,
@@ -917,15 +918,13 @@ class WorkerPipeline:
             database_path,
             generation_id=generation_id,
             corpus_sha256=corpus_sha256,
+            contract_sha256=contract_sha256,
             embedding_provider=self.embeddings.provider,
             embedding_model=self.embeddings.model,
             issuers=[adapter.spec for adapter in self.adapters],
             documents=[document.record for document in processed],
             evidence=evidence,
             unsupported_products=unsupported,
-            extra_metadata={
-                "contract_sha256": contract_sha256,
-            },
         )
         current_remote = await self.webdav.validated_current_generation()
         if current_remote is None and await self.webdav.get_bytes(STABLE_POINTER_PATH) is not None:
@@ -957,8 +956,10 @@ class WorkerPipeline:
             )
         )
         manifest = GenerationManifest(
+            schema_version=GENERATION_SCHEMA_ID,
             generation_id=generation_id,
             created_at=datetime.now(UTC),
+            serving_schema=SERVING_SCHEMA_ID,
             serving_database=ArtifactRef(
                 sha256=export.sha256,
                 size_bytes=export.size_bytes,
@@ -973,7 +974,7 @@ class WorkerPipeline:
                 dimension=1536,
                 count=len(evidence),
             ),
-            issuer_codes=tuple(sorted({row.record.issuer for row in processed})),
+            issuer_codes=tuple(sorted(adapter.spec.code for adapter in self.adapters)),
             counts=GenerationCounts(
                 documents=len(processed),
                 pdf_objects=len({row.record.pdf_sha256 for row in processed}),
@@ -1061,6 +1062,7 @@ class WorkerPipeline:
             manifest.generation_id != generation_id
             or manifest.corpus_sha256 != corpus_sha256
             or manifest.contract_sha256 != contract_sha256
+            or manifest.schema_version != GENERATION_SCHEMA_ID
             or manifest.serving_schema != SERVING_SCHEMA_ID
         ):
             raise RuntimeError("sealed generation manifest identity/contract mismatch")

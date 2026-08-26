@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -32,6 +33,22 @@ from cardrag_core import (
     generation_ready_path,
     object_path,
     sha256_bytes,
+)
+
+GenerationSchema = Literal[
+    "cardrag.generation.v1",
+    "cardrag.generation.v2",
+    "cardrag.generation.v3",
+]
+ServingSchema = Literal[
+    "cardrag.serving-db.v1",
+    "cardrag.serving-db.v2",
+    "cardrag.serving-db.v3",
+]
+SCHEMA_PAIRS: tuple[tuple[GenerationSchema, ServingSchema], ...] = (
+    ("cardrag.generation.v1", "cardrag.serving-db.v1"),
+    ("cardrag.generation.v2", "cardrag.serving-db.v2"),
+    ("cardrag.generation.v3", "cardrag.serving-db.v3"),
 )
 
 
@@ -214,7 +231,7 @@ def test_stable_pointer_is_the_only_atomic_overwrite_path(
 def _publish_current_generation(
     client: WebDAVClient,
     *,
-    legacy_v1: bool = False,
+    schema_pair: tuple[GenerationSchema, ServingSchema],
 ) -> tuple[GenerationManifest, ArtifactRef]:
     pdf = CASPublisher(client).publish_bytes(b"%PDF-test", media_type="application/pdf")
     generation_id = "gen-20260825"
@@ -231,10 +248,10 @@ def _publish_current_generation(
         page_count=1,
     )
     manifest = GenerationManifest(
-        schema_version="cardrag.generation.v1" if legacy_v1 else "cardrag.generation.v2",
+        schema_version=schema_pair[0],
         generation_id=generation_id,
         created_at=datetime(2026, 8, 25, tzinfo=UTC),
-        serving_schema="cardrag.serving-db.v1" if legacy_v1 else "cardrag.serving-db.v2",
+        serving_schema=schema_pair[1],
         serving_database=database,
         corpus_sha256=sha256_bytes(b"corpus"),
         contract_sha256=sha256_bytes(b"contract"),
@@ -274,12 +291,14 @@ def _publish_current_generation(
     return manifest, pdf
 
 
-def test_mcp_facade_exposes_verified_reads_only(
+@pytest.mark.parametrize("schema_pair", SCHEMA_PAIRS)
+def test_mcp_facade_exposes_verified_supported_schema_reads_only(
     webdav: tuple[_MemoryWebDAV, WebDAVClient],
     tmp_path: Path,
+    schema_pair: tuple[GenerationSchema, ServingSchema],
 ) -> None:
     _, client = webdav
-    manifest, pdf = _publish_current_generation(client)
+    manifest, pdf = _publish_current_generation(client, schema_pair=schema_pair)
     read_only = client.read_only()
     assert not hasattr(read_only, "put")
     assert not hasattr(read_only, "move")
@@ -287,28 +306,18 @@ def test_mcp_facade_exposes_verified_reads_only(
     reader = MCPArtifactReader(read_only)
     current = reader.read_current_generation()
     assert current.manifest == manifest
+    assert (current.manifest.schema_version, current.manifest.serving_schema) == schema_pair
     assert reader.read_object(pdf) == b"%PDF-test"
     destination = (tmp_path / "index.sqlite3").resolve()
     reader.download_serving_database(destination, current=current)
     assert destination.read_bytes() == b"SQLite format 3\x00test"
 
 
-def test_artifact_reader_verifies_a_legacy_v1_head_for_worker_successor(
-    webdav: tuple[_MemoryWebDAV, WebDAVClient],
-) -> None:
-    _, client = webdav
-    manifest, _ = _publish_current_generation(client, legacy_v1=True)
-    current = MCPArtifactReader(client.read_only()).read_current_generation()
-    assert current.manifest == manifest
-    assert current.manifest.schema_version == "cardrag.generation.v1"
-    assert current.manifest.serving_schema == "cardrag.serving-db.v1"
-
-
 def test_mcp_facade_rejects_pointer_ready_tampering(
     webdav: tuple[_MemoryWebDAV, WebDAVClient],
 ) -> None:
     backend, client = webdav
-    _publish_current_generation(client)
+    _publish_current_generation(client, schema_pair=SCHEMA_PAIRS[-1])
     pointer = GenerationPointer.model_validate_json(backend.files[STABLE_POINTER_PATH.as_posix()])
     forged = pointer.model_copy(update={"ready_sha256": "0" * 64})
     backend.files[STABLE_POINTER_PATH.as_posix()] = forged.canonical_bytes()

@@ -31,7 +31,10 @@ _REGISTRATIONS = tuple(
 )
 
 REGISTERED_ISSUERS: Mapping[str, Registration] = {row.spec.code: row for row in _REGISTRATIONS}
-DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan")
+# Keep the fail-safe CLI default aligned with the production Compose default.
+# Shinhan remains registered and can be re-enabled explicitly after its current
+# disclosure endpoint is verified to return PDFs again.
+DEFAULT_ENABLED_ISSUERS = ("woori", "kb")
 
 
 def enabled_issuer_codes(

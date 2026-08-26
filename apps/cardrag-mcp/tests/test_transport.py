@@ -100,6 +100,13 @@ async def test_stable_etag_skips_control_files_but_not_first_verified_read() -> 
     first = await reader.read_stable_generation()
     second = await reader.read_stable_generation()
     assert first == second
+    assert first.serving_schema == "cardrag.serving-db.v3"
+    assert first.corpus_sha256 == "c" * 64
+    assert first.contract_sha256 == "d" * 64
+    assert first.issuer_codes == ("woori",)
+    assert first.document_count == 1
+    assert first.documents[0].issuer == "woori"
+    assert first.documents[0].page_count == 1
     assert facade.calls == 1
 
     client.etag = '"etag-2"'

@@ -1,4 +1,4 @@
-"""Validation and immutable loading for ``cardrag.serving-db.v2``."""
+"""Validation and immutable loading for supported serving database generations."""
 
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ from numpy.typing import NDArray
 
 from cardrag_mcp.models import ServingMetadata
 
-SCHEMA_ID = "cardrag.serving-db.v2"
+SCHEMA_ID = "cardrag.serving-db.v3"
+SUPPORTED_SCHEMA_IDS = frozenset({"cardrag.serving-db.v2", SCHEMA_ID})
 UNSUPPORTED_DOCUMENTS_SCHEMA = "cardrag.unsupported-documents.v1"
 FLOAT32_BYTES = 4
 EMBEDDING_BYTES = EMBEDDING_DIMENSION * FLOAT32_BYTES
@@ -141,6 +142,8 @@ def _reject_json_constant(value: str) -> None:
 def _validate_unsupported_products(
     connection: sqlite3.Connection,
     values: Mapping[str, str],
+    *,
+    schema_id: str,
 ) -> tuple[int, str]:
     expected_count = _integer_metadata(values, "unsupported_document_count")
     actual_count = int(
@@ -161,6 +164,9 @@ def _validate_unsupported_products(
     }
     payloads: list[dict[str, object]] = []
     source_ids: set[str] = set()
+    allowed_protected_magic = {"SCDSA002", "SCDSA004"}
+    if schema_id == "cardrag.serving-db.v3":
+        allowed_protected_magic.add("FASOO_DRMONE")
     rows = connection.execute(
         """
         SELECT issuer,product_code,name,disposition,source_id,source_version,source_url,
@@ -194,7 +200,7 @@ def _validate_unsupported_products(
             or len(source_version) > 512
             or not source_url.startswith("https://")
             or len(source_url) > 4_096
-            or protected_magic not in {"SCDSA002", "SCDSA004"}
+            or protected_magic not in allowed_protected_magic
             or _SHA256.fullmatch(protected_sha256) is None
             or isinstance(protected_size, bool)
             or not isinstance(protected_size, int)
@@ -309,6 +315,7 @@ def validate_schema(
         "schema_id",
         "generation_id",
         "corpus_sha256",
+        "contract_sha256",
         "embedding_provider",
         "embedding_model",
         "embedding_input_policy_version",
@@ -317,6 +324,9 @@ def validate_schema(
     )
     if any(not values.get(key) for key in required_text):
         raise ServingDatabaseError("required serving metadata is missing")
+    schema_id = values["schema_id"]
+    if schema_id not in SUPPORTED_SCHEMA_IDS:
+        raise ServingDatabaseError("serving database schema version is incompatible")
     if (
         values["embedding_input_policy_version"] != EMBEDDING_POLICY_VERSION
         or values["embedding_document_prefix"] != DOCUMENT_EMBEDDING_PREFIX
@@ -325,7 +335,11 @@ def validate_schema(
         raise ServingDatabaseError("serving database embedding input policy is incompatible")
     dimension = _integer_metadata(values, "embedding_dimension")
     count = _integer_metadata(values, "embedding_count")
-    unsupported_count, unsupported_sha256 = _validate_unsupported_products(connection, values)
+    unsupported_count, unsupported_sha256 = _validate_unsupported_products(
+        connection,
+        values,
+        schema_id=schema_id,
+    )
     expected_vector_bytes = count * EMBEDDING_BYTES
     if maximum_vector_bytes is not None and expected_vector_bytes > maximum_vector_bytes:
         raise ServingDatabaseError(
@@ -335,9 +349,10 @@ def validate_schema(
     try:
         metadata = ServingMetadata.model_validate(
             {
-                "schema_id": values["schema_id"],
+                "schema_id": schema_id,
                 "generation_id": values["generation_id"],
                 "corpus_sha256": values["corpus_sha256"],
+                "contract_sha256": values["contract_sha256"],
                 "embedding_provider": values["embedding_provider"],
                 "embedding_model": values["embedding_model"],
                 "embedding_input_policy_version": values["embedding_input_policy_version"],
@@ -348,7 +363,7 @@ def validate_schema(
             }
         )
     except Exception as exc:
-        raise ServingDatabaseError("serving metadata does not satisfy v2") from exc
+        raise ServingDatabaseError("serving metadata does not satisfy a supported schema") from exc
 
     evidence_count = int(connection.execute("SELECT count(*) FROM evidence").fetchone()[0])
     fts_count = int(connection.execute("SELECT count(*) FROM evidence_fts").fetchone()[0])

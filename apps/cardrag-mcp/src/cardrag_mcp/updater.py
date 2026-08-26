@@ -39,14 +39,25 @@ class RemoteArtifact:
 @dataclass(frozen=True, slots=True)
 class RemoteDocument:
     document_id: str
+    issuer: str
+    page_count: int
     pdf: RemoteArtifact
+    ocr_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RemoteGeneration:
     generation_id: str
+    serving_schema: str
+    corpus_sha256: str
+    contract_sha256: str
     database: RemoteArtifact
     documents: tuple[RemoteDocument, ...]
+    issuer_codes: tuple[str, ...]
+    document_count: int
+    pdf_object_count: int
+    ocr_object_count: int
+    chunk_count: int
     embedding_provider: str
     embedding_model: str
     embedding_dimension: int
@@ -134,6 +145,7 @@ class WebDAVUpdater:
                 raise RuntimeError("stable WebDAV channel is absent")
             if not GENERATION_ID.fullmatch(generation.generation_id):
                 raise RuntimeError("remote generation ID is unsafe")
+            self._verify_remote_manifest_contract(generation)
             if self.store.active_generation_id == generation.generation_id:
                 # A no-op channel poll is also the repair loop for the active
                 # generation's local CAS. Request handlers never reach out to
@@ -213,6 +225,32 @@ class WebDAVUpdater:
                 shutil.rmtree(staging)
             raise
 
+    @staticmethod
+    def _verify_remote_manifest_contract(generation: RemoteGeneration) -> None:
+        """Defend the updater protocol even when its reader is not the core facade."""
+
+        if generation.issuer_codes != tuple(sorted(set(generation.issuer_codes))):
+            raise RuntimeError("generation manifest issuer codes are not sorted and unique")
+        if generation.document_count != len(generation.documents):
+            raise RuntimeError("generation manifest document count differs from its documents")
+        if generation.pdf_object_count != len(
+            {document.pdf.sha256 for document in generation.documents}
+        ):
+            raise RuntimeError("generation manifest PDF object count differs from its documents")
+        if generation.ocr_object_count != len(
+            {
+                document.ocr_sha256
+                for document in generation.documents
+                if document.ocr_sha256 is not None
+            }
+        ):
+            raise RuntimeError("generation manifest OCR object count differs from its documents")
+        if generation.chunk_count != generation.embedding_count:
+            raise RuntimeError("generation manifest chunk count differs from embedding count")
+        document_issuers = {document.issuer for document in generation.documents}
+        if not document_issuers.issubset(generation.issuer_codes):
+            raise RuntimeError("generation document references an undeclared issuer")
+
     def _validated_handle(
         self,
         directory: Path,
@@ -244,37 +282,85 @@ class WebDAVUpdater:
     ) -> None:
         metadata = handle.metadata
         if (
-            metadata.embedding_provider != generation.embedding_provider
+            metadata.schema_id != generation.serving_schema
+            or metadata.generation_id != generation.generation_id
+            or metadata.corpus_sha256 != generation.corpus_sha256
+            or metadata.contract_sha256 != generation.contract_sha256
+            or metadata.embedding_provider != generation.embedding_provider
             or metadata.embedding_model != generation.embedding_model
             or metadata.embedding_dimension != generation.embedding_dimension
             or metadata.embedding_count != generation.embedding_count
         ):
-            raise RuntimeError("database embedding contract differs from generation manifest")
-        documents = self._documents(handle)
-        declared = {item.document_id: item.pdf for item in generation.documents}
+            raise RuntimeError("database contract differs from generation manifest")
+        documents, counts, issuer_codes = self._database_contract(handle)
+        declared = {item.document_id: item for item in generation.documents}
         if len(declared) != len(generation.documents):
             raise RuntimeError("generation manifest contains duplicate document IDs")
         if set(declared) != {item[0] for item in documents}:
             raise RuntimeError("manifest and database document sets differ")
-        for document_id, pdf_sha256, pdf_size_bytes in documents:
-            artifact = declared[document_id]
+        for document_id, issuer, page_count, pdf_sha256, pdf_size_bytes in documents:
+            manifest_document = declared[document_id]
+            artifact = manifest_document.pdf
             if (
-                artifact.sha256 != pdf_sha256
+                manifest_document.issuer != issuer
+                or manifest_document.page_count != page_count
+                or artifact.sha256 != pdf_sha256
                 or artifact.size_bytes != pdf_size_bytes
                 or artifact.media_type != "application/pdf"
             ):
                 raise RuntimeError("manifest and database PDF references differ")
+        expected_counts = (
+            len(generation.issuer_codes),
+            generation.document_count,
+            generation.document_count,
+            sum(document.page_count for document in generation.documents),
+            generation.chunk_count,
+            generation.pdf_object_count,
+        )
+        if issuer_codes != generation.issuer_codes or counts != expected_counts:
+            raise RuntimeError("manifest and database corpus counts differ")
 
     @staticmethod
-    def _documents(handle: GenerationHandle) -> list[tuple[str, str, int]]:
+    def _database_contract(
+        handle: GenerationHandle,
+    ) -> tuple[
+        list[tuple[str, str, int, str, int]],
+        tuple[int, int, int, int, int, int],
+        tuple[str, ...],
+    ]:
         with handle.connect() as connection:
-            return [
-                (str(row[0]), str(row[1]), int(row[2]))
+            documents = [
+                (str(row[0]), str(row[1]), int(row[2]), str(row[3]), int(row[4]))
                 for row in connection.execute(
-                    "SELECT document_id,pdf_sha256,pdf_size_bytes "
+                    "SELECT document_id,issuer,page_count,pdf_sha256,pdf_size_bytes "
                     "FROM documents ORDER BY document_id"
                 )
             ]
+            issuer_codes = tuple(
+                str(row[0]) for row in connection.execute("SELECT code FROM issuers ORDER BY code")
+            )
+            raw_counts = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM issuers),
+                  (SELECT count(*) FROM products),
+                  (SELECT count(*) FROM documents),
+                  (SELECT count(*) FROM pages),
+                  (SELECT count(*) FROM evidence),
+                  (SELECT count(DISTINCT pdf_sha256) FROM documents)
+                """
+            ).fetchone()
+            if raw_counts is None:
+                raise RuntimeError("serving database corpus counts are unavailable")
+            counts = (
+                int(raw_counts[0]),
+                int(raw_counts[1]),
+                int(raw_counts[2]),
+                int(raw_counts[3]),
+                int(raw_counts[4]),
+                int(raw_counts[5]),
+            )
+            return documents, counts, issuer_codes
 
     async def _sync_pdf(self, artifact: RemoteArtifact) -> None:
         if artifact.size_bytes > self.maximum_pdf_bytes:

@@ -80,7 +80,8 @@ CREATE TABLE unsupported_products (
   source_id TEXT NOT NULL CHECK(length(source_id)=71),
   source_version TEXT NOT NULL,
   source_url TEXT NOT NULL,
-  protected_magic TEXT NOT NULL CHECK(protected_magic IN ('SCDSA002','SCDSA004')),
+  protected_magic TEXT NOT NULL
+    CHECK(protected_magic IN ('SCDSA002','SCDSA004','FASOO_DRMONE')),
   protected_sha256 TEXT NOT NULL CHECK(length(protected_sha256)=64),
   protected_size_bytes INTEGER NOT NULL CHECK(protected_size_bytes > 0),
   source_payload_json TEXT NOT NULL,
@@ -161,7 +162,7 @@ def _validate_inputs(
     unsupported_products: Sequence[UnsupportedProductRecord],
 ) -> None:
     if len(unsupported_products) > 100:
-        raise ServingDatabaseError("unsupported product count exceeds the v2 promotion limit")
+        raise ServingDatabaseError("unsupported product count exceeds the promotion limit")
     issuer_codes = [row.code for row in issuers]
     if len(set(issuer_codes)) != len(issuer_codes):
         raise ServingDatabaseError("duplicate issuer code")
@@ -308,6 +309,7 @@ class ServingDatabaseExporter:
         *,
         generation_id: str,
         corpus_sha256: str,
+        contract_sha256: str,
         embedding_provider: str,
         embedding_model: str,
         issuers: Sequence[IssuerSpec],
@@ -342,6 +344,7 @@ class ServingDatabaseExporter:
             "schema_id": SERVING_SCHEMA_ID,
             "generation_id": generation_id,
             "corpus_sha256": corpus_sha256,
+            "contract_sha256": contract_sha256,
             "embedding_provider": embedding_provider,
             "embedding_model": embedding_model,
             "embedding_dimension": str(EMBEDDING_DIMENSION),

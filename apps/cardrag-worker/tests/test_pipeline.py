@@ -29,6 +29,17 @@ class StopAfterNoChangeCheck(RuntimeError):
     pass
 
 
+def test_remote_generation_identity_rejects_cross_schema_pair() -> None:
+    with pytest.raises(ValueError, match="schema versions must match"):
+        RemoteGenerationIdentity(
+            generation_id="g-cross",
+            corpus_sha256="a" * 64,
+            contract_sha256="b" * 64,
+            generation_schema="cardrag.generation.v2",
+            serving_schema="cardrag.serving-db.v3",
+        )
+
+
 class FakeOCR:
     contract = {"schema_version": "test-ocr.v1"}
     adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
@@ -147,6 +158,11 @@ def corpus_for(
     *,
     unsupported: tuple[tuple[SourceRecord, bytes], ...] = (),
 ) -> str:
+    protected_magic = {
+        b"SCDSA002": "SCDSA002",
+        b"SCDSA004": "SCDSA004",
+        b"\x9b DRMONE": "FASOO_DRMONE",
+    }
     path = tmp_path / "identity.pdf"
     path.write_bytes(payload)
     digest, size, pages = validate_pdf(path)
@@ -165,7 +181,7 @@ def corpus_for(
                 (
                     {
                         "disposition": "unsupported_drm",
-                        "protected_magic": body[:8].decode("ascii"),
+                        "protected_magic": protected_magic[body[:8]],
                         "protected_sha256": hashlib.sha256(body).hexdigest(),
                         "protected_size_bytes": len(body),
                         "source": row.discovery_payload,
@@ -186,7 +202,7 @@ async def test_explicit_protected_product_is_audited_once_and_part_of_corpus_ide
     protected = source(product_code="p1", source_url="https://cards.example/protected.pdf")
     valid = source(product_code="p2", source_url="https://cards.example/current.pdf")
     payload = pdf_bytes()
-    protected_payload = b"SCDSA002" + b"\x00" * 64
+    protected_payload = b"\x9b DRMONE" + b"\x00" * 64
     requests: list[str] = []
     real_async_client = httpx.AsyncClient
 
@@ -220,7 +236,7 @@ async def test_explicit_protected_product_is_audited_once_and_part_of_corpus_ide
                 source_url=protected.source_url,
                 sha256=hashlib.sha256(protected_payload).hexdigest(),
                 size_bytes=len(protected_payload),
-                magic="SCDSA002",
+                magic="FASOO_DRMONE",
             ),
         ),
     )
@@ -287,7 +303,7 @@ async def test_changed_protected_bytes_do_not_match_an_approved_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = source(source_url="https://cards.example/protected.pdf")
-    protected_payload = b"SCDSA002" + b"changed"
+    protected_payload = b"\x9b DRMONE" + b"changed"
     requests: list[str] = []
     install_http(monkeypatch, protected_payload, requests)
     adapter = Adapter((record,))
@@ -301,7 +317,7 @@ async def test_changed_protected_bytes_do_not_match_an_approved_source(
                 source_url=record.source_url,
                 sha256="f" * 64,
                 size_bytes=len(protected_payload),
-                magic="SCDSA002",
+                magic="FASOO_DRMONE",
             ),
         ),
     )
@@ -350,9 +366,13 @@ async def test_remote_exact_match_is_no_change_without_local_publish_row_or_prov
             generation_id="g-current",
             corpus_sha256=corpus_for(payload, record, tmp_path),
             contract_sha256=pipeline.contract_sha256,
+            generation_schema="cardrag.generation.v2",
+            serving_schema="cardrag.serving-db.v2",
         )
         result = await pipeline.run()
     assert result.status == "no_change"
+    assert webdav.current.generation_schema == "cardrag.generation.v2"
+    assert webdav.current.serving_schema == "cardrag.serving-db.v2"
     assert len(requests) == 1
     assert adapter.prepare_calls == 1
     assert ocr.calls == embeddings.calls == 0
