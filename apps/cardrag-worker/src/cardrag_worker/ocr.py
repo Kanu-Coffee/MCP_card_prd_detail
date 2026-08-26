@@ -133,24 +133,34 @@ def render_pdf(pdf_path: Path, output_dir: Path, *, scale: float = 6.0) -> tuple
     return tuple(paths)
 
 
-def _validate_target_page_values(
+def _validate_and_normalize_target_page_values(
     page_numbers: tuple[int, ...],
     values: tuple[str, ...],
-) -> None:
-    """Apply the core minimum-page invariant before persisting a checkpoint."""
+) -> tuple[str, ...]:
+    """Apply minimum-page invariants and canonicalize sparse-page whitespace."""
 
     if len(page_numbers) != len(values):
         raise OCRValidationError("OCR page/value count differs")
+    normalized: list[str] = []
     for page_number, value in zip(page_numbers, values, strict=True):
         if value.startswith(OCR_SPARSE_PAGE_PREFIX):
             lines = value.splitlines()
-            visible = lines[1].strip() if len(lines) == 2 else ""
-            if lines[:1] != [OCR_SPARSE_PAGE_PREFIX] or not visible or len("".join(visible.split())) > 12:
+            visible_lines = tuple(line.strip() for line in lines[1:] if line.strip())
+            if lines[:1] != [OCR_SPARSE_PAGE_PREFIX] or len(visible_lines) != 1:
                 raise OCRValidationError("OCR sparse-page wrapper is invalid")
+            visible = visible_lines[0]
+            if len("".join(visible.split())) > 12:
+                raise OCRValidationError("OCR sparse-page wrapper is invalid")
+            # Markdown generators commonly insert one blank line after the
+            # wrapper. It carries no source information, so persist one stable
+            # representation while retaining the visible transcription text.
+            value = f"{OCR_SPARSE_PAGE_PREFIX}\n{visible}"
         elif value.startswith(OCR_BLANK_PAGE_SENTINEL) and value != OCR_BLANK_PAGE_SENTINEL:
             raise OCRValidationError("OCR blank-page sentinel must be exact")
         if len(f"## Page {page_number}\n\n{value}") < 20:
             raise OCRValidationError("OCR provider returned an implausibly short page")
+        normalized.append(value)
+    return tuple(normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,7 +597,10 @@ class OCRResolver:
                             expected_count=len(call.target_page_numbers),
                             first_page=call.target_page_numbers[0],
                         )
-                        _validate_target_page_values(call.target_page_numbers, pages)
+                        pages = _validate_and_normalize_target_page_values(
+                            call.target_page_numbers,
+                            pages,
+                        )
                     except OCRValidationError:
                         # A short or malformed provider response from an older
                         # failed attempt must not poison every retry. Re-run
@@ -613,7 +626,7 @@ class OCRResolver:
             )
             if any(not value for value in values):
                 raise OCRValidationError("OCR provider returned an empty page")
-            _validate_target_page_values(call.target_page_numbers, values)
+            values = _validate_and_normalize_target_page_values(call.target_page_numbers, values)
             normalized = (
                 "\n\n".join(
                     f"## Page {page_number}\n\n{value}"

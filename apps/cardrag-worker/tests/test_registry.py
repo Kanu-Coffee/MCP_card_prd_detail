@@ -38,6 +38,7 @@ def test_default_activation_is_fixed_and_does_not_expand_with_registry() -> None
         **REGISTERED_ISSUERS,
         "lotte": Registration(LotteAdapter.spec, LotteAdapter),
     }
+    assert DEFAULT_ENABLED_ISSUERS == ("woori", "kb", "shinhan")
     assert enabled_issuer_codes(None, registry=registry) == DEFAULT_ENABLED_ISSUERS
     assert [adapter.spec.code for adapter in enabled_adapters("lotte", registry=registry)] == ["lotte"]
 

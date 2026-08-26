@@ -22,8 +22,15 @@ from .common import IssuerMarkupChanged, absolute_https_url, clean_text, parse_s
 BASE_URL = "https://www.shinhancard.com"
 NOTICE_PATH = "/hpp/HPPCARDN/HPPPdPbnA01C.shc?creChkCcd=2"
 LIST_PATH = "/hpp/HPPCUSTMN/CrdPdPbn02.ahtml"
+# Keep this retired transport URL in SourceRecord identity so already published
+# sources and OCR assets remain adoptable. Only the ephemeral download request
+# moves to the official mobile endpoints below.
 DOWNLOAD_PATH = "/hpp/HPPCUSTMN/CrdPdPbn01FileDn.shc"
+MOBILE_NOTICE_PATH = "/mob/MOBFM12051N/MOBFM12051R01.shc"
+MOBILE_LIST_PATH = "/mob/MOBFM12051N/MOBFM12051R01C.ajax"
+MOBILE_DOWNLOAD_PATH = "/mob/MOBFM12051N/MOBFM12051R03.shc"
 SHINHAN_CATEGORIES = {"credit": "0", "check": "1"}
+SHINHAN_MOBILE_PAGES = {"credit": "CRE", "check": "CHK"}
 DOWNLOAD_NAME_METADATA_KEY = "download_pbn_name"
 REFRESH_MAXIMUM_PAGES = 5
 REFRESH_MAXIMUM_RECORDS = 50
@@ -42,6 +49,15 @@ class _ListingRecord:
     source: SourceRecord
     file_token: str
     download_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _MobileListingRecord:
+    product_code: str
+    product_name: str
+    effective_date: date
+    source_version: str
+    file_token: str
 
 
 def _parse_listing_records(
@@ -106,6 +122,91 @@ def parse_listing(
     return [row.source for row in rows], next_cursor, done
 
 
+def _parse_mobile_listing(
+    payload: object,
+    *,
+    category: str,
+    product_name: str,
+) -> tuple[list[_MobileListingRecord], str]:
+    category_code = SHINHAN_CATEGORIES.get(category)
+    if category_code is None:
+        raise ValueError("unknown Shinhan disclosure category")
+    if not isinstance(payload, dict) or payload.get("mbw_result") != "S":
+        raise IssuerMarkupChanged("Shinhan mobile disclosure lookup failed")
+    body = payload.get("mbw_json")
+    if not isinstance(body, dict):
+        raise IssuerMarkupChanged("Shinhan mobile disclosure response is invalid")
+    raw_records = body.get("crdPdPbnList")
+    data = body.get("data")
+    if not isinstance(raw_records, list) or not isinstance(data, dict):
+        raise IssuerMarkupChanged("Shinhan mobile disclosure response is invalid")
+    next_cursor = data.get("nxtQyKey")
+    echoed_category = data.get("crdTcd")
+    echoed_product_name = data.get("crdPdGuiNm")
+    if (
+        not isinstance(next_cursor, str)
+        or echoed_category != category_code
+        or echoed_product_name != product_name
+    ):
+        raise IssuerMarkupChanged("Shinhan mobile disclosure query binding is invalid")
+
+    records: list[_MobileListingRecord] = []
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            raise IssuerMarkupChanged("Shinhan mobile disclosure record is invalid")
+        product_code = raw.get("CRD_PD_GUI_N")
+        current_product_name = raw.get("CRD_PD_GUI_NM")
+        effective_raw = raw.get("CRD_PD_GUI_BUL_D")
+        file_token = raw.get("CRD_PD_GUI_FIL_NM")
+        if not (
+            isinstance(product_code, str)
+            and product_code.strip()
+            and isinstance(current_product_name, str)
+            and current_product_name.strip()
+            and isinstance(effective_raw, str)
+            and effective_raw.strip()
+            and isinstance(file_token, str)
+            and file_token.strip()
+        ):
+            raise IssuerMarkupChanged("Shinhan mobile disclosure record is invalid")
+        try:
+            effective = parse_source_date(effective_raw)
+        except ValueError as exc:
+            raise IssuerMarkupChanged("Shinhan mobile disclosure date is invalid") from exc
+        records.append(
+            _MobileListingRecord(
+                product_code=product_code.strip(),
+                product_name=clean_text(current_product_name),
+                effective_date=effective,
+                source_version=effective.strftime("%Y%m%d"),
+                file_token=file_token.strip(),
+            )
+        )
+    return records, next_cursor
+
+
+def _validate_download_source_identity(source: SourceRecord) -> None:
+    download_name = source.metadata.get(DOWNLOAD_NAME_METADATA_KEY)
+    expected_file_name = (
+        download_name.strip()
+        if isinstance(download_name, str) and download_name.casefold().strip().endswith(".pdf")
+        else f"{download_name.strip()}.pdf"
+        if isinstance(download_name, str)
+        else ""
+    )
+    if (
+        not isinstance(download_name, str)
+        or not download_name.strip()
+        or dict(source.metadata) != {DOWNLOAD_NAME_METADATA_KEY: download_name}
+        or source.source_url != BASE_URL + DOWNLOAD_PATH
+        or source.source_post_id != f"{source.category}:{source.product_code}"
+        or source.file_name != expected_file_name
+        or source.document_type != "product_description"
+        or source.source_version != source.effective_date.strftime("%Y%m%d")
+    ):
+        raise ValueError("source does not satisfy the Shinhan discovery identity")
+
+
 class ShinhanAdapter:
     spec = SPEC
     parser_version = "shinhan.current.v2"
@@ -163,6 +264,72 @@ class ShinhanAdapter:
             seen.add(next_cursor)
             cursor = next_cursor
 
+    async def _post_mobile(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        category: str,
+        product_name: str,
+        cursor: str,
+        referer: str,
+    ) -> tuple[list[_MobileListingRecord], str]:
+        category_code = SHINHAN_CATEGORIES.get(category)
+        if category_code is None:
+            raise ValueError("unknown Shinhan disclosure category")
+        response = await client.post(
+            self.base_url + MOBILE_LIST_PATH,
+            data={
+                "nxtQyKey": cursor,
+                "crdTcd": category_code,
+                "crdPdGuiNm": product_name,
+            },
+            headers={
+                "Accept": "application/json",
+                "Referer": referer,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise IssuerMarkupChanged("Shinhan mobile disclosure response is not JSON") from exc
+        return _parse_mobile_listing(payload, category=category, product_name=product_name)
+
+    async def _query_mobile_current(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        category: str,
+        product_name: str,
+        referer: str,
+        maximum_pages: int,
+        maximum_records: int,
+    ) -> list[_MobileListingRecord]:
+        records: list[_MobileListingRecord] = []
+        cursor = ""
+        seen: set[str] = set()
+        for page_count in range(1, maximum_pages + 1):
+            batch, next_cursor = await self._post_mobile(
+                client,
+                category=category,
+                product_name=product_name,
+                cursor=cursor,
+                referer=referer,
+            )
+            records.extend(batch)
+            if len(records) > maximum_records:
+                raise IssuerMarkupChanged("Shinhan filtered disclosure lookup exceeded its record limit")
+            if not next_cursor:
+                return records
+            if page_count >= maximum_pages:
+                raise IssuerMarkupChanged("Shinhan filtered disclosure lookup exceeded its page limit")
+            if next_cursor in seen:
+                raise IssuerMarkupChanged("Shinhan pagination cursor repeated")
+            seen.add(next_cursor)
+            cursor = next_cursor
+        raise IssuerMarkupChanged("Shinhan filtered disclosure lookup exceeded its page limit")
+
     async def discover_current(self, client: httpx.AsyncClient) -> SourceSnapshot:
         started = datetime.now(UTC)
         landing = await client.get(self.base_url + NOTICE_PATH)
@@ -205,25 +372,38 @@ class ShinhanAdapter:
             raise ValueError("source issuer does not match adapter")
         if source.category not in SHINHAN_CATEGORIES:
             raise ValueError("unknown Shinhan disclosure category")
-        landing = await client.get(self.base_url + NOTICE_PATH)
+        _validate_download_source_identity(source)
+        mobile_page = SHINHAN_MOBILE_PAGES[source.category]
+        landing_url = str(httpx.URL(self.base_url + MOBILE_NOTICE_PATH, params={"page": mobile_page}))
+        landing = await client.get(landing_url)
         landing.raise_for_status()
-        current = await self._query_current(
+        current = await self._query_mobile_current(
             client,
             category=source.category,
             product_name=source.product_name,
-            discovered_at=datetime.now(UTC),
+            referer=landing_url,
             maximum_pages=REFRESH_MAXIMUM_PAGES,
             maximum_records=REFRESH_MAXIMUM_RECORDS,
         )
-        matches = [row for row in current if row.source.discovery_payload == source.discovery_payload]
+        matches = [
+            row
+            for row in current
+            if row.product_code == source.product_code
+            and row.product_name == source.product_name
+            and row.effective_date == source.effective_date
+            and row.source_version == source.source_version
+        ]
         if len(matches) != 1:
             raise IssuerMarkupChanged(
                 "Shinhan current disclosure did not return exactly one stable source match"
             )
         match = matches[0]
         return DownloadRequest(
-            url=self.base_url + DOWNLOAD_PATH,
-            method="POST",
-            form={"filNm": match.file_token, "pbnNm": match.download_name},
-            headers={"Referer": self.base_url + NOTICE_PATH},
+            url=str(
+                httpx.URL(
+                    self.base_url + MOBILE_DOWNLOAD_PATH,
+                    params={"pbnNm": match.product_name, "aFilenm": match.file_token},
+                )
+            ),
+            headers={"Referer": landing_url},
         )

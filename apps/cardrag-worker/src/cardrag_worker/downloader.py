@@ -216,7 +216,14 @@ class SecurePDFDownloader:
                         media_type = (
                             response.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
                         )
-                        if media_type and media_type not in {"application/pdf", "application/octet-stream"}:
+                        # Shinhan's official mobile PDF endpoint currently misspells
+                        # application/octet-stream as "application/octect-stream".
+                        # Bytes still pass the strict PDF signature and structure checks below.
+                        if media_type and media_type not in {
+                            "application/pdf",
+                            "application/octet-stream",
+                            "application/octect-stream",
+                        }:
                             raise PDFValidationError("response MIME type is not PDF-compatible")
                         raw_length = response.headers.get("content-length")
                         try:

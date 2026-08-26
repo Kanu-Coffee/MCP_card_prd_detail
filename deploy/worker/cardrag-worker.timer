@@ -1,6 +1,6 @@
 [Unit]
 Description=Run CardRAG Worker daily at 03:00 Asia/Seoul
-Documentation=file:/opt/cardrag-v1.0.4/docs/SIMPLE_RUNTIME.md
+Documentation=file:/opt/cardrag-v1.0.5/docs/SIMPLE_RUNTIME.md
 
 [Timer]
 OnCalendar=*-*-* 03:00:00 Asia/Seoul
