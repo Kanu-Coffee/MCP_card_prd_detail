@@ -160,6 +160,9 @@ def test_default_prompt_has_one_unambiguous_long_blank_page_sentinel() -> None:
     assert len(f"## Page 1\n\n{OCR_BLANK_PAGE_SENTINEL}") >= 20
     assert OCR_SPARSE_PAGE_PREFIX in DEFAULT_OCR_PROMPT
     assert len(f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n우리카드") >= 20
+    assert sha256_bytes(DEFAULT_OCR_PROMPT.encode()) == (
+        "1448d7e530d4f8412102c67cd44dc9c9cdab9e3aa165eddb88b3a980a245b946"
+    )
 
 
 @pytest.mark.asyncio
@@ -181,7 +184,8 @@ async def test_blank_and_sparse_page_contract_seals_successfully(
             del images, page_numbers, target_page_numbers, total_pages, prompt
             self.calls.append(1)
             return (
-                f"## Page 1\n\n{OCR_BLANK_PAGE_SENTINEL}\n\n## Page 2\n\n{OCR_SPARSE_PAGE_PREFIX}\n우리카드\n"
+                f"## Page 1\n\n{OCR_BLANK_PAGE_SENTINEL}\n\n"
+                f"## Page 2\n\n{OCR_SPARSE_PAGE_PREFIX}\n\nROVL Mileage\n"
             )
 
     provider = SparseProvider()
@@ -203,9 +207,14 @@ async def test_blank_and_sparse_page_contract_seals_successfully(
         assert provider.calls == [1]
         assert result.pages == (
             OCR_BLANK_PAGE_SENTINEL,
-            f"{OCR_SPARSE_PAGE_PREFIX}\n우리카드",
+            f"{OCR_SPARSE_PAGE_PREFIX}\nROVL Mileage",
         )
         assert verify_ocr_bytes(result.ocr_bytes, expected_page_count=2).sha256 == result.ocr_sha256
+        checkpoint = state.checkpoint(run_id, "doc_blank_sparse", "ocr", 0)
+        assert checkpoint is not None
+        assert Path(checkpoint["artifact_path"]).read_text(encoding="utf-8") == (
+            f"## Page 1\n\n{OCR_BLANK_PAGE_SENTINEL}\n\n## Page 2\n\n{OCR_SPARSE_PAGE_PREFIX}\nROVL Mileage\n"
+        )
     finally:
         state.close()
 
@@ -246,6 +255,46 @@ async def test_sparse_page_wrapper_rejects_more_than_twelve_visible_characters(
                 output_dir=tmp_path / "ocr",
             )
         assert state.checkpoint(run_id, "doc_dense_wrapper", "ocr", 0) is None
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_sparse_page_wrapper_rejects_multiple_nonblank_transcription_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class MultilineSparseProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, target_page_numbers, total_pages, prompt
+            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\nROVL\nMileage\n"
+
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=MultilineSparseProvider(), state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid"):
+            await resolver.resolve(
+                run_id=run_id,
+                document_id="doc_multiline_sparse",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+        assert state.checkpoint(run_id, "doc_multiline_sparse", "ocr", 0) is None
     finally:
         state.close()
 

@@ -22,13 +22,13 @@ cardrag-worker gc --apply
 Issuer activation is explicit:
 
 ```console
-export CARDRAG_ENABLED_ISSUERS=woori,kb
+export CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
 ```
 
-The Shinhan adapter remains registered and refreshes its rotating download token
-just in time. Its upstream endpoint returned service-error HTML rather than PDF
-bytes during the 2026-08-26 production audit, so operators must verify recovery
-before explicitly adding `shinhan` again.
+The Shinhan adapter refreshes its rotating token just in time through the
+official mobile disclosure endpoint, then binds product code, name, effective
+date, and source version back to the stable desktop discovery record before it
+downloads any bytes.
 
 Live discovery, OCR, embeddings, and WebDAV publishing require real issuer and
 provider credentials/endpoints. A successful/no-change daily run also performs

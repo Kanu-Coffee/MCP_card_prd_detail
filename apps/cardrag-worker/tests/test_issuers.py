@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -11,8 +12,12 @@ from cardrag_worker.issuers.kb import SPEC as KB_SPEC
 from cardrag_worker.issuers.kb import KBAdapter, parse_listing
 from cardrag_worker.issuers.shinhan import (
     DOWNLOAD_NAME_METADATA_KEY,
+    MOBILE_DOWNLOAD_PATH,
+    MOBILE_LIST_PATH,
+    MOBILE_NOTICE_PATH,
     REFRESH_MAXIMUM_PAGES,
     ShinhanAdapter,
+    _parse_mobile_listing,
 )
 from cardrag_worker.issuers.woori import DETAIL_PATH, MAIN_PATH, WooriAdapter, parse_detail_records
 from cardrag_worker.issuers.woori import SPEC as WOORI_SPEC
@@ -137,6 +142,36 @@ def shinhan_page(
     """
 
 
+def shinhan_mobile_payload(
+    code: str = "P1",
+    *,
+    tokens: tuple[str, ...] = ("TOKEN-REFRESHED",),
+    product_name: str = "신한 P1 카드",
+    cursor: str = "",
+    category_code: str = "0",
+    query: str = "신한 P1 카드",
+) -> dict[str, Any]:
+    return {
+        "mbw_result": "S",
+        "mbw_json": {
+            "crdPdPbnList": [
+                {
+                    "CRD_PD_GUI_N": code,
+                    "CRD_PD_GUI_NM": product_name,
+                    "CRD_PD_GUI_BUL_D": "2026.08.25",
+                    "CRD_PD_GUI_FIL_NM": token,
+                }
+                for token in tokens
+            ],
+            "data": {
+                "nxtQyKey": cursor,
+                "crdTcd": category_code,
+                "crdPdGuiNm": query,
+            },
+        },
+    }
+
+
 class ShinhanClient:
     def __init__(
         self,
@@ -145,7 +180,7 @@ class ShinhanClient:
         initial_fil_nm_prefix: str = "FILNM",
         refresh_code: str = "P1",
         refresh_tokens: tuple[str, ...] = ("TOKEN-REFRESHED",),
-        refresh_download_name: str = "P1 안내장",
+        refresh_download_name: str = "신한 P1 카드",
     ) -> None:
         self.empty = empty
         self.initial_fil_nm_prefix = initial_fil_nm_prefix
@@ -165,6 +200,16 @@ class ShinhanClient:
         search = str(kwargs["data"]["crdPdGuiNm"])
         self.cursors.append(cursor)
         self.searches.append(search)
+        if url.endswith(MOBILE_LIST_PATH):
+            return Response(
+                payload=shinhan_mobile_payload(
+                    self.refresh_code,
+                    tokens=self.refresh_tokens,
+                    product_name=self.refresh_download_name,
+                    category_code=str(kwargs["data"]["crdTcd"]),
+                    query=search,
+                )
+            )
         if self.empty:
             return Response(content="<!-- DONE -->".encode("euc-kr"))
         if search:
@@ -214,12 +259,13 @@ class ShinhanUnboundedRefreshClient:
         assert kwargs["data"]["crdPdGuiNm"] == "신한 P1 카드"
         self.posts += 1
         next_cursor = "repeat" if self.repeat_cursor else str(self.posts)
-        html = shinhan_page(
-            "P1",
-            tokens=(f"FILNM-REFRESH-{self.posts}",),
-            cursor=next_cursor,
+        return Response(
+            payload=shinhan_mobile_payload(
+                tokens=(f"FILNM-REFRESH-{self.posts}",),
+                cursor=next_cursor,
+                query="신한 P1 카드",
+            )
         )
-        return Response(content=html.encode("euc-kr"))
 
 
 @pytest.mark.asyncio
@@ -398,7 +444,7 @@ def test_woori_current_protected_detail_rows_recalculate_allowlisted_source_ids(
 
 
 @pytest.mark.asyncio
-async def test_shinhan_cursor_and_post_download_contract() -> None:
+async def test_shinhan_cursor_and_mobile_get_download_contract() -> None:
     adapter = ShinhanAdapter(minimum_records=1)
     adapter.spec = replace(adapter.spec, categories=("credit",))
     client = ShinhanClient()
@@ -409,8 +455,15 @@ async def test_shinhan_cursor_and_post_download_contract() -> None:
     assert snapshot.records[0].file_name == "P1 안내장.pdf"
     assert snapshot.records[0].metadata == {DOWNLOAD_NAME_METADATA_KEY: "P1 안내장"}
     request = await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
-    assert request.method == "POST"
-    assert request.form == {"filNm": "TOKEN-REFRESHED", "pbnNm": "P1 안내장"}
+    parsed = urlsplit(request.url)
+    assert request.method == "GET"
+    assert request.form is None
+    assert parsed.path == MOBILE_DOWNLOAD_PATH
+    assert parse_qs(parsed.query) == {
+        "aFilenm": ["TOKEN-REFRESHED"],
+        "pbnNm": ["신한 P1 카드"],
+    }
+    assert request.headers == {"Referer": "https://www.shinhancard.com" + MOBILE_NOTICE_PATH + "?page=CRE"}
     assert client.searches == ["", "", "신한 P1 카드"]
     assert client.gets == 2
 
@@ -448,6 +501,21 @@ async def test_shinhan_download_refresh_requires_one_exact_stable_match(client: 
 
     with pytest.raises(IssuerMarkupChanged, match="exactly one stable source match"):
         await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"mbw_result": "E", "mbw_json": {}},
+        {"mbw_result": "S", "mbw_json": {"crdPdPbnList": [], "data": {}}},
+        shinhan_mobile_payload(query="different product"),
+        shinhan_mobile_payload(tokens=("",)),
+    ],
+    ids=("result-failure", "missing-binding", "query-mismatch", "empty-token"),
+)
+def test_shinhan_mobile_listing_contract_fails_closed(payload: object) -> None:
+    with pytest.raises(IssuerMarkupChanged, match="mobile disclosure"):
+        _parse_mobile_listing(payload, category="credit", product_name="신한 P1 카드")
 
 
 @pytest.mark.asyncio
@@ -496,6 +564,16 @@ async def test_shinhan_download_rejects_wrong_issuer_or_category_before_network(
         await adapter.prepare_download(client, replace(source, issuer="kb"))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="category"):
         await adapter.prepare_download(client, replace(source, category="corporate"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="discovery identity"):
+        await adapter.prepare_download(  # type: ignore[arg-type]
+            client,
+            replace(source, source_url="https://www.shinhancard.com/changed"),
+        )
+    with pytest.raises(ValueError, match="discovery identity"):
+        await adapter.prepare_download(  # type: ignore[arg-type]
+            client,
+            replace(source, metadata={DOWNLOAD_NAME_METADATA_KEY: "changed"}),
+        )
     assert (client.gets, len(client.cursors)) == calls_before
 
 

@@ -32,9 +32,9 @@ _REGISTRATIONS = tuple(
 
 REGISTERED_ISSUERS: Mapping[str, Registration] = {row.spec.code: row for row in _REGISTRATIONS}
 # Keep the fail-safe CLI default aligned with the production Compose default.
-# Shinhan remains registered and can be re-enabled explicitly after its current
-# disclosure endpoint is verified to return PDFs again.
-DEFAULT_ENABLED_ISSUERS = ("woori", "kb")
+# v1.0.5 refreshes Shinhan downloads through its verified official mobile
+# disclosure endpoint while retaining the stable desktop discovery identity.
+DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan")
 
 
 def enabled_issuer_codes(

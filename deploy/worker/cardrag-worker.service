@@ -1,6 +1,6 @@
 [Unit]
 Description=Run the one-shot CardRAG Worker
-Documentation=file:/opt/cardrag-v1.0.4/docs/SIMPLE_RUNTIME.md
+Documentation=file:/opt/cardrag-v1.0.5/docs/SIMPLE_RUNTIME.md
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -9,7 +9,7 @@ Wants=network-online.target
 Type=oneshot
 User=cardrag
 SupplementaryGroups=docker
-WorkingDirectory=/opt/cardrag-v1.0.4
+WorkingDirectory=/opt/cardrag-v1.0.5
 Environment=CARDRAG_WORKER_COMPOSE_OVERLAYS=
 EnvironmentFile=/etc/cardrag/worker.env
 ExecStartPre=/usr/bin/docker compose --env-file /etc/cardrag/worker.env --file deploy/worker/compose.yaml --file deploy/worker/compose.secrets.yaml $CARDRAG_WORKER_COMPOSE_OVERLAYS config --quiet

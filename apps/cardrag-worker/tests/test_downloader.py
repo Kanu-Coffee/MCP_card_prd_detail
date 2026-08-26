@@ -107,6 +107,60 @@ async def test_downloader_rejects_service_error_html_without_publishing_a_file(t
 
 
 @pytest.mark.asyncio
+async def test_downloader_accepts_official_shinhan_mime_typo_after_pdf_validation(
+    tmp_path: Path,
+) -> None:
+    payload = pdf_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/octect-stream"},
+            content=payload,
+            request=request,
+        )
+
+    downloader = SecurePDFDownloader(
+        DownloadPolicy(allowed_hosts=frozenset({"cards.example"})),
+        resolver=public_ip,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await downloader.download(
+            client,
+            DownloadRequest(url="https://cards.example/download"),
+            tmp_path / "result.pdf",
+        )
+    assert result.page_count == 1
+
+
+@pytest.mark.asyncio
+async def test_downloader_still_rejects_non_pdf_with_official_shinhan_mime_typo(
+    tmp_path: Path,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/octect-stream"},
+            content=b"not a PDF",
+            request=request,
+        )
+
+    destination = tmp_path / "result.pdf"
+    downloader = SecurePDFDownloader(
+        DownloadPolicy(allowed_hosts=frozenset({"cards.example"})),
+        resolver=public_ip,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PDFValidationError, match="PDF signature"):
+            await downloader.download(
+                client,
+                DownloadRequest(url="https://cards.example/download"),
+                destination,
+            )
+    assert not destination.exists()
+
+
+@pytest.mark.asyncio
 async def test_downloader_enforces_stream_cap_and_refuses_symlink(tmp_path: Path) -> None:
     payload = pdf_bytes()
 
