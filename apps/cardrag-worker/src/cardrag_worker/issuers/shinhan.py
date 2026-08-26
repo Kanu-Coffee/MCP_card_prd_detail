@@ -34,6 +34,9 @@ SHINHAN_MOBILE_PAGES = {"credit": "CRE", "check": "CHK"}
 DOWNLOAD_NAME_METADATA_KEY = "download_pbn_name"
 REFRESH_MAXIMUM_PAGES = 5
 REFRESH_MAXIMUM_RECORDS = 50
+REFRESH_SEARCH_MAXIMUM_BYTES = 50
+REFRESH_FULL_LIST_MAXIMUM_PAGES = 100
+REFRESH_FULL_LIST_MAXIMUM_RECORDS = 1_000
 SPEC = IssuerSpec(
     code="shinhan",
     display_name="신한카드",
@@ -207,6 +210,41 @@ def _validate_download_source_identity(source: SourceRecord) -> None:
         raise ValueError("source does not satisfy the Shinhan discovery identity")
 
 
+def _bounded_mobile_search_term(product_name: str) -> str:
+    """Fit the primary query to Shinhan's legacy EUC-KR search boundary."""
+
+    prefix: list[str] = []
+    byte_count = 0
+    for character in product_name:
+        try:
+            character_bytes = len(character.encode("euc-kr"))
+        except UnicodeEncodeError as exc:
+            raise IssuerMarkupChanged(
+                "Shinhan mobile disclosure search term is not EUC-KR encodable"
+            ) from exc
+        if byte_count + character_bytes > REFRESH_SEARCH_MAXIMUM_BYTES:
+            break
+        prefix.append(character)
+        byte_count += character_bytes
+    search_term = "".join(prefix).rstrip()
+    if not search_term:
+        raise IssuerMarkupChanged("Shinhan mobile disclosure search term is empty")
+    return search_term
+
+
+def _matching_mobile_records(
+    records: list[_MobileListingRecord], source: SourceRecord
+) -> list[_MobileListingRecord]:
+    return [
+        row
+        for row in records
+        if row.product_code == source.product_code
+        and row.product_name == source.product_name
+        and row.effective_date == source.effective_date
+        and row.source_version == source.source_version
+    ]
+
+
 class ShinhanAdapter:
     spec = SPEC
     parser_version = "shinhan.current.v2"
@@ -377,22 +415,30 @@ class ShinhanAdapter:
         landing_url = str(httpx.URL(self.base_url + MOBILE_NOTICE_PATH, params={"page": mobile_page}))
         landing = await client.get(landing_url)
         landing.raise_for_status()
+        primary_search_term = _bounded_mobile_search_term(source.product_name)
         current = await self._query_mobile_current(
             client,
             category=source.category,
-            product_name=source.product_name,
+            product_name=primary_search_term,
             referer=landing_url,
             maximum_pages=REFRESH_MAXIMUM_PAGES,
             maximum_records=REFRESH_MAXIMUM_RECORDS,
         )
-        matches = [
-            row
-            for row in current
-            if row.product_code == source.product_code
-            and row.product_name == source.product_name
-            and row.effective_date == source.effective_date
-            and row.source_version == source.source_version
-        ]
+        matches = _matching_mobile_records(current, source)
+        if len(matches) != 1:
+            # A few official rows cannot be found by their own display name.
+            # Fall back only after a structurally valid primary response, and
+            # keep the full-list request bounded. Selection remains an exact
+            # singleton match across every stable source identity field.
+            current = await self._query_mobile_current(
+                client,
+                category=source.category,
+                product_name="",
+                referer=landing_url,
+                maximum_pages=REFRESH_FULL_LIST_MAXIMUM_PAGES,
+                maximum_records=REFRESH_FULL_LIST_MAXIMUM_RECORDS,
+            )
+            matches = _matching_mobile_records(current, source)
         if len(matches) != 1:
             raise IssuerMarkupChanged(
                 "Shinhan current disclosure did not return exactly one stable source match"
