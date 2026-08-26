@@ -3,7 +3,7 @@
 Privileged, finite CardRAG batch worker. It discovers the current disclosure PDF
 for each explicitly enabled issuer, downloads and verifies PDFs through one
 SSRF-safe downloader, resumes OCR/chunk checkpoints, embeds evidence, and
-publishes an immutable `cardrag.serving-db.v1` SQLite bundle.
+publishes an immutable `cardrag.serving-db.v2` SQLite bundle.
 
 The always-on MCP process is deliberately not part of this package. It only
 downloads the stable generation's `index.sqlite3` and opens it read-only.

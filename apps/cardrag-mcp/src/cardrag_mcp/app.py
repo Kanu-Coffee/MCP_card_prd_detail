@@ -101,6 +101,8 @@ def build_mcp_server(
         "CardRAG",
         instructions=(
             "Read-only search over the currently active card-product snapshot. "
+            "Products whose current official source is protected DRM are explicitly reported "
+            "with availability=unsupported_drm and have no document or PDF. "
             "There is no history, version, as-of, remote-PDF, or page-image interface."
         ),
     )
@@ -147,7 +149,7 @@ def build_mcp_server(
 
     @server.tool()
     async def get_product(issuer: str, product_code: str) -> dict[str, Any]:
-        """Return the active product and its single active document."""
+        """Return the active product, or an explicit unsupported_drm availability result."""
 
         value = await repository.get_product(issuer, product_code)
         if value is None:

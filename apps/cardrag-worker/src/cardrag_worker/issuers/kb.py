@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from cardrag_worker.contracts import (
     DownloadRequest,
     IssuerSpec,
+    ProtectedSourceAllowance,
     SourceRecord,
     SourceSnapshot,
     snapshot_from_records,
@@ -36,6 +37,37 @@ SPEC = IssuerSpec(
     allowed_hosts=frozenset({"card.kbcard.com", "img2.kbcard.com"}),
     categories=tuple(KB_CATEGORIES),
     minimum_records=25,
+    # These exact current disclosures are SoftCamp SCDSA containers on KB's
+    # CDN, not PDF bytes. Any source or byte change fails closed for review.
+    protected_source_allowances=(
+        ProtectedSourceAllowance(
+            source_id="source_532c32eb860fd121fab8da902a41509ef51194ff90baa42cc7779f3cf91ef1c6",
+            product_code="04130",
+            source_version="20260204",
+            source_url="https://img2.kbcard.com/obj/card/download/_04130__prdctOpmn_20260204.pdf",
+            sha256="143f5afb2ab9a974e76cd7f3099b2affb69d55154fe131fb653d3cbc5dd6571e",
+            size_bytes=545086,
+            magic="SCDSA002",
+        ),
+        ProtectedSourceAllowance(
+            source_id="source_f9071260e77356c3e87d35df8920079899de77e48af0268a94420c65b9c95b5b",
+            product_code="04292",
+            source_version="20260303",
+            source_url="https://img2.kbcard.com/obj/card/download/04292__prdctOpmn_20260303.pdf",
+            sha256="8357e5d0d8bb03e03b8388144db3be0d393d9f623ac4c883a2a9beca10f2ae45",
+            size_bytes=691230,
+            magic="SCDSA002",
+        ),
+        ProtectedSourceAllowance(
+            source_id="source_5d449cf9fa203e64bed7894b2c071f885457fa426237c27abb2bd9168d062056",
+            product_code="04460",
+            source_version="20260204",
+            source_url="https://img2.kbcard.com/obj/card/download/04460__prdctOpmn_20260204.pdf",
+            sha256="46f6f921a8399c4f6f917aa929a01569f6442f27af9e5ded92f05c2272c66064",
+            size_bytes=827358,
+            magic="SCDSA002",
+        ),
+    ),
 )
 
 _DETAIL_CALL = re.compile(

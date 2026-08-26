@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Literal
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -24,6 +25,22 @@ class DownloadSecurityError(RuntimeError):
 
 class PDFValidationError(RuntimeError):
     pass
+
+
+class ProtectedDocumentError(PDFValidationError):
+    """The issuer served a recognized DRM container instead of PDF bytes."""
+
+    def __init__(
+        self,
+        *,
+        magic: Literal["SCDSA002", "SCDSA004"],
+        sha256: str,
+        size_bytes: int,
+    ) -> None:
+        super().__init__("response is a recognized protected document container")
+        self.magic = magic
+        self.sha256 = sha256
+        self.size_bytes = size_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +105,22 @@ def validate_pdf(path: Path, *, expected_sha256: str | None = None) -> tuple[str
     size = path.stat().st_size
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        if source.read(5) != b"%PDF-":
-            raise PDFValidationError("response does not start with a PDF signature")
+        signature = source.read(8)
         source.seek(0)
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     sha256 = digest.hexdigest()
+    if signature in {b"SCDSA002", b"SCDSA004"}:
+        protected_magic: Literal["SCDSA002", "SCDSA004"] = (
+            "SCDSA002" if signature == b"SCDSA002" else "SCDSA004"
+        )
+        raise ProtectedDocumentError(
+            magic=protected_magic,
+            sha256=sha256,
+            size_bytes=size,
+        )
+    if not signature.startswith(b"%PDF-"):
+        raise PDFValidationError("response does not start with a PDF signature")
     if expected_sha256 is not None and sha256 != expected_sha256:
         raise PDFValidationError("downloaded PDF hash differs from the expected hash")
     try:

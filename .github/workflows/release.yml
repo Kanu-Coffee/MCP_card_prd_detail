@@ -480,11 +480,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Download Worker release evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: release-${{ needs.validate.outputs.version }}-*
+          name: release-${{ needs.validate.outputs.version }}-worker
           path: release-parts
-          merge-multiple: true
+
+      - name: Download MCP release evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ needs.validate.outputs.version }}-mcp
+          path: release-parts
 
       - name: Revalidate tag and assemble deterministic release metadata
         env:
@@ -506,7 +512,8 @@ jobs:
           from pathlib import Path
 
           source = Path("release-parts")
-          role_paths = sorted(source.glob("release-*.json"))
+          role_paths = [source / f"release-{role}.json" for role in ("worker", "mcp")]
+          assert all(path.is_file() for path in role_paths), role_paths
           parts = [json.loads(path.read_text(encoding="utf-8")) for path in role_paths]
           roles = {part["role"]: part for part in parts}
           expected_roles = {"worker", "mcp"}
@@ -606,7 +613,7 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-      - name: Create or repair the GitHub Release for this immutable tag
+      - name: Create or safely repair the GitHub Release for this immutable tag
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.validate.outputs.version }}
@@ -622,23 +629,132 @@ jobs:
             release-assets/cosign-mcp.json
             release-assets/SHA256SUMS
           )
-          if gh release view "$tag" >/dev/null 2>&1; then
-            test "$(gh release view "$tag" --json tagName --jq .tagName)" = "$tag"
-            gh release upload "$tag" "${assets[@]}" --clobber
-            gh release edit "$tag" \
-              --verify-tag \
-              --title "CardRAG ${tag}" \
-              --notes-file release-notes.md \
-              --draft=false \
-              --prerelease=false \
-              --latest
+          (cd release-assets && sha256sum --check SHA256SUMS)
+          release_lookup="$RUNNER_TEMP/cardrag-release-lookup.json"
+          release_json="$RUNNER_TEMP/cardrag-release.json"
+          release_owner=${GITHUB_REPOSITORY%%/*}
+          release_repo=${GITHUB_REPOSITORY#*/}
+          expected_assets=$(
+            for asset in "${assets[@]}"; do
+              digest=$(sha256sum "$asset" | awk '{print $1}')
+              jq -cn \
+                --arg name "$(basename "$asset")" \
+                --arg digest "sha256:${digest}" \
+                '{name: $name, digest: $digest}'
+            done | jq -s 'sort_by(.name)'
+          )
+
+          lookup_release() {
+            local query
+            # GraphQL variables are intentionally literal for gh to bind with -F.
+            # shellcheck disable=SC2016
+            query='query($owner:String!,$repo:String!,$tag:String!){repository(owner:$owner,name:$repo){release(tagName:$tag){databaseId tagName}}}'
+            gh api graphql \
+              -f query="$query" \
+              -F owner="$release_owner" \
+              -F repo="$release_repo" \
+              -F tag="$tag" > "$release_lookup"
+          }
+
+          release_id_from_lookup() {
+            jq -r --arg tag "$tag" '
+              .data.repository.release
+              | select(.tagName == $tag)
+              | .databaseId // empty
+            ' "$release_lookup"
+          }
+
+          load_release() {
+            gh api "repos/${GITHUB_REPOSITORY}/releases/$1" > "$release_json"
+          }
+
+          refresh_release() {
+            local release_id
+            lookup_release
+            release_id=$(release_id_from_lookup)
+            if [[ -z "$release_id" ]]; then
+              return 1
+            fi
+            load_release "$release_id"
+          }
+
+          verify_remote_release() {
+            local expected_draft=$1
+            local _attempt
+            for _attempt in $(seq 1 12); do
+              if refresh_release \
+                  && jq -e \
+                    --arg tag "$tag" \
+                    --arg expected_name "CardRAG ${tag}" \
+                    --rawfile expected_body release-notes.md \
+                    --argjson expected_draft "$expected_draft" \
+                    --argjson expected_assets "$expected_assets" '
+                      .tag_name == $tag
+                      and .name == $expected_name
+                      and .body == $expected_body
+                      and .draft == $expected_draft
+                      and .prerelease == false
+                      and ([.assets[] | {name, digest}] | sort_by(.name)) == $expected_assets
+                      and all(.assets[]; .state == "uploaded")
+                    ' "$release_json" >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          # Only a successful GraphQL lookup returning null proves absence. Network,
+          # authorization, or schema failures stop the job before any mutation.
+          lookup_release
+          release_id=$(release_id_from_lookup)
+          if [[ -n "$release_id" ]]; then
+            load_release "$release_id"
+            if jq -e '.draft == false' "$release_json" >/dev/null; then
+              if ! verify_remote_release false; then
+                echo "::error::existing public release is partial or differs; refusing mutation"
+                exit 1
+              fi
+              echo "Existing public release is exact; no mutation required."
+              exit 0
+            fi
+            jq -e --arg tag "$tag" '.tag_name == $tag and .draft == true' \
+              "$release_json" >/dev/null
           else
-            gh release create "$tag" "${assets[@]}" \
+            gh release create "$tag" \
               --verify-tag \
-              --latest \
+              --draft \
               --title "CardRAG ${tag}" \
               --notes-file release-notes.md
           fi
+
+          # Drafts are safe to repair destructively: an interrupted upload stays unpublished,
+          # and a same-run retry can reconstruct the exact asset set deterministically.
+          refresh_release
+          jq -e --arg tag "$tag" \
+            '.tag_name == $tag and .draft == true and .prerelease == false' \
+            "$release_json" >/dev/null
+          mapfile -t existing_asset_ids < <(jq -r '.assets[].id' "$release_json")
+          for asset_id in "${existing_asset_ids[@]}"; do
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done
+
+          gh release edit "$tag" \
+            --verify-tag \
+            --title "CardRAG ${tag}" \
+            --notes-file release-notes.md \
+            --draft=true \
+            --prerelease=false
+          gh release upload "$tag" "${assets[@]}"
+          verify_remote_release true
+          gh release edit "$tag" \
+            --verify-tag \
+            --title "CardRAG ${tag}" \
+            --notes-file release-notes.md \
+            --draft=false \
+            --prerelease=false \
+            --latest
 
       - name: Verify published GitHub Release assets
         env:
@@ -646,18 +762,41 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
-          gh release view "v${VERSION}" --json assets,isDraft,isPrerelease,tagName \
-            | jq -e --arg tag "v${VERSION}" '
-                .tagName == $tag
-                and .isDraft == false
-                and .isPrerelease == false
-                and ([.assets[].name] | sort)
-                    == ([
-                      "SHA256SUMS",
-                      "cosign-mcp.json",
-                      "cosign-worker.json",
-                      "release-manifest.json",
-                      "release-mcp.json",
-                      "release-worker.json"
-                    ] | sort)
-              ' >/dev/null
+          tag="v${VERSION}"
+          assets=(
+            release-assets/release-manifest.json
+            release-assets/release-worker.json
+            release-assets/release-mcp.json
+            release-assets/cosign-worker.json
+            release-assets/cosign-mcp.json
+            release-assets/SHA256SUMS
+          )
+          (cd release-assets && sha256sum --check SHA256SUMS)
+          release_view="$RUNNER_TEMP/cardrag-release-view.json"
+          expected_assets=$(
+            for asset in "${assets[@]}"; do
+              digest=$(sha256sum "$asset" | awk '{print $1}')
+              jq -cn \
+                --arg name "$(basename "$asset")" \
+                --arg digest "sha256:${digest}" \
+                '{name: $name, digest: $digest}'
+            done | jq -s 'sort_by(.name)'
+          )
+          gh release view "$tag" \
+            --json apiUrl,isDraft,isPrerelease,tagName > "$release_view"
+          release_api=$(jq -er --arg tag "$tag" \
+            'select(.tagName == $tag) | .apiUrl' "$release_view")
+          gh api "$release_api" \
+            | jq -e \
+                --arg tag "$tag" \
+                --arg expected_name "CardRAG ${tag}" \
+                --rawfile expected_body release-notes.md \
+                --argjson expected_assets "$expected_assets" '
+                  .tag_name == $tag
+                  and .name == $expected_name
+                  and .body == $expected_body
+                  and .draft == false
+                  and .prerelease == false
+                  and ([.assets[] | {name, digest}] | sort_by(.name)) == $expected_assets
+                  and all(.assets[]; .state == "uploaded")
+                ' >/dev/null

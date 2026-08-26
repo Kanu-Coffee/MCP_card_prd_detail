@@ -1,9 +1,11 @@
-"""Validation and immutable loading for ``cardrag.serving-db.v1``."""
+"""Validation and immutable loading for ``cardrag.serving-db.v2``."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,15 +24,46 @@ from numpy.typing import NDArray
 
 from cardrag_mcp.models import ServingMetadata
 
-SCHEMA_ID = "cardrag.serving-db.v1"
+SCHEMA_ID = "cardrag.serving-db.v2"
+UNSUPPORTED_DOCUMENTS_SCHEMA = "cardrag.unsupported-documents.v1"
 FLOAT32_BYTES = 4
 EMBEDDING_BYTES = EMBEDDING_DIMENSION * FLOAT32_BYTES
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
+_SOURCE_FIELDS = frozenset(
+    {
+        "category",
+        "document_type",
+        "effective_date",
+        "file_name",
+        "issuer",
+        "metadata",
+        "product_code",
+        "product_name",
+        "source_post_id",
+        "source_url",
+        "source_version",
+    }
+)
 
 REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "metadata": ("key", "value"),
         "issuers": ("code", "display_name", "sort_order"),
         "products": ("issuer", "product_code", "name", "document_id"),
+        "unsupported_products": (
+            "issuer",
+            "product_code",
+            "name",
+            "disposition",
+            "source_id",
+            "source_version",
+            "source_url",
+            "protected_magic",
+            "protected_sha256",
+            "protected_size_bytes",
+            "source_payload_json",
+        ),
         "documents": (
             "document_id",
             "issuer",
@@ -84,6 +117,155 @@ def _integer_metadata(values: Mapping[str, str], key: str) -> int:
     if value < 0:
         raise ServingDatabaseError(f"metadata {key} must not be negative")
     return value
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise ServingDatabaseError(
+            "unsupported product source payload is not canonical JSON"
+        ) from exc
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _validate_unsupported_products(
+    connection: sqlite3.Connection,
+    values: Mapping[str, str],
+) -> tuple[int, str]:
+    expected_count = _integer_metadata(values, "unsupported_document_count")
+    actual_count = int(
+        connection.execute("SELECT count(*) FROM unsupported_products").fetchone()[0]
+    )
+    if expected_count > 100 or actual_count > 100:
+        raise ServingDatabaseError("unsupported product count exceeds the promotion limit")
+    expected_sha256 = values.get("unsupported_documents_sha256", "")
+    if _SHA256.fullmatch(expected_sha256) is None:
+        raise ServingDatabaseError("metadata unsupported_documents_sha256 is missing or invalid")
+
+    issuer_codes = {
+        str(row[0]) for row in connection.execute("SELECT code FROM issuers ORDER BY code")
+    }
+    available_products = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute("SELECT issuer,product_code FROM products")
+    }
+    payloads: list[dict[str, object]] = []
+    source_ids: set[str] = set()
+    rows = connection.execute(
+        """
+        SELECT issuer,product_code,name,disposition,source_id,source_version,source_url,
+               protected_magic,protected_sha256,protected_size_bytes,source_payload_json
+        FROM unsupported_products
+        ORDER BY issuer,product_code
+        """
+    )
+    for row in rows:
+        issuer = str(row["issuer"])
+        product_code = str(row["product_code"])
+        name = str(row["name"])
+        disposition = str(row["disposition"])
+        source_id = str(row["source_id"])
+        source_version = str(row["source_version"])
+        source_url = str(row["source_url"])
+        protected_magic = str(row["protected_magic"])
+        protected_sha256 = str(row["protected_sha256"])
+        protected_size = row["protected_size_bytes"]
+        source_payload_json = str(row["source_payload_json"])
+        if (
+            not issuer
+            or len(issuer) > 512
+            or not product_code
+            or len(product_code) > 512
+            or not name
+            or len(name) > 1_000
+            or disposition != "unsupported_drm"
+            or _SOURCE_ID.fullmatch(source_id) is None
+            or not source_version
+            or len(source_version) > 512
+            or not source_url.startswith("https://")
+            or len(source_url) > 4_096
+            or protected_magic not in {"SCDSA002", "SCDSA004"}
+            or _SHA256.fullmatch(protected_sha256) is None
+            or isinstance(protected_size, bool)
+            or not isinstance(protected_size, int)
+            or protected_size < 1
+        ):
+            raise ServingDatabaseError("unsupported product contains an invalid bounded value")
+        if issuer not in issuer_codes:
+            raise ServingDatabaseError("unsupported product references an unknown issuer")
+        if (issuer, product_code) in available_products:
+            raise ServingDatabaseError("product cannot be both available and unsupported")
+        if source_id in source_ids:
+            raise ServingDatabaseError("unsupported products contain a duplicate source_id")
+        source_ids.add(source_id)
+        try:
+            source_payload_bytes = source_payload_json.encode("utf-8")
+        except UnicodeError as exc:
+            raise ServingDatabaseError("unsupported product source payload is not UTF-8") from exc
+        if len(source_payload_bytes) > 1024 * 1024:
+            raise ServingDatabaseError("unsupported product source payload is too large")
+        try:
+            source = json.loads(source_payload_json, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, RecursionError, ValueError) as exc:
+            raise ServingDatabaseError(
+                "unsupported product source payload is invalid JSON"
+            ) from exc
+        if not isinstance(source, dict) or set(source) != _SOURCE_FIELDS:
+            raise ServingDatabaseError("unsupported product source payload has unexpected fields")
+        canonical_source = _canonical_json_bytes(source)
+        if source_payload_bytes != canonical_source:
+            raise ServingDatabaseError("unsupported product source payload is not canonical JSON")
+        calculated_source_id = "source_" + hashlib.sha256(canonical_source).hexdigest()
+        if calculated_source_id != source_id:
+            raise ServingDatabaseError("unsupported product source_id does not bind its payload")
+        string_fields = _SOURCE_FIELDS - {"metadata"}
+        if any(not isinstance(source.get(key), str) for key in string_fields) or not isinstance(
+            source.get("metadata"), dict
+        ):
+            raise ServingDatabaseError("unsupported product source payload has invalid field types")
+        if (
+            source["issuer"] != issuer
+            or source["product_code"] != product_code
+            or source["product_name"] != name
+            or source["source_version"] != source_version
+            or source["source_url"] != source_url
+        ):
+            raise ServingDatabaseError("unsupported product columns do not bind its source payload")
+        payloads.append(
+            {
+                "disposition": disposition,
+                "protected_magic": protected_magic,
+                "protected_sha256": protected_sha256,
+                "protected_size_bytes": protected_size,
+                "source": source,
+                "source_id": source_id,
+            }
+        )
+
+    if len(payloads) != expected_count:
+        raise ServingDatabaseError("unsupported product count differs from metadata")
+    payloads.sort(key=_canonical_json_bytes)
+    actual_sha256 = hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "documents": payloads,
+                "schema_version": UNSUPPORTED_DOCUMENTS_SCHEMA,
+            }
+        )
+    ).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ServingDatabaseError("unsupported product hash differs from metadata")
+    return expected_count, expected_sha256
 
 
 def validate_schema(
@@ -143,6 +325,7 @@ def validate_schema(
         raise ServingDatabaseError("serving database embedding input policy is incompatible")
     dimension = _integer_metadata(values, "embedding_dimension")
     count = _integer_metadata(values, "embedding_count")
+    unsupported_count, unsupported_sha256 = _validate_unsupported_products(connection, values)
     expected_vector_bytes = count * EMBEDDING_BYTES
     if maximum_vector_bytes is not None and expected_vector_bytes > maximum_vector_bytes:
         raise ServingDatabaseError(
@@ -160,10 +343,12 @@ def validate_schema(
                 "embedding_input_policy_version": values["embedding_input_policy_version"],
                 "embedding_dimension": dimension,
                 "embedding_count": count,
+                "unsupported_document_count": unsupported_count,
+                "unsupported_documents_sha256": unsupported_sha256,
             }
         )
     except Exception as exc:
-        raise ServingDatabaseError("serving metadata does not satisfy v1") from exc
+        raise ServingDatabaseError("serving metadata does not satisfy v2") from exc
 
     evidence_count = int(connection.execute("SELECT count(*) FROM evidence").fetchone()[0])
     fts_count = int(connection.execute("SELECT count(*) FROM evidence_fts").fetchone()[0])

@@ -211,7 +211,11 @@ def test_stable_pointer_is_the_only_atomic_overwrite_path(
     assert len(move_requests) == 2
 
 
-def _publish_current_generation(client: WebDAVClient) -> tuple[GenerationManifest, ArtifactRef]:
+def _publish_current_generation(
+    client: WebDAVClient,
+    *,
+    legacy_v1: bool = False,
+) -> tuple[GenerationManifest, ArtifactRef]:
     pdf = CASPublisher(client).publish_bytes(b"%PDF-test", media_type="application/pdf")
     generation_id = "gen-20260825"
     database_bytes = b"SQLite format 3\x00test"
@@ -227,8 +231,10 @@ def _publish_current_generation(client: WebDAVClient) -> tuple[GenerationManifes
         page_count=1,
     )
     manifest = GenerationManifest(
+        schema_version="cardrag.generation.v1" if legacy_v1 else "cardrag.generation.v2",
         generation_id=generation_id,
         created_at=datetime(2026, 8, 25, tzinfo=UTC),
+        serving_schema="cardrag.serving-db.v1" if legacy_v1 else "cardrag.serving-db.v2",
         serving_database=database,
         corpus_sha256=sha256_bytes(b"corpus"),
         contract_sha256=sha256_bytes(b"contract"),
@@ -285,6 +291,17 @@ def test_mcp_facade_exposes_verified_reads_only(
     destination = (tmp_path / "index.sqlite3").resolve()
     reader.download_serving_database(destination, current=current)
     assert destination.read_bytes() == b"SQLite format 3\x00test"
+
+
+def test_artifact_reader_verifies_a_legacy_v1_head_for_worker_successor(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+) -> None:
+    _, client = webdav
+    manifest, _ = _publish_current_generation(client, legacy_v1=True)
+    current = MCPArtifactReader(client.read_only()).read_current_generation()
+    assert current.manifest == manifest
+    assert current.manifest.schema_version == "cardrag.generation.v1"
+    assert current.manifest.serving_schema == "cardrag.serving-db.v1"
 
 
 def test_mcp_facade_rejects_pointer_ready_tampering(

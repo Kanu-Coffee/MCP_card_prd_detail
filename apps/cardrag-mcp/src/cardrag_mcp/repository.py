@@ -26,6 +26,7 @@ from cardrag_mcp.models import (
     SearchPage,
     SearchRequest,
     SourcePage,
+    UnsupportedProduct,
 )
 from cardrag_mcp.store import GenerationHandle, GenerationStore
 
@@ -391,12 +392,18 @@ class ServingRepository:
             len(rows) > limit,
         )
 
-    async def get_product(self, issuer: str, product_code: str) -> Product | None:
+    async def get_product(
+        self, issuer: str, product_code: str
+    ) -> Product | UnsupportedProduct | None:
         with self.store.pin() as handle:
             return await asyncio.to_thread(self._get_product, handle, issuer, product_code)
 
     @staticmethod
-    def _get_product(handle: GenerationHandle, issuer: str, product_code: str) -> Product | None:
+    def _get_product(
+        handle: GenerationHandle,
+        issuer: str,
+        product_code: str,
+    ) -> Product | UnsupportedProduct | None:
         with handle.connect() as connection:
             row = connection.execute(
                 """
@@ -409,8 +416,32 @@ class ServingRepository:
                 """,
                 (issuer, product_code),
             ).fetchone()
+            if row is None:
+                unsupported = connection.execute(
+                    """
+                    SELECT issuer,product_code,name,source_id,source_version,source_url,
+                           protected_magic,protected_sha256,protected_size_bytes
+                    FROM unsupported_products
+                    WHERE issuer=? AND product_code=?
+                    """,
+                    (issuer, product_code),
+                ).fetchone()
+            else:
+                unsupported = None
         if row is None:
-            return None
+            if unsupported is None:
+                return None
+            return UnsupportedProduct(
+                issuer=unsupported["issuer"],
+                product_code=unsupported["product_code"],
+                name=unsupported["name"],
+                source_id=unsupported["source_id"],
+                source_version=unsupported["source_version"],
+                source_url=unsupported["source_url"],
+                protected_magic=unsupported["protected_magic"],
+                protected_source_sha256=unsupported["protected_sha256"],
+                protected_source_size_bytes=unsupported["protected_size_bytes"],
+            )
         document = Document(
             document_id=row["document_id"],
             issuer=row["issuer"],
@@ -468,18 +499,29 @@ class ServingRepository:
                 ).fetchall()
         return tuple(Issuer(**dict(row)) for row in rows)
 
-    async def list_products(self, issuer: str | None = None) -> tuple[Product, ...]:
+    async def list_products(
+        self, issuer: str | None = None
+    ) -> tuple[Product | UnsupportedProduct, ...]:
         with self.store.pin() as handle:
             with handle.connect() as connection:
                 if issuer is None:
                     rows = connection.execute(
-                        "SELECT issuer,product_code FROM products ORDER BY issuer,product_code"
+                        """
+                        SELECT issuer,product_code FROM products
+                        UNION ALL
+                        SELECT issuer,product_code FROM unsupported_products
+                        ORDER BY issuer,product_code
+                        """
                     ).fetchall()
                 else:
                     rows = connection.execute(
-                        "SELECT issuer,product_code FROM products "
-                        "WHERE issuer=? ORDER BY product_code",
-                        (issuer,),
+                        """
+                        SELECT issuer,product_code FROM products WHERE issuer=?
+                        UNION ALL
+                        SELECT issuer,product_code FROM unsupported_products WHERE issuer=?
+                        ORDER BY product_code
+                        """,
+                        (issuer, issuer),
                     ).fetchall()
             products = [self._get_product(handle, str(row[0]), str(row[1])) for row in rows]
         return tuple(product for product in products if product is not None)

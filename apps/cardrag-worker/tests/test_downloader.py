@@ -11,7 +11,9 @@ from cardrag_worker.downloader import (
     DownloadPolicy,
     DownloadSecurityError,
     PDFValidationError,
+    ProtectedDocumentError,
     SecurePDFDownloader,
+    validate_pdf,
     validate_url,
 )
 
@@ -115,3 +117,11 @@ def test_url_validation_rejects_private_dns_and_credentials() -> None:
         validate_url("https://cards.example/a.pdf", policy, resolver=lambda _host: ("10.0.0.4",))
     with pytest.raises(DownloadSecurityError, match="credential-free"):
         validate_url("https://user:pass@cards.example/a.pdf", policy, resolver=public_ip)
+
+
+@pytest.mark.parametrize("signature", [b"SCDSA002", b"SCDSA004"])
+def test_pdf_validator_classifies_recognized_protected_containers(tmp_path: Path, signature: bytes) -> None:
+    protected = tmp_path / "protected.pdf"
+    protected.write_bytes(signature + b"\x00" * 64)
+    with pytest.raises(ProtectedDocumentError, match="protected document"):
+        validate_pdf(protected)

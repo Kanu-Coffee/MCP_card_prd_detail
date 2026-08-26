@@ -222,12 +222,30 @@ def test_generation_manifest_lists_pdf_cas_and_open_issuer_codes() -> None:
         counts=GenerationCounts(documents=2, pdf_objects=1, ocr_objects=1, chunks=5),
         documents=documents,
     )
-    assert manifest.serving_schema == "cardrag.serving-db.v1"
+    assert manifest.schema_version == "cardrag.generation.v2"
+    assert manifest.serving_schema == "cardrag.serving-db.v2"
     assert manifest.issuer_codes == ("kb", "lotte")
     assert manifest.documents[0].ocr_cache_kind == "native"
     assert manifest.documents[0].ocr_reuse_key == reuse_key
     assert manifest.documents[1].ocr_cache_kind is None
     assert manifest.documents[1].ocr_reuse_key is None
+    legacy = GenerationManifest.model_validate(
+        {
+            **manifest.model_dump(mode="python"),
+            "schema_version": "cardrag.generation.v1",
+            "serving_schema": "cardrag.serving-db.v1",
+        }
+    )
+    assert legacy.schema_version == "cardrag.generation.v1"
+    assert legacy.serving_schema == "cardrag.serving-db.v1"
+    with pytest.raises(ValidationError, match="schema versions must match"):
+        GenerationManifest.model_validate(
+            {
+                **manifest.model_dump(mode="python"),
+                "schema_version": "cardrag.generation.v1",
+                "serving_schema": "cardrag.serving-db.v2",
+            }
+        )
     with pytest.raises(ValidationError, match="document count"):
         GenerationManifest.model_validate(
             {

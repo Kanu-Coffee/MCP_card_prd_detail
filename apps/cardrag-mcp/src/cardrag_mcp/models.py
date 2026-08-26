@@ -37,7 +37,21 @@ class Product(StrictModel):
     issuer: Identifier
     product_code: Identifier
     name: str = Field(min_length=1, max_length=1_000)
+    availability: Literal["available"] = "available"
     document: Document
+
+
+class UnsupportedProduct(StrictModel):
+    issuer: Identifier
+    product_code: Identifier
+    name: str = Field(min_length=1, max_length=1_000)
+    availability: Literal["unsupported_drm"] = "unsupported_drm"
+    source_id: Identifier
+    source_version: str = Field(min_length=1, max_length=512)
+    source_url: str = Field(min_length=1, max_length=4_096)
+    protected_magic: Literal["SCDSA002", "SCDSA004"]
+    protected_source_sha256: Sha256Hex
+    protected_source_size_bytes: int = Field(ge=1)
 
 
 class SourcePage(StrictModel):
@@ -101,7 +115,7 @@ class SourcePdfDescriptor(StrictModel):
 
 
 class ServingMetadata(StrictModel):
-    schema_id: Literal["cardrag.serving-db.v1"]
+    schema_id: Literal["cardrag.serving-db.v2"]
     generation_id: Identifier
     corpus_sha256: Sha256Hex
     embedding_provider: str = Field(min_length=1, max_length=256)
@@ -109,6 +123,8 @@ class ServingMetadata(StrictModel):
     embedding_input_policy_version: Literal["cardrag.embedding-input.v1"]
     embedding_dimension: Literal[1536]
     embedding_count: int = Field(ge=0)
+    unsupported_document_count: int = Field(ge=0)
+    unsupported_documents_sha256: Sha256Hex
 
 
 class SearchRequest(StrictModel):

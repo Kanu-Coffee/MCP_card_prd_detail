@@ -12,11 +12,15 @@ def test_state_uses_wal_and_resume_resets_attempts_and_refreshes_discovery(tmp_p
         assert state.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         run_id = state.start_run(run_id="run-1")
         state.ensure_stage(run_id, "doc", "ocr", max_attempts=1)
+        state.ensure_stage(run_id, "protected", "download", max_attempts=1)
         state.ensure_stage(run_id, "issuer-kb", "discovery", max_attempts=1)
         assert state.stage_started(run_id, "issuer-kb", "discovery") == 1
         state.stage_succeeded(run_id, "issuer-kb", "discovery")
         assert state.stage_started(run_id, "doc", "ocr") == 1
         assert state.stage_failed(run_id, "doc", "ocr", RuntimeError("boom"), delay_seconds=0) == "failed"
+        assert state.stage_started(run_id, "protected", "download") == 1
+        state.stage_skipped(run_id, "protected", "download", "unsupported_drm kb/04130")
+        assert state.stage_status_count(run_id, "download", "skipped") == 1
         artifact = tmp_path / "chunk.md"
         artifact.write_text("checkpoint", encoding="utf-8")
         state.save_checkpoint(
@@ -36,6 +40,9 @@ def test_state_uses_wal_and_resume_resets_attempts_and_refreshes_discovery(tmp_p
         discovery = state.get_stage(run_id, "issuer-kb", "discovery")
         assert discovery is not None
         assert (discovery.status, discovery.attempt_count) == ("retry", 0)
+        protected = state.get_stage(run_id, "protected", "download")
+        assert protected is not None
+        assert (protected.status, protected.attempt_count) == ("retry", 0)
         assert state.checkpoint(run_id, "doc", "ocr", 0) is not None
         assert state.stage_started(run_id, "doc", "ocr") == 1
 
