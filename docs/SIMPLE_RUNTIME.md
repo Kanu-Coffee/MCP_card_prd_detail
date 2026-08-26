@@ -1,11 +1,11 @@
-# CardRAG v1.0.0 실운영 가이드
+# CardRAG v1.0.1 실운영 가이드
 
 이 문서는 처음 운영 서버를 준비하는 사람을 위한 순서형 안내서입니다. 명령은
 별도 표시가 없으면 `/opt/cardrag`에서 실행합니다.
 
 ## 1. 운영 구조 이해하기
 
-CardRAG v1.0.0은 Worker 하나와 MCP 하나로 동작합니다.
+CardRAG v1.0.1은 Worker 하나와 MCP 하나로 동작합니다.
 
 ```text
 카드사 PDF
@@ -55,7 +55,7 @@ Worker만 WebDAV에 씁니다. Worker와 MCP는 같은 WebDAV Basic Auth 계정�
 - HTTPS WebDAV 주소, 사용자 이름, 비밀번호
 - OpenRouter API 키
 - MCP가 외부에서 사용할 HTTPS 주소와 TLS 리버스 프록시
-- `/opt/cardrag`에 배치한 v1.0.0 저장소 파일
+- `/opt/cardrag`에 배치한 v1.0.1 저장소 파일
 
 WebDAV 계정에는 `PROPFIND`, `MKCOL`, `PUT`, `GET`, `HEAD`, `MOVE`, `DELETE`
 권한이 필요합니다. `MOVE`의 `Overwrite:F` 요청도 올바르게 거부해야 합니다.
@@ -63,8 +63,8 @@ WebDAV 계정에는 `PROPFIND`, `MKCOL`, `PUT`, `GET`, `HEAD`, `MOVE`, `DELETE`
 운영 이미지는 다음 두 태그로 고정합니다.
 
 ```text
-ymtop59/mcp-card-prd-detail:1.0.0-worker
-ymtop59/mcp-card-prd-detail:1.0.0-mcp
+ymtop59/mcp-card-prd-detail:1.0.1-worker
+ymtop59/mcp-card-prd-detail:1.0.1-mcp
 ```
 
 서버에서 배포 파일 위치를 확인합니다.
@@ -193,7 +193,7 @@ sudoedit /etc/cardrag/worker.env
 
 ```dotenv
 CARDRAG_ENVIRONMENT=production
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.0-worker
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.1-worker
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
@@ -229,7 +229,7 @@ sudoedit /etc/cardrag/mcp.env
 
 ```dotenv
 CARDRAG_ENVIRONMENT=production
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.0-mcp
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.1-mcp
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
 CARDRAG_WEBDAV_USERNAME_SECRET_FILE=/etc/cardrag/secrets/webdav_username
@@ -300,11 +300,11 @@ CARDRAG_WORKER_COMPOSE_OVERLAYS=--file deploy/worker/compose.ca.yaml
 
 ## 5. 이미지와 Compose 설정 확인
 
-v1.0.0 이미지를 미리 내려받습니다.
+v1.0.1 이미지를 미리 내려받습니다.
 
 ```bash
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.0-worker
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.0-mcp
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.1-worker
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.1-mcp
 ```
 
 Worker 설정을 실제 systemd 실행 사용자로 검증합니다.
@@ -639,7 +639,7 @@ Worker 볼륨에는 Codex 인증과 재개 checkpoint가 있고, MCP 볼륨에�
 
 ## 13. 이미지 업그레이드
 
-현재 설치값은 두 `1.0.0` 역할 태그입니다. 이후 승인된 버전으로 업그레이드할
+현재 설치값은 두 `1.0.1` 역할 태그입니다. 이후 승인된 버전으로 업그레이드할
 때도 Worker와 MCP 역할 태그를 함께 준비하고 `latest`는 사용하지 않습니다.
 
 1. 새 배포 파일을 `/opt/cardrag`에 반영합니다.

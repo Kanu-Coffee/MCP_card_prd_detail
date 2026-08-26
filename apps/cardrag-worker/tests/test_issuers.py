@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from cardrag_worker.issuers.common import IssuerMarkupChanged
-from cardrag_worker.issuers.kb import KBAdapter
+from cardrag_worker.issuers.kb import KBAdapter, parse_listing
 from cardrag_worker.issuers.shinhan import ShinhanAdapter
 from cardrag_worker.issuers.woori import DETAIL_PATH, MAIN_PATH, WooriAdapter
 
@@ -75,8 +76,8 @@ class WooriClient:
 KB_PAGE_1 = """
 <table><tr><td>KB 테스트 카드</td>
 <td><a href="/obj/card/download/card_20260825.pdf">PDF</a></td>
-<td onclick="goDetail('P1','KB 테스트 카드')">상세</td></tr></table>
-<a onclick="doSearchSpider('HSHMCXCRSZZC0002','2')">2</a>
+<td><a href="javascript:goDetail('P1','KB 테스트 카드','dtlView_0');">상세</a></td></tr></table>
+<a href="javascript:doSearchSpider('HSHMCXCRSZZC0002','2');">2</a>
 """
 KB_PAGE_2 = """
 <table><tr><td>KB 두번째 카드</td>
@@ -150,9 +151,20 @@ async def test_kb_pagination_and_direct_get_download_contract() -> None:
     client = KBClient()
     snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
     assert [row.product_code for row in snapshot.records] == ["P1", "P2"]
+    assert snapshot.records[0].metadata == {"category_code": "0"}
     assert client.posts == ["1", "2"]
     request = await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
     assert request.method == "GET"
+
+
+def test_kb_rejects_non_javascript_href_with_handler_substring() -> None:
+    html = """
+    <table><tr><td>거부할 카드</td>
+    <td><a href="/obj/card/download/card_20260825.pdf">PDF</a></td>
+    <td><a href="https://invalid.example/goDetail('BAD','거부할 카드')">상세</a></td>
+    </tr></table>
+    """
+    assert parse_listing(html, category_code="0", discovered_at=datetime.now(UTC)) == []
 
 
 @pytest.mark.asyncio
