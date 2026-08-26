@@ -38,6 +38,17 @@ SPEC = IssuerSpec(
     minimum_records=25,
 )
 
+_DETAIL_CALL = re.compile(
+    r"^\s*(?:javascript:\s*)?goDetail\(\s*'([^']+)'\s*,\s*'([^']*)'"
+    r"(?:\s*,\s*'[^']*')?\s*\)\s*;?\s*$",
+    flags=re.I,
+)
+_PAGE_CALL = re.compile(
+    r'^\s*(?:javascript:\s*)?doSearchSpider\(\s*["\']HSHMCXCRSZZC0002["\']'
+    r'\s*,\s*["\'](\d+)["\']\s*\)\s*;?\s*$',
+    flags=re.I,
+)
+
 
 def _pdf_date(url: str) -> str:
     match = re.search(r"(20\d{6}|19\d{6})(?=\.pdf(?:$|\?))", url, flags=re.I)
@@ -49,10 +60,19 @@ def parse_listing(page_html: str, *, category_code: str, discovered_at: datetime
     records: list[SourceRecord] = []
     for row in soup.select("tr"):
         pdf = row.select_one('a[href*="/obj/card/download/"][href$=".pdf"]')
-        detail = row.select_one("[onclick*='goDetail']")
+        detail = row.select_one("[onclick*='goDetail'], a[href*='goDetail']")
         if pdf is None or detail is None:
             continue
-        match = re.search(r"goDetail\(\s*'([^']+)'\s*,\s*'([^']*)'", str(detail.get("onclick") or ""))
+        onclick = detail.get("onclick")
+        href = detail.get("href")
+        detail_call = str(onclick or href or "")
+        if (
+            href is not None
+            and onclick is None
+            and not detail_call.lstrip().lower().startswith("javascript:")
+        ):
+            continue
+        match = _DETAIL_CALL.fullmatch(detail_call)
         cells = row.select("td")
         if not match or not cells:
             continue
@@ -83,8 +103,13 @@ def parse_listing(page_html: str, *, category_code: str, discovered_at: datetime
 def _last_page(page_html: str) -> int:
     soup = BeautifulSoup(page_html, "lxml")
     pages: list[int] = []
-    for node in soup.select("[onclick*='doSearchSpider']"):
-        match = re.search(r'HSHMCXCRSZZC0002["\']\s*,\s*["\'](\d+)', str(node.get("onclick")))
+    for node in soup.select("[onclick*='doSearchSpider'], a[href*='doSearchSpider']"):
+        onclick = node.get("onclick")
+        href = node.get("href")
+        page_call = str(onclick or href or "")
+        if href is not None and onclick is None and not page_call.lstrip().lower().startswith("javascript:"):
+            continue
+        match = _PAGE_CALL.fullmatch(page_call)
         if match:
             pages.append(int(match.group(1)))
     return max(pages, default=1)
@@ -92,7 +117,7 @@ def _last_page(page_html: str) -> int:
 
 class KBAdapter:
     spec = SPEC
-    parser_version = "kb.current.v1"
+    parser_version = "kb.current.v2"
 
     def __init__(self, *, base_url: str = BASE_URL, minimum_records: int | None = None) -> None:
         self.base_url = base_url.rstrip("/")

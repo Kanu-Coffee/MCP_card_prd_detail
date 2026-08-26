@@ -160,6 +160,8 @@ class OCRResolver:
         self.render_scale_milli = render_scale_milli
         self.adoption_policy_version = adoption_policy_version
         self.contract = NativeOCRContract(
+            # Adapter-only patch releases keep the OCR processing contract stable
+            # so verified native cache entries remain reusable.
             processor_version="cardrag-worker/1.0.0",
             cache_epoch=cache_epoch,
             prompt_version=prompt_version,
