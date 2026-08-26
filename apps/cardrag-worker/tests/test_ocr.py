@@ -236,7 +236,7 @@ async def test_sparse_page_wrapper_rejects_more_than_twelve_visible_characters(
             prompt: str,
         ) -> str:
             del images, page_numbers, target_page_numbers, total_pages, prompt
-            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n이것은 열세 글자를 넘는 일반 본문입니다.\n"
+            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n123456\n\n789012\n3\n"
 
     state = WorkerState(tmp_path / "state.sqlite3")
     resolver = OCRResolver(provider=DenseWrapperProvider(), state=state, webdav=None)  # type: ignore[arg-type]
@@ -244,7 +244,7 @@ async def test_sparse_page_wrapper_rejects_more_than_twelve_visible_characters(
         run_id = state.start_run(run_id="run")
         pdf = tmp_path / "pdf-pages.txt"
         pdf.write_text("1", encoding="utf-8")
-        with pytest.raises(Exception, match="sparse-page wrapper is invalid"):
+        with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid"):
             await resolver.resolve(
                 run_id=run_id,
                 document_id="doc_dense_wrapper",
@@ -260,7 +260,7 @@ async def test_sparse_page_wrapper_rejects_more_than_twelve_visible_characters(
 
 
 @pytest.mark.asyncio
-async def test_sparse_page_wrapper_rejects_multiple_nonblank_transcription_lines(
+async def test_sparse_page_wrapper_accepts_multiple_short_visible_lines_and_normalizes_whitespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
@@ -276,25 +276,138 @@ async def test_sparse_page_wrapper_rejects_multiple_nonblank_transcription_lines
             prompt: str,
         ) -> str:
             del images, page_numbers, target_page_numbers, total_pages, prompt
-            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\nROVL\nMileage\n"
+            self.calls.append(1)
+            return (
+                f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n\n TANTUM  \n\n < \n\n"
+                f"## Page 2\n\n{OCR_SPARSE_PAGE_PREFIX}\n ROVL \n\n Mileage \n"
+            )
+
+    provider = MultilineSparseProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=provider, state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("2", encoding="utf-8")
+        result = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_multiline_sparse",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=2,
+            output_dir=tmp_path / "ocr",
+        )
+
+        expected_page_1 = f"{OCR_SPARSE_PAGE_PREFIX}\nTANTUM\n<"
+        expected_page_2 = f"{OCR_SPARSE_PAGE_PREFIX}\nROVL\nMileage"
+        assert provider.calls == [1]
+        assert result.pages == (expected_page_1, expected_page_2)
+        checkpoint = state.checkpoint(run_id, "doc_multiline_sparse", "ocr", 0)
+        assert checkpoint is not None
+        assert Path(checkpoint["artifact_path"]).read_text(encoding="utf-8") == (
+            f"## Page 1\n\n{expected_page_1}\n\n## Page 2\n\n{expected_page_2}\n"
+        )
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_sparse_page_wrapper_accepts_twelve_visible_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class TwelveLineSparseProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, target_page_numbers, total_pages, prompt
+            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n" + "\n".join("x" for _ in range(12))
 
     state = WorkerState(tmp_path / "state.sqlite3")
-    resolver = OCRResolver(provider=MultilineSparseProvider(), state=state, webdav=None)  # type: ignore[arg-type]
+    resolver = OCRResolver(provider=TwelveLineSparseProvider(), state=state, webdav=None)  # type: ignore[arg-type]
     try:
         run_id = state.start_run(run_id="run")
         pdf = tmp_path / "pdf-pages.txt"
         pdf.write_text("1", encoding="utf-8")
-        with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid"):
+        result = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_twelve_line_sparse",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "ocr",
+        )
+        assert result.pages == (f"{OCR_SPARSE_PAGE_PREFIX}\n" + "\n".join("x" for _ in range(12)),)
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        OCR_SPARSE_PAGE_PREFIX,
+        f"{OCR_SPARSE_PAGE_PREFIX} trailing\nTANTUM",
+        f"ordinary\n{OCR_SPARSE_PAGE_PREFIX}\nTANTUM",
+        f"{OCR_SPARSE_PAGE_PREFIX}\n  ## Page 9",
+        f"{OCR_SPARSE_PAGE_PREFIX}\n{OCR_BLANK_PAGE_SENTINEL}",
+        f"{OCR_SPARSE_PAGE_PREFIX}\n{OCR_SPARSE_PAGE_PREFIX}",
+    ],
+    ids=[
+        "empty",
+        "text-on-wrapper-line",
+        "wrapper-after-ordinary-body",
+        "nested-page-marker",
+        "nested-blank-sentinel",
+        "nested-sparse-wrapper",
+    ],
+)
+async def test_sparse_page_wrapper_rejects_malformed_or_nested_control_bodies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class MalformedSparseProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, target_page_numbers, total_pages, prompt
+            return f"## Page 1\n\n{body}\n"
+
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=MalformedSparseProvider(), state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(OCRValidationError):
             await resolver.resolve(
                 run_id=run_id,
-                document_id="doc_multiline_sparse",
+                document_id="doc_malformed_sparse",
                 pdf_path=pdf,
                 pdf_sha256=PDF_SHA,
                 pdf_size_bytes=3,
                 page_count=1,
                 output_dir=tmp_path / "ocr",
             )
-        assert state.checkpoint(run_id, "doc_multiline_sparse", "ocr", 0) is None
+        assert state.checkpoint(run_id, "doc_malformed_sparse", "ocr", 0) is None
     finally:
         state.close()
 
