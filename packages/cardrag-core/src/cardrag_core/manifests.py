@@ -82,10 +82,18 @@ class GenerationDocument(StrictFrozenModel):
 
 
 class GenerationManifest(StrictFrozenModel):
-    schema_version: Literal["cardrag.generation.v1", "cardrag.generation.v2"] = "cardrag.generation.v2"
+    schema_version: Literal[
+        "cardrag.generation.v1",
+        "cardrag.generation.v2",
+        "cardrag.generation.v3",
+    ] = "cardrag.generation.v3"
     generation_id: str
     created_at: AwareDatetime
-    serving_schema: Literal["cardrag.serving-db.v1", "cardrag.serving-db.v2"] = "cardrag.serving-db.v2"
+    serving_schema: Literal[
+        "cardrag.serving-db.v1",
+        "cardrag.serving-db.v2",
+        "cardrag.serving-db.v3",
+    ] = "cardrag.serving-db.v3"
     serving_database: ArtifactRef
     corpus_sha256: Sha256Hex
     contract_sha256: Sha256Hex
@@ -133,6 +141,7 @@ class GenerationManifest(StrictFrozenModel):
         expected_serving_schema = {
             "cardrag.generation.v1": "cardrag.serving-db.v1",
             "cardrag.generation.v2": "cardrag.serving-db.v2",
+            "cardrag.generation.v3": "cardrag.serving-db.v3",
         }[self.schema_version]
         if self.serving_schema != expected_serving_schema:
             raise ValueError("generation and serving database schema versions must match")
@@ -152,9 +161,9 @@ class GenerationManifest(StrictFrozenModel):
             raise ValueError("generation OCR object count does not match documents")
         if self.embedding_contract.count != self.counts.chunks:
             raise ValueError("embedding count must equal generation chunk count")
-        document_issuers = tuple(sorted({document.issuer for document in self.documents}))
-        if self.documents and self.issuer_codes != document_issuers:
-            raise ValueError("issuer_codes do not match generation documents")
+        document_issuers = {document.issuer for document in self.documents}
+        if not document_issuers.issubset(self.issuer_codes):
+            raise ValueError("generation documents reference an undeclared issuer")
         return self
 
     def canonical_bytes(self) -> bytes:

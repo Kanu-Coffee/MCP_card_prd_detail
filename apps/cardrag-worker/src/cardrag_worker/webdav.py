@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
 from cardrag_core import (
@@ -54,6 +54,25 @@ class RemoteGenerationIdentity:
     generation_id: str
     corpus_sha256: str
     contract_sha256: str
+    generation_schema: Literal[
+        "cardrag.generation.v1",
+        "cardrag.generation.v2",
+        "cardrag.generation.v3",
+    ] = "cardrag.generation.v3"
+    serving_schema: Literal[
+        "cardrag.serving-db.v1",
+        "cardrag.serving-db.v2",
+        "cardrag.serving-db.v3",
+    ] = "cardrag.serving-db.v3"
+
+    def __post_init__(self) -> None:
+        expected = {
+            "cardrag.generation.v1": "cardrag.serving-db.v1",
+            "cardrag.generation.v2": "cardrag.serving-db.v2",
+            "cardrag.generation.v3": "cardrag.serving-db.v3",
+        }[self.generation_schema]
+        if self.serving_schema != expected:
+            raise ValueError("remote generation and serving schema versions must match")
 
 
 class WebDAVClient:
@@ -245,6 +264,8 @@ class WebDAVClient:
                 generation_id=current.manifest.generation_id,
                 corpus_sha256=current.manifest.corpus_sha256,
                 contract_sha256=current.manifest.contract_sha256,
+                generation_schema=current.manifest.schema_version,
+                serving_schema=current.manifest.serving_schema,
             )
 
         try:

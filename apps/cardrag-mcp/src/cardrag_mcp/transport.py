@@ -56,11 +56,25 @@ class CoreArtifactReader:
         contract = manifest.embedding_contract
         remote = RemoteGeneration(
             generation_id=manifest.generation_id,
+            serving_schema=manifest.serving_schema,
+            corpus_sha256=manifest.corpus_sha256,
+            contract_sha256=manifest.contract_sha256,
             database=_artifact(manifest.serving_database),
             documents=tuple(
-                RemoteDocument(document_id=item.document_id, pdf=_artifact(item.pdf))
+                RemoteDocument(
+                    document_id=item.document_id,
+                    issuer=item.issuer,
+                    page_count=item.page_count,
+                    pdf=_artifact(item.pdf),
+                    ocr_sha256=None if item.ocr is None else item.ocr.sha256,
+                )
                 for item in manifest.documents
             ),
+            issuer_codes=manifest.issuer_codes,
+            document_count=manifest.counts.documents,
+            pdf_object_count=manifest.counts.pdf_objects,
+            ocr_object_count=manifest.counts.ocr_objects,
+            chunk_count=manifest.counts.chunks,
             embedding_provider=contract.provider,
             embedding_model=contract.model,
             embedding_dimension=contract.dimension,

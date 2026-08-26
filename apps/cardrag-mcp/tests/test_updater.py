@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,9 @@ def remote_generation(fixture) -> RemoteGeneration:
     database_body = fixture.database.read_bytes()
     return RemoteGeneration(
         generation_id=fixture.generation_id,
+        serving_schema=fixture.serving_schema,
+        corpus_sha256=fixture.corpus_sha256,
+        contract_sha256=fixture.contract_sha256,
         database=RemoteArtifact(
             path=f"v1/generations/{fixture.generation_id}/index.sqlite3",
             sha256=hashlib.sha256(database_body).hexdigest(),
@@ -30,6 +35,8 @@ def remote_generation(fixture) -> RemoteGeneration:
         documents=tuple(
             RemoteDocument(
                 document_id=document_id,
+                issuer=issuer,
+                page_count=page_count,
                 pdf=RemoteArtifact(
                     path=f"v1/objects/sha256/{digest[:2]}/{digest}",
                     sha256=digest,
@@ -37,8 +44,17 @@ def remote_generation(fixture) -> RemoteGeneration:
                     media_type="application/pdf",
                 ),
             )
-            for document_id, digest, size, _ in fixture.documents
+            for (document_id, digest, size, _), (_, issuer, page_count) in zip(
+                fixture.documents,
+                fixture.document_contracts,
+                strict=True,
+            )
         ),
+        issuer_codes=fixture.issuer_codes,
+        document_count=len(fixture.documents),
+        pdf_object_count=len({digest for _, digest, _, _ in fixture.documents}),
+        ocr_object_count=0,
+        chunk_count=3 if len(fixture.documents) == 2 else 2,
         embedding_provider="openrouter",
         embedding_model="openai/text-embedding-3-small",
         embedding_dimension=1536,
@@ -67,6 +83,135 @@ class FakeReader:
 
     async def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("database_schema", "manifest_schema"),
+    (
+        ("cardrag.serving-db.v2", "cardrag.serving-db.v3"),
+        ("cardrag.serving-db.v3", "cardrag.serving-db.v2"),
+    ),
+)
+async def test_updater_rejects_manifest_database_schema_cross_pair(
+    tmp_path: Path,
+    database_schema: str,
+    manifest_schema: str,
+) -> None:
+    fixture = create_database(
+        tmp_path / "remote.sqlite3",
+        "gen-cross-schema",
+        schema_id=database_schema,
+    )
+    remote = replace(
+        remote_generation(fixture),
+        serving_schema=manifest_schema,
+    )
+    reader = FakeReader(
+        remote,
+        fixture.database,
+        {digest: body for _, digest, _, body in fixture.documents},
+    )
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    updater = WebDAVUpdater(reader, store, Metrics.create(), poll_seconds=300)
+
+    with pytest.raises(RuntimeError, match="database contract differs"):
+        await updater.poll_once()
+
+    assert store.active_generation_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ("corpus_sha256", "contract_sha256"))
+async def test_updater_rejects_manifest_database_hash_cross_pair(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    fixture = create_database(tmp_path / "remote.sqlite3", "gen-cross-hash")
+    remote = replace(remote_generation(fixture), **{field: "0" * 64})
+    reader = FakeReader(
+        remote,
+        fixture.database,
+        {digest: body for _, digest, _, body in fixture.documents},
+    )
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    updater = WebDAVUpdater(reader, store, Metrics.create(), poll_seconds=300)
+
+    with pytest.raises(RuntimeError, match="database contract differs"):
+        await updater.poll_once()
+
+    assert store.active_generation_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ("issuer", "page_count"))
+async def test_updater_rejects_manifest_database_document_cross_pair(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    fixture = create_database(tmp_path / "remote.sqlite3", "gen-cross-document")
+    remote = remote_generation(fixture)
+    documents = list(remote.documents)
+    if field == "issuer":
+        documents[0] = replace(documents[0], issuer=documents[1].issuer)
+        documents[1] = replace(documents[1], issuer=remote.documents[0].issuer)
+    else:
+        documents[0] = replace(documents[0], page_count=2)
+    remote = replace(remote, documents=tuple(documents))
+    reader = FakeReader(
+        remote,
+        fixture.database,
+        {digest: body for _, digest, _, body in fixture.documents},
+    )
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    updater = WebDAVUpdater(reader, store, Metrics.create(), poll_seconds=300)
+
+    with pytest.raises(RuntimeError, match="manifest and database PDF references differ"):
+        await updater.poll_once()
+
+    assert store.active_generation_id is None
+
+
+@pytest.mark.asyncio
+async def test_updater_rejects_database_corpus_count_cross_pair(tmp_path: Path) -> None:
+    fixture = create_database(tmp_path / "remote.sqlite3", "gen-cross-count")
+    with sqlite3.connect(fixture.database) as connection:
+        connection.execute("DELETE FROM products WHERE product_code='P2'")
+    remote = remote_generation(fixture)
+    reader = FakeReader(
+        remote,
+        fixture.database,
+        {digest: body for _, digest, _, body in fixture.documents},
+    )
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    updater = WebDAVUpdater(reader, store, Metrics.create(), poll_seconds=300)
+
+    with pytest.raises(RuntimeError, match="manifest and database corpus counts differ"):
+        await updater.poll_once()
+
+    assert store.active_generation_id is None
+
+
+@pytest.mark.asyncio
+async def test_updater_can_activate_last_good_v2_during_mcp_first_upgrade(tmp_path: Path) -> None:
+    fixture = create_database(
+        tmp_path / "remote-v2.sqlite3",
+        "gen-v2",
+        schema_id="cardrag.serving-db.v2",
+    )
+    remote = remote_generation(fixture)
+    reader = FakeReader(
+        remote,
+        fixture.database,
+        {digest: body for _, digest, _, body in fixture.documents},
+    )
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    updater = WebDAVUpdater(reader, store, Metrics.create(), poll_seconds=300)
+
+    assert await updater.poll_once() is True
+    assert store.active_generation_id == "gen-v2"
+    with store.pin() as handle:
+        assert handle.metadata.schema_id == "cardrag.serving-db.v2"
 
 
 @pytest.mark.asyncio

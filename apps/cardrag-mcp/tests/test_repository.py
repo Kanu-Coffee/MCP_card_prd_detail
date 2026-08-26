@@ -9,6 +9,7 @@ from conftest import FakeEmbedder, create_database, unit_vector
 
 from cardrag_mcp.embeddings import EmbeddingUnavailable
 from cardrag_mcp.models import Product, SearchFilters, SearchRequest, UnsupportedProduct
+from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.schema import ServingDatabaseError
 from cardrag_mcp.store import GenerationStore, load_generation_handle
 
@@ -77,6 +78,111 @@ def test_promotion_rejects_incompatible_query_embedding_policy(tmp_path: Path) -
             tmp_path / "objects",
             maximum_vector_bytes=1024 * 1024,
         )
+
+
+@pytest.mark.parametrize(
+    ("schema_id", "protected_magic"),
+    (
+        ("cardrag.serving-db.v2", "SCDSA004"),
+        ("cardrag.serving-db.v3", "FASOO_DRMONE"),
+    ),
+)
+def test_loader_accepts_last_good_v2_and_current_v3(
+    tmp_path: Path,
+    schema_id: str,
+    protected_magic: str,
+) -> None:
+    directory = tmp_path / f"gen-{schema_id.rsplit('.', 1)[-1]}"
+    fixture = create_database(
+        directory / "index.sqlite3",
+        directory.name,
+        schema_id=schema_id,
+        protected_magic=protected_magic,
+    )
+
+    handle = load_generation_handle(
+        directory,
+        tmp_path / "objects",
+        maximum_vector_bytes=1024 * 1024,
+    )
+
+    assert handle.metadata.schema_id == schema_id
+    assert handle.metadata.contract_sha256 == fixture.contract_sha256
+
+
+@pytest.mark.parametrize("schema_id", ("cardrag.serving-db.v2", "cardrag.serving-db.v3"))
+def test_loader_rejects_missing_contract_hash(tmp_path: Path, schema_id: str) -> None:
+    directory = tmp_path / f"gen-missing-contract-{schema_id.rsplit('.', 1)[-1]}"
+    database = directory / "index.sqlite3"
+    create_database(database, directory.name, schema_id=schema_id)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM metadata WHERE key='contract_sha256'")
+
+    with pytest.raises(ServingDatabaseError, match="required serving metadata is missing"):
+        load_generation_handle(
+            directory,
+            tmp_path / "objects",
+            maximum_vector_bytes=1024 * 1024,
+        )
+
+
+@pytest.mark.parametrize(
+    ("schema_id", "protected_magic", "expected_error"),
+    (
+        ("cardrag.serving-db.v2", "FASOO_DRMONE", "invalid bounded value"),
+        ("cardrag.serving-db.v4", "SCDSA002", "schema version is incompatible"),
+    ),
+)
+def test_loader_rejects_cross_version_magic_and_unknown_schema(
+    tmp_path: Path,
+    schema_id: str,
+    protected_magic: str,
+    expected_error: str,
+) -> None:
+    directory = tmp_path / "gen-incompatible"
+    create_database(
+        directory / "index.sqlite3",
+        directory.name,
+        schema_id=schema_id,
+        protected_magic=protected_magic,
+    )
+
+    with pytest.raises(ServingDatabaseError, match=expected_error):
+        load_generation_handle(
+            directory,
+            tmp_path / "objects",
+            maximum_vector_bytes=1024 * 1024,
+        )
+
+
+@pytest.mark.asyncio
+async def test_v3_fasoo_product_remains_explicitly_visible(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    directory = store.generations / "gen-fasoo"
+    create_database(
+        directory / "index.sqlite3",
+        directory.name,
+        schema_id="cardrag.serving-db.v3",
+        protected_magic="FASOO_DRMONE",
+    )
+    handle = load_generation_handle(
+        directory,
+        store.objects,
+        maximum_vector_bytes=store.maximum_vector_bytes,
+    )
+    store.activate(handle)
+    repository = ServingRepository(
+        store,
+        FakeEmbedder(unit_vector(0)),
+        cursor_secret=b"test-cursor-secret-value",
+        maximum_candidates=20,
+    )
+
+    product = await repository.get_product("woori", "P-DRM")
+
+    assert isinstance(product, UnsupportedProduct)
+    assert product.availability == "unsupported_drm"
+    assert product.protected_magic == "FASOO_DRMONE"
 
 
 @pytest.mark.parametrize(

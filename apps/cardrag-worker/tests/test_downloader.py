@@ -82,6 +82,31 @@ async def test_downloader_revalidates_redirect_target_before_connecting(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_downloader_rejects_service_error_html_without_publishing_a_file(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=EUC-KR"},
+            content=b"<!DOCTYPE html><title>service error</title>",
+            request=request,
+        )
+
+    destination = tmp_path / "result.pdf"
+    downloader = SecurePDFDownloader(
+        DownloadPolicy(allowed_hosts=frozenset({"cards.example"})),
+        resolver=public_ip,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PDFValidationError, match="MIME type is not PDF-compatible"):
+            await downloader.download(
+                client,
+                DownloadRequest(url="https://cards.example/download", method="POST"),
+                destination,
+            )
+    assert not destination.exists()
+
+
+@pytest.mark.asyncio
 async def test_downloader_enforces_stream_cap_and_refuses_symlink(tmp_path: Path) -> None:
     payload = pdf_bytes()
 
@@ -119,9 +144,28 @@ def test_url_validation_rejects_private_dns_and_credentials() -> None:
         validate_url("https://user:pass@cards.example/a.pdf", policy, resolver=public_ip)
 
 
-@pytest.mark.parametrize("signature", [b"SCDSA002", b"SCDSA004"])
-def test_pdf_validator_classifies_recognized_protected_containers(tmp_path: Path, signature: bytes) -> None:
+@pytest.mark.parametrize(
+    ("signature", "magic"),
+    [
+        (b"SCDSA002", "SCDSA002"),
+        (b"SCDSA004", "SCDSA004"),
+        (b"\x9b DRMONE", "FASOO_DRMONE"),
+    ],
+)
+def test_pdf_validator_classifies_recognized_protected_containers(
+    tmp_path: Path,
+    signature: bytes,
+    magic: str,
+) -> None:
     protected = tmp_path / "protected.pdf"
     protected.write_bytes(signature + b"\x00" * 64)
-    with pytest.raises(ProtectedDocumentError, match="protected document"):
+    with pytest.raises(ProtectedDocumentError, match="protected document") as captured:
+        validate_pdf(protected)
+    assert captured.value.magic == magic
+
+
+def test_pdf_validator_requires_exact_fasoo_magic(tmp_path: Path) -> None:
+    protected = tmp_path / "near-miss.pdf"
+    protected.write_bytes(b"\x9a DRMONE" + b"\x00" * 64)
+    with pytest.raises(PDFValidationError, match="PDF signature"):
         validate_pdf(protected)

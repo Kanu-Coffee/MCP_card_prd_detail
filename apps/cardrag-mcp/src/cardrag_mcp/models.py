@@ -49,7 +49,7 @@ class UnsupportedProduct(StrictModel):
     source_id: Identifier
     source_version: str = Field(min_length=1, max_length=512)
     source_url: str = Field(min_length=1, max_length=4_096)
-    protected_magic: Literal["SCDSA002", "SCDSA004"]
+    protected_magic: Literal["SCDSA002", "SCDSA004", "FASOO_DRMONE"]
     protected_source_sha256: Sha256Hex
     protected_source_size_bytes: int = Field(ge=1)
 
@@ -115,9 +115,10 @@ class SourcePdfDescriptor(StrictModel):
 
 
 class ServingMetadata(StrictModel):
-    schema_id: Literal["cardrag.serving-db.v2"]
+    schema_id: Literal["cardrag.serving-db.v2", "cardrag.serving-db.v3"]
     generation_id: Identifier
     corpus_sha256: Sha256Hex
+    contract_sha256: Sha256Hex
     embedding_provider: str = Field(min_length=1, max_length=256)
     embedding_model: str = Field(min_length=1, max_length=512)
     embedding_input_policy_version: Literal["cardrag.embedding-input.v1"]

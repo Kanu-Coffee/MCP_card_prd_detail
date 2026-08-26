@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.padding import PKCS7
 from cardrag_worker.contracts import (
     DownloadRequest,
     IssuerSpec,
+    ProtectedSourceAllowance,
     SourceRecord,
     SourceSnapshot,
     snapshot_from_records,
@@ -46,6 +47,44 @@ SPEC = IssuerSpec(
     allowed_hosts=frozenset({"pc.wooricard.com"}),
     categories=("personal",),
     minimum_records=25,
+    protected_source_allowances=(
+        ProtectedSourceAllowance(
+            source_id="source_854d1b4effb9473acc693aacc76484de24bfb658fb31df126b908d093a4e815a",
+            product_code="102958",
+            source_version="2",
+            source_url=(
+                "https://pc.wooricard.com/upload/cardClause/2024/3/19/"
+                "574d01a3-65d0-42f3-bec0-e82c77710f49.pdf"
+            ),
+            sha256="ea143c393bed26325e75ed55be266c07281678a1e37cac0fc53d6b248c3f6f46",
+            size_bytes=2_132_864,
+            magic="FASOO_DRMONE",
+        ),
+        ProtectedSourceAllowance(
+            source_id="source_caa72dffbeafe404460e0a0a427467b5d99ee619c802a4b6db77719f666d0854",
+            product_code="203988",
+            source_version="11",
+            source_url=(
+                "https://pc.wooricard.com/upload/cardClause/2021/10/5/"
+                "be9faab5-be15-4a2a-9db1-9189aafc7852.pdf"
+            ),
+            sha256="1fefe29375616a983941675b6394e5f8406f601cef362ffb799cd61f49c8f0e3",
+            size_bytes=1_097_360,
+            magic="FASOO_DRMONE",
+        ),
+        ProtectedSourceAllowance(
+            source_id="source_8aea463c3fc9d8e43ae5dd894af4ca54d47686dc9a77326d1ab6576f34f074bc",
+            product_code="832388",
+            source_version="11",
+            source_url=(
+                "https://pc.wooricard.com/upload/cardClause/2026/8/11/"
+                "f1f9d290-30e9-43ea-abe0-6f43e947eaa5.pdf"
+            ),
+            sha256="dfba0d8a61a0ec3783f133be6e45c2e465a6bcbd83f056b6b68048a0643e5c61",
+            size_bytes=417_596,
+            magic="SCDSA004",
+        ),
+    ),
 )
 
 

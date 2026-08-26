@@ -33,7 +33,7 @@ class ProtectedDocumentError(PDFValidationError):
     def __init__(
         self,
         *,
-        magic: Literal["SCDSA002", "SCDSA004"],
+        magic: Literal["SCDSA002", "SCDSA004", "FASOO_DRMONE"],
         sha256: str,
         size_bytes: int,
     ) -> None:
@@ -110,10 +110,16 @@ def validate_pdf(path: Path, *, expected_sha256: str | None = None) -> tuple[str
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     sha256 = digest.hexdigest()
-    if signature in {b"SCDSA002", b"SCDSA004"}:
-        protected_magic: Literal["SCDSA002", "SCDSA004"] = (
-            "SCDSA002" if signature == b"SCDSA002" else "SCDSA004"
-        )
+    protected_signatures: dict[
+        bytes,
+        Literal["SCDSA002", "SCDSA004", "FASOO_DRMONE"],
+    ] = {
+        b"SCDSA002": "SCDSA002",
+        b"SCDSA004": "SCDSA004",
+        b"\x9b DRMONE": "FASOO_DRMONE",
+    }
+    protected_magic = protected_signatures.get(signature)
+    if protected_magic is not None:
         raise ProtectedDocumentError(
             magic=protected_magic,
             sha256=sha256,

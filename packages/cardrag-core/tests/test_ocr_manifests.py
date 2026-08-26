@@ -218,34 +218,53 @@ def test_generation_manifest_lists_pdf_cas_and_open_issuer_codes() -> None:
             dimension=1536,
             count=5,
         ),
-        issuer_codes=("kb", "lotte"),
+        issuer_codes=("kb", "lotte", "woori"),
         counts=GenerationCounts(documents=2, pdf_objects=1, ocr_objects=1, chunks=5),
         documents=documents,
     )
-    assert manifest.schema_version == "cardrag.generation.v2"
-    assert manifest.serving_schema == "cardrag.serving-db.v2"
-    assert manifest.issuer_codes == ("kb", "lotte")
+    assert manifest.schema_version == "cardrag.generation.v3"
+    assert manifest.serving_schema == "cardrag.serving-db.v3"
+    assert manifest.issuer_codes == ("kb", "lotte", "woori")
     assert manifest.documents[0].ocr_cache_kind == "native"
     assert manifest.documents[0].ocr_reuse_key == reuse_key
     assert manifest.documents[1].ocr_cache_kind is None
     assert manifest.documents[1].ocr_reuse_key is None
-    legacy = GenerationManifest.model_validate(
-        {
-            **manifest.model_dump(mode="python"),
-            "schema_version": "cardrag.generation.v1",
-            "serving_schema": "cardrag.serving-db.v1",
-        }
-    )
-    assert legacy.schema_version == "cardrag.generation.v1"
-    assert legacy.serving_schema == "cardrag.serving-db.v1"
-    with pytest.raises(ValidationError, match="schema versions must match"):
+    with pytest.raises(ValidationError, match="undeclared issuer"):
         GenerationManifest.model_validate(
             {
                 **manifest.model_dump(mode="python"),
-                "schema_version": "cardrag.generation.v1",
-                "serving_schema": "cardrag.serving-db.v2",
+                "issuer_codes": ("kb",),
             }
         )
+    compatible_pairs = (
+        ("cardrag.generation.v1", "cardrag.serving-db.v1"),
+        ("cardrag.generation.v2", "cardrag.serving-db.v2"),
+        ("cardrag.generation.v3", "cardrag.serving-db.v3"),
+    )
+    for generation_schema, serving_schema in compatible_pairs:
+        compatible = GenerationManifest.model_validate(
+            {
+                **manifest.model_dump(mode="python"),
+                "schema_version": generation_schema,
+                "serving_schema": serving_schema,
+            }
+        )
+        assert (compatible.schema_version, compatible.serving_schema) == (
+            generation_schema,
+            serving_schema,
+        )
+    for generation_schema, expected_serving_schema in compatible_pairs:
+        for _, serving_schema in compatible_pairs:
+            if serving_schema == expected_serving_schema:
+                continue
+            with pytest.raises(ValidationError, match="schema versions must match"):
+                GenerationManifest.model_validate(
+                    {
+                        **manifest.model_dump(mode="python"),
+                        "schema_version": generation_schema,
+                        "serving_schema": serving_schema,
+                    }
+                )
     with pytest.raises(ValidationError, match="document count"):
         GenerationManifest.model_validate(
             {

@@ -1,4 +1,4 @@
-# CardRAG v1.0.2 배포 파일
+# CardRAG v1.0.3 배포 파일
 
 운영 배포는 Worker와 MCP 두 Compose 프로젝트만 사용합니다.
 
@@ -37,12 +37,16 @@ deploy/
 지정합니다.
 
 ```dotenv
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.2-worker
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.2-mcp
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.3-worker
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.3-mcp
 ```
 
 운영에서 기본값인 `cardrag-worker:local`, `cardrag-mcp:local`에 의존하지
 마십시오.
+
+v1.0.2에서 올릴 때는 MCP 이미지만 먼저 v1.0.3으로 바꾸고 기존 v2 세대를
+정상 제공하는지 확인한 뒤 Worker 이미지를 v1.0.3으로 바꿉니다. Worker를 먼저
+실행하면 v1.0.2 MCP는 새 v3 세대를 활성화할 수 없습니다.
 
 ## Compose 사용 원칙
 

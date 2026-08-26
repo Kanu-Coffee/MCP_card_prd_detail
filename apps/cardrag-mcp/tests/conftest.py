@@ -45,7 +45,8 @@ CREATE TABLE unsupported_products (
   source_id TEXT NOT NULL,
   source_version TEXT NOT NULL,
   source_url TEXT NOT NULL,
-  protected_magic TEXT NOT NULL CHECK(protected_magic IN ('SCDSA002','SCDSA004')),
+  protected_magic TEXT NOT NULL
+    CHECK(protected_magic IN ('SCDSA002','SCDSA004','FASOO_DRMONE')),
   protected_sha256 TEXT NOT NULL CHECK(length(protected_sha256)=64),
   protected_size_bytes INTEGER NOT NULL CHECK(protected_size_bytes > 0),
   source_payload_json TEXT NOT NULL,
@@ -119,8 +120,13 @@ def canonical_json_bytes(value: object) -> bytes:
 @dataclass(frozen=True)
 class GenerationFixture:
     generation_id: str
+    serving_schema: str
+    corpus_sha256: str
+    contract_sha256: str
     database: Path
     documents: tuple[tuple[str, str, int, bytes], ...]
+    document_contracts: tuple[tuple[str, str, int], ...]
+    issuer_codes: tuple[str, ...]
 
 
 def create_database(
@@ -129,6 +135,8 @@ def create_database(
     *,
     suffix: str = "",
     two_documents: bool = True,
+    schema_id: str = "cardrag.serving-db.v3",
+    protected_magic: str = "SCDSA002",
 ) -> GenerationFixture:
     target.parent.mkdir(parents=True, exist_ok=True)
     pdf_one = b"%PDF-1.4\n" + f"first-{generation_id}".encode()
@@ -152,7 +160,12 @@ def create_database(
         doc_one: "airport lounge benefit\nairport lounge condition",
         doc_two: "mileage reward",
     }
-    protected_bytes = b"SCDSA002fixture-protected-source"
+    protected_prefixes = {
+        "SCDSA002": b"SCDSA002",
+        "SCDSA004": b"SCDSA004",
+        "FASOO_DRMONE": b"\x9b DRMONE",
+    }
+    protected_bytes = protected_prefixes[protected_magic] + b"fixture-protected-source"
     protected_sha256 = hashlib.sha256(protected_bytes).hexdigest()
     unsupported_source = {
         "category": "credit",
@@ -171,7 +184,7 @@ def create_database(
     unsupported_source_id = "source_" + hashlib.sha256(unsupported_source_bytes).hexdigest()
     unsupported_payload = {
         "disposition": "unsupported_drm",
-        "protected_magic": "SCDSA002",
+        "protected_magic": protected_magic,
         "protected_sha256": protected_sha256,
         "protected_size_bytes": len(protected_bytes),
         "source": unsupported_source,
@@ -185,10 +198,13 @@ def create_database(
             }
         )
     ).hexdigest()
+    corpus_sha256 = hashlib.sha256(generation_id.encode()).hexdigest()
+    contract_sha256 = hashlib.sha256(f"contract:{generation_id}".encode()).hexdigest()
     metadata = {
-        "schema_id": "cardrag.serving-db.v2",
+        "schema_id": schema_id,
         "generation_id": generation_id,
-        "corpus_sha256": hashlib.sha256(generation_id.encode()).hexdigest(),
+        "corpus_sha256": corpus_sha256,
+        "contract_sha256": contract_sha256,
         "embedding_provider": "openrouter",
         "embedding_model": "openai/text-embedding-3-small",
         "embedding_input_policy_version": "cardrag.embedding-input.v1",
@@ -235,7 +251,7 @@ def create_database(
                 unsupported_source_id,
                 "20260826",
                 "https://example.com/protected.pdf",
-                "SCDSA002",
+                protected_magic,
                 protected_sha256,
                 len(protected_bytes),
                 unsupported_source_bytes.decode("utf-8"),
@@ -266,8 +282,13 @@ def create_database(
         connection.close()
     return GenerationFixture(
         generation_id=generation_id,
+        serving_schema=schema_id,
+        corpus_sha256=corpus_sha256,
+        contract_sha256=contract_sha256,
         database=target,
         documents=tuple((row[0], row[4], row[5], row[6]) for row in documents),
+        document_contracts=tuple((row[0], row[1], 1) for row in documents),
+        issuer_codes=tuple(sorted({row[1] for row in documents})),
     )
 
 
