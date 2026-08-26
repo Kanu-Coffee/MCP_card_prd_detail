@@ -1,4 +1,4 @@
-# CardRAG v1.0.6 배포 파일
+# CardRAG v1.0.7 배포 파일
 
 운영 배포는 Worker와 MCP 두 Compose 프로젝트만 사용합니다.
 
@@ -32,10 +32,10 @@ deploy/
 - Worker의 `compose.adoption.yaml`은 sealed legacy OCR export와 그 export에
   기록된 원본 source root를 컨테이너의 같은 절대경로에 read-only로 연결합니다.
   평상시 Worker 실행에는 추가하지 않습니다.
-- Worker service와 timer는 immutable `/opt/cardrag-v1.0.6`에서 Worker를 매일 03:00
+- Worker service와 timer는 immutable `/opt/cardrag-v1.0.7`에서 Worker를 매일 03:00
   Asia/Seoul에 실행합니다.
 
-`/opt/cardrag-v1.0.6`는 운영 계정이 소유해도 됩니다. 런타임은 특정 소유자를
+`/opt/cardrag-v1.0.7`은 운영 계정이 소유해도 됩니다. 런타임은 특정 소유자를
 요구하지 않지만, 설치가 끝난 트리의 모든 쓰기 비트는 제거해야 합니다. 운영 env와
 secret은 이 트리에 두지 않고 `/etc/cardrag`에서만 주입합니다.
 
@@ -45,8 +45,8 @@ secret은 이 트리에 두지 않고 `/etc/cardrag`에서만 주입합니다.
 지정합니다.
 
 ```dotenv
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.6-worker
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.6-mcp
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.7-worker
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.7-mcp
 ```
 
 운영에서 기본값인 `cardrag-worker:local`, `cardrag-mcp:local`에 의존하지
@@ -56,9 +56,10 @@ v1.0.2에서 올릴 때는 MCP 이미지만 먼저 v1.0.4 이상으로 바꾸고
 정상 제공하는지 확인한 뒤 Worker 이미지를 v1.0.4 이상으로 바꿉니다. Worker를 먼저
 실행하면 v1.0.2 MCP는 새 v3 세대를 활성화할 수 없습니다.
 
-v1.0.6 Worker는 v1.0.4 native OCR processor contract를 그대로 사용합니다. 이미
-검증되어 WebDAV native cache에 게시된 완료 문서는 새 실행에서 재사용하며, 실패한
-실행 ID 자체를 재개할 필요가 없습니다.
+v1.0.7 Worker는 여러 줄의 짧은 가시 요소가 있는 정상 희소 페이지를 추가로
+허용하지만 v1.0.4 native OCR processor contract는 그대로 사용합니다. v1.0.4부터
+v1.0.6까지 검증되어 WebDAV native cache에 게시된 완료 문서는 v1.0.7 새 실행에서
+재사용하며, 이전 실패 실행 ID 자체를 재개하지 않습니다.
 
 ## Compose 사용 원칙
 
