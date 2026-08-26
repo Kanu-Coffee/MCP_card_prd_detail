@@ -1,11 +1,11 @@
-# CardRAG v1.0.6 실운영 가이드
+# CardRAG v1.0.7 실운영 가이드
 
 이 문서는 처음 운영 서버를 준비하는 사람을 위한 순서형 안내서입니다. 명령은
-별도 표시가 없으면 immutable staging인 `/opt/cardrag-v1.0.6`에서 실행합니다.
+별도 표시가 없으면 immutable staging인 `/opt/cardrag-v1.0.7`에서 실행합니다.
 
 ## 1. 운영 구조 이해하기
 
-CardRAG v1.0.6은 Worker 하나와 MCP 하나로 동작합니다.
+CardRAG v1.0.7은 Worker 하나와 MCP 하나로 동작합니다.
 
 ```text
 카드사 PDF
@@ -73,11 +73,11 @@ SCDSA004)을 승인 목록으로 제한합니다. 이 항목을 표현하기 위
 
 신한카드의 기존 desktop 다운로드 경로는 2026-08-26 점검에서 서비스 오류 HTML을
 반환했지만, 같은 공식 사이트의 모바일 상품공시 API와 다운로드 경로는 정상 PDF를
-반환했습니다. v1.0.6은 안정적인 desktop 목록으로 868건을 발견하고 모바일 목록의
-상품코드·이름·시행일·source version이 정확히 일치할 때만 회전 토큰을 사용합니다.
-검색어는 모바일 API의 EUC-KR 경계 안으로 제한하고, 검색 인덱스가 정확한 문서를
-찾지 못할 때만 범위가 제한된 현재 카테고리 목록을 조회합니다. 어느 경로든 desktop
-identity 전체가 정확히 한 건 일치해야 합니다.
+반환했습니다. v1.0.6에서 도입한 adapter는 안정적인 desktop 목록으로 868건을
+발견하고 모바일 목록의 상품코드·이름·시행일·source version이 정확히 일치할 때만
+회전 토큰을 사용합니다. v1.0.7도 검색어를 모바일 API의 EUC-KR 경계 안으로 제한하고,
+검색 인덱스가 정확한 문서를 찾지 못할 때만 범위가 제한된 현재 카테고리 목록을
+조회합니다. 어느 경로든 desktop identity 전체가 정확히 한 건 일치해야 합니다.
 신용·체크 샘플은 PDF signature와 전체 page tree 검증을 통과했으며, 운영 활성값은
 `CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan`입니다. 어느 결속이나 PDF 검증이
 실패해도 generation을 게시하지 않습니다.
@@ -93,7 +93,7 @@ identity 전체가 정확히 한 건 일치해야 합니다.
 - HTTPS WebDAV 주소, 사용자 이름, 비밀번호
 - OpenRouter API 키
 - MCP가 외부에서 사용할 HTTPS 주소와 TLS 리버스 프록시
-- 기존 `/opt/cardrag`을 변경하지 않고 `/opt/cardrag-v1.0.6`에 배치한 v1.0.6 저장소 파일
+- 기존 `/opt/cardrag`을 변경하지 않고 `/opt/cardrag-v1.0.7`에 배치한 v1.0.7 저장소 파일
 
 WebDAV 계정에는 `PROPFIND`, `MKCOL`, `PUT`, `GET`, `HEAD`, `MOVE`, `DELETE`
 권한이 필요합니다. `MOVE`의 `Overwrite:F` 요청도 올바르게 거부해야 합니다.
@@ -101,18 +101,18 @@ WebDAV 계정에는 `PROPFIND`, `MKCOL`, `PUT`, `GET`, `HEAD`, `MOVE`, `DELETE`
 운영 이미지는 다음 두 태그로 고정합니다.
 
 ```text
-ymtop59/mcp-card-prd-detail:1.0.6-worker
-ymtop59/mcp-card-prd-detail:1.0.6-mcp
+ymtop59/mcp-card-prd-detail:1.0.7-worker
+ymtop59/mcp-card-prd-detail:1.0.7-mcp
 ```
 
 서버에서 배포 파일 위치를 확인합니다.
 
 ```bash
-chmod -R a-w /opt/cardrag-v1.0.6
-find /opt/cardrag-v1.0.6 -xdev -type d -exec chmod a+rx {} +
-find /opt/cardrag-v1.0.6 -xdev -type f -exec chmod a+r {} +
-test -z "$(find /opt/cardrag-v1.0.6 -xdev -perm /0222 -print -quit)"
-cd /opt/cardrag-v1.0.6
+chmod -R a-w /opt/cardrag-v1.0.7
+find /opt/cardrag-v1.0.7 -xdev -type d -exec chmod a+rx {} +
+find /opt/cardrag-v1.0.7 -xdev -type f -exec chmod a+r {} +
+test -z "$(find /opt/cardrag-v1.0.7 -xdev -perm /0222 -print -quit)"
+cd /opt/cardrag-v1.0.7
 test -f deploy/worker/compose.yaml
 test -f deploy/mcp/compose.yaml
 test -f deploy/simple.env.example
@@ -239,7 +239,7 @@ sudoedit /etc/cardrag/worker.env
 
 ```dotenv
 CARDRAG_ENVIRONMENT=production
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.6-worker
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.7-worker
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
@@ -276,10 +276,12 @@ OpenRouter 키는 OCR provider가 `codex-exec`이어도 임베딩 생성에 필�
 scale, 분할·문맥 값, cache epoch를
 변경하면 OCR 재사용 계약이 달라지므로 운영 중 임의로 바꾸지 마십시오.
 
-v1.0.6도 native OCR의 processor contract는
-`cardrag-worker/1.0.4`로 유지합니다. 희소 페이지의 의미 없는 빈 줄만 정규화하므로
-v1.0.4가 동일한 설정으로 완전히 검증·게시한 OCR은 새 실행에서도 안전하게
-재사용됩니다. 이 호환성을 유지하려면 위 OCR 설정과 cache epoch를 바꾸지 마십시오.
+v1.0.7도 native OCR의 processor contract는 `cardrag-worker/1.0.4`로 유지합니다.
+기존 희소 페이지의 의미 없는 빈 줄 정규화에 더해, 서로 떨어진 짧은 가시 요소가
+여러 줄인 정상 wrapper를 허용하는 additive validator 수정만 포함합니다. 기존에
+성공한 OCR 바이트의 의미나 검증 결과는 바뀌지 않으므로 v1.0.4부터 v1.0.6까지 같은
+설정으로 완전히 검증·게시한 OCR은 새 실행에서도 안전하게 재사용됩니다. 이 호환성을
+유지하려면 위 OCR 설정, prompt와 cache epoch를 바꾸지 마십시오.
 
 ### 4.4 MCP env 편집
 
@@ -291,7 +293,7 @@ sudoedit /etc/cardrag/mcp.env
 
 ```dotenv
 CARDRAG_ENVIRONMENT=production
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.6-mcp
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.7-mcp
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
 CARDRAG_WEBDAV_USERNAME_SECRET_FILE=/etc/cardrag/secrets/webdav_username
@@ -362,11 +364,11 @@ CARDRAG_WORKER_COMPOSE_OVERLAYS=--file deploy/worker/compose.ca.yaml
 
 ## 5. 이미지와 Compose 설정 확인
 
-v1.0.6 이미지를 미리 내려받습니다.
+v1.0.7 이미지를 미리 내려받습니다.
 
 ```bash
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.6-worker
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.6-mcp
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.7-worker
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.7-mcp
 ```
 
 Worker 설정을 실제 systemd 실행 사용자로 검증합니다.
@@ -454,7 +456,7 @@ Worker 게시를 진행하지 말고 WebDAV 권한, URL, TLS 인증서, 프록�
 
 ### 8.1 systemd unit 설치
 
-Worker service는 `/opt/cardrag-v1.0.6`과 `/etc/cardrag/worker.env`를 사용하도록 이미
+Worker service는 `/opt/cardrag-v1.0.7`과 `/etc/cardrag/worker.env`를 사용하도록 이미
 정의되어 있습니다.
 
 ```bash
@@ -647,12 +649,12 @@ sudo journalctl -u cardrag-worker.service -o cat --since today
 env, secret, Codex 인증, 카드사 연결, OpenRouter, WebDAV 문제를 해결한 뒤 같은
 릴리스가 만든 실패 실행만 명시적으로 재개할 수 있습니다.
 
-v1.0.6 전환 중에는 v1.0.4에서 실패한 `run_id`를 `resume`하지 않습니다. v1.0.6
-이미지와 설정을 검증한 뒤 새 실행을 시작하십시오. v1.0.4 실행이 문서 단위로
-완전히 검증해 WebDAV native cache에 게시한 OCR은 동일한 v1.0.4 processor contract
-덕분에 새 실행이 자동 재사용합니다. 실패 문서의 일부 run-local chunk만으로는
-완료된 native cache가 아니므로 새 실행에서 다시 처리됩니다. 아래 `resume` 절차는
-v1.0.6이 새로 만든 실행에만 사용할 수 있습니다.
+v1.0.7 전환 중에는 v1.0.6에서 실패한 `run_id`를 `resume`하지 않습니다. v1.0.7
+이미지와 설정을 검증한 뒤 새 실행을 시작하십시오. v1.0.4부터 v1.0.6까지의 실행이
+문서 단위로 완전히 검증해 WebDAV native cache에 게시한 OCR은 동일한 v1.0.4
+processor contract 덕분에 새 실행이 자동 재사용합니다. 실패 문서의 일부 run-local
+chunk만으로는 완료된 native cache가 아니므로 새 실행에서 다시 처리됩니다. 아래
+`resume` 절차는 v1.0.7이 새로 만든 실행에만 사용할 수 있습니다.
 
 ```bash
 RUN_ID=로그에서_확인한_run_id
@@ -710,8 +712,8 @@ Worker 볼륨에는 Codex 인증과 재개 checkpoint가 있고, MCP 볼륨에�
 
 v1.0.4부터 Worker 게시 형식은 `cardrag.generation.v3`와
 `cardrag.serving-db.v3`입니다. v1.0.4 이상 MCP는 v2와 v3를 모두 읽지만 v1.0.2
-MCP는 v3를 읽지 못합니다. 따라서 v1.0.2에서 현재 v1.0.6으로 올릴 때의 순서는 반드시
-**MCP v1.0.6 먼저, Worker v1.0.6 나중**입니다. 순서를 바꾸지 마십시오.
+MCP는 v3를 읽지 못합니다. 따라서 v1.0.2에서 현재 v1.0.7로 올릴 때의 순서는 반드시
+**MCP v1.0.7 먼저, Worker v1.0.7 나중**입니다. 순서를 바꾸지 마십시오.
 
 이 업그레이드는 v3 세대가 `stable.json`에 게시되는 순간부터 MCP 바이너리에
 대해서는 forward-only 경계입니다. v3 게시 전에는 MCP 이미지를 v1.0.2로 되돌릴
@@ -732,19 +734,19 @@ sudo systemctl status cardrag-worker.service --no-pager
 ```
 
 새 배포 파일은 기존 `/opt/cardrag`을 덮어쓰지 말고 immutable
-`/opt/cardrag-v1.0.6`에 설치한 뒤 두 고정 이미지를 미리 내려받습니다. `latest`
+`/opt/cardrag-v1.0.7`에 설치한 뒤 두 고정 이미지를 미리 내려받습니다. `latest`
 태그는 사용하지 않습니다.
 
 ```bash
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.6-mcp
-sudo docker pull ymtop59/mcp-card-prd-detail:1.0.6-worker
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.7-mcp
+sudo docker pull ymtop59/mcp-card-prd-detail:1.0.7-worker
 ```
 
 먼저 `/etc/cardrag/mcp.env`의 MCP 이미지만 다음 값으로 바꿉니다. 아직
 `worker.env`는 바꾸지 않습니다.
 
 ```dotenv
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.6-mcp
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.7-mcp
 ```
 
 MCP Compose 설정을 검증하고 교체합니다.
@@ -766,15 +768,16 @@ curl --fail http://127.0.0.1:8000/health/live
 curl --fail http://127.0.0.1:8000/health/ready
 ```
 
-이 시점의 v1.0.6 MCP는 WebDAV와 로컬에 있던 v2 세대를 그대로 서비스해야
+이 시점의 v1.0.7 MCP는 WebDAV와 로컬에 있던 v2 세대를 그대로 서비스해야
 합니다. readiness가 200이 아니면 Worker를 교체하지 말고 MCP 로그를 먼저
 확인합니다.
 
-MCP 확인이 끝난 뒤 `/etc/cardrag/worker.env`를 다음과 같이 바꿉니다. v1.0.6은
-공식 모바일 상품공시 경로를 검증했으므로 신한카드도 함께 활성화합니다.
+MCP 확인이 끝난 뒤 `/etc/cardrag/worker.env`를 다음과 같이 바꿉니다. v1.0.7은
+v1.0.6에서 도입한 공식 모바일 상품공시 경로를 유지하므로 신한카드도 함께
+활성화합니다.
 
 ```dotenv
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.6-worker
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.7-worker
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
 ```
 
@@ -819,12 +822,12 @@ systemctl list-timers cardrag-worker.timer
 ```
 
 모든 확인이 끝날 때까지 Worker와 MCP 상태 볼륨을 유지합니다. 새 WebDAV 세대가
-손상되거나 호환되지 않으면 v1.0.6 MCP는 마지막 정상 v2 또는 v3 세대를 계속
+손상되거나 호환되지 않으면 v1.0.7 MCP는 마지막 정상 v2 또는 v3 세대를 계속
 제공합니다. 실패 시 볼륨을 삭제하지 말고 로그와 manifest를 확인하십시오.
 
 ## 14. 자주 하는 실수
 
-- `/opt/cardrag-v1.0.6`이 아닌 위치에 배포해 Worker service가 파일을 찾지 못함
+- `/opt/cardrag-v1.0.7`이 아닌 위치에 배포해 Worker service가 파일을 찾지 못함
 - 운영 이미지 변수를 설정하지 않아 로컬 이미지 이름을 사용함
 - `*_SECRET_FILE`과 직접 secret 값을 동시에 설정함
 - secret 파일이 비어 있거나 UID/GID 10001에서 읽히지 않음

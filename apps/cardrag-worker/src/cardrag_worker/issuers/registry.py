@@ -32,9 +32,9 @@ _REGISTRATIONS = tuple(
 
 REGISTERED_ISSUERS: Mapping[str, Registration] = {row.spec.code: row for row in _REGISTRATIONS}
 # Keep the fail-safe CLI default aligned with the production Compose default.
-# v1.0.6 refreshes Shinhan downloads through its verified official mobile
-# disclosure endpoint, with bounded search and current-category fallback while
-# retaining the complete stable desktop discovery identity.
+# Since v1.0.6, Shinhan downloads use its verified official mobile disclosure
+# endpoint, with bounded search and current-category fallback while retaining
+# the complete stable desktop discovery identity.
 DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan")
 
 
