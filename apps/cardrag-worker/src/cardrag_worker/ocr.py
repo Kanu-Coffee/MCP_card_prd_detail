@@ -746,9 +746,9 @@ class FailoverOCRResolver:
         output_dir = Path(kwargs.pop("output_dir"))
         try:
             return await self.primary.resolve(**kwargs, output_dir=output_dir / "primary")
-        except (ProviderError, OCRValidationError, httpx.HTTPError, TimeoutError) as exc:
+        except (ProviderError, OCRValidationError, httpx.HTTPError, TimeoutError):
             warnings.warn(
-                f"primary OCR failed; starting fresh whole-document fallback: {exc}",
+                "primary OCR failed; starting fresh whole-document fallback",
                 RuntimeWarning,
                 stacklevel=2,
             )

@@ -56,10 +56,16 @@ class FakeProvider:
     model = "gpt-5.6-sol"
     reasoning_effort = "high"
 
-    def __init__(self, *, fail_calls: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_calls: set[int] | None = None,
+        failure_message: str = "temporary failure",
+    ) -> None:
         self.calls: list[int] = []
         self.requests: list[dict[str, object]] = []
         self.fail_calls = fail_calls or set()
+        self.failure_message = failure_message
 
     async def recognize(
         self,
@@ -81,7 +87,7 @@ class FakeProvider:
             }
         )
         if len(self.calls) in self.fail_calls:
-            raise ProviderError("temporary failure")
+            raise ProviderError(self.failure_message)
         return (
             "\n\n".join(
                 f"## Page {page_number}\n\n페이지 {page_number} 카드 혜택 조건과 제외 사항 본문입니다."
@@ -1130,7 +1136,8 @@ async def test_failover_preserves_fallback_verified_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
-    primary_provider = FakeProvider(fail_calls={1})
+    raw_sentinel = "RAW_PROVIDER_STDERR_SECRET_SENTINEL"
+    primary_provider = FakeProvider(fail_calls={1}, failure_message=raw_sentinel)
     fallback_provider = FakeProvider()
     state = WorkerState(tmp_path / "state.sqlite3")
     primary = OCRResolver(provider=primary_provider, state=state, webdav=None, chunk_pages=1)  # type: ignore[arg-type]
@@ -1140,7 +1147,7 @@ async def test_failover_preserves_fallback_verified_bytes(
         run_id = state.start_run(run_id="run")
         pdf = tmp_path / "pdf-pages.txt"
         pdf.write_text("1", encoding="utf-8")
-        with pytest.warns(RuntimeWarning, match="primary OCR failed"):
+        with pytest.warns(RuntimeWarning, match="primary OCR failed") as captured_warnings:
             result = await resolver.resolve(
                 run_id=run_id,
                 document_id="doc_failover",
@@ -1150,6 +1157,7 @@ async def test_failover_preserves_fallback_verified_bytes(
                 page_count=1,
                 output_dir=tmp_path / "ocr",
             )
+        assert raw_sentinel not in "".join(str(item.message) for item in captured_warnings)
 
         assert primary_provider.calls == [1]
         assert fallback_provider.calls == [1]

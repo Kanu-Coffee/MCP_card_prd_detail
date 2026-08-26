@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import re
 import shutil
 import sqlite3
 import struct
@@ -57,18 +59,100 @@ from .downloader import (
     validate_pdf,
 )
 from .exporter import ServingDatabaseExporter, encode_embedding
-from .ocr import OCRResolver, OCRResult, page_records
-from .providers import EmbeddingProvider
+from .ocr import OCRResolver, OCRResult, OCRValidationError, page_records
+from .providers import EmbeddingProvider, ProviderError
 from .rate_limit import IssuerRateLimiter, RateLimitedClient
 from .state import WorkerState, retry_delay, worker_lock
 from .webdav import PublishedBundle, WebDAVBundlePublisher, WebDAVClient
 
 T = TypeVar("T")
 CHUNK_CONTRACT = "cardrag.page-window.v1"
+LOGGER = logging.getLogger(__name__)
 
 
 class CorpusConflictError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class OCRFailureReason:
+    reason_code: str
+    reason: str
+
+    @property
+    def stored_error(self) -> str:
+        return f"{self.reason_code}: {self.reason}"
+
+
+@dataclass(frozen=True, slots=True)
+class OCRFailureRecord:
+    issuer: str
+    product_code: str
+    product_name: str
+    file_name: str
+    document_id: str
+    pdf_sha256: str
+    page_count: int
+    attempts: int
+    reason_code: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        limits = {
+            "issuer": 64,
+            "product_code": 256,
+            "product_name": 512,
+            "file_name": 512,
+            "reason": 256,
+        }
+        for field_name, maximum in limits.items():
+            value = str(getattr(self, field_name))
+            if not value or len(value) > maximum:
+                raise ValueError(f"OCR failure {field_name} is empty or too long")
+        if not re.fullmatch(r"doc_[0-9a-f]{64}", self.document_id):
+            raise ValueError("OCR failure document_id is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.pdf_sha256):
+            raise ValueError("OCR failure PDF sha256 is invalid")
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", self.reason_code):
+            raise ValueError("OCR failure reason_code is invalid")
+        if "\n" in self.reason or "\r" in self.reason:
+            raise ValueError("OCR failure reason must be one line")
+        if self.page_count < 1 or self.attempts < 1:
+            raise ValueError("OCR failure counts must be positive")
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return {
+            "attempts": self.attempts,
+            "document_id": self.document_id,
+            "file_name": self.file_name,
+            "issuer": self.issuer,
+            "page_count": self.page_count,
+            "pdf_sha256": self.pdf_sha256,
+            "product_code": self.product_code,
+            "product_name": self.product_name,
+            "reason": self.reason,
+            "reason_code": self.reason_code,
+        }
+
+
+class OCRDocumentFailuresError(RuntimeError):
+    """A safe aggregate raised only after every acquired PDF was attempted."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        report_path: Path,
+        failures: Sequence[OCRFailureRecord],
+    ) -> None:
+        self.run_id = run_id
+        self.report_path = report_path
+        self.report = f"runs/{run_id}/reports/ocr-failures.json"
+        self.failures = tuple(failures)
+        if not self.failures:
+            raise ValueError("OCR document failure aggregate cannot be empty")
+        super().__init__(f"{len(self.failures)} OCR document(s) failed; report={self.report}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +219,111 @@ def _canonical_ocr_body(result: OCRResult) -> bytes:
     # valid legacy spacing (for example, one newline after a page marker) and
     # break the manifest/CAS SHA binding.
     return result.ocr_bytes
+
+
+_CODEX_EXIT = re.compile(r"^Codex OCR exited (-?[0-9]{1,3}):")
+
+
+def _bounded_report_text(value: str, *, maximum: int) -> str:
+    return value if len(value) <= maximum else value[:maximum]
+
+
+def classify_ocr_failure(exc: Exception) -> OCRFailureReason:
+    """Map an OCR exception to bounded text that is safe to persist and print."""
+
+    if isinstance(exc, OCRValidationError):
+        message = str(exc)
+        if message == "OCR sparse-page wrapper is invalid":
+            return OCRFailureReason(
+                "sparse_page_wrapper_invalid",
+                "The provider returned an invalid sparse-page wrapper.",
+            )
+        if message.startswith("OCR page markers ") and " do not match " in message:
+            return OCRFailureReason(
+                "page_marker_mismatch",
+                "The provider returned page markers that did not match the requested pages.",
+            )
+        if message == "OCR provider output must begin with the first Page marker":
+            return OCRFailureReason(
+                "output_not_marker_first",
+                "The provider output did not begin with the required page marker.",
+            )
+        if message in {"OCR contains an empty page", "OCR provider returned an empty page"}:
+            return OCRFailureReason("empty_page", "The provider returned an empty OCR page.")
+        if message == "OCR blank-page sentinel must be exact":
+            return OCRFailureReason(
+                "blank_sentinel_invalid",
+                "The provider returned an invalid blank-page sentinel.",
+            )
+        if message in {
+            "OCR provider returned an implausibly short page",
+            "OCR contains an implausibly short page",
+        }:
+            return OCRFailureReason(
+                "implausibly_short",
+                "The provider returned an implausibly short OCR page.",
+            )
+        if "cache" in message.casefold() or message.startswith("local native OCR"):
+            return OCRFailureReason(
+                "cache_validation_error",
+                "A cached OCR artifact failed validation.",
+            )
+        return OCRFailureReason(
+            "generic_validation_error",
+            "The OCR output failed validation.",
+        )
+    if isinstance(exc, ProviderError):
+        match = _CODEX_EXIT.match(str(exc))
+        if match is not None:
+            exit_code = match.group(1)
+            exit_reason_code = f"negative_{exit_code[1:]}" if exit_code.startswith("-") else exit_code
+            return OCRFailureReason(
+                f"provider_exit_{exit_reason_code}",
+                f"The OCR provider process exited with code {exit_code}.",
+            )
+        return OCRFailureReason("provider_error", "The OCR provider failed.")
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+        return OCRFailureReason("provider_timeout", "The OCR provider timed out.")
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return OCRFailureReason(
+            f"provider_http_{status_code}",
+            f"The OCR provider returned HTTP status {status_code}.",
+        )
+    if isinstance(exc, httpx.RequestError):
+        return OCRFailureReason(
+            "provider_network_error",
+            "The OCR provider could not be reached.",
+        )
+    if isinstance(exc, OSError):
+        return OCRFailureReason("local_io_error", "A local OCR file operation failed.")
+    return OCRFailureReason("unexpected_error", "OCR failed unexpectedly.")
+
+
+def _write_ocr_failure_report(
+    path: Path,
+    *,
+    run_id: str,
+    failures: Sequence[OCRFailureRecord],
+) -> None:
+    ordered = sorted(
+        failures,
+        key=lambda item: (item.issuer, item.product_code, item.document_id),
+    )
+    try:
+        _atomic_write(
+            path,
+            canonical_json_bytes(
+                {
+                    "failure_count": len(ordered),
+                    "failures": [item.payload for item in ordered],
+                    "run_id": run_id,
+                    "schema_version": "cardrag.ocr-failure-report.v1",
+                }
+            ),
+        )
+    except Exception:
+        raise RuntimeError("OCR failure report write failed") from None
 
 
 def select_current(records: Sequence[SourceRecord]) -> tuple[SourceRecord, ...]:
@@ -355,6 +544,7 @@ class WorkerPipeline:
         maximum_attempts: int | None = None,
         retry_base_seconds: float = 1.0,
         non_retryable_predicate: Callable[[Exception], bool] | None = None,
+        error_formatter: Callable[[Exception], str] | None = None,
     ) -> T:
         maximum = maximum_attempts or self.maximum_attempts
         self.state.ensure_stage(run_id, document_id, name, max_attempts=maximum)
@@ -368,12 +558,22 @@ class WorkerPipeline:
             except Exception as exc:
                 if non_retryable_predicate is not None and non_retryable_predicate(exc):
                     raise
-                delay = retry_delay(
-                    attempt,
-                    base_seconds=retry_base_seconds,
-                    cap_seconds=self.retry_cap_seconds,
-                )
-                status = self.state.stage_failed(run_id, document_id, name, exc, delay_seconds=delay)
+                try:
+                    delay = retry_delay(
+                        attempt,
+                        base_seconds=retry_base_seconds,
+                        cap_seconds=self.retry_cap_seconds,
+                    )
+                    stored_error = error_formatter(exc) if error_formatter is not None else str(exc)
+                    status = self.state.stage_failed(
+                        run_id,
+                        document_id,
+                        name,
+                        stored_error,
+                        delay_seconds=delay,
+                    )
+                except Exception:
+                    raise RuntimeError("stage failure bookkeeping failed") from None
                 if status == "failed":
                     raise
                 await asyncio.sleep(delay)
@@ -697,6 +897,8 @@ class WorkerPipeline:
         # OCR/embeddings are reused through their content caches below.
 
         processed: list[_ProcessedDocument] = []
+        ocr_failures: list[OCRFailureRecord] = []
+        ocr_failure_report = run_dir / "reports" / "ocr-failures.json"
         for acquired_document in acquired:
             source = acquired_document.source
             pdf = acquired_document.pdf
@@ -718,14 +920,64 @@ class WorkerPipeline:
                     output_dir=current_output_dir,
                 )
 
-            ocr_result = await self._finite_stage(
-                run_id=run_id,
-                document_id=document_id,
-                name="ocr",
-                operation=recognize,
-            )
+            ocr_result: OCRResult | None = None
+            failure_reason: OCRFailureReason | None = None
+            failure_attempts: int | None = None
+            try:
+                ocr_result = await self._finite_stage(
+                    run_id=run_id,
+                    document_id=document_id,
+                    name="ocr",
+                    operation=recognize,
+                    error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
+                )
+            except Exception as exc:
+                stage = self.state.get_stage(run_id, document_id, "ocr")
+                failure_reason = classify_ocr_failure(exc)
+                if (
+                    stage is None
+                    or stage.status != "failed"
+                    or stage.attempt_count != stage.max_attempts
+                    or not stage.last_error
+                    or stage.last_error != failure_reason.stored_error
+                ):
+                    raise RuntimeError(
+                        "OCR failure isolation requires a fully exhausted failed stage"
+                    ) from None
+                failure_attempts = stage.attempt_count
+            if failure_reason is not None:
+                if failure_attempts is None:
+                    raise RuntimeError("OCR failure isolation lost its attempt count")
+                failure_record = OCRFailureRecord(
+                    issuer=_bounded_report_text(source.issuer, maximum=64),
+                    product_code=_bounded_report_text(source.product_code, maximum=256),
+                    product_name=_bounded_report_text(source.product_name, maximum=512),
+                    file_name=_bounded_report_text(source.file_name, maximum=512),
+                    document_id=document_id,
+                    pdf_sha256=pdf.sha256,
+                    page_count=pdf.page_count,
+                    attempts=failure_attempts,
+                    reason_code=failure_reason.reason_code,
+                    reason=failure_reason.reason,
+                )
+                ocr_failures.append(failure_record)
+                _write_ocr_failure_report(
+                    ocr_failure_report,
+                    run_id=run_id,
+                    failures=ocr_failures,
+                )
+                LOGGER.warning(
+                    "OCR attempts exhausted document_id=%s reason_code=%s reason=%s; continuing",
+                    document_id,
+                    failure_reason.reason_code,
+                    failure_reason.reason,
+                )
+                continue
+            if ocr_result is None:
+                raise RuntimeError("OCR stage returned no result")
+            verified_ocr_sha256 = ocr_result.ocr_sha256
             ocr_body = _canonical_ocr_body(ocr_result)
-            if hashlib.sha256(ocr_body).hexdigest() != ocr_result.ocr_sha256:
+            if hashlib.sha256(ocr_body).hexdigest() != verified_ocr_sha256:
                 raise RuntimeError("OCR result bytes changed after verification")
             ocr_path = ocr_output_dir / "ocr.md"
             if not ocr_path.exists() or ocr_path.read_bytes() != ocr_body:
@@ -735,7 +987,7 @@ class WorkerPipeline:
 
             async def structure(
                 current_pages: tuple[PageRecord, ...] = pages,
-                current_ocr_sha256: str = ocr_result.ocr_sha256,
+                current_ocr_sha256: str = verified_ocr_sha256,
                 destination: Path = structure_path,
             ) -> tuple[PageRecord, ...]:
                 payload = {
@@ -771,7 +1023,7 @@ class WorkerPipeline:
 
             async def make_chunks(
                 current_pages: tuple[PageRecord, ...] = structured_pages,
-                current_ocr_sha256: str = ocr_result.ocr_sha256,
+                current_ocr_sha256: str = verified_ocr_sha256,
                 destination: Path = chunks_path,
                 current_document_id: str = document_id,
             ) -> tuple[dict[str, Any], ...]:
@@ -817,12 +1069,25 @@ class WorkerPipeline:
                     ),
                     pdf_path=pdf.path,
                     ocr_path=ocr_path,
-                    ocr_sha256=ocr_result.ocr_sha256,
+                    ocr_sha256=verified_ocr_sha256,
                     ocr_size_bytes=ocr_result.size_bytes,
                     ocr_cache_kind=ocr_result.cache_kind,
                     ocr_reuse_key=ocr_result.cache_reuse_key,
                     chunks=chunks,
                 )
+            )
+
+        if ocr_failures:
+            ordered_failures = tuple(
+                sorted(
+                    ocr_failures,
+                    key=lambda item: (item.issuer, item.product_code, item.document_id),
+                )
+            )
+            raise OCRDocumentFailuresError(
+                run_id=run_id,
+                report_path=ocr_failure_report,
+                failures=ordered_failures,
             )
 
         chunk_rows = tuple(row for document in processed for row in document.chunks)

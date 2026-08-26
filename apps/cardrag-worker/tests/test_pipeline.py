@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import traceback
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -20,7 +22,13 @@ from cardrag_worker.contracts import (
 )
 from cardrag_worker.downloader import ProtectedDocumentError, validate_pdf
 from cardrag_worker.downloader import SecurePDFDownloader as RealDownloader
-from cardrag_worker.pipeline import WorkerPipeline
+from cardrag_worker.ocr import OCRResult, OCRValidationError
+from cardrag_worker.pipeline import (
+    OCRDocumentFailuresError,
+    WorkerPipeline,
+    classify_ocr_failure,
+)
+from cardrag_worker.providers import ProviderError
 from cardrag_worker.state import WorkerState
 from cardrag_worker.webdav import RemoteGenerationIdentity
 
@@ -63,6 +71,35 @@ class FakeEmbeddings:
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         self.calls += 1
         return [[1.0] + [0.0] * 1535 for _ in texts]
+
+
+class SelectiveOCR:
+    contract = {"schema_version": "test-ocr.v1"}
+    adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+
+    def __init__(self, failing_document_ids: set[str], raw_sentinel: str) -> None:
+        self.failing_document_ids = failing_document_ids
+        self.raw_sentinel = raw_sentinel
+        self.calls: list[str] = []
+
+    async def resolve(self, **kwargs: Any) -> OCRResult:
+        document_id = str(kwargs["document_id"])
+        self.calls.append(document_id)
+        if document_id in self.failing_document_ids:
+            raise ProviderError(f"Codex OCR exited 17: {self.raw_sentinel}")
+        page = "정상적으로 처리된 OCR 문서의 충분히 긴 본문입니다."
+        body = f"## Page 1\n\n{page}\n".encode()
+        return OCRResult(
+            pages=(page,),
+            ocr_bytes=body,
+            ocr_text=body.decode(),
+            ocr_sha256=hashlib.sha256(body).hexdigest(),
+            size_bytes=len(body),
+            provenance="native",
+            provider="test",
+            model="test",
+            reuse_key="a" * 64,
+        )
 
 
 class FakeWebDAV:
@@ -149,6 +186,193 @@ def install_http(monkeypatch: pytest.MonkeyPatch, payload: bytes, requests: list
         "SecurePDFDownloader",
         lambda policy: RealDownloader(policy, resolver=lambda _host: ("93.184.216.34",)),
     )
+
+
+@pytest.mark.asyncio
+async def test_ocr_failures_are_reported_then_later_documents_continue_without_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = pdf_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    records = tuple(
+        source(
+            product_code=f"p{index}",
+            source_url=f"https://cards.example/current-{index}.pdf",
+        )
+        for index in range(1, 4)
+    )
+    failing_ids = {records[0].document_id(digest), records[2].document_id(digest)}
+    raw_sentinel = "RAW_PROVIDER_STDERR_SECRET_SENTINEL"
+    ocr = SelectiveOCR(failing_ids, raw_sentinel)
+    embeddings = FakeEmbeddings()
+    requests: list[str] = []
+    install_http(monkeypatch, payload, requests)
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[Adapter(records)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=2,
+            retry_cap_seconds=0,
+        )
+        with pytest.raises(OCRDocumentFailuresError) as captured:
+            await pipeline.run()
+
+        error = captured.value
+        assert [item.product_code for item in error.failures] == ["p1", "p3"]
+        assert ocr.calls == [
+            records[0].document_id(digest),
+            records[0].document_id(digest),
+            records[1].document_id(digest),
+            records[2].document_id(digest),
+            records[2].document_id(digest),
+        ]
+        assert embeddings.calls == 0
+        assert state.connection.execute("SELECT count(*) FROM publish").fetchone()[0] == 0
+        run_row = state.connection.execute("SELECT status,error FROM run").fetchone()
+        assert tuple(run_row) == (
+            "failed",
+            f"2 OCR document(s) failed; report={error.report}",
+        )
+        for record, expected_status, expected_attempts in (
+            (records[0], "failed", 2),
+            (records[1], "succeeded", 1),
+            (records[2], "failed", 2),
+        ):
+            stage = state.get_stage(error.run_id, record.document_id(digest), "ocr")
+            assert stage is not None
+            assert (stage.status, stage.attempt_count) == (expected_status, expected_attempts)
+            if expected_status == "failed":
+                assert stage.last_error == ("provider_exit_17: The OCR provider process exited with code 17.")
+        successful_document_id = records[1].document_id(digest)
+        for stage_name in ("structure", "chunk"):
+            stage = state.get_stage(error.run_id, successful_document_id, stage_name)
+            assert stage is not None
+            assert (stage.status, stage.attempt_count) == ("succeeded", 1)
+        successful_root = tmp_path / "runs" / error.run_id / "documents" / successful_document_id
+        assert (successful_root / "ocr" / "ocr.md").is_file()
+        assert (successful_root / "structure" / "pages.json").is_file()
+        assert (successful_root / "chunks" / "chunks.json").is_file()
+
+        report_body = error.report_path.read_bytes()
+        report = json.loads(report_body)
+        assert report_body == pipeline_module.canonical_json_bytes(report)
+        assert report["schema_version"] == "cardrag.ocr-failure-report.v1"
+        assert report["run_id"] == error.run_id
+        assert report["failure_count"] == 2
+        assert [item["product_code"] for item in report["failures"]] == ["p1", "p3"]
+        assert all(item["attempts"] == 2 for item in report["failures"])
+        assert all(item["reason_code"] == "provider_exit_17" for item in report["failures"])
+        persisted = json.dumps(report, ensure_ascii=False) + str(
+            state.connection.execute("SELECT error FROM run").fetchone()[0]
+        )
+        persisted += "".join(
+            str(row[0] or "") for row in state.connection.execute("SELECT last_error FROM stage").fetchall()
+        )
+        assert raw_sentinel not in persisted
+
+    assert len(requests) == 3
+    assert not (tmp_path / "runs" / error.run_id / "sealed").exists()
+    assert raw_sentinel not in caplog.text
+    assert caplog.text.count("; continuing") == 2
+
+
+@pytest.mark.parametrize(
+    ("exc", "reason_code"),
+    [
+        (OCRValidationError("OCR sparse-page wrapper is invalid"), "sparse_page_wrapper_invalid"),
+        (OCRValidationError("OCR page markers [2] do not match [1]"), "page_marker_mismatch"),
+        (
+            OCRValidationError("OCR provider output must begin with the first Page marker"),
+            "output_not_marker_first",
+        ),
+        (OCRValidationError("OCR provider returned an empty page"), "empty_page"),
+        (OCRValidationError("OCR blank-page sentinel must be exact"), "blank_sentinel_invalid"),
+        (
+            OCRValidationError("OCR provider returned an implausibly short page"),
+            "implausibly_short",
+        ),
+        (OCRValidationError("invalid native OCR cache JSON"), "cache_validation_error"),
+        (OCRValidationError("private validation detail"), "generic_validation_error"),
+        (ProviderError("opaque provider detail"), "provider_error"),
+        (ProviderError("Codex OCR exited -9: private stderr"), "provider_exit_negative_9"),
+        (TimeoutError("private timeout detail"), "provider_timeout"),
+        (
+            httpx.HTTPStatusError(
+                "private HTTP detail",
+                request=httpx.Request("POST", "https://private.example/token"),
+                response=httpx.Response(
+                    503,
+                    request=httpx.Request("POST", "https://private.example/token"),
+                ),
+            ),
+            "provider_http_503",
+        ),
+        (
+            httpx.ConnectError(
+                "private network detail",
+                request=httpx.Request("POST", "https://private.example/token"),
+            ),
+            "provider_network_error",
+        ),
+        (OSError("/private/path"), "local_io_error"),
+        (RuntimeError("private unexpected detail"), "unexpected_error"),
+    ],
+)
+def test_ocr_failure_classification_is_allowlisted(exc: Exception, reason_code: str) -> None:
+    failure = classify_ocr_failure(exc)
+    assert failure.reason_code == reason_code
+    assert str(exc) not in failure.stored_error
+
+
+@pytest.mark.asyncio
+async def test_stage_failure_bookkeeping_error_suppresses_original_exception_context(
+    tmp_path: Path,
+) -> None:
+    raw_sentinel = "RAW_PROVIDER_STDERR_SECRET_SENTINEL"
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(run_id="run-safe-bookkeeping")
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[Adapter((source(),))],
+            ocr=FakeOCR(),  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+        )
+
+        async def fail() -> None:
+            raise ProviderError(raw_sentinel)
+
+        def broken_formatter(_exc: Exception) -> str:
+            raise RuntimeError("private formatter failure")
+
+        with pytest.raises(RuntimeError, match="stage failure bookkeeping failed") as captured:
+            await pipeline._finite_stage(  # noqa: SLF001
+                run_id=run_id,
+                document_id="doc_" + "a" * 64,
+                name="ocr",
+                operation=fail,
+                error_formatter=broken_formatter,
+            )
+        rendered = "".join(
+            traceback.format_exception(
+                type(captured.value),
+                captured.value,
+                captured.value.__traceback__,
+            )
+        )
+        assert raw_sentinel not in rendered
+        assert "private formatter failure" not in rendered
 
 
 def corpus_for(
@@ -411,8 +635,9 @@ async def test_same_url_with_changed_pdf_bytes_does_not_false_no_change(
             corpus_sha256=corpus_for(old_payload, record, tmp_path),
             contract_sha256=pipeline.contract_sha256,
         )
-        with pytest.raises(StopAfterNoChangeCheck):
+        with pytest.raises(OCRDocumentFailuresError) as captured:
             await pipeline.run()
+        assert captured.value.failures[0].reason_code == "unexpected_error"
     assert len(requests) == 1
     assert ocr.calls == 1
 

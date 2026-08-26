@@ -24,7 +24,7 @@ from .adoption import (
 from .gc import collect_garbage
 from .issuers import enabled_adapters
 from .ocr import FailoverOCRResolver, OCRResolver
-from .pipeline import WorkerPipeline
+from .pipeline import OCRDocumentFailuresError, WorkerPipeline
 from .providers import OCRProvider, OpenRouterEmbeddingProvider, make_ocr_provider
 from .settings import WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
@@ -35,6 +35,30 @@ app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/emb
 
 def _echo(payload: Any) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str))
+
+
+def _echo_ocr_failures(exc: OCRDocumentFailuresError) -> None:
+    sample = [
+        {
+            "attempts": failure.attempts,
+            "document_id": failure.document_id,
+            "issuer": failure.issuer,
+            "product_code": failure.product_code,
+            "reason": failure.reason,
+            "reason_code": failure.reason_code,
+        }
+        for failure in exc.failures[:5]
+    ]
+    _echo(
+        {
+            "ocr_failure_count": len(exc.failures),
+            "reason_code": "ocr_document_failures",
+            "report": exc.report,
+            "run_id": exc.run_id,
+            "sample": sample,
+            "status": "failed",
+        }
+    )
 
 
 def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
@@ -124,6 +148,9 @@ def run_command(
 ) -> None:
     try:
         _echo(asyncio.run(_run(resume)))
+    except OCRDocumentFailuresError as exc:
+        _echo_ocr_failures(exc)
+        raise typer.Exit(code=1) from None
     except AlreadyRunning as exc:
         _echo({"status": "already_running", "error": str(exc)})
 
@@ -132,6 +159,9 @@ def run_command(
 def resume_command(run_id: str = typer.Argument(..., help="Failed finite run ID.")) -> None:
     try:
         _echo(asyncio.run(_run(run_id)))
+    except OCRDocumentFailuresError as exc:
+        _echo_ocr_failures(exc)
+        raise typer.Exit(code=1) from None
     except AlreadyRunning as exc:
         _echo({"status": "already_running", "error": str(exc)})
 

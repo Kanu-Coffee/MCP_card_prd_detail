@@ -315,7 +315,7 @@ class WorkerState:
         run_id: str,
         document_id: str,
         stage_name: str,
-        error: BaseException,
+        error: BaseException | str,
         *,
         delay_seconds: float,
     ) -> str:
