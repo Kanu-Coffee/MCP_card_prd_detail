@@ -20,6 +20,8 @@ from cardrag_core import OCRCacheKind
 from cardrag_core.canonical import canonical_sha256, sha256_bytes
 from cardrag_core.domain import ArtifactRef
 from cardrag_core.manifests import (
+    LEGACY_ADOPTION_POLICY_V1,
+    LEGACY_ADOPTION_POLICY_V2,
     AdoptedOCRArtifactManifest,
     OCRArtifactManifest,
     OCRReady,
@@ -34,11 +36,20 @@ from cardrag_core.ocr import (
 from cardrag_core.paths import ocr_manifest_path, ocr_ready_path
 
 from .contracts import PageRecord
-from .providers import DEFAULT_OCR_PROMPT, OCRProvider, ProviderError
+from .providers import (
+    DEFAULT_OCR_PROMPT,
+    OCR_BLANK_PAGE_SENTINEL,
+    OCR_SPARSE_PAGE_PREFIX,
+    OCRProvider,
+    ProviderError,
+)
 from .state import WorkerState
 from .webdav import WebDAVClient
 
-PAGE_MARKER = re.compile(r"^## Page (\d+)\s*$", re.MULTILINE)
+PAGE_MARKER = re.compile(r"^## Page ([1-9][0-9]*)$", re.MULTILINE)
+OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
+OCR_SEGMENTATION_STRATEGY_ID = "cardrag.ocr.windowed-continuity.v1"
+OCR_OUTPUT_POLICY: Literal["target-pages-only"] = "target-pages-only"
 
 
 class OCRValidationError(RuntimeError):
@@ -80,6 +91,8 @@ def _page_body(page_with_marker: str) -> str:
 
 def split_ocr_pages(text: str, *, expected_count: int, first_page: int = 1) -> tuple[str, ...]:
     matches = list(PAGE_MARKER.finditer(text))
+    if matches and matches[0].start() != 0:
+        raise OCRValidationError("OCR provider output must begin with the first Page marker")
     numbers = [int(match.group(1)) for match in matches]
     expected = list(range(first_page, first_page + expected_count))
     if numbers != expected:
@@ -93,7 +106,7 @@ def split_ocr_pages(text: str, *, expected_count: int, first_page: int = 1) -> t
     return pages
 
 
-def render_pdf(pdf_path: Path, output_dir: Path, *, scale: float = 3.0) -> tuple[Path, ...]:
+def render_pdf(pdf_path: Path, output_dir: Path, *, scale: float = 6.0) -> tuple[Path, ...]:
     output_dir.mkdir(parents=True, exist_ok=True)
     document = pdfium.PdfDocument(str(pdf_path))
     paths: list[Path] = []
@@ -102,24 +115,49 @@ def render_pdf(pdf_path: Path, output_dir: Path, *, scale: float = 3.0) -> tuple
             raise OCRValidationError("OCR input has no pages")
         for index in range(len(document)):
             destination = output_dir / f"page-{index + 1:04d}.png"
-            if not destination.exists():
-                page = document[index]
-                try:
-                    image = page.render(scale=scale).to_pil()
-                    temporary = destination.with_suffix(".tmp.png")
-                    image.save(temporary, format="PNG")
-                    temporary.replace(destination)
-                finally:
-                    page.close()
+            # Rendering is part of the OCR contract. A filename left by an
+            # older renderer or scale is not evidence that its pixels match
+            # this run, so every page is atomically rendered again before
+            # checkpoint input hashes are evaluated.
+            page = document[index]
+            try:
+                image = page.render(scale=scale).to_pil()
+                temporary = destination.with_suffix(".tmp.png")
+                image.save(temporary, format="PNG")
+                temporary.replace(destination)
+            finally:
+                page.close()
             paths.append(destination)
     finally:
         document.close()
     return tuple(paths)
 
 
+def _validate_target_page_values(
+    page_numbers: tuple[int, ...],
+    values: tuple[str, ...],
+) -> None:
+    """Apply the core minimum-page invariant before persisting a checkpoint."""
+
+    if len(page_numbers) != len(values):
+        raise OCRValidationError("OCR page/value count differs")
+    for page_number, value in zip(page_numbers, values, strict=True):
+        if value.startswith(OCR_SPARSE_PAGE_PREFIX):
+            lines = value.splitlines()
+            visible = lines[1].strip() if len(lines) == 2 else ""
+            if lines[:1] != [OCR_SPARSE_PAGE_PREFIX] or not visible or len("".join(visible.split())) > 12:
+                raise OCRValidationError("OCR sparse-page wrapper is invalid")
+        elif value.startswith(OCR_BLANK_PAGE_SENTINEL) and value != OCR_BLANK_PAGE_SENTINEL:
+            raise OCRValidationError("OCR blank-page sentinel must be exact")
+        if len(f"## Page {page_number}\n\n{value}") < 20:
+            raise OCRValidationError("OCR provider returned an implausibly short page")
+
+
 @dataclass(frozen=True, slots=True)
 class OCRResult:
     pages: tuple[str, ...]
+    ocr_bytes: bytes
+    ocr_text: str
     ocr_sha256: str
     size_bytes: int
     provenance: str
@@ -132,6 +170,61 @@ class OCRResult:
     def __post_init__(self) -> None:
         if (self.cache_kind is None) != (self.cache_reuse_key is None):
             raise ValueError("OCR cache kind and reuse key must be present together")
+        try:
+            verified = verify_ocr_bytes(
+                self.ocr_bytes,
+                expected_page_count=len(self.pages),
+                expected_sha256=self.ocr_sha256,
+                expected_size_bytes=self.size_bytes,
+            )
+        except Exception as exc:
+            raise OCRValidationError("OCR result bytes failed strict verification") from exc
+        if verified.text != self.ocr_text:
+            raise OCRValidationError("OCR result text does not match its exact bytes")
+        if tuple(_page_body(page) for page in verified.pages) != self.pages:
+            raise OCRValidationError("OCR result pages do not match its exact bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class OCRCall:
+    """One provider call with target output pages and read-only visual context."""
+
+    target_page_numbers: tuple[int, ...]
+    input_page_numbers: tuple[int, ...]
+
+
+def plan_ocr_calls(
+    *,
+    page_count: int,
+    whole_document_max_pages: int,
+    target_pages_per_call: int,
+    context_pages_before: int,
+    context_pages_after: int,
+) -> tuple[OCRCall, ...]:
+    if page_count < 1:
+        raise ValueError("page_count must be positive")
+    if whole_document_max_pages < 1:
+        raise ValueError("whole_document_max_pages must be positive")
+    if target_pages_per_call < 1:
+        raise ValueError("target_pages_per_call must be positive")
+    if context_pages_before < 0 or context_pages_after < 0:
+        raise ValueError("OCR context page counts must be non-negative")
+    all_pages = tuple(range(1, page_count + 1))
+    if page_count <= whole_document_max_pages:
+        return (OCRCall(target_page_numbers=all_pages, input_page_numbers=all_pages),)
+    calls: list[OCRCall] = []
+    for first_target in range(1, page_count + 1, target_pages_per_call):
+        last_target = min(page_count, first_target + target_pages_per_call - 1)
+        targets = tuple(range(first_target, last_target + 1))
+        first_input = max(1, first_target - context_pages_before)
+        last_input = min(page_count, last_target + context_pages_after)
+        calls.append(
+            OCRCall(
+                target_page_numbers=targets,
+                input_page_numbers=tuple(range(first_input, last_input + 1)),
+            )
+        )
+    return tuple(calls)
 
 
 class OCRResolver:
@@ -146,23 +239,33 @@ class OCRResolver:
         chunk_pages: int = 2,
         prompt: str = DEFAULT_OCR_PROMPT,
         cache_epoch: int = 0,
-        render_scale_milli: int = 3000,
-        adoption_policy_version: str = "cardrag.legacy-ocr-adoption.v1",
-        prompt_version: str = "cardrag-ocr.ko.v1",
+        render_scale_milli: int = 6000,
+        adoption_policy_version: str = LEGACY_ADOPTION_POLICY_V2,
+        prompt_version: str = "cardrag-ocr.ko.v2",
+        whole_document_max_pages: int = 4,
+        context_pages_before: int = 1,
+        context_pages_after: int = 1,
     ) -> None:
         if chunk_pages < 1:
             raise ValueError("chunk_pages must be positive")
+        if whole_document_max_pages < 1:
+            raise ValueError("whole_document_max_pages must be positive")
+        if context_pages_before < 0 or context_pages_after < 0:
+            raise ValueError("OCR context page counts must be non-negative")
+        if render_scale_milli < 1000 or render_scale_milli > 8000:
+            raise ValueError("render_scale_milli must be between 1000 and 8000")
         self.provider = provider
         self.state = state
         self.webdav = webdav
         self.chunk_pages = chunk_pages
+        self.whole_document_max_pages = whole_document_max_pages
+        self.context_pages_before = context_pages_before
+        self.context_pages_after = context_pages_after
         self.prompt = prompt
         self.render_scale_milli = render_scale_milli
         self.adoption_policy_version = adoption_policy_version
         self.contract = NativeOCRContract(
-            # Adapter-only patch releases keep the OCR processing contract stable
-            # so verified native cache entries remain reusable.
-            processor_version="cardrag-worker/1.0.0",
+            processor_version=OCR_PROCESSOR_VERSION,
             cache_epoch=cache_epoch,
             prompt_version=prompt_version,
             prompt_sha256=sha256_bytes(prompt.encode()),
@@ -171,7 +274,12 @@ class OCRResolver:
             provider=provider.provider,
             model=provider.model,
             reasoning_effort=getattr(provider, "reasoning_effort", None),
-            chunk_pages=chunk_pages,
+            segmentation_strategy_id=OCR_SEGMENTATION_STRATEGY_ID,
+            whole_document_max_pages=whole_document_max_pages,
+            target_pages_per_call=chunk_pages,
+            context_pages_before=context_pages_before,
+            context_pages_after=context_pages_after,
+            output_policy=OCR_OUTPUT_POLICY,
         )
 
     async def _lookup_cache(
@@ -181,6 +289,7 @@ class OCRResolver:
         reuse_key: str,
         source: OCRInput,
         source_document_id: str,
+        adoption_policy_version: str | None = None,
     ) -> OCRResult | None:
         if self.webdav is None:
             return None
@@ -232,7 +341,7 @@ class OCRResolver:
                 adopted.reuse_key != reuse_key
                 or adopted.source != source
                 or adopted.receipt.source_document_id != source_document_id
-                or adopted.receipt.adoption_policy_version != self.adoption_policy_version
+                or adopted.receipt.adoption_policy_version != adoption_policy_version
             ):
                 raise OCRValidationError("adopted OCR cache source/receipt mismatch")
             artifact = adopted.output
@@ -256,6 +365,8 @@ class OCRResolver:
             raise OCRValidationError("OCR cache bytes failed strict verification") from exc
         return OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
+            ocr_bytes=body,
+            ocr_text=verified.text,
             ocr_sha256=verified.sha256,
             size_bytes=verified.size_bytes,
             provenance=kind,
@@ -289,7 +400,9 @@ class OCRResolver:
         except Exception as exc:
             raise OCRValidationError("local native OCR manifest is invalid") from exc
         if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
-            raise OCRValidationError("local native OCR manifest source/contract mismatch")
+            # A sealed artifact from an older processing contract is a clean
+            # cache miss. Its checkpoints are independently input-hash bound.
+            return None
         body = ocr_path.read_bytes()
         try:
             verified = verify_ocr_bytes(
@@ -305,6 +418,8 @@ class OCRResolver:
         return (
             OCRResult(
                 pages=tuple(_page_body(page) for page in verified.pages),
+                ocr_bytes=body,
+                ocr_text=verified.text,
                 ocr_sha256=verified.sha256,
                 size_bytes=verified.size_bytes,
                 provenance="native-local",
@@ -324,6 +439,8 @@ class OCRResolver:
         body: bytes,
         native_cache_invalid: bool,
     ) -> OCRResult:
+        if body != result.ocr_bytes:
+            raise OCRValidationError("local native OCR body does not match its verified result")
         if self.webdav is None:
             return result
         try:
@@ -344,6 +461,8 @@ class OCRResolver:
             raise
         return OCRResult(
             pages=result.pages,
+            ocr_bytes=result.ocr_bytes,
+            ocr_text=result.ocr_text,
             ocr_sha256=result.ocr_sha256,
             size_bytes=result.size_bytes,
             provenance=result.provenance,
@@ -371,23 +490,34 @@ class OCRResolver:
             page_count=page_count,
         )
         native_key = native_ocr_reuse_key(self.contract, source)
-        adopted_key = adopted_ocr_reuse_key(
-            adoption_policy_version=self.adoption_policy_version,
-            source_document_id=document_id,
-            pdf_sha256=pdf_sha256,
-        )
         native_cache_invalid = False
-        cache_candidates: tuple[tuple[Literal["native", "adopted"], str], ...] = (
-            ("native", native_key),
-            ("adopted", adopted_key),
-        )
-        for kind, lookup_key in cache_candidates:
+        adopted_policies = [self.adoption_policy_version]
+        if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
+            adopted_policies.append(LEGACY_ADOPTION_POLICY_V1)
+        cache_candidate_list: list[tuple[Literal["native", "adopted"], str, str | None]] = [
+            ("native", native_key, None)
+        ]
+        for policy in adopted_policies:
+            cache_candidate_list.append(
+                (
+                    "adopted",
+                    adopted_ocr_reuse_key(
+                        adoption_policy_version=policy,
+                        source_document_id=document_id,
+                        pdf_sha256=pdf_sha256,
+                    ),
+                    policy,
+                )
+            )
+        cache_candidates = tuple(cache_candidate_list)
+        for kind, lookup_key, candidate_policy in cache_candidates:
             try:
                 found = await self._lookup_cache(
                     kind=kind,
                     reuse_key=lookup_key,
                     source=source,
                     source_document_id=document_id,
+                    adoption_policy_version=candidate_policy,
                 )
             except OCRValidationError as exc:
                 if kind == "native":
@@ -418,16 +548,32 @@ class OCRResolver:
         )
         if len(images) != page_count:
             raise OCRValidationError("rendered page count differs from validated PDF")
+        calls = plan_ocr_calls(
+            page_count=page_count,
+            whole_document_max_pages=self.whole_document_max_pages,
+            target_pages_per_call=self.chunk_pages,
+            context_pages_before=self.context_pages_before,
+            context_pages_after=self.context_pages_after,
+        )
+        image_hashes = {
+            page_number: file_sha256(images[page_number - 1]) for page_number in range(1, page_count + 1)
+        }
         page_text: dict[int, str] = {}
-        for chunk_index, start in enumerate(range(0, page_count, self.chunk_pages)):
-            selected = images[start : start + self.chunk_pages]
+        for chunk_index, call in enumerate(calls):
+            selected = tuple(images[page_number - 1] for page_number in call.input_page_numbers)
             input_sha = canonical_sha256(
                 {
                     "contract_sha256": self.contract.contract_sha256,
-                    "image_sha256": [file_sha256(path) for path in selected],
+                    "input_images": [
+                        {"page_number": page_number, "sha256": image_hashes[page_number]}
+                        for page_number in call.input_page_numbers
+                    ],
                     "model": self.provider.model,
+                    "output_policy": OCR_OUTPUT_POLICY,
                     "provider": self.provider.provider,
-                    "start_page": start + 1,
+                    "schema_version": "cardrag.ocr-checkpoint-input.v2",
+                    "target_page_numbers": call.target_page_numbers,
+                    "total_pages": page_count,
                 }
             )
             checkpoint = self.state.checkpoint(run_id, document_id, "ocr", chunk_index)
@@ -435,27 +581,44 @@ class OCRResolver:
                 checkpoint_path = Path(checkpoint["artifact_path"])
                 if checkpoint_path.exists() and file_sha256(checkpoint_path) == checkpoint["output_sha256"]:
                     chunk = checkpoint_path.read_text(encoding="utf-8")
-                    pages = split_ocr_pages(chunk, expected_count=len(selected), first_page=start + 1)
-                    for offset, value in enumerate(pages):
-                        page_text[start + offset + 1] = value
-                    continue
-            raw = await self.provider.recognize(selected, first_page=start + 1, prompt=self.prompt)
-            # Normalize chunk-local absolute markers to a strict persisted form.
-            matches = list(PAGE_MARKER.finditer(raw))
-            numbers = [int(match.group(1)) for match in matches]
-            expected = list(range(start + 1, start + len(selected) + 1))
-            if numbers != expected:
-                raise OCRValidationError(f"OCR chunk page markers {numbers} != {expected}")
-            values = tuple(
-                raw[
-                    match.end() : matches[index + 1].start() if index + 1 < len(matches) else len(raw)
-                ].strip()
-                for index, match in enumerate(matches)
+                    try:
+                        pages = split_ocr_pages(
+                            chunk,
+                            expected_count=len(call.target_page_numbers),
+                            first_page=call.target_page_numbers[0],
+                        )
+                        _validate_target_page_values(call.target_page_numbers, pages)
+                    except OCRValidationError:
+                        # A short or malformed provider response from an older
+                        # failed attempt must not poison every retry. Re-run
+                        # this exact call and atomically replace it below.
+                        pass
+                    else:
+                        for page_number, value in zip(call.target_page_numbers, pages, strict=True):
+                            page_text[page_number] = value
+                        continue
+            raw = await self.provider.recognize(
+                selected,
+                page_numbers=call.input_page_numbers,
+                target_page_numbers=call.target_page_numbers,
+                total_pages=page_count,
+                prompt=self.prompt,
+            )
+            # Context images may inform continuity but are never persisted as
+            # output from this call. Exact target markers enforce that boundary.
+            values = split_ocr_pages(
+                raw,
+                expected_count=len(call.target_page_numbers),
+                first_page=call.target_page_numbers[0],
             )
             if any(not value for value in values):
                 raise OCRValidationError("OCR provider returned an empty page")
+            _validate_target_page_values(call.target_page_numbers, values)
             normalized = (
-                "\n\n".join(f"## Page {start + index + 1}\n\n{value}" for index, value in enumerate(values))
+                "\n\n".join(
+                    f"## Page {page_number}\n\n{value}"
+                    for page_number, value in zip(call.target_page_numbers, values, strict=True)
+                )
                 + "\n"
             )
             chunk_path = output_dir / "checkpoints" / f"chunk-{chunk_index:04d}.md"
@@ -469,24 +632,26 @@ class OCRResolver:
                 output_sha256=file_sha256(chunk_path),
                 artifact_path=chunk_path,
             )
-            for offset, value in enumerate(values):
-                page_text[start + offset + 1] = value
+            for page_number, value in zip(call.target_page_numbers, values, strict=True):
+                page_text[page_number] = value
         pages = tuple(page_text[index] for index in range(1, page_count + 1))
         combined = "\n\n".join(f"## Page {index}\n\n{value}" for index, value in enumerate(pages, 1)) + "\n"
         body = combined.encode()
         ocr_path = output_dir / "ocr.md"
         atomic_write(ocr_path, body)
+        # Verify exactly the bytes that will be cached and referenced by generations.
+        verified = verify_ocr_bytes(body, expected_page_count=page_count)
         result = OCRResult(
-            pages=pages,
-            ocr_sha256=hashlib.sha256(body).hexdigest(),
-            size_bytes=len(body),
+            pages=tuple(_page_body(page) for page in verified.pages),
+            ocr_bytes=body,
+            ocr_text=verified.text,
+            ocr_sha256=verified.sha256,
+            size_bytes=verified.size_bytes,
             provenance="native",
             provider=self.provider.provider,
             model=self.provider.model,
             reuse_key=native_key,
         )
-        # Verify exactly the bytes that will be cached and referenced by generations.
-        verified = verify_ocr_bytes(body, expected_page_count=page_count)
         manifest = OCRArtifactManifest(
             reuse_key=result.reuse_key,
             source=source,

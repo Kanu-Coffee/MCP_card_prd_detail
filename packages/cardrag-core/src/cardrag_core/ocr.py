@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self, cast
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
 
 from .canonical import canonical_sha256, sha256_bytes
 from .domain import (
@@ -17,7 +23,8 @@ from .domain import (
     StrictFrozenModel,
 )
 
-OCR_CONTRACT_SCHEMA: Literal["cardrag.ocr-contract.v1"] = "cardrag.ocr-contract.v1"
+OCR_CONTRACT_SCHEMA: Literal["cardrag.ocr-contract.v2"] = "cardrag.ocr-contract.v2"
+LEGACY_OCR_CONTRACT_SCHEMA: Literal["cardrag.ocr-contract.v1"] = "cardrag.ocr-contract.v1"
 OCR_INPUT_SCHEMA: Literal["cardrag.ocr-input.v1"] = "cardrag.ocr-input.v1"
 OCR_OUTPUT_PROFILE: Literal["cardrag.ocr-markdown.v1"] = "cardrag.ocr-markdown.v1"
 
@@ -29,7 +36,7 @@ ReasoningEffort = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,
 class NativeOCRContract(StrictFrozenModel):
     """Every semantic input that may change native OCR output."""
 
-    schema_version: Literal["cardrag.ocr-contract.v1"] = OCR_CONTRACT_SCHEMA
+    schema_version: Literal["cardrag.ocr-contract.v1", "cardrag.ocr-contract.v2"] = OCR_CONTRACT_SCHEMA
     processor_version: NonEmptyText
     output_profile: Literal["cardrag.ocr-markdown.v1"] = OCR_OUTPUT_PROFILE
     cache_epoch: NonNegativeInt = 0
@@ -40,7 +47,56 @@ class NativeOCRContract(StrictFrozenModel):
     provider: NonEmptyText
     model: NonEmptyText
     reasoning_effort: ReasoningEffort | None = None
-    chunk_pages: int = Field(strict=True, ge=1, le=100)
+    # ``chunk_pages`` is retained only to parse and hash v1 manifests exactly.
+    # New producers use the explicit continuity-aware segmentation fields.
+    chunk_pages: int | None = Field(default=None, strict=True, ge=1, le=100)
+    segmentation_strategy_id: NonEmptyText | None = None
+    whole_document_max_pages: int | None = Field(default=None, strict=True, ge=1, le=100)
+    target_pages_per_call: int | None = Field(default=None, strict=True, ge=1, le=100)
+    context_pages_before: int | None = Field(default=None, strict=True, ge=0, le=20)
+    context_pages_after: int | None = Field(default=None, strict=True, ge=0, le=20)
+    output_policy: Literal["target-pages-only"] | None = None
+
+    @model_validator(mode="after")
+    def segmentation_contract_matches_schema(self) -> Self:
+        continuity_fields = (
+            self.segmentation_strategy_id,
+            self.whole_document_max_pages,
+            self.target_pages_per_call,
+            self.context_pages_before,
+            self.context_pages_after,
+            self.output_policy,
+        )
+        if self.schema_version == LEGACY_OCR_CONTRACT_SCHEMA:
+            if self.chunk_pages is None:
+                raise ValueError("v1 OCR contract requires chunk_pages")
+            if any(value is not None for value in continuity_fields):
+                raise ValueError("v1 OCR contract cannot contain v2 segmentation fields")
+            return self
+        if self.chunk_pages is not None:
+            raise ValueError("v2 OCR contract must use target_pages_per_call, not chunk_pages")
+        if any(value is None for value in continuity_fields):
+            raise ValueError("v2 OCR contract requires the complete segmentation contract")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_by_schema(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Keep historical v1 JSON byte-compatible while emitting all v2 inputs."""
+
+        payload = cast(dict[str, Any], handler(self))
+        if self.schema_version == LEGACY_OCR_CONTRACT_SCHEMA:
+            for field_name in (
+                "segmentation_strategy_id",
+                "whole_document_max_pages",
+                "target_pages_per_call",
+                "context_pages_before",
+                "context_pages_after",
+                "output_policy",
+            ):
+                payload.pop(field_name, None)
+        else:
+            payload.pop("chunk_pages", None)
+        return payload
 
     @property
     def contract_sha256(self) -> str:

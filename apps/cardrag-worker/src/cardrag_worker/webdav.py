@@ -105,6 +105,11 @@ class WebDAVClient:
             raise
         return response.content
 
+    async def exists(self, path: str | PurePosixPath) -> bool:
+        """Check object existence through the capability-limited read-only facade."""
+
+        return await asyncio.to_thread(self.core.read_only().exists, path)
+
     async def get_json(
         self,
         path: str | PurePosixPath,

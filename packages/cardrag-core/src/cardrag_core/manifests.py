@@ -32,6 +32,19 @@ _DOCUMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 DocumentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")]
 OCRCacheKind = Literal["native", "adopted"]
 
+LEGACY_ADOPTION_POLICY_V1: Literal["cardrag.legacy-ocr-adoption.v1"] = "cardrag.legacy-ocr-adoption.v1"
+LEGACY_ADOPTION_POLICY_V2: Literal["cardrag.legacy-ocr-adoption.v2"] = "cardrag.legacy-ocr-adoption.v2"
+LEGACY_OCR_NORMALIZATION_EXACT: Literal["exact"] = "exact"
+LEGACY_OCR_NORMALIZATION_STRIP_PREFIX_V1: Literal["strip-exact-generated-prefix-v1"] = (
+    "strip-exact-generated-prefix-v1"
+)
+LEGACY_OCR_APPROVED_PREFIX = "# OCR 처리 완료본\n\n".encode()
+LEGACY_OCR_APPROVED_PREFIX_SHA256 = "dd547e4a08542b54f8cc2f1f90b4c71d97bec67a5c286cfcb2d59587bb4adc48"
+LegacyOCRNormalizationProfile = Literal[
+    "exact",
+    "strip-exact-generated-prefix-v1",
+]
+
 
 class EmbeddingContract(StrictFrozenModel):
     provider: NonEmptyText
@@ -298,16 +311,72 @@ class LegacyAdoptionReceipt(StrictFrozenModel):
     validation: LegacyAdoptionValidation
 
 
+class LegacyAdoptionValidationV2(StrictFrozenModel):
+    """Proofs made while both original and normalized legacy bytes were available."""
+
+    source_hash_verified: Literal[True]
+    normalized_hash_verified: Literal[True]
+    transformation_verified: Literal[True]
+    page_coverage_verified: Literal[True]
+    utf8_verified: Literal[True]
+    ledger_bound: Literal[True]
+
+
+class LegacyAdoptionReceiptV2(StrictFrozenModel):
+    """Dual-lineage receipt for a narrowly approved legacy normalization."""
+
+    schema_version: Literal["cardrag.legacy-adoption-receipt.v2"] = "cardrag.legacy-adoption-receipt.v2"
+    adoption_policy_version: Literal["cardrag.legacy-ocr-adoption.v2"] = LEGACY_ADOPTION_POLICY_V2
+    source_bundle_id: NonEmptyText
+    source_bundle_sha256: Sha256Hex
+    source_database_id: NonEmptyText
+    source_document_id: DocumentId
+    pdf_sha256: Sha256Hex
+    source_ocr_sha256: Sha256Hex
+    source_ocr_size_bytes: PositiveInt
+    normalized_ocr_sha256: Sha256Hex
+    normalized_ocr_size_bytes: PositiveInt
+    normalization_profile: LegacyOCRNormalizationProfile
+    prefix_sha256: Sha256Hex | None = None
+    removed_bytes: NonNegativeInt
+    validation: LegacyAdoptionValidationV2
+
+    @model_validator(mode="after")
+    def normalization_is_narrow_and_fully_bound(self) -> Self:
+        if self.normalization_profile == LEGACY_OCR_NORMALIZATION_EXACT:
+            if self.source_ocr_sha256 != self.normalized_ocr_sha256:
+                raise ValueError("exact adoption requires identical source and normalized OCR hashes")
+            if self.source_ocr_size_bytes != self.normalized_ocr_size_bytes:
+                raise ValueError("exact adoption requires identical source and normalized OCR sizes")
+            if self.prefix_sha256 is not None or self.removed_bytes != 0:
+                raise ValueError("exact adoption cannot remove a prefix")
+            return self
+        if self.normalization_profile != LEGACY_OCR_NORMALIZATION_STRIP_PREFIX_V1:
+            raise ValueError("unsupported legacy OCR normalization profile")
+        if self.prefix_sha256 != LEGACY_OCR_APPROVED_PREFIX_SHA256:
+            raise ValueError("prefix-strip adoption requires the approved prefix hash")
+        if self.removed_bytes != len(LEGACY_OCR_APPROVED_PREFIX):
+            raise ValueError("prefix-strip adoption requires exactly 24 removed bytes")
+        if self.source_ocr_size_bytes != self.normalized_ocr_size_bytes + self.removed_bytes:
+            raise ValueError("prefix-strip adoption OCR sizes do not match removed bytes")
+        if self.source_ocr_sha256 == self.normalized_ocr_sha256:
+            raise ValueError("prefix-strip adoption requires distinct source and normalized OCR hashes")
+        return self
+
+
 class AdoptedOCRArtifactManifest(StrictFrozenModel):
     """Strict legacy OCR artifact without fabricating native model provenance."""
 
-    schema_version: Literal["cardrag.ocr-artifact.v1"] = "cardrag.ocr-artifact.v1"
+    schema_version: Literal["cardrag.ocr-artifact.v1", "cardrag.ocr-artifact.v2"] = "cardrag.ocr-artifact.v1"
     origin: Literal["legacy_adoption"] = "legacy_adoption"
     status: Literal["succeeded"] = "succeeded"
-    validation_profile: Literal["cardrag.legacy-ocr-adoption.v1"] = "cardrag.legacy-ocr-adoption.v1"
+    validation_profile: Literal[
+        "cardrag.legacy-ocr-adoption.v1",
+        "cardrag.legacy-ocr-adoption.v2",
+    ] = "cardrag.legacy-ocr-adoption.v1"
     reuse_key: Sha256Hex
     source: OCRInput
-    receipt: LegacyAdoptionReceipt
+    receipt: LegacyAdoptionReceipt | LegacyAdoptionReceiptV2
     output: ArtifactRef
     ocr_chars: PositiveInt
     page_output_sha256: tuple[Sha256Hex, ...] = Field(min_length=1)
@@ -320,6 +389,23 @@ class AdoptedOCRArtifactManifest(StrictFrozenModel):
 
     @model_validator(mode="after")
     def adoption_is_fully_bound(self) -> Self:
+        if isinstance(self.receipt, LegacyAdoptionReceiptV2):
+            if (
+                self.schema_version != "cardrag.ocr-artifact.v2"
+                or self.validation_profile != LEGACY_ADOPTION_POLICY_V2
+            ):
+                raise ValueError("v2 adoption receipt requires the v2 artifact/profile contract")
+            receipt_ocr_sha256 = self.receipt.normalized_ocr_sha256
+            receipt_ocr_size_bytes = self.receipt.normalized_ocr_size_bytes
+        else:
+            if (
+                self.schema_version != "cardrag.ocr-artifact.v1"
+                or self.validation_profile != LEGACY_ADOPTION_POLICY_V1
+                or self.receipt.adoption_policy_version != LEGACY_ADOPTION_POLICY_V1
+            ):
+                raise ValueError("v1 adoption receipt requires the v1 artifact/profile contract")
+            receipt_ocr_sha256 = self.receipt.ocr_sha256
+            receipt_ocr_size_bytes = self.output.size_bytes
         expected_key = adopted_ocr_reuse_key(
             adoption_policy_version=self.receipt.adoption_policy_version,
             source_document_id=self.receipt.source_document_id,
@@ -329,8 +415,10 @@ class AdoptedOCRArtifactManifest(StrictFrozenModel):
             raise ValueError("adopted OCR reuse key does not match receipt and PDF")
         if self.receipt.pdf_sha256 != self.source.pdf_sha256:
             raise ValueError("adoption receipt PDF hash does not match OCR input")
-        if self.receipt.ocr_sha256 != self.output.sha256:
+        if receipt_ocr_sha256 != self.output.sha256:
             raise ValueError("adoption receipt OCR hash does not match output")
+        if receipt_ocr_size_bytes != self.output.size_bytes:
+            raise ValueError("adoption receipt OCR size does not match output")
         if self.output.media_type != "text/markdown; charset=utf-8":
             raise ValueError("adopted OCR output media type is invalid")
         if PurePosixPath(self.output.path) != object_path(self.output.sha256):

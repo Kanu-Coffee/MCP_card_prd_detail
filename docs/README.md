@@ -1,6 +1,6 @@
-# CardRAG v1.0.3 운영 문서
+# CardRAG v1.0.4 운영 문서
 
-CardRAG v1.0.3의 지원 운영 구조는 다음과 같습니다.
+CardRAG v1.0.4의 지원 운영 구조는 다음과 같습니다.
 
 ```text
 cardrag-worker -> WebDAV -> cardrag-mcp
@@ -16,6 +16,8 @@ WebDAV의 불변 객체와 세대 포인터만 공유합니다.
 2. [배포 파일 안내](../deploy/README.md)에서 Compose와 secret overlay의 역할을
    확인합니다.
 3. [실운영 가이드](SIMPLE_RUNTIME.md)를 위에서 아래로 실행합니다.
+4. 검증된 과거 OCR을 이관할 때만
+   [Legacy data-kit OCR adoption v2](LEGACY_DATA_KIT_ADOPTION_V2.md)를 따릅니다.
 
 ## 운영 완료 기준
 
@@ -30,6 +32,6 @@ WebDAV의 불변 객체와 세대 포인터만 공유합니다.
 상태 확인, 실패 실행 재개, MCP 재동기화, 이미지 업그레이드 절차도
 [실운영 가이드](SIMPLE_RUNTIME.md)에 포함되어 있습니다.
 
-v1.0.2에서 v1.0.3으로 올릴 때는 v2/v3를 함께 읽는 v1.0.3 MCP를 먼저 배포하고,
+v1.0.2에서 v1.0.4로 올릴 때는 v2/v3를 함께 읽는 v1.0.4 MCP를 먼저 배포하고,
 그 MCP가 기존 v2 세대를 계속 서비스하는 것을 확인한 다음 v3 Worker를
 배포하십시오.

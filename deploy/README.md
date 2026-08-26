@@ -1,4 +1,4 @@
-# CardRAG v1.0.3 배포 파일
+# CardRAG v1.0.4 배포 파일
 
 운영 배포는 Worker와 MCP 두 Compose 프로젝트만 사용합니다.
 
@@ -9,6 +9,7 @@ deploy/
 │   ├── compose.yaml
 │   ├── compose.secrets.yaml
 │   ├── compose.ca.yaml
+│   ├── compose.adoption.yaml
 │   ├── cardrag-worker.service
 │   └── cardrag-worker.timer
 └── mcp/
@@ -28,8 +29,14 @@ deploy/
   `/run/secrets/*`로 연결합니다.
 - 각 역할의 `compose.ca.yaml`은 사설 WebDAV CA가 있을 때만 마지막 overlay로
   추가합니다.
-- Worker service와 timer는 `/opt/cardrag`에서 Worker를 매일 03:00
+- Worker의 `compose.adoption.yaml`은 sealed legacy OCR export와 그 export에
+  기록된 원본 source root를 컨테이너의 같은 절대경로에 read-only로 연결합니다.
+  평상시 Worker 실행에는 추가하지 않습니다.
+- Worker service와 timer는 immutable `/opt/cardrag-v1.0.4`에서 Worker를 매일 03:00
   Asia/Seoul에 실행합니다.
+
+`/opt/cardrag-v1.0.4`는 `root:root` 소유로 설치하고 모든 쓰기 비트를 제거합니다.
+운영 env와 secret은 이 트리에 두지 않고 `/etc/cardrag`에서만 주입합니다.
 
 ## 운영 이미지
 
@@ -37,15 +44,15 @@ deploy/
 지정합니다.
 
 ```dotenv
-CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.3-worker
-CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.3-mcp
+CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.4-worker
+CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.4-mcp
 ```
 
 운영에서 기본값인 `cardrag-worker:local`, `cardrag-mcp:local`에 의존하지
 마십시오.
 
-v1.0.2에서 올릴 때는 MCP 이미지만 먼저 v1.0.3으로 바꾸고 기존 v2 세대를
-정상 제공하는지 확인한 뒤 Worker 이미지를 v1.0.3으로 바꿉니다. Worker를 먼저
+v1.0.2에서 올릴 때는 MCP 이미지만 먼저 v1.0.4로 바꾸고 기존 v2 세대를
+정상 제공하는지 확인한 뒤 Worker 이미지를 v1.0.4로 바꿉니다. Worker를 먼저
 실행하면 v1.0.2 MCP는 새 v3 세대를 활성화할 수 없습니다.
 
 ## Compose 사용 원칙

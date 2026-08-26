@@ -6,6 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from cardrag_core import (
+    LEGACY_OCR_APPROVED_PREFIX,
+    LEGACY_OCR_APPROVED_PREFIX_SHA256,
     AdoptedOCRArtifactManifest,
     ArtifactRef,
     EmbeddingContract,
@@ -13,12 +15,15 @@ from cardrag_core import (
     GenerationDocument,
     GenerationManifest,
     LegacyAdoptionReceipt,
+    LegacyAdoptionReceiptV2,
     LegacyAdoptionValidation,
+    LegacyAdoptionValidationV2,
     NativeOCRContract,
     OCRArtifactManifest,
     OCRInput,
     OCRVerificationError,
     adopted_ocr_reuse_key,
+    canonical_sha256,
     generation_database_path,
     native_ocr_reuse_key,
     sha256_bytes,
@@ -30,15 +35,20 @@ NOW = datetime(2026, 8, 25, 1, 2, 3, tzinfo=UTC)
 
 def _contract(**updates: object) -> NativeOCRContract:
     values: dict[str, object] = {
-        "processor_version": "ocr-processor.v1",
-        "prompt_version": "cardrag-ocr.ko.v1",
+        "processor_version": "cardrag-worker/1.0.4",
+        "prompt_version": "cardrag-ocr.ko.v2",
         "prompt_sha256": sha256_bytes(b"prompt"),
         "renderer_id": "pdfium-5.12.1-rgb-v1",
-        "render_scale_milli": 3000,
+        "render_scale_milli": 6000,
         "provider": "codex-exec",
-        "model": "gpt-5.4",
+        "model": "gpt-5.6-sol",
         "reasoning_effort": "high",
-        "chunk_pages": 2,
+        "segmentation_strategy_id": "cardrag.ocr.windowed-continuity.v1",
+        "whole_document_max_pages": 4,
+        "target_pages_per_call": 2,
+        "context_pages_before": 1,
+        "context_pages_after": 1,
+        "output_policy": "target-pages-only",
     }
     values.update(updates)
     return NativeOCRContract(**values)
@@ -62,6 +72,38 @@ def test_native_reuse_key_changes_with_processing_contract() -> None:
     assert baseline != native_ocr_reuse_key(_contract(prompt_sha256=sha256_bytes(b"new")), source)
     assert baseline != native_ocr_reuse_key(_contract(provider="openrouter"), source)
     assert baseline != native_ocr_reuse_key(_contract(cache_epoch=1), source)
+    assert baseline != native_ocr_reuse_key(_contract(render_scale_milli=5000), source)
+    assert baseline != native_ocr_reuse_key(_contract(model="gpt-5.4"), source)
+    assert baseline != native_ocr_reuse_key(_contract(whole_document_max_pages=3), source)
+    assert baseline != native_ocr_reuse_key(_contract(target_pages_per_call=1), source)
+    assert baseline != native_ocr_reuse_key(_contract(context_pages_before=0), source)
+    assert baseline != native_ocr_reuse_key(_contract(context_pages_after=0), source)
+    assert baseline != native_ocr_reuse_key(
+        _contract(segmentation_strategy_id="cardrag.ocr.windowed-continuity.v2"), source
+    )
+
+
+def test_legacy_v1_contract_parses_and_hashes_without_becoming_v2() -> None:
+    legacy_payload = {
+        "schema_version": "cardrag.ocr-contract.v1",
+        "processor_version": "cardrag-worker/1.0.0",
+        "output_profile": "cardrag.ocr-markdown.v1",
+        "cache_epoch": 0,
+        "prompt_version": "cardrag-ocr.ko.v1",
+        "prompt_sha256": sha256_bytes(b"old-prompt"),
+        "renderer_id": "pypdfium2/5.12.1",
+        "render_scale_milli": 3000,
+        "provider": "codex-exec",
+        "model": "gpt-5.4",
+        "reasoning_effort": "high",
+        "chunk_pages": 2,
+    }
+    legacy = NativeOCRContract.model_validate(legacy_payload)
+    current = _contract()
+
+    assert legacy.model_dump(mode="json") == legacy_payload
+    assert legacy.contract_sha256 == canonical_sha256(legacy_payload)
+    assert native_ocr_reuse_key(legacy, _source()) != native_ocr_reuse_key(current, _source())
 
 
 def test_strict_ocr_verifier_binds_bytes_pages_and_hashes() -> None:
@@ -172,6 +214,101 @@ def test_adopted_manifest_requires_a_hash_and_ledger_bound_receipt() -> None:
             ocr_chars=verified.char_count,
             page_output_sha256=verified.page_sha256,
             created_at=NOW,
+        )
+
+
+def test_v2_adopted_manifest_binds_original_and_normalized_ocr_lineage() -> None:
+    assert len(LEGACY_OCR_APPROVED_PREFIX) == 24
+    assert sha256_bytes(LEGACY_OCR_APPROVED_PREFIX) == LEGACY_OCR_APPROVED_PREFIX_SHA256
+    source = _source()
+    normalized = _ocr_payload()
+    original = LEGACY_OCR_APPROVED_PREFIX + normalized
+    verified = verify_ocr_bytes(normalized, expected_page_count=2)
+    output = ArtifactRef.for_cas(
+        sha256=verified.sha256,
+        size_bytes=verified.size_bytes,
+        media_type="text/markdown; charset=utf-8",
+    )
+    document_id = "doc_" + "d" * 64
+    receipt = LegacyAdoptionReceiptV2(
+        source_bundle_id="bundle-v2",
+        source_bundle_sha256=sha256_bytes(b"bundle-v2"),
+        source_database_id="legacy-data-kit",
+        source_document_id=document_id,
+        pdf_sha256=source.pdf_sha256,
+        source_ocr_sha256=sha256_bytes(original),
+        source_ocr_size_bytes=len(original),
+        normalized_ocr_sha256=verified.sha256,
+        normalized_ocr_size_bytes=verified.size_bytes,
+        normalization_profile="strip-exact-generated-prefix-v1",
+        prefix_sha256=LEGACY_OCR_APPROVED_PREFIX_SHA256,
+        removed_bytes=24,
+        validation=LegacyAdoptionValidationV2(
+            source_hash_verified=True,
+            normalized_hash_verified=True,
+            transformation_verified=True,
+            page_coverage_verified=True,
+            utf8_verified=True,
+            ledger_bound=True,
+        ),
+    )
+    reuse_key = adopted_ocr_reuse_key(
+        adoption_policy_version=receipt.adoption_policy_version,
+        source_document_id=document_id,
+        pdf_sha256=source.pdf_sha256,
+    )
+    manifest = AdoptedOCRArtifactManifest(
+        schema_version="cardrag.ocr-artifact.v2",
+        validation_profile="cardrag.legacy-ocr-adoption.v2",
+        reuse_key=reuse_key,
+        source=source,
+        receipt=receipt,
+        output=output,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+    )
+    reparsed = AdoptedOCRArtifactManifest.model_validate_json(manifest.canonical_bytes())
+    assert isinstance(reparsed.receipt, LegacyAdoptionReceiptV2)
+    assert reparsed.receipt.source_ocr_sha256 == sha256_bytes(original)
+    assert reparsed.receipt.normalized_ocr_sha256 == verified.sha256
+    assert reparsed.output.sha256 == reparsed.receipt.normalized_ocr_sha256
+
+
+def test_v2_adoption_rejects_arbitrary_or_mixed_normalization_contracts() -> None:
+    normalized = _ocr_payload()
+    valid = {
+        "source_bundle_id": "bundle-v2",
+        "source_bundle_sha256": sha256_bytes(b"bundle-v2"),
+        "source_database_id": "legacy-data-kit",
+        "source_document_id": "doc_" + "d" * 64,
+        "pdf_sha256": sha256_bytes(b"pdf"),
+        "source_ocr_sha256": sha256_bytes(LEGACY_OCR_APPROVED_PREFIX + normalized),
+        "source_ocr_size_bytes": len(LEGACY_OCR_APPROVED_PREFIX + normalized),
+        "normalized_ocr_sha256": sha256_bytes(normalized),
+        "normalized_ocr_size_bytes": len(normalized),
+        "normalization_profile": "strip-exact-generated-prefix-v1",
+        "prefix_sha256": LEGACY_OCR_APPROVED_PREFIX_SHA256,
+        "removed_bytes": 24,
+        "validation": {
+            "source_hash_verified": True,
+            "normalized_hash_verified": True,
+            "transformation_verified": True,
+            "page_coverage_verified": True,
+            "utf8_verified": True,
+            "ledger_bound": True,
+        },
+    }
+    with pytest.raises(ValidationError, match="approved prefix hash"):
+        LegacyAdoptionReceiptV2.model_validate({**valid, "prefix_sha256": "0" * 64})
+    with pytest.raises(ValidationError, match="exact adoption requires identical"):
+        LegacyAdoptionReceiptV2.model_validate(
+            {
+                **valid,
+                "normalization_profile": "exact",
+                "prefix_sha256": None,
+                "removed_bytes": 0,
+            }
         )
 
 
