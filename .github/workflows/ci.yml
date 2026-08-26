@@ -36,12 +36,14 @@ jobs:
             packages/cardrag-core \
             apps/cardrag-worker \
             apps/cardrag-mcp \
-            tests/runtime_v1
+            tests/runtime_v1 \
+            tools
           uv run --all-packages ruff format --check \
             packages/cardrag-core \
             apps/cardrag-worker \
             apps/cardrag-mcp \
-            tests/runtime_v1
+            tests/runtime_v1 \
+            tools
           uv run --all-packages mypy \
             packages/cardrag-core/src \
             apps/cardrag-worker/src \
@@ -79,6 +81,13 @@ jobs:
             -f deploy/worker/compose.secrets.yaml \
             -f deploy/worker/compose.ca.yaml \
             config --quiet
+          CARDRAG_LEGACY_ADOPTION_EXPORT_DIR=/tmp/cardrag-adoption-v2-export \
+          CARDRAG_LEGACY_SOURCE_ROOT=/tmp/cardrag-legacy-source \
+            docker compose \
+              -f deploy/worker/compose.yaml \
+              -f deploy/worker/compose.secrets.yaml \
+              -f deploy/worker/compose.adoption.yaml \
+              config --quiet
           docker compose \
             -f deploy/mcp/compose.yaml \
             -f deploy/mcp/compose.secrets.yaml \

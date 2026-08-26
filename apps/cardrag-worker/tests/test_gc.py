@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from cardrag_core import (
     STABLE_POINTER_PATH,
+    AdoptedOCRArtifactManifest,
     ArtifactRef,
     EmbeddingContract,
     GenerationCounts,
@@ -14,11 +15,14 @@ from cardrag_core import (
     GenerationManifest,
     GenerationPointer,
     GenerationReady,
+    LegacyAdoptionReceiptV2,
+    LegacyAdoptionValidationV2,
     NativeOCRContract,
     OCRArtifactManifest,
     OCRInput,
     OCRReady,
     WebDAVHTTPError,
+    adopted_ocr_reuse_key,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -65,6 +69,7 @@ class FakeWebDAV:
 def cache_control(*, cache_epoch: int, body: bytes) -> tuple[str, OCRArtifactManifest, OCRReady, ArtifactRef]:
     source = OCRInput(pdf_sha256=sha256_bytes(b"pdf"), pdf_size_bytes=3, page_count=1)
     contract = NativeOCRContract(
+        schema_version="cardrag.ocr-contract.v1",
         processor_version="worker/1",
         cache_epoch=cache_epoch,
         prompt_version="prompt.v1",
@@ -216,6 +221,109 @@ async def test_gc_marks_exact_cache_key_and_sweeps_generation_cache_then_cas(tmp
     cache_index = next(index for index, path in enumerate(second.deleted) if path.startswith("v1/ocr-cache"))
     object_index = next(index for index, path in enumerate(second.deleted) if path.startswith("v1/objects"))
     assert cache_index < object_index
+
+
+@pytest.mark.asyncio
+async def test_gc_parses_and_marks_retained_v2_adopted_cache(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    pointer = GenerationPointer.model_validate_json(webdav.objects[STABLE_POINTER_PATH.as_posix()])
+    generation_path = generation_manifest_path(pointer.generation_id).as_posix()
+    generation = GenerationManifest.model_validate_json(webdav.objects[generation_path])
+    document = generation.documents[0]
+    assert document.ocr is not None
+    source = OCRInput(
+        pdf_sha256=document.pdf.sha256,
+        pdf_size_bytes=document.pdf.size_bytes,
+        page_count=document.page_count,
+    )
+    document_id = document.document_id
+    key = adopted_ocr_reuse_key(
+        adoption_policy_version="cardrag.legacy-ocr-adoption.v2",
+        source_document_id=document_id,
+        pdf_sha256=source.pdf_sha256,
+    )
+    receipt = LegacyAdoptionReceiptV2(
+        source_bundle_id="bundle-v2",
+        source_bundle_sha256="e" * 64,
+        source_database_id="legacy-data-kit",
+        source_document_id=document_id,
+        pdf_sha256=source.pdf_sha256,
+        source_ocr_sha256=document.ocr.sha256,
+        source_ocr_size_bytes=document.ocr.size_bytes,
+        normalized_ocr_sha256=document.ocr.sha256,
+        normalized_ocr_size_bytes=document.ocr.size_bytes,
+        normalization_profile="exact",
+        prefix_sha256=None,
+        removed_bytes=0,
+        validation=LegacyAdoptionValidationV2(
+            source_hash_verified=True,
+            normalized_hash_verified=True,
+            transformation_verified=True,
+            page_coverage_verified=True,
+            utf8_verified=True,
+            ledger_bound=True,
+        ),
+    )
+    adopted = AdoptedOCRArtifactManifest(
+        schema_version="cardrag.ocr-artifact.v2",
+        validation_profile="cardrag.legacy-ocr-adoption.v2",
+        reuse_key=key,
+        source=source,
+        receipt=receipt,
+        output=document.ocr,
+        ocr_chars=32,
+        page_output_sha256=("f" * 64,),
+        created_at=NOW,
+    )
+    adopted_ready = OCRReady(
+        reuse_key=key,
+        manifest_sha256=sha256_bytes(adopted.canonical_bytes()),
+        ocr_sha256=document.ocr.sha256,
+    )
+    adopted_document = GenerationDocument(
+        document_id=document.document_id,
+        issuer=document.issuer,
+        pdf=document.pdf,
+        ocr=document.ocr,
+        ocr_cache_kind="adopted",
+        ocr_reuse_key=key,
+        page_count=document.page_count,
+    )
+    updated_generation = GenerationManifest.model_validate(
+        {**generation.model_dump(mode="python"), "documents": (adopted_document,)}
+    )
+    generation_body = updated_generation.canonical_bytes()
+    database = updated_generation.serving_database
+    generation_ready = GenerationReady(
+        generation_id=updated_generation.generation_id,
+        manifest_sha256=sha256_bytes(generation_body),
+        serving_database_sha256=database.sha256,
+        serving_database_size_bytes=database.size_bytes,
+    )
+    ready_body = generation_ready.canonical_bytes()
+    webdav.objects[generation_path] = generation_body
+    webdav.objects[generation_ready_path(pointer.generation_id).as_posix()] = ready_body
+    webdav.objects[STABLE_POINTER_PATH.as_posix()] = GenerationPointer(
+        generation_id=pointer.generation_id,
+        manifest_sha256=generation_ready.manifest_sha256,
+        ready_sha256=sha256_bytes(ready_body),
+    ).canonical_bytes()
+    webdav.objects[ocr_manifest_path(key, kind="adopted").as_posix()] = adopted.canonical_bytes()
+    webdav.objects[ocr_ready_path(key, kind="adopted").as_posix()] = adopted_ready.canonical_bytes()
+    adopted_root = PurePosixPath("v1/ocr-cache/adopted")
+    prefix = adopted_root / key[:2]
+    reuse_root = prefix / key
+    webdav.children[adopted_root.as_posix()] = (prefix,)
+    webdav.children[prefix.as_posix()] = (reuse_root,)
+    webdav.children[reuse_root.as_posix()] = (
+        reuse_root / "manifest.json",
+        reuse_root / "READY.json",
+    )
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        result = await collect_garbage(webdav=webdav, state=state, now=NOW)
+
+    assert reuse_root.as_posix() not in result.candidates
 
 
 @pytest.mark.asyncio

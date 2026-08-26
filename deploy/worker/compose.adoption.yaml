@@ -1,0 +1,15 @@
+services:
+  worker:
+    volumes:
+      - type: bind
+        source: ${CARDRAG_LEGACY_ADOPTION_EXPORT_DIR:?CARDRAG_LEGACY_ADOPTION_EXPORT_DIR is required}
+        target: ${CARDRAG_LEGACY_ADOPTION_EXPORT_DIR:?CARDRAG_LEGACY_ADOPTION_EXPORT_DIR is required}
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CARDRAG_LEGACY_SOURCE_ROOT:?CARDRAG_LEGACY_SOURCE_ROOT is required}
+        target: ${CARDRAG_LEGACY_SOURCE_ROOT:?CARDRAG_LEGACY_SOURCE_ROOT is required}
+        read_only: true
+        bind:
+          create_host_path: false

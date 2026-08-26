@@ -10,6 +10,7 @@ from cardrag_core import SecretResolutionError
 from typer.testing import CliRunner
 
 import cardrag_worker.cli as cli_module
+from cardrag_worker.adoption import AdoptionError
 from cardrag_worker.providers import CodexOCRProvider
 from cardrag_worker.settings import WorkerSettings, _read_secret
 from cardrag_worker.state import AlreadyRunning
@@ -28,6 +29,40 @@ def test_cli_already_running_is_success_and_resume_passes_exact_id(
     resumed = CliRunner().invoke(cli_module.app, ["resume", "run-123"])
     assert resumed.exit_code == 0
     assert "busy:run-123" in resumed.stdout
+
+
+def test_adoption_guard_cli_fails_closed_without_echoing_remote_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def blocked() -> dict[str, Any]:
+        raise AdoptionError("stable exists; remote-content-must-stay-secret")
+
+    monkeypatch.setattr(cli_module, "_guard_adoption_namespace", blocked)
+    result = CliRunner().invoke(cli_module.app, ["adoption-guard"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "stable_pointer_absent": False,
+        "status": "blocked",
+    }
+    assert "remote-content-must-stay-secret" not in result.stdout
+
+
+def test_adoption_audit_cli_reports_verified_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def verified(inventory: Path) -> dict[str, Any]:
+        assert inventory == tmp_path
+        return {"expected": 1558, "audited": 1558, "status": "verified"}
+
+    monkeypatch.setattr(cli_module, "_audit_adoption_export", verified)
+    result = CliRunner().invoke(cli_module.app, ["adoption-audit", str(tmp_path)])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "expected": 1558,
+        "audited": 1558,
+        "status": "verified",
+    }
 
 
 def test_secret_files_must_be_absolute_regular_single_line(
@@ -71,12 +106,46 @@ def test_production_openrouter_base_url_requires_https_without_credentials(
     assert WorkerSettings.from_env().openrouter_base_url == "https://openrouter.example/api/v1"
 
 
+def test_ocr_quality_defaults_and_configuration_are_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "CARDRAG_OCR_MODEL",
+        "CARDRAG_OCR_REASONING_EFFORT",
+        "CARDRAG_OCR_PROMPT_VERSION",
+        "CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS",
+        "CARDRAG_OCR_RENDER_SCALE_MILLI",
+        "CARDRAG_OCR_WHOLE_DOCUMENT_MAX_PAGES",
+        "CARDRAG_OCR_CONTEXT_PAGES_BEFORE",
+        "CARDRAG_OCR_CONTEXT_PAGES_AFTER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    settings = WorkerSettings.from_env()
+    assert settings.ocr_provider == "codex-exec"
+    assert settings.ocr_model == "gpt-5.6-sol"
+    assert settings.ocr_reasoning_effort == "high"
+    assert settings.ocr_prompt_version == "cardrag-ocr.ko.v2"
+    assert settings.ocr_provider_timeout_seconds == 1800
+    assert settings.ocr_render_scale_milli == 6000
+    assert settings.ocr_whole_document_max_pages == 4
+    assert (settings.ocr_context_pages_before, settings.ocr_context_pages_after) == (1, 1)
+
+    monkeypatch.setenv("CARDRAG_OCR_RENDER_SCALE_MILLI", "999")
+    with pytest.raises(ValueError, match="CARDRAG_OCR_RENDER_SCALE_MILLI"):
+        WorkerSettings.from_env()
+    monkeypatch.setenv("CARDRAG_OCR_RENDER_SCALE_MILLI", "6000")
+    monkeypatch.setenv("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ValueError, match="CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS"):
+        WorkerSettings.from_env()
+
+
 @pytest.mark.asyncio
 async def test_codex_ocr_subprocess_is_explicitly_read_only_and_env_filtered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    image = tmp_path / "page.png"
-    image.write_bytes(b"png")
+    images = tuple(tmp_path / f"page-{page}.png" for page in range(2, 6))
+    for image in images:
+        image.write_bytes(b"png")
     captured: dict[str, Any] = {}
 
     class Process:
@@ -84,7 +153,10 @@ async def test_codex_ocr_subprocess_is_explicitly_read_only_and_env_filtered(
 
         async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
             captured["stdin"] = body
-            return "## Page 1\n\n충분히 긴 카드 상품설명 본문을 반환합니다.\n".encode(), b""
+            return (
+                "## Page 3\n\n충분히 긴 카드 상품설명 본문을 반환합니다.\n\n"
+                "## Page 4\n\n다음 대상 페이지도 상품 문맥을 유지해 반환합니다.\n"
+            ).encode(), b""
 
         def kill(self) -> None:
             return None
@@ -99,11 +171,31 @@ async def test_codex_ocr_subprocess_is_explicitly_read_only_and_env_filtered(
 
     monkeypatch.setenv("SHOULD_NOT_LEAK", "secret")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
-    result = await CodexOCRProvider(executable="codex", model="gpt-5.4").recognize(
-        (image,), first_page=1, prompt="transcribe"
+    provider = CodexOCRProvider(
+        executable="codex",
+        model="gpt-5.6-sol",
+        timeout_seconds=1800,
+        reasoning_effort="high",
+    )
+    result = await provider.recognize(
+        images,
+        page_numbers=(2, 3, 4, 5),
+        target_page_numbers=(3, 4),
+        total_pages=5,
+        prompt="transcribe",
     )
     arguments = captured["args"]
     sandbox_index = arguments.index("--sandbox")
     assert arguments[sandbox_index + 1] == "read-only"
+    assert arguments[arguments.index("--model") + 1] == "gpt-5.6-sol"
+    assert 'model_reasoning_effort="high"' in arguments
     assert "SHOULD_NOT_LEAK" not in captured["env"]
-    assert result.startswith("## Page 1")
+    stdin = captured["stdin"].decode("utf-8")
+    assert "5 ordered pages in total" in stdin
+    assert "Page 2 of 5: CONTEXT BEFORE" in stdin
+    assert "Page 3 of 5: TARGET" in stdin
+    assert "Page 4 of 5: TARGET" in stdin
+    assert "Page 5 of 5: CONTEXT AFTER" in stdin
+    assert "only these TARGET markers" in stdin
+    assert provider.timeout_seconds == 1800
+    assert result.startswith("## Page 3")

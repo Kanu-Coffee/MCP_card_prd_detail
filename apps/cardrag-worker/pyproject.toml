@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cardrag-worker"
-version = "1.0.3"
+version = "1.0.4"
 description = "Offline acquisition, OCR, embedding, and serving-bundle worker for CardRAG"
 requires-python = ">=3.12,<3.15"
 dependencies = [

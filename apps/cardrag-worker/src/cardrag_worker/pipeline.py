@@ -130,9 +130,11 @@ def _atomic_write(path: Path, body: bytes) -> None:
 
 
 def _canonical_ocr_body(result: OCRResult) -> bytes:
-    return (
-        "\n\n".join(f"## Page {page}\n\n{text}" for page, text in enumerate(result.pages, 1)) + "\n"
-    ).encode("utf-8")
+    # OCRResult has already strictly verified and retained the immutable source
+    # artifact. Rebuilding it from marker-free page text would silently change
+    # valid legacy spacing (for example, one newline after a page marker) and
+    # break the manifest/CAS SHA binding.
+    return result.ocr_bytes
 
 
 def select_current(records: Sequence[SourceRecord]) -> tuple[SourceRecord, ...]:

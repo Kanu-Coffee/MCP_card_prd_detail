@@ -147,15 +147,17 @@ class FixtureOCR:
         self,
         images: tuple[Path, ...] | list[Path],
         *,
-        first_page: int,
+        page_numbers: tuple[int, ...],
+        target_page_numbers: tuple[int, ...],
+        total_pages: int,
         prompt: str,
     ) -> str:
-        del prompt
+        del images, page_numbers, total_pages, prompt
         self.calls += 1
         return (
             "\n\n".join(
-                f"## Page {first_page + index}\n\nAirport lounge benefit for premium card holders."
-                for index, _ in enumerate(images)
+                f"## Page {page_number}\n\nAirport lounge benefit for premium card holders."
+                for page_number in target_page_numbers
             )
             + "\n"
         )

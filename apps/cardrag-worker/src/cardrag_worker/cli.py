@@ -10,6 +10,10 @@ from typing import Any
 import typer
 
 from .adoption import (
+    ADOPTION_POLICY_VERSION,
+    AdoptionError,
+    audit_published_adoptions,
+    guard_adoption_publication,
     load_inventory,
     load_legacy_prepare_bundle,
     publish_adoptions,
@@ -42,6 +46,7 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
         codex_executable=settings.codex_executable,
         codex_auth_root=settings.codex_auth_root,
         reasoning_effort=settings.ocr_reasoning_effort,
+        timeout_seconds=settings.ocr_provider_timeout_seconds,
     )
 
 
@@ -56,6 +61,10 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 state=state,
                 webdav=webdav,
                 chunk_pages=settings.ocr_chunk_pages,
+                whole_document_max_pages=settings.ocr_whole_document_max_pages,
+                context_pages_before=settings.ocr_context_pages_before,
+                context_pages_after=settings.ocr_context_pages_after,
+                render_scale_milli=settings.ocr_render_scale_milli,
                 cache_epoch=settings.ocr_cache_epoch,
                 prompt_version=settings.ocr_prompt_version,
             )
@@ -69,6 +78,10 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     state=state,
                     webdav=webdav,
                     chunk_pages=settings.ocr_chunk_pages,
+                    whole_document_max_pages=settings.ocr_whole_document_max_pages,
+                    context_pages_before=settings.ocr_context_pages_before,
+                    context_pages_after=settings.ocr_context_pages_after,
+                    render_scale_milli=settings.ocr_render_scale_milli,
                     cache_epoch=settings.ocr_cache_epoch,
                     prompt_version=settings.ocr_prompt_version,
                 )
@@ -146,6 +159,8 @@ async def _publish_if_requested(result: Any, publish: bool) -> int:
         return 0
     if any(conflict.blocking for conflict in result.conflicts):
         raise ValueError("refusing adoption publication while blocking conflicts exist")
+    if any(error.get("policy_version") == ADOPTION_POLICY_VERSION for error in result.errors):
+        raise ValueError("refusing partial publication of a sealed v2 adoption export")
     # Inventory/bundle structure and ledger binding fail before an
     # AdoptionResult is produced. Errors recorded here are isolated candidate
     # failures (for example, a corrupt PDF or non-canonical OCR file). The v1
@@ -155,9 +170,54 @@ async def _publish_if_requested(result: Any, publish: bool) -> int:
     WorkerSettings.from_env(require_webdav=True)
     client = WebDAVClient.from_env()
     try:
+        await guard_adoption_publication(client)
         return await publish_adoptions(result, client)
     finally:
         await client.close()
+
+
+async def _guard_adoption_namespace() -> dict[str, Any]:
+    WorkerSettings.from_env(require_webdav=True)
+    client = WebDAVClient.from_env()
+    try:
+        await guard_adoption_publication(client)
+        return {"stable_pointer_absent": True, "status": "clear"}
+    finally:
+        await client.close()
+
+
+@app.command("adoption-guard")
+def adoption_guard() -> None:
+    """Prove stable.json is absent using only a read-only existence check."""
+
+    try:
+        _echo(asyncio.run(_guard_adoption_namespace()))
+    except Exception:
+        _echo({"stable_pointer_absent": False, "status": "blocked"})
+        raise typer.Exit(code=1) from None
+
+
+async def _audit_adoption_export(inventory: Path) -> dict[str, Any]:
+    rows = load_inventory(inventory)
+    result = validate_inventory(rows, source_kind="legacy")
+    if result.conflicts or result.errors or len(result.receipts) != len(rows):
+        raise AdoptionError("sealed v2 export did not validate completely for audit")
+    WorkerSettings.from_env(require_webdav=True)
+    client = WebDAVClient.from_env()
+    try:
+        audited = await audit_published_adoptions(result, client)
+    finally:
+        await client.close()
+    return {"expected": len(result.receipts), "audited": audited, "status": "verified"}
+
+
+@app.command("adoption-audit")
+def adoption_audit(
+    inventory: Path = typer.Argument(..., exists=True),
+) -> None:
+    """Read back a sealed v2 export's published manifests, READYs, and OCR objects."""
+
+    _echo(asyncio.run(_audit_adoption_export(inventory)))
 
 
 @app.command("adopt")

@@ -4,6 +4,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from cardrag_worker import __version__ as worker_runtime_version
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -29,7 +31,9 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-worker",
         "cardrag-mcp",
     ]
-    assert len({project["version"] for project in projects}) == 1
+    versions = {project["version"] for project in projects}
+    assert len(versions) == 1
+    assert worker_runtime_version == versions.pop()
 
 
 def test_default_deployment_has_only_worker_and_mcp() -> None:
