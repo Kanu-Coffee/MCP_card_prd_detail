@@ -747,11 +747,15 @@ class FailoverOCRResolver:
         try:
             return await self.primary.resolve(**kwargs, output_dir=output_dir / "primary")
         except (ProviderError, OCRValidationError, httpx.HTTPError, TimeoutError):
-            warnings.warn(
-                "primary OCR failed; starting fresh whole-document fallback",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            result = await self.fallback.resolve(**kwargs, output_dir=output_dir / "fallback")
-            shutil.rmtree(output_dir / "primary" / "rendered", ignore_errors=True)
-            return result
+            pass
+        # Warning emission and fallback execution stay outside the primary
+        # exception handler so cancellation cannot retain provider stderr as
+        # implicit exception context.
+        warnings.warn(
+            "primary OCR failed; starting fresh whole-document fallback",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        result = await self.fallback.resolve(**kwargs, output_dir=output_dir / "fallback")
+        shutil.rmtree(output_dir / "primary" / "rendered", ignore_errors=True)
+        return result

@@ -155,6 +155,22 @@ class OCRDocumentFailuresError(RuntimeError):
         super().__init__(f"{len(self.failures)} OCR document(s) failed; report={self.report}")
 
 
+class OCRSystemicFailureError(RuntimeError):
+    """A safe terminal error for failures that are not isolated to one PDF."""
+
+    stored_error = "non_document_scoped_error: OCR failed outside a document boundary."
+
+    def __init__(self) -> None:
+        super().__init__("OCR failed with a non-document-scoped error")
+
+
+class OCRFailureBookkeepingError(RuntimeError):
+    """A safe terminal error for failure-isolation state corruption."""
+
+    def __init__(self) -> None:
+        super().__init__("OCR failure isolation bookkeeping failed")
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineResult:
     run_id: str
@@ -222,10 +238,28 @@ def _canonical_ocr_body(result: OCRResult) -> bytes:
 
 
 _CODEX_EXIT = re.compile(r"^Codex OCR exited (-?[0-9]{1,3}):")
+_DOCUMENT_SCOPED_HTTP_STATUSES = frozenset({408, 413, 422, 425, 429})
 
 
 def _bounded_report_text(value: str, *, maximum: int) -> str:
     return value if len(value) <= maximum else value[:maximum]
+
+
+def is_isolatable_document_ocr_failure(exc: Exception) -> bool:
+    """Return whether an exhausted OCR error may be isolated to one PDF.
+
+    This is intentionally an allowlist. Authentication/configuration responses,
+    connection failures, local I/O, state/database failures, and unexpected
+    programming errors must stop the run immediately instead of being repeated
+    across the remaining corpus.
+    """
+
+    if isinstance(exc, (OCRValidationError, ProviderError, httpx.TimeoutException, TimeoutError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code in _DOCUMENT_SCOPED_HTTP_STATUSES or 500 <= status_code <= 599
+    return False
 
 
 def classify_ocr_failure(exc: Exception) -> OCRFailureReason:
@@ -544,6 +578,7 @@ class WorkerPipeline:
         maximum_attempts: int | None = None,
         retry_base_seconds: float = 1.0,
         non_retryable_predicate: Callable[[Exception], bool] | None = None,
+        non_retryable_error_formatter: Callable[[Exception], str] | None = None,
         error_formatter: Callable[[Exception], str] | None = None,
     ) -> T:
         maximum = maximum_attempts or self.maximum_attempts
@@ -553,10 +588,21 @@ class WorkerPipeline:
             return await operation()
         while True:
             attempt = self.state.stage_started(run_id, document_id, name)
+            retry_after: float | None = None
             try:
                 result = await operation()
             except Exception as exc:
                 if non_retryable_predicate is not None and non_retryable_predicate(exc):
+                    if non_retryable_error_formatter is not None:
+                        try:
+                            self.state.stage_terminal_failed(
+                                run_id,
+                                document_id,
+                                name,
+                                non_retryable_error_formatter(exc),
+                            )
+                        except Exception:
+                            raise RuntimeError("stage failure bookkeeping failed") from None
                     raise
                 try:
                     delay = retry_delay(
@@ -576,10 +622,15 @@ class WorkerPipeline:
                     raise RuntimeError("stage failure bookkeeping failed") from None
                 if status == "failed":
                     raise
-                await asyncio.sleep(delay)
+                retry_after = delay
             else:
                 self.state.stage_succeeded(run_id, document_id, name)
                 return result
+            if retry_after is None:
+                raise RuntimeError("retrying stage lost its backoff delay")
+            # Keep cancellation during backoff outside the exception handler so
+            # the prior provider exception cannot become CancelledError context.
+            await asyncio.sleep(retry_after)
 
     async def run(self, *, resume_run_id: str | None = None) -> PipelineResult:
         with worker_lock(self.state_dir / "worker.lock"):
@@ -921,6 +972,7 @@ class WorkerPipeline:
                 )
 
             ocr_result: OCRResult | None = None
+            isolated_failure: Exception | None = None
             failure_reason: OCRFailureReason | None = None
             failure_attempts: int | None = None
             try:
@@ -929,22 +981,31 @@ class WorkerPipeline:
                     document_id=document_id,
                     name="ocr",
                     operation=recognize,
+                    non_retryable_predicate=lambda exc: not is_isolatable_document_ocr_failure(exc),
+                    non_retryable_error_formatter=lambda _exc: OCRSystemicFailureError.stored_error,
                     error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
                 )
             except Exception as exc:
-                stage = self.state.get_stage(run_id, document_id, "ocr")
-                failure_reason = classify_ocr_failure(exc)
-                if (
-                    stage is None
-                    or stage.status != "failed"
-                    or stage.attempt_count != stage.max_attempts
-                    or not stage.last_error
-                    or stage.last_error != failure_reason.stored_error
-                ):
-                    raise RuntimeError(
-                        "OCR failure isolation requires a fully exhausted failed stage"
-                    ) from None
-                failure_attempts = stage.attempt_count
+                if not is_isolatable_document_ocr_failure(exc):
+                    raise OCRSystemicFailureError() from None
+                isolated_failure = exc
+            if isolated_failure is not None:
+                try:
+                    stage = self.state.get_stage(run_id, document_id, "ocr")
+                    failure_reason = classify_ocr_failure(isolated_failure)
+                    if (
+                        stage is None
+                        or stage.status != "failed"
+                        or stage.attempt_count != stage.max_attempts
+                        or not stage.last_error
+                        or stage.last_error != failure_reason.stored_error
+                    ):
+                        raise RuntimeError("OCR failure isolation requires a fully exhausted failed stage")
+                    failure_attempts = stage.attempt_count
+                except Exception:
+                    raise OCRFailureBookkeepingError() from None
+                finally:
+                    isolated_failure = None
             if failure_reason is not None:
                 if failure_attempts is None:
                     raise RuntimeError("OCR failure isolation lost its attempt count")

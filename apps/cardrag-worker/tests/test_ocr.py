@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -30,6 +32,7 @@ from cardrag_worker.ocr import (
     OCR_OUTPUT_POLICY,
     FailoverOCRResolver,
     OCRResolver,
+    OCRResult,
     OCRValidationError,
     render_pdf,
 )
@@ -1166,3 +1169,43 @@ async def test_failover_preserves_fallback_verified_bytes(
         assert _canonical_ocr_body(result) == result.ocr_bytes
     finally:
         state.close()
+
+
+@pytest.mark.asyncio
+async def test_failover_cancellation_has_no_primary_provider_exception_context(tmp_path: Path) -> None:
+    raw_sentinel = "RAW_PRIMARY_PROVIDER_STDERR_SENTINEL"
+    fallback_started = asyncio.Event()
+
+    class FailingPrimary:
+        adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+        contract = {"schema_version": "test-primary.v1"}
+
+        async def resolve(self, **_kwargs: Any) -> OCRResult:
+            raise ProviderError(raw_sentinel)
+
+    class BlockingFallback:
+        adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+        contract = {"schema_version": "test-fallback.v1"}
+
+        async def resolve(self, **_kwargs: Any) -> OCRResult:
+            fallback_started.set()
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+    resolver = FailoverOCRResolver(FailingPrimary(), BlockingFallback())  # type: ignore[arg-type]
+    with pytest.warns(RuntimeWarning, match="primary OCR failed"):
+        task = asyncio.create_task(resolver.resolve(output_dir=tmp_path / "ocr"))
+        await fallback_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as captured:
+            await task
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value),
+            captured.value,
+            captured.value.__traceback__,
+        )
+    )
+    assert captured.value.__context__ is None
+    assert raw_sentinel not in rendered

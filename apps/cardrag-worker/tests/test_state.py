@@ -7,6 +7,22 @@ import pytest
 from cardrag_worker.state import AlreadyRunning, WorkerState, worker_lock
 
 
+def test_stage_terminal_failure_does_not_require_exhausted_attempts(tmp_path: Path) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(run_id="run-terminal")
+        state.ensure_stage(run_id, "doc", "ocr", max_attempts=4)
+        assert state.stage_started(run_id, "doc", "ocr") == 1
+        state.stage_terminal_failed(run_id, "doc", "ocr", "safe terminal error")
+        stage = state.get_stage(run_id, "doc", "ocr")
+        assert stage is not None
+        assert (stage.status, stage.attempt_count, stage.max_attempts, stage.last_error) == (
+            "failed",
+            1,
+            4,
+            "safe terminal error",
+        )
+
+
 def test_state_uses_wal_and_resume_resets_attempts_and_refreshes_discovery(tmp_path: Path) -> None:
     with WorkerState(tmp_path / "state.sqlite3") as state:
         assert state.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
