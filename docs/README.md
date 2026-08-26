@@ -1,6 +1,6 @@
-# CardRAG v1.0.5 운영 문서
+# CardRAG v1.0.6 운영 문서
 
-CardRAG v1.0.5의 지원 운영 구조는 다음과 같습니다.
+CardRAG v1.0.6의 지원 운영 구조는 다음과 같습니다.
 
 ```text
 cardrag-worker -> WebDAV -> cardrag-mcp

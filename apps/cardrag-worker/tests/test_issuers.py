@@ -15,8 +15,12 @@ from cardrag_worker.issuers.shinhan import (
     MOBILE_DOWNLOAD_PATH,
     MOBILE_LIST_PATH,
     MOBILE_NOTICE_PATH,
+    REFRESH_FULL_LIST_MAXIMUM_PAGES,
+    REFRESH_FULL_LIST_MAXIMUM_RECORDS,
     REFRESH_MAXIMUM_PAGES,
+    REFRESH_SEARCH_MAXIMUM_BYTES,
     ShinhanAdapter,
+    _bounded_mobile_search_term,
     _parse_mobile_listing,
 )
 from cardrag_worker.issuers.woori import DETAIL_PATH, MAIN_PATH, WooriAdapter, parse_detail_records
@@ -268,6 +272,112 @@ class ShinhanUnboundedRefreshClient:
         )
 
 
+LONG_SHINHAN_PRODUCT_NAME = "신한카드 즉시 발급용 미래에셋 자산관리 CMA LOVE체크"
+
+
+class ShinhanLongNameClient:
+    def __init__(self) -> None:
+        self.searches: list[str] = []
+
+    async def get(self, url: str, **kwargs: Any) -> Response:
+        return Response(text="landing")
+
+    async def post(self, url: str, **kwargs: Any) -> Response:
+        search = str(kwargs["data"]["crdPdGuiNm"])
+        if url.endswith(MOBILE_LIST_PATH):
+            self.searches.append(search)
+            assert search == _bounded_mobile_search_term(LONG_SHINHAN_PRODUCT_NAME)
+            return Response(
+                payload=shinhan_mobile_payload(
+                    "00284",
+                    product_name=LONG_SHINHAN_PRODUCT_NAME,
+                    category_code="1",
+                    query=search,
+                )
+            )
+        return Response(
+            content=shinhan_page(
+                "00284",
+                download_name=LONG_SHINHAN_PRODUCT_NAME,
+                product_name=LONG_SHINHAN_PRODUCT_NAME,
+                done=True,
+            ).encode("euc-kr")
+        )
+
+
+SHORT_INDEX_MISS_PRODUCT_NAME = "이마트 WISE&SHOPPING discount 신한카드"
+
+
+class ShinhanFullListFallbackClient:
+    def __init__(
+        self, *, fallback_code: str = "00533", fallback_tokens: tuple[str, ...] = ("TOKEN-FULL",)
+    ) -> None:
+        self.fallback_code = fallback_code
+        self.fallback_tokens = fallback_tokens
+        self.searches: list[str] = []
+
+    async def get(self, url: str, **kwargs: Any) -> Response:
+        return Response(text="landing")
+
+    async def post(self, url: str, **kwargs: Any) -> Response:
+        search = str(kwargs["data"]["crdPdGuiNm"])
+        if url.endswith(MOBILE_LIST_PATH):
+            self.searches.append(search)
+            return Response(
+                payload=shinhan_mobile_payload(
+                    self.fallback_code,
+                    tokens=self.fallback_tokens if not search else (),
+                    product_name=SHORT_INDEX_MISS_PRODUCT_NAME,
+                    query=search,
+                )
+            )
+        return Response(
+            content=shinhan_page(
+                "00533",
+                download_name=SHORT_INDEX_MISS_PRODUCT_NAME,
+                product_name=SHORT_INDEX_MISS_PRODUCT_NAME,
+                done=True,
+            ).encode("euc-kr")
+        )
+
+
+class ShinhanUnboundedFullListFallbackClient:
+    def __init__(self) -> None:
+        self.full_list_posts = 0
+        self.searches: list[str] = []
+
+    async def get(self, url: str, **kwargs: Any) -> Response:
+        return Response(text="landing")
+
+    async def post(self, url: str, **kwargs: Any) -> Response:
+        search = str(kwargs["data"]["crdPdGuiNm"])
+        self.searches.append(search)
+        if search:
+            return Response(payload=shinhan_mobile_payload(tokens=(), query=search))
+        self.full_list_posts += 1
+        return Response(
+            payload=shinhan_mobile_payload(
+                "different-code",
+                product_name="unrelated product",
+                cursor=str(self.full_list_posts),
+                query="",
+            )
+        )
+
+
+class ShinhanMalformedPrimaryClient:
+    def __init__(self) -> None:
+        self.searches: list[str] = []
+
+    async def get(self, url: str, **kwargs: Any) -> Response:
+        return Response(text="landing")
+
+    async def post(self, url: str, **kwargs: Any) -> Response:
+        search = str(kwargs["data"]["crdPdGuiNm"])
+        self.searches.append(search)
+        return Response(payload={"mbw_result": "E", "mbw_json": {}})
+
+
 @pytest.mark.asyncio
 async def test_woori_discovery_uses_natural_version_and_post_download_contract() -> None:
     adapter = WooriAdapter(minimum_records=1)
@@ -466,6 +576,125 @@ async def test_shinhan_cursor_and_mobile_get_download_contract() -> None:
     assert request.headers == {"Referer": "https://www.shinhancard.com" + MOBILE_NOTICE_PATH + "?page=CRE"}
     assert client.searches == ["", "", "신한 P1 카드"]
     assert client.gets == 2
+
+
+def test_shinhan_mobile_primary_search_term_stops_at_euc_kr_boundary() -> None:
+    term = _bounded_mobile_search_term(LONG_SHINHAN_PRODUCT_NAME)
+
+    assert term == "신한카드 즉시 발급용 미래에셋 자산관리 CMA LOVE체"
+    assert len(term.encode("euc-kr")) <= REFRESH_SEARCH_MAXIMUM_BYTES
+    next_character = LONG_SHINHAN_PRODUCT_NAME[len(term)]
+    assert len((term + next_character).encode("euc-kr")) > REFRESH_SEARCH_MAXIMUM_BYTES
+    assert _bounded_mobile_search_term(SHORT_INDEX_MISS_PRODUCT_NAME) == (SHORT_INDEX_MISS_PRODUCT_NAME)
+
+
+@pytest.mark.asyncio
+async def test_shinhan_long_name_uses_bounded_primary_query_without_changing_identity() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("check",))
+    client = ShinhanLongNameClient()
+    snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
+    source = snapshot.records[0]
+    source_id = source.source_id
+
+    request = await adapter.prepare_download(client, source)  # type: ignore[arg-type]
+
+    assert client.searches == [_bounded_mobile_search_term(LONG_SHINHAN_PRODUCT_NAME)]
+    assert source.source_id == source_id
+    assert source.product_code == "00284"
+    assert source.product_name == LONG_SHINHAN_PRODUCT_NAME
+    assert source.source_post_id == "check:00284"
+    assert source.source_version == "20260825"
+    assert parse_qs(urlsplit(request.url).query) == {
+        "aFilenm": ["TOKEN-REFRESHED"],
+        "pbnNm": [LONG_SHINHAN_PRODUCT_NAME],
+    }
+
+
+@pytest.mark.asyncio
+async def test_shinhan_short_index_miss_uses_bounded_full_list_fallback() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    client = ShinhanFullListFallbackClient()
+    snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
+    source = snapshot.records[0]
+    source_id = source.source_id
+
+    request = await adapter.prepare_download(client, source)  # type: ignore[arg-type]
+
+    assert client.searches == [SHORT_INDEX_MISS_PRODUCT_NAME, ""]
+    assert source.source_id == source_id
+    assert parse_qs(urlsplit(request.url).query) == {
+        "aFilenm": ["TOKEN-FULL"],
+        "pbnNm": [SHORT_INDEX_MISS_PRODUCT_NAME],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client",
+    [
+        ShinhanFullListFallbackClient(fallback_code="different-code"),
+        ShinhanFullListFallbackClient(fallback_tokens=("TOKEN-A", "TOKEN-B")),
+    ],
+    ids=("mismatch", "ambiguous"),
+)
+async def test_shinhan_full_list_fallback_requires_exact_stable_singleton(
+    client: ShinhanFullListFallbackClient,
+) -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
+
+    with pytest.raises(IssuerMarkupChanged, match="exactly one stable source match"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+
+    assert client.searches == [SHORT_INDEX_MISS_PRODUCT_NAME, ""]
+
+
+@pytest.mark.asyncio
+async def test_shinhan_full_list_fallback_is_strictly_page_bounded() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    snapshot = await adapter.discover_current(ShinhanClient())  # type: ignore[arg-type]
+    client = ShinhanUnboundedFullListFallbackClient()
+
+    with pytest.raises(IssuerMarkupChanged, match="page limit"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+
+    assert client.full_list_posts == REFRESH_FULL_LIST_MAXIMUM_PAGES
+    assert len(client.searches) == REFRESH_FULL_LIST_MAXIMUM_PAGES + 1
+    assert client.searches[0] == "신한 P1 카드"
+    assert set(client.searches[1:]) == {""}
+    assert REFRESH_FULL_LIST_MAXIMUM_RECORDS >= 669
+
+
+@pytest.mark.asyncio
+async def test_shinhan_full_list_fallback_is_strictly_record_bounded() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    client = ShinhanFullListFallbackClient(
+        fallback_tokens=tuple(f"TOKEN-{index}" for index in range(REFRESH_FULL_LIST_MAXIMUM_RECORDS + 1))
+    )
+    snapshot = await adapter.discover_current(client)  # type: ignore[arg-type]
+
+    with pytest.raises(IssuerMarkupChanged, match="record limit"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+
+    assert client.searches == [SHORT_INDEX_MISS_PRODUCT_NAME, ""]
+
+
+@pytest.mark.asyncio
+async def test_shinhan_malformed_primary_response_is_not_masked_by_full_list_fallback() -> None:
+    adapter = ShinhanAdapter(minimum_records=1)
+    adapter.spec = replace(adapter.spec, categories=("credit",))
+    snapshot = await adapter.discover_current(ShinhanClient())  # type: ignore[arg-type]
+    client = ShinhanMalformedPrimaryClient()
+
+    with pytest.raises(IssuerMarkupChanged, match="lookup failed"):
+        await adapter.prepare_download(client, snapshot.records[0])  # type: ignore[arg-type]
+
+    assert client.searches == ["신한 P1 카드"]
 
 
 @pytest.mark.asyncio
