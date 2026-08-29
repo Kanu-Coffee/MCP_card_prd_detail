@@ -19,6 +19,7 @@ import json
 import math
 import mmap
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -121,6 +122,7 @@ _MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_SIDECAR_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_EXTERNAL_ROWS_PER_QUERY = 2_000_000
 _MAX_CAPTURE_STATE_FILE_BYTES = 64 * 1024 * 1024
+_SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 class GoldCaptureError(RuntimeError):
@@ -130,6 +132,26 @@ class GoldCaptureError(RuntimeError):
         self.code = code
         self.line = line
         super().__init__(code)
+
+
+def _validated_expected_source_commit(
+    value: str | None,
+    *,
+    release_gate: bool,
+) -> str | None:
+    if value is None:
+        if release_gate:
+            raise GoldCaptureError("expected_source_commit_required")
+        return None
+    if _SOURCE_COMMIT.fullmatch(value) is None:
+        raise GoldCaptureError("expected_source_commit_invalid")
+    return value
+
+
+def _validated_source_commit(value: str) -> str:
+    if _SOURCE_COMMIT.fullmatch(value) is None:
+        raise GoldCaptureError("source_commit_invalid")
+    return value
 
 
 class _StrictModel(BaseModel):
@@ -1251,6 +1273,7 @@ def seal_external_observation(
     vector_path: Path | None,
     output_path: Path,
     receipt_path: Path,
+    expected_source_commit: str | None = None,
     release_gate: bool = True,
 ) -> LaneCaptureReceipt:
     """Validate and seal v1.0.9 or Qwen-page external raw observations."""
@@ -1258,6 +1281,10 @@ def seal_external_observation(
     gold = load_gold_jsonl(gold_path, release_gate=release_gate)
     if gold.sha256 != expected_gold_sha256:
         raise GoldCaptureError("gold_sha256_mismatch")
+    candidate_source_commit = _validated_expected_source_commit(
+        expected_source_commit,
+        release_gate=release_gate,
+    )
     observation_binding = _hash_regular(
         observation_path,
         maximum_bytes=MAX_SCORE_ARTIFACT_BYTES,
@@ -1284,6 +1311,12 @@ def seal_external_observation(
             or manifest.generation_manifest.sha256 == "0" * 64
         ):
             raise GoldCaptureError("external_observation_manifest_binding_mismatch", line=1)
+        if (
+            manifest.lane == "qwen_page"
+            and candidate_source_commit is not None
+            and manifest.source_commit != candidate_source_commit
+        ):
+            raise GoldCaptureError("candidate_source_commit_mismatch", line=1)
 
         if manifest.lane == "v109_baseline":
             source_manifest, generation_binding = _load_generation_manifest(
@@ -2041,6 +2074,7 @@ async def capture_native_v5_lanes(
     source_commit: str,
     embedder: OpenRouterEmbedder,
     reranker_lane: RerankerShadowLane,
+    expected_source_commit: str | None = None,
     release_gate: bool = True,
 ) -> NativeV5CaptureResult:
     """Capture structure exact and both shadow lanes from the actual v5 APIs."""
@@ -2048,6 +2082,13 @@ async def capture_native_v5_lanes(
     gold = load_gold_jsonl(gold_path, release_gate=release_gate)
     if gold.sha256 != expected_gold_sha256:
         raise GoldCaptureError("gold_sha256_mismatch")
+    actual_source_commit = _validated_source_commit(source_commit)
+    candidate_source_commit = _validated_expected_source_commit(
+        expected_source_commit,
+        release_gate=release_gate,
+    )
+    if candidate_source_commit is not None and actual_source_commit != candidate_source_commit:
+        raise GoldCaptureError("candidate_source_commit_mismatch")
     generation_manifest, generation_binding = _load_generation_manifest(generation_manifest_path)
     if generation_manifest.schema_version != "cardrag.generation.v5":
         raise GoldCaptureError("native_capture_requires_generation_v5")
@@ -2115,7 +2156,7 @@ async def capture_native_v5_lanes(
         synthetic=False,
         gold_sha256=gold.sha256,
         query_count=len(gold.queries),
-        source_commit=source_commit,
+        source_commit=actual_source_commit,
         generation_id=generation_manifest.generation_id,
         generation_manifest=generation_binding,
         serving_database=database_binding,
@@ -2163,7 +2204,7 @@ async def capture_native_v5_lanes(
         if (
             score_manifest.gold_sha256 != gold.sha256
             or score_manifest.query_count != len(gold.queries)
-            or score_manifest.source_commit != source_commit
+            or score_manifest.source_commit != actual_source_commit
             or score_manifest.generation_id != generation_manifest.generation_id
             or score_manifest.generation_manifest_sha256 != generation_binding.sha256
             or score_manifest.serving_database_sha256 != database_binding.sha256
@@ -2466,6 +2507,7 @@ def validate_native_v5_capture(
     run_paths: Mapping[EvaluationLane, Path],
     receipt_paths: Mapping[EvaluationLane, Path],
     reranker_state_root: Path,
+    expected_source_commit: str | None = None,
     release_gate: bool = True,
 ) -> dict[EvaluationLane, LaneCaptureReceipt]:
     """Recompute native evidence bindings without network or serving calls."""
@@ -2476,6 +2518,10 @@ def validate_native_v5_capture(
     gold = load_gold_jsonl(gold_path, release_gate=release_gate)
     if gold.sha256 != expected_gold_sha256:
         raise GoldCaptureError("gold_sha256_mismatch")
+    candidate_source_commit = _validated_expected_source_commit(
+        expected_source_commit,
+        release_gate=release_gate,
+    )
     generation, generation_binding = _load_generation_manifest(generation_manifest_path)
     if generation.schema_version != "cardrag.generation.v5":
         raise GoldCaptureError("native_capture_requires_generation_v5")
@@ -2521,6 +2567,10 @@ def validate_native_v5_capture(
         lane: load_run_jsonl(run_paths[cast(EvaluationLane, lane)], lane=cast(EvaluationLane, lane))
         for lane in native_lanes
     }
+    if candidate_source_commit is not None and any(
+        dataset.manifest.source_commit != candidate_source_commit for dataset in datasets.values()
+    ):
+        raise GoldCaptureError("candidate_source_commit_mismatch")
     attestation_binding = _hash_regular(
         attestation_path,
         maximum_bytes=MAX_JSONL_BYTES,
@@ -2583,6 +2633,13 @@ def validate_native_v5_capture(
         if (
             attestation_manifest.gold_sha256 != gold.sha256
             or attestation_manifest.query_count != len(gold.queries)
+            or (
+                candidate_source_commit is not None
+                and (
+                    attestation_manifest.source_commit != candidate_source_commit
+                    or score_manifest.source_commit != candidate_source_commit
+                )
+            )
             or attestation_manifest.generation_id != generation.generation_id
             or attestation_manifest.generation_manifest != generation_binding
             or attestation_manifest.serving_database != database_binding
@@ -2897,9 +2954,10 @@ def validate_capture_set(
     native_score_artifact_path: Path,
     expected_receipt_sha256: Mapping[EvaluationLane, str],
     output_path: Path | None = None,
+    expected_source_commit: str | None = None,
     release_gate: bool = True,
 ) -> CaptureSetReceipt:
-    """Bind exactly five already-revalidated lane captures into one receipt."""
+    """Bind five already-revalidated lanes; this does not replay their source artifacts."""
 
     if (
         set(run_paths) != set(LANES)
@@ -2911,6 +2969,10 @@ def validate_capture_set(
     gold = load_gold_jsonl(gold_path, release_gate=release_gate)
     if gold.sha256 != expected_gold_sha256:
         raise GoldCaptureError("gold_sha256_mismatch")
+    candidate_source_commit = _validated_expected_source_commit(
+        expected_source_commit,
+        release_gate=release_gate,
+    )
     receipts: list[LaneCaptureReceipt] = []
     datasets_by_lane: dict[EvaluationLane, Mapping[str, QueryRunResult]] = {}
     manifests_by_lane: dict[EvaluationLane, RunArtifactManifest] = {}
@@ -2924,6 +2986,12 @@ def validate_capture_set(
             maximum_bytes=MAX_JSONL_BYTES,
             code="run_artifact",
         )
+        if (
+            lane != "v109_baseline"
+            and candidate_source_commit is not None
+            and dataset.manifest.source_commit != candidate_source_commit
+        ):
+            raise GoldCaptureError("candidate_source_commit_mismatch")
         if (
             receipt_binding.sha256 != expected_receipt_sha256[lane]
             or receipt.lane != lane
@@ -3049,7 +3117,9 @@ def _validated_openrouter_base_url(raw_value: str) -> str:
         not raw_value
         or raw_value != raw_value.strip()
         or "\\" in raw_value
-        or any(character.isspace() or ord(character) == 127 for character in raw_value)
+        or "?" in raw_value
+        or "#" in raw_value
+        or any(character.isspace() or not character.isprintable() for character in raw_value)
     ):
         raise GoldCaptureError("openrouter_base_url_invalid")
     try:
@@ -3079,6 +3149,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     external.add_argument("--gold", type=Path, required=True)
     external.add_argument("--expected-gold-sha256", required=True)
+    external.add_argument("--expected-source-commit")
     external.add_argument("--observation", type=Path, required=True)
     external.add_argument("--expected-observation-sha256", required=True)
     external.add_argument("--inventory", type=Path, required=True)
@@ -3106,6 +3177,7 @@ def _parser() -> argparse.ArgumentParser:
     native.add_argument("--output-dir", type=Path, required=True)
     native.add_argument("--state-dir", type=Path, required=True)
     native.add_argument("--source-commit", required=True)
+    native.add_argument("--expected-source-commit")
     native.add_argument("--openrouter-api-key-file", type=Path, required=True)
     native.add_argument("--openrouter-base-url", default="https://openrouter.ai/api/v1")
     native.add_argument("--timeout-seconds", type=float, default=60.0)
@@ -3118,6 +3190,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     validate_native.add_argument("--gold", type=Path, required=True)
     validate_native.add_argument("--expected-gold-sha256", required=True)
+    validate_native.add_argument("--expected-source-commit")
     validate_native.add_argument("--score-artifact", type=Path, required=True)
     validate_native.add_argument("--answer-artifact", type=Path, required=True)
     validate_native.add_argument("--generation-manifest", type=Path, required=True)
@@ -3135,6 +3208,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     validate_set.add_argument("--gold", type=Path, required=True)
     validate_set.add_argument("--expected-gold-sha256", required=True)
+    validate_set.add_argument("--expected-source-commit")
     validate_set.add_argument("--run", action="append", default=[])
     validate_set.add_argument("--receipt", action="append", default=[])
     validate_set.add_argument("--attestation", action="append", default=[])
@@ -3146,6 +3220,14 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _run_native(arguments: argparse.Namespace) -> NativeV5CaptureResult:
+    release_gate = not bool(arguments.fixture_mode)
+    source_commit = _validated_source_commit(str(arguments.source_commit))
+    expected_source_commit = _validated_expected_source_commit(
+        cast(str | None, arguments.expected_source_commit),
+        release_gate=release_gate,
+    )
+    if expected_source_commit is not None and source_commit != expected_source_commit:
+        raise GoldCaptureError("candidate_source_commit_mismatch")
     base_url = _validated_openrouter_base_url(str(arguments.openrouter_base_url))
     api_key = _read_secret(cast(Path, arguments.openrouter_api_key_file))
     embedder = OpenRouterEmbedder(
@@ -3177,10 +3259,11 @@ async def _run_native(arguments: argparse.Namespace) -> NativeV5CaptureResult:
             object_root=cast(Path, arguments.object_root),
             output_directory=cast(Path, arguments.output_dir),
             state_directory=state,
-            source_commit=str(arguments.source_commit),
+            source_commit=source_commit,
             embedder=embedder,
             reranker_lane=reranker_lane,
-            release_gate=not bool(arguments.fixture_mode),
+            expected_source_commit=expected_source_commit,
+            release_gate=release_gate,
         )
     finally:
         await reranker_lane.close()
@@ -3203,6 +3286,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vector_path=cast(Path | None, arguments.vectors),
                 output_path=cast(Path, arguments.output),
                 receipt_path=cast(Path, arguments.receipt),
+                expected_source_commit=cast(str | None, arguments.expected_source_commit),
                 release_gate=not bool(arguments.fixture_mode),
             )
             payload: object = receipt
@@ -3229,6 +3313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_paths=_lane_paths(arguments.run, label="run"),
                 receipt_paths=_lane_paths(arguments.receipt, label="receipt"),
                 reranker_state_root=cast(Path, arguments.reranker_state_root),
+                expected_source_commit=cast(str | None, arguments.expected_source_commit),
                 release_gate=not bool(arguments.fixture_mode),
             )
             payload = {lane: receipt for lane, receipt in sorted(receipts.items())}
@@ -3245,6 +3330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     label="receipt_sha256",
                 ),
                 output_path=cast(Path, arguments.output),
+                expected_source_commit=cast(str | None, arguments.expected_source_commit),
                 release_gate=not bool(arguments.fixture_mode),
             )
             payload = set_receipt

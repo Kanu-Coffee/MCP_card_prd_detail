@@ -165,6 +165,13 @@ provider, result count/index/finite score는 bounded shadow failure로 격리됩
 footnote는 절대 bundle에 섞지 않습니다. 상품 lineage가 하나로 명시되고 current
 revision이 하나이면 최신 계약 전체를 원문 순서로 반환할 수 있습니다.
 
+공통 조건·제외 `NOTICE` section은 parser가 그 container에서 앞선 각 `BENEFIT` item으로
+`APPLIES_TO`를 명시하고, item 단위 조건은 해당 `NOTICE` item에서 직전 `BENEFIT` item으로
+연결합니다. exact bundle은 각 링크가 명시한 notice container의 descendant만 보존합니다.
+`FOOTNOTE_OF`, `CONTINUATION_OF`, `PREVIOUS`, `NEXT`는 기존처럼 endpoint의 가장 가까운
+item 문맥만 한 hop 확장하며, 새로 포함된 link를 다시 순회하는 transitive closure는
+허용하지 않습니다.
+
 ## public API와 promotion gate
 
 v5 전용 MCP tools는 다음 세 개이며 기존 다섯 tools도 유지합니다.

@@ -1342,6 +1342,26 @@ class V5ExactRepository:
             if item_id is not None:
                 add_descendants(item_id)
 
+        def add_applies_source_context(node_id: str) -> None:
+            """Expand only the explicit NOTICE/MIXED container that carries a condition."""
+
+            if node_id not in node_rows:
+                return
+            add_item_context(node_id)
+            current = node_id
+            while current in node_rows:
+                row = node_rows[current]
+                if str(row[2]) in {"ITEM", "MAJOR_SECTION"} and str(row[3]) in {
+                    "NOTICE",
+                    "MIXED",
+                }:
+                    add_descendants(current)
+                    return
+                parent = row[1]
+                if parent is None:
+                    return
+                current = str(parent)
+
         if not full:
             for node_id in tuple(selected):
                 add_item_context(node_id)
@@ -1350,9 +1370,19 @@ class V5ExactRepository:
             # long leaf chains in parser output, so walking to a fixed point
             # would turn one dense hit into an entire-contract bundle.
             base_context = frozenset(selected)
-            semantic_types = {"APPLIES_TO", "FOOTNOTE_OF", "CONTINUATION_OF"}
             for link in links:
-                if link.link_type in semantic_types and (
+                if link.link_type == "APPLIES_TO" and (
+                    link.from_node_id in base_context or link.to_node_id in base_context
+                ):
+                    # APPLIES_TO is directional: the condition/notice is the
+                    # source, while the benefit it constrains is the target.
+                    # A source container owns its descendants, so retain that
+                    # one explicit subtree without following newly selected
+                    # semantic links to a fixed point.
+                    add_applies_source_context(link.from_node_id)
+                    add_item_context(link.to_node_id)
+            for link in links:
+                if link.link_type in {"FOOTNOTE_OF", "CONTINUATION_OF"} and (
                     link.from_node_id in base_context or link.to_node_id in base_context
                 ):
                     add_item_context(link.from_node_id)

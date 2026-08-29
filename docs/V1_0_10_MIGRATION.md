@@ -46,17 +46,45 @@ copy와 prune을 하지 않습니다. secret 값과 tokenized URL은 inventory�
 전체 Compose JSON을 터미널, 파일 또는 `tee`로 보내지 않고 아래 비민감 assertion의
 boolean 결과만 출력합니다.
 
+먼저 독립 승인된 candidate acceptance validation에서 role별 OCI index reference와 platform
+config digest를 옮깁니다. tag, local image, public repository, short digest는 허용하지 않습니다.
+아래 네 변수는 같은 shell과 이후 candidate 명령 전체에서 유지해야 합니다.
+
 ```bash
+set -euo pipefail
+: "${CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST:?receipt-bound Worker index digest is required}"
+: "${CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST:?receipt-bound Worker config digest is required}"
+: "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?receipt-bound MCP index digest is required}"
+: "${CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST:?receipt-bound MCP config digest is required}"
+[[ "$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+CARDRAG_CANDIDATE_WORKER_IMAGE="$candidate_repository@$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST"
+CARDRAG_CANDIDATE_MCP_IMAGE="$candidate_repository@$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"
+export CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST
+export CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST
+
 docker compose \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
-  -f deploy/worker/compose.cache-seed.yaml config --format json | jq -e '
+  -f deploy/worker/compose.cache-seed.yaml config --format json | jq -e \
+  --arg expected_image "$CARDRAG_CANDIDATE_WORKER_IMAGE" '
     .name == "cardrag-v110-candidate" and
+    .services.worker.image == $expected_image and
+    (.services.worker.build? == null) and
+    .services.worker.pull_policy == "always" and
+    .services.worker.user == "10001:10001" and
+    .services.worker.read_only == true and
+    .services.worker.cap_drop == ["ALL"] and
+    .services.worker.security_opt == ["no-new-privileges:true"] and
     .services.worker.environment.CARDRAG_CHANNEL == "candidate-v1.0.10" and
     .services.worker.environment.CARDRAG_OCR_CACHE_MODE == "read-only" and
     .services.worker.environment.CARDRAG_OCR_CACHE_PUBLICATION_APPROVED == "false" and
     .services.worker.environment.CARDRAG_COLLECT_REMOTE_GARBAGE == "false" and
     .services.worker.environment.CARDRAG_REMOTE_GC_APPROVED == "false" and
+    .services.worker.environment.CARDRAG_ENABLED_ISSUERS == "kb,samsung,shinhan,woori" and
     .services.worker.environment.CARDRAG_EMBEDDING_DIMENSION == "4096" and
     .services.worker.environment.CARDRAG_WORKER_MAX_STATE_BYTES == "68719476736" and
     .services.worker.environment.CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES == "2147483648" and
@@ -70,9 +98,30 @@ docker compose \
 
 docker compose \
   -f deploy/mcp/compose.yaml \
-  -f deploy/mcp/compose.candidate.yaml config --format json | jq -e '
+  -f deploy/mcp/compose.candidate.yaml config --format json | jq -e \
+  --arg expected_image "$CARDRAG_CANDIDATE_MCP_IMAGE" '
     .name == "cardrag-v110-candidate" and
+    .services.mcp.image == $expected_image and
+    (.services.mcp.build? == null) and
+    .services.mcp.pull_policy == "always" and
+    .services.mcp.user == "10001:10001" and
+    .services.mcp.read_only == true and
+    .services.mcp.cap_drop == ["ALL"] and
+    .services.mcp.security_opt == ["no-new-privileges:true"] and
     .services.mcp.environment.CARDRAG_CHANNEL == "candidate-v1.0.10" and
+    .services.mcp.environment.CARDRAG_MCP_MAX_VECTOR_BYTES == "1073741824" and
+    .services.mcp.environment.CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES == "1073741824" and
+    .services.mcp.environment.CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES == "17179869184" and
+    .services.mcp.environment.CARDRAG_MCP_MAX_SERVING_DATABASE_BYTES == "4294967296" and
+    .services.mcp.environment.CARDRAG_MCP_MAX_GENERATION_DOWNLOAD_BYTES == "34359738368" and
+    .services.mcp.environment.CARDRAG_MCP_MAX_STATE_BYTES == "68719476736" and
+    .services.mcp.environment.CARDRAG_MCP_RESERVED_FREE_SPACE_BYTES == "2147483648" and
+    .services.mcp.environment.CARDRAG_MCP_EXHAUSTIVE_AUDIT_MAX_JOBS == "32" and
+    .services.mcp.environment.CARDRAG_MCP_EXHAUSTIVE_AUDIT_MAX_TOTAL_BYTES == "2147483648" and
+    .services.mcp.environment.CARDRAG_MCP_EXHAUSTIVE_AUDIT_MAX_ARTIFACT_BYTES == "268435456" and
+    .services.mcp.environment.CARDRAG_MCP_RERANKER_AUDIT_MAX_JOBS == "1024" and
+    .services.mcp.environment.CARDRAG_MCP_RERANKER_AUDIT_MAX_TOTAL_BYTES == "536870912" and
+    .services.mcp.environment.CARDRAG_MCP_RERANKER_AUDIT_MAX_ARTIFACT_BYTES == "8388608" and
     .volumes["mcp-state"].name == "cardrag-mcp-v110-state" and
     .services.mcp.ports == [{
       mode: "ingress", host_ip: "127.0.0.1", target: 8000,
@@ -81,12 +130,19 @@ docker compose \
 ```
 
 Worker source mount의 `read_only=true`, 두 destination volume 이름, project 이름,
-channel, port, `CARDRAG_OCR_CACHE_MODE=read-only`,
+channel, exact receipt-bound private image index, inherited build 없음, `pull_policy=always`,
+UID/GID 10001, read-only rootfs, all-cap drop, no-new-privileges,
+exact four-issuer set, port, `CARDRAG_OCR_CACHE_MODE=read-only`,
 `CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=false`,
 `CARDRAG_COLLECT_REMOTE_GARBAGE=false`,
-`CARDRAG_REMOTE_GC_APPROVED=false`, Qwen 4,096D와 Worker capacity 기본값을 모두
-assert합니다. candidate overlay는 shared/base env의 2 GiB 값을 상속하지 않고 release
-launch에 `CARDRAG_WORKER_MINIMUM_START_FREE_BYTES=34359738368`을 고정합니다.
+`CARDRAG_REMOTE_GC_APPROVED=false`, Qwen 4,096D, Worker capacity, MCP
+legacy/resident/sidecar/DB/download/state/reserve 및 두 audit job/byte cap을 모두
+assert합니다. 이 assertion이 성공한 sanitized effective-config 결과만 candidate acceptance
+receipt의 config SHA 근거로 승인합니다. canonical effective-config evidence에는 위 image
+reference와 config digest도 함께 기록합니다. candidate overlay는 private repository를
+YAML에 고정하고 receipt-bound index digest 변수가 없으면 render를 거부하며 base의 local
+`image`/`build` fallback을 제거합니다. capacity와 issuer 값을
+ambient environment에서 상속하지 않고 release launch에 exact literal을 고정합니다.
 
 ## 3. v1.0.9 PDF/OCR seed
 
@@ -178,12 +234,22 @@ host provisioning을 정해야 합니다. 32 GiB floor는 이 중 명백히 작�
 않습니다. 이 용량 gate는 v5 전용이고 v4 rollback artifact/reader 동작은 바뀌지 않습니다.
 
 ```bash
+worker_container=cardrag-v110-candidate-worker-acceptance
 docker compose \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
   -f deploy/worker/compose.secrets.yaml \
-  run --rm worker run
+  run --name "$worker_container" worker run
+test "$(docker inspect --format '{{.Image}}' "$worker_container")" = \
+  "$CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST"
+docker image inspect "$CARDRAG_CANDIDATE_WORKER_IMAGE" \
+  --format '{{json .RepoDigests}}' | jq -e \
+  --arg expected "$CARDRAG_CANDIDATE_WORKER_IMAGE" 'index($expected) != null'
 ```
+
+검증 컨테이너는 image identity evidence를 읽은 뒤에도 자동 삭제하지 않습니다. candidate
+container cleanup은 별도 승인 대상으로 남깁니다. Worker metrics의
+`runtime_container_image_id`와 `runtime_image_repo_digest`에는 위 두 관측값을 기록합니다.
 
 성공 후 manifest와 READY에서 `cardrag.generation.v5`,
 `cardrag.serving-db.v5`, Qwen 4,096D, all view counts와 `vectors.f32` 결속을
@@ -195,11 +261,22 @@ docker compose \
   -f deploy/mcp/compose.candidate.yaml \
   -f deploy/mcp/compose.secrets.yaml \
   up -d --wait
+mcp_container=$(docker compose \
+  -f deploy/mcp/compose.yaml \
+  -f deploy/mcp/compose.candidate.yaml \
+  -f deploy/mcp/compose.secrets.yaml ps -q mcp)
+test -n "$mcp_container"
+test "$(docker inspect --format '{{.Image}}' "$mcp_container")" = \
+  "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST"
+docker image inspect "$CARDRAG_CANDIDATE_MCP_IMAGE" \
+  --format '{{json .RepoDigests}}' | jq -e \
+  --arg expected "$CARDRAG_CANDIDATE_MCP_IMAGE" 'index($expected) != null'
 ```
 
 health/readiness, 8개 tool discovery, `search_contracts`, bundle/revision API,
 legacy adapter와 source PDF range를 smoke합니다. exact response의 expected/scored
-contract/row count가 같아야 합니다.
+contract/row count가 같아야 합니다. MCP smoke의 `runtime_container_image_id`와
+`runtime_image_repo_digest`에도 위 두 관측값을 기록합니다.
 
 reranker shadow는 기본적으로 꺼져 있습니다. sealed provider preflight를 확인한 뒤에도
 `candidate-v1.0.10` MCP env에서만 아래처럼 명시적으로 켭니다. stable channel에서

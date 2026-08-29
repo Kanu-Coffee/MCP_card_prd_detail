@@ -4,6 +4,9 @@
 버전은 같은 Compose project·상태 volume·WebDAV base URL·채널 포인터·호스트
 포트를 공유하지 않습니다.
 
+Worker/MCP base image, exact Wolfi package, strict final-image scan과 sandbox/readiness
+release gate는 [컨테이너 런타임 계약](../docs/V1_0_10_CONTAINER_RUNTIME.md)을 따릅니다.
+
 ```text
 deploy/
 ├── simple.env.example
@@ -52,6 +55,11 @@ deploy/
 ```dotenv
 CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v110-candidate
 CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://candidate-cardrag.example
+# 반드시 독립 승인된 candidate receipt의 private OCI index/config digest로 교체합니다.
+CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
+CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
+CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
+CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung
 CARDRAG_EMBEDDING_PROVIDER_ID=deepinfra
 CARDRAG_WORKER_MAX_STATE_BYTES=68719476736
@@ -62,14 +70,27 @@ CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES=4294967296
 CARDRAG_WORKER_MINIMUM_START_FREE_BYTES=34359738368
 # Off by default. Enable only in the candidate MCP env after provider preflight.
 CARDRAG_RERANKER_SHADOW_ENABLED=false
+# The release-acceptance overlay pins this false. A separate reviewed evaluation
+# overlay may enable it only after a winning gold-bound profile is sealed.
+CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED=false
 ```
 
+위 네 image digest 값은 env 파일에만 두지 말고 아래 사전검사와 runtime identity capture를
+실행하는 caller shell에도 동일한 receipt 값으로 export합니다. 출력하거나 로그로 남기지
+않습니다.
+
 ```bash
+set -euo pipefail
+[[ "$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+
 docker compose --env-file /etc/cardrag/candidate-worker.env \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
   -f deploy/worker/compose.secrets.yaml \
-  run --rm worker run
+  run --name cardrag-v110-candidate-worker-acceptance worker run
 
 docker compose --env-file /etc/cardrag/candidate-mcp.env \
   -f deploy/mcp/compose.yaml \
@@ -78,12 +99,29 @@ docker compose --env-file /etc/cardrag/candidate-mcp.env \
   up -d --wait
 ```
 
+candidate overlay는 private repository를 YAML에 고정하고 위 receipt-bound `sha256` index
+digest 변수가 없으면 Compose render를 거부합니다. base의 local image와 `build:` fallback을
+제거하며 `pull_policy=always`를 강제합니다. 실행 전
+sanitized Compose JSON의 role image가 receipt reference와 같고 `build`가 없음을 검사하고,
+실행 뒤 container `.Image`가 receipt의 platform config digest인지, local RepoDigests가 exact
+index reference를 포함하는지 확인합니다. canonical 명령과 영수증 필드 기록은
+[v1.0.10 migration](../docs/V1_0_10_MIGRATION.md)을 따릅니다.
+
 운영 stable channel이나 v1.0.9 volume을 후보의 RW base/overlay에 지정하지
 마십시오. seed overlay도 운영 Worker가 terminal인 것을 확인한 뒤에만 사용합니다.
 reranker shadow를 시험할 때는 candidate MCP env에서만
 `CARDRAG_RERANKER_SHADOW_ENABLED=true`로 바꾸며, stable은 Settings 단계에서 이를
 거부합니다. shadow artifact는 candidate MCP volume에만 기록되고 primary 검색 순위에는
 적용되지 않습니다.
+experimental long-context 감사는 release-acceptance overlay와 분리된 명시적 evaluation
+overlay에서만 `CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED=true`, 봉인된 model/provider ID,
+gold evaluation artifact SHA-256을 함께 설정합니다. 그 실행은 8-tool candidate acceptance
+receipt를 발급할 수 없습니다. 이 lane은 별도 MCP tool과
+candidate 전용 immutable job artifact만 사용하며, 기본 4096의 봉인된
+`CARDRAG_EXPERIMENTAL_MAP_REDUCE_MAX_COMPLETION_TOKENS`가 각 provider 호출의 생성 비용을
+제한합니다. job 전체 호출·입력 문자·출력 token budget과 process 공통 provider 동시성
+상한도 각각 `MAX_JOB_*` 및 `MAX_CONCURRENT_PROVIDER_CALLS` 설정으로 fail-close합니다.
+primary exact 응답에는 합쳐지지 않습니다.
 candidate Worker는 `CARDRAG_OCR_CACHE_MODE=read-only`와
 `CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=false`를 강제합니다. 검증된 remote OCR cache
 hit는 GET으로 재사용하지만 native/adopted cache manifest와 READY를 생성·repair하지
@@ -135,10 +173,12 @@ WebDAV timeout은 요청별 inactivity 상한이고 한 검증 thread에는 여�
 하나임을 확인한 뒤 컨테이너 전체에만 수행하며, 상세 절차는
 [v1.0.10 migration](../docs/V1_0_10_MIGRATION.md)을 따릅니다.
 
-기본 Worker 명령은 `docker compose run --rm`이므로 종료한 임시 컨테이너는 증거로
-남지 않습니다. 장애가 발생하면 재시작하기 전에 journal, `systemctl show` 결과와
-상태 volume의 read-only snapshot을 먼저 보존합니다. 컨테이너 보존을 위해 운영
-명령에서 임의로 `--rm`을 제거하거나 고정 container name을 추가하지 않습니다.
+일반 Worker 명령은 `docker compose run --rm`이므로 종료한 임시 컨테이너는 증거로
+남지 않습니다. 단, 위 candidate acceptance 절차는 실제 container config ID를 봉인하기 위해
+문서에 고정된 candidate-only 이름으로 컨테이너를 보존하는 승인된 예외입니다. 장애가 발생하면
+재시작하기 전에 journal, `systemctl show` 결과와 상태 volume의 read-only snapshot을 먼저
+보존합니다. 이 절차 밖 운영 명령에서 임의로 `--rm`을 제거하거나 고정 container name을
+추가하지 않습니다.
 
 ## stable 운영 원칙
 

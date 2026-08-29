@@ -24,6 +24,22 @@ on:
         description: "Independently approved SHA-256 of the five-lane binding receipt after source replay"
         required: true
         type: string
+      candidate_source_commit:
+        description: "Exact lowercase 40-hex candidate commit before the evidence-only sealing commit"
+        required: true
+        type: string
+      candidate_acceptance_sha256:
+        description: "Independently approved SHA-256 of the canonical candidate acceptance receipt"
+        required: true
+        type: string
+      candidate_worker_image_digest:
+        description: "Receipt-bound Worker OCI index digest (sha256: followed by 64 lowercase hex)"
+        required: true
+        type: string
+      candidate_mcp_image_digest:
+        description: "Receipt-bound MCP OCI index digest (sha256: followed by 64 lowercase hex)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -34,6 +50,7 @@ concurrency:
 
 env:
   IMAGE_NAME: ymtop59/mcp-card-prd-detail
+  CANDIDATE_IMAGE_REPOSITORY: ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
   IMMUTABLE_TAG_RULE: '^[0-9]+\.[0-9]+\.[0-9]+-(mcp|worker|admin)(-sha-[0-9a-f]{12})?$'
 
 jobs:
@@ -45,6 +62,15 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       short_sha: ${{ steps.version.outputs.short_sha }}
+      candidate_source_commit: ${{ steps.version.outputs.candidate_source_commit }}
+      worker_digest: ${{ steps.version.outputs.worker_digest }}
+      worker_platform_digest: ${{ steps.version.outputs.worker_platform_digest }}
+      worker_config_digest: ${{ steps.version.outputs.worker_config_digest }}
+      worker_attestation_digest: ${{ steps.version.outputs.worker_attestation_digest }}
+      mcp_digest: ${{ steps.version.outputs.mcp_digest }}
+      mcp_platform_digest: ${{ steps.version.outputs.mcp_platform_digest }}
+      mcp_config_digest: ${{ steps.version.outputs.mcp_config_digest }}
+      mcp_attestation_digest: ${{ steps.version.outputs.mcp_attestation_digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -54,11 +80,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the locked offline release validator
+      - name: Install the checksum-pinned release validator environment
         run: |
-          python -m pip install --disable-pip-version-check uv==0.8.17
-          uv lock --check
-          uv sync --frozen --package cardrag-mcp --package cardrag-worker --no-dev
+          set -euo pipefail
+          validator_tools_dir="$RUNNER_TEMP/cardrag-release-validator-tools"
+          mkdir -p "$validator_tools_dir/unpack"
+          curl --fail --location --silent --show-error \
+            --output "$validator_tools_dir/uv.tar.gz" \
+            https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz
+          echo "920cbcaad514cc185634f6f0dcd71df5e8f4ee4456d440a22e0f8c0f142a8203  $validator_tools_dir/uv.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$validator_tools_dir/uv.tar.gz" -C "$validator_tools_dir/unpack"
+          install -m 0755 \
+            "$validator_tools_dir/unpack/uv-x86_64-unknown-linux-gnu/uv" \
+            "$validator_tools_dir/uv"
+          test "$("$validator_tools_dir/uv" --version)" = "uv 0.8.17"
+          "$validator_tools_dir/uv" lock --check
+          "$validator_tools_dir/uv" sync --frozen \
+            --package cardrag-mcp --package cardrag-worker --no-dev
 
       - name: Validate immutable release source
         id: version
@@ -68,6 +107,10 @@ jobs:
           ACCEPTANCE_REPORT_SHA256: ${{ inputs.acceptance_report_sha256 }}
           AGGREGATION_PROFILE_SHA256: ${{ inputs.aggregation_profile_sha256 }}
           CAPTURE_SET_RECEIPT_SHA256: ${{ inputs.capture_set_receipt_sha256 }}
+          CANDIDATE_SOURCE_COMMIT: ${{ inputs.candidate_source_commit }}
+          CANDIDATE_ACCEPTANCE_SHA256: ${{ inputs.candidate_acceptance_sha256 }}
+          CANDIDATE_WORKER_IMAGE_DIGEST: ${{ inputs.candidate_worker_image_digest }}
+          CANDIDATE_MCP_IMAGE_DIGEST: ${{ inputs.candidate_mcp_image_digest }}
         run: |
           set -euo pipefail
           version=$REQUESTED_VERSION
@@ -84,17 +127,80 @@ jobs:
             aggregation_profile="$evidence_dir/document-aggregation-profile.json"
             aggregation_scores="$evidence_dir/document-aggregation-scores.jsonl"
             capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"
+            candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
             serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"
             legacy_historical="$evidence_dir/v109-kb-real-regression-baseline.json"
+            legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"
             legacy_reaudit="$evidence_dir/v109-kb-v4-structure-reaudit.json"
             [[ "$ACCEPTANCE_REPORT_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$AGGREGATION_PROFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$CAPTURE_SET_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$CANDIDATE_ACCEPTANCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"
+            git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
+            mapfile -d '' candidate_evidence_paths < <(
+              git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
+            )
+            ((${#candidate_evidence_paths[@]} > 0))
+            git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" -- \
+              . ':(exclude)release-evidence/v1.0.10/**'
+            for evidence_path in "${candidate_evidence_paths[@]}"; do
+              case "$evidence_path" in
+                release-evidence/v1.0.10/*) ;;
+                *)
+                  echo "non-evidence change after candidate source: $evidence_path" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            test "$(sha256sum "$candidate_acceptance" | awk '{print $1}')" = \
+              "$CANDIDATE_ACCEPTANCE_SHA256"
+            candidate_validation=$(.venv/bin/python -m cardrag_core.candidate_acceptance \
+              --receipt "$candidate_acceptance" \
+              --evidence-root "$evidence_dir" \
+              --expected-receipt-sha256 "$CANDIDATE_ACCEPTANCE_SHA256" \
+              --expected-source-commit "$CANDIDATE_SOURCE_COMMIT" \
+              --expected-image-repository "$CANDIDATE_IMAGE_REPOSITORY")
+            test "$(jq -r '.schema_version' <<<"$candidate_validation")" = \
+              "cardrag.candidate-acceptance-validation.v1"
+            test "$(jq -r '.status' <<<"$candidate_validation")" = validated
+            test "$(jq -r '.source_commit' <<<"$candidate_validation")" = \
+              "$CANDIDATE_SOURCE_COMMIT"
+            test "$(jq -r '.worker_image.repository' <<<"$candidate_validation")" = \
+              "$CANDIDATE_IMAGE_REPOSITORY"
+            test "$(jq -r '.mcp_image.repository' <<<"$candidate_validation")" = \
+              "$CANDIDATE_IMAGE_REPOSITORY"
+            test "$(jq -r '.worker_image.digest' <<<"$candidate_validation")" = \
+              "$CANDIDATE_WORKER_IMAGE_DIGEST"
+            test "$(jq -r '.mcp_image.digest' <<<"$candidate_validation")" = \
+              "$CANDIDATE_MCP_IMAGE_DIGEST"
+            worker_platform_digest=$(jq -r '.worker_image.platform_manifest_digest' \
+              <<<"$candidate_validation")
+            worker_config_digest=$(jq -r '.worker_image.platform_config_digest' \
+              <<<"$candidate_validation")
+            worker_attestation_digest=$(jq -r '.worker_image.attestation_manifest_digest' \
+              <<<"$candidate_validation")
+            mcp_platform_digest=$(jq -r '.mcp_image.platform_manifest_digest' \
+              <<<"$candidate_validation")
+            mcp_config_digest=$(jq -r '.mcp_image.platform_config_digest' \
+              <<<"$candidate_validation")
+            mcp_attestation_digest=$(jq -r '.mcp_image.attestation_manifest_digest' \
+              <<<"$candidate_validation")
+            [[ "$worker_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$worker_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$worker_attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$mcp_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$mcp_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$mcp_attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             test "$(sha256sum "$capture_set_receipt" | awk '{print $1}')" = \
               "$CAPTURE_SET_RECEIPT_SHA256"
             .venv/bin/python -m cardrag_worker.legacy_v4_audit \
               --validate-release-artifact "$legacy_reaudit" \
-              --historical-artifact "$legacy_historical"
+              --historical-artifact "$legacy_historical" \
+              --historical-source-artifact "$legacy_historical_source"
             .venv/bin/python -m cardrag_mcp.aggregation_profile \
               --gold "$evidence_dir/gold.jsonl" \
               --scores "$aggregation_scores" \
@@ -102,6 +208,7 @@ jobs:
               --expected-profile-sha256 "$AGGREGATION_PROFILE_SHA256" \
               --generation-manifest-dir "$evidence_dir/generation-manifests" \
               --serving-generation-manifest "$serving_generation_manifest" \
+              --expected-source-commit "$CANDIDATE_SOURCE_COMMIT" \
               --bootstrap-samples 2000 \
               --bootstrap-seed 1010
             validator_args=(
@@ -110,6 +217,7 @@ jobs:
               --validate-report "$acceptance_report"
               --expected-report-sha256 "$ACCEPTANCE_REPORT_SHA256"
               --generation-manifest-dir "$evidence_dir/generation-manifests"
+              --expected-source-commit "$CANDIDATE_SOURCE_COMMIT"
               --bootstrap-samples 2000
               --bootstrap-seed 1010
             )
@@ -128,6 +236,7 @@ jobs:
               --gold "$evidence_dir/gold.jsonl"
               --expected-gold-sha256 "$gold_sha256"
               --native-score-artifact "$aggregation_scores"
+              --expected-source-commit "$CANDIDATE_SOURCE_COMMIT"
               --output "$capture_set_receipt"
             )
             for lane in \
@@ -153,13 +262,25 @@ jobs:
                 )
               fi
             done
-            # validate-set replays canonical cross-bindings, not the large source
-            # DB/vector/provider capture. This independently approved digest is
-            # the trust root attesting that external and native source replay
-            # commands completed before the evidence was committed.
+            # validate-set revalidates canonical bindings; it does not replay the
+            # source DB/vector/provider capture and cannot prove replay by itself.
+            # This digest is a release trust root only after independent source
+            # replay and approval completed before the evidence-only commit.
             .venv/bin/python -m cardrag_mcp.gold_capture "${capture_args[@]}"
             test "$(sha256sum "$capture_set_receipt" | awk '{print $1}')" = \
               "$CAPTURE_SET_RECEIPT_SHA256"
+            {
+              echo "candidate_source_commit=$CANDIDATE_SOURCE_COMMIT"
+              echo "short_sha=${CANDIDATE_SOURCE_COMMIT::12}"
+              echo "worker_digest=$CANDIDATE_WORKER_IMAGE_DIGEST"
+              echo "worker_platform_digest=$worker_platform_digest"
+              echo "worker_config_digest=$worker_config_digest"
+              echo "worker_attestation_digest=$worker_attestation_digest"
+              echo "mcp_digest=$CANDIDATE_MCP_IMAGE_DIGEST"
+              echo "mcp_platform_digest=$mcp_platform_digest"
+              echo "mcp_config_digest=$mcp_config_digest"
+              echo "mcp_attestation_digest=$mcp_attestation_digest"
+            } >> "$GITHUB_OUTPUT"
           fi
           python - "$version" <<'PY'
           import sys
@@ -186,7 +307,6 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Require successful CI for this commit
         env:
@@ -200,12 +320,393 @@ jobs:
             '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")] | length > 0' \
             <<<"$runs" >/dev/null
 
-  registry-preflight:
+  strict-filesystem-scan:
     runs-on: ubuntu-24.04
     needs: validate
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install checksum-pinned Trivy
+        run: |
+          set -euo pipefail
+          audit_tools_dir="$RUNNER_TEMP/cardrag-release-fs-audit-tools"
+          mkdir -p "$audit_tools_dir/trivy-unpack"
+          curl --fail --location --silent --show-error \
+            --output "$audit_tools_dir/trivy.tar.gz" \
+            https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+          echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  $audit_tools_dir/trivy.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$audit_tools_dir/trivy.tar.gz" -C "$audit_tools_dir/trivy-unpack"
+          install -m 0755 "$audit_tools_dir/trivy-unpack/trivy" "$audit_tools_dir/trivy"
+          "$audit_tools_dir/trivy" --version
+
+      - name: Strictly scan the tagged source and sealed evidence checkout
+        env:
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cardrag-release-fs-audit-tools/trivy" fs \
+            --scanners vuln,secret,misconfig \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output trivy-filesystem.json \
+            .
+          "$RUNNER_TEMP/cardrag-release-fs-audit-tools/trivy" --version --format json \
+            > trivy-filesystem-version.json
+          python - trivy-filesystem-version.json <<'PY'
+          import json
+          import sys
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+
+          metadata = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert metadata["Version"] == "0.74.0"
+          database = metadata["VulnerabilityDB"]
+
+          def timestamp(name: str) -> datetime:
+              value = database[name]
+              assert isinstance(value, str) and value.endswith("Z")
+              return datetime.fromisoformat(value[:-1] + "+00:00")
+
+          now = datetime.now(UTC)
+          updated_at = timestamp("UpdatedAt")
+          downloaded_at = timestamp("DownloadedAt")
+          assert updated_at <= now + timedelta(minutes=5)
+          assert downloaded_at <= now + timedelta(minutes=5)
+          assert now - updated_at <= timedelta(hours=36)
+          assert now - downloaded_at <= timedelta(hours=2)
+          PY
+          jq -cnS \
+            --arg schema cardrag.strict-filesystem-scan.v1 \
+            --arg tag_commit "$GITHUB_SHA" \
+            --arg candidate_source_commit "$CANDIDATE_SOURCE_COMMIT" \
+            --arg report_sha256 "$(sha256sum trivy-filesystem.json | cut -d' ' -f1)" \
+            --arg version_metadata_sha256 \
+              "$(sha256sum trivy-filesystem-version.json | cut -d' ' -f1)" \
+            --arg db_updated_at \
+              "$(jq -r '.VulnerabilityDB.UpdatedAt' trivy-filesystem-version.json)" \
+            --arg db_downloaded_at \
+              "$(jq -r '.VulnerabilityDB.DownloadedAt' trivy-filesystem-version.json)" \
+            '{schema: $schema, tag_commit: $tag_commit,
+              candidate_source_commit: $candidate_source_commit,
+              scope: "tagged-worktree-and-release-evidence.trivy-default-skips",
+              report_sha256: $report_sha256,
+              version_metadata_sha256: $version_metadata_sha256,
+              db_updated_at: $db_updated_at, db_downloaded_at: $db_downloaded_at,
+              scanners: ["vuln", "secret", "misconfig"],
+              severities: ["HIGH", "CRITICAL"], ignore_unfixed: false,
+              language_dependency_completion: "exact-final-image-scans", result: "passed"}' \
+            > strict-filesystem-scan.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
+          path: |
+            strict-filesystem-scan.json
+            trivy-filesystem.json
+            trivy-filesystem-version.json
+          if-no-files-found: error
+
+  strict-image-scan:
+    runs-on: ubuntu-24.04
+    needs: validate
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [worker, mcp]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Require the candidate package to remain private and repository-scoped
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            /orgs/Kanu-Coffee/packages/container/mcp-card-prd-detail-candidate \
+            | jq -e '
+                .package_type == "container"
+                and .visibility == "private"
+                and .repository.full_name == env.GITHUB_REPOSITORY
+              ' >/dev/null
+
+      - name: Authenticate read-only to the private candidate registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Install checksum-pinned Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_tools_dir="$RUNNER_TEMP/cardrag-release-audit-tools"
+          mkdir -p "$audit_tools_dir/trivy-unpack"
+          curl --fail --location --silent --show-error \
+            --output "$audit_tools_dir/trivy.tar.gz" \
+            https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+          echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  $audit_tools_dir/trivy.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$audit_tools_dir/trivy.tar.gz" -C "$audit_tools_dir/trivy-unpack"
+          install -m 0755 "$audit_tools_dir/trivy-unpack/trivy" "$audit_tools_dir/trivy"
+          "$audit_tools_dir/trivy" --version
+
+      - name: Install checksum-pinned OCI evidence reader
+        run: |
+          set -euo pipefail
+          registry_tools_dir="$RUNNER_TEMP/cardrag-release-registry-tools"
+          mkdir -p "$registry_tools_dir/unpack"
+          curl --fail --location --silent --show-error \
+            --output "$registry_tools_dir/go-containerregistry.tar.gz" \
+            https://github.com/google/go-containerregistry/releases/download/v0.22.0/go-containerregistry_Linux_x86_64.tar.gz
+          echo "edb74d53fad9a596860f59d1c5d04a43dfb5f441dc71f57060dd0bf39483c833  $registry_tools_dir/go-containerregistry.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$registry_tools_dir/go-containerregistry.tar.gz" \
+            -C "$registry_tools_dir/unpack" crane
+          install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
+          "$registry_tools_dir/crane" version
+
+      - name: Resolve and validate the exact receipt-bound OCI image
+        id: accepted-image
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+          WORKER_DIGEST: ${{ needs.validate.outputs.worker_digest }}
+          WORKER_PLATFORM_DIGEST: ${{ needs.validate.outputs.worker_platform_digest }}
+          WORKER_CONFIG_DIGEST: ${{ needs.validate.outputs.worker_config_digest }}
+          WORKER_ATTESTATION_DIGEST: ${{ needs.validate.outputs.worker_attestation_digest }}
+          MCP_DIGEST: ${{ needs.validate.outputs.mcp_digest }}
+          MCP_PLATFORM_DIGEST: ${{ needs.validate.outputs.mcp_platform_digest }}
+          MCP_CONFIG_DIGEST: ${{ needs.validate.outputs.mcp_config_digest }}
+          MCP_ATTESTATION_DIGEST: ${{ needs.validate.outputs.mcp_attestation_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            worker)
+              digest=$WORKER_DIGEST
+              platform_digest=$WORKER_PLATFORM_DIGEST
+              config_digest=$WORKER_CONFIG_DIGEST
+              attestation_digest=$WORKER_ATTESTATION_DIGEST
+              ;;
+            mcp)
+              digest=$MCP_DIGEST
+              platform_digest=$MCP_PLATFORM_DIGEST
+              config_digest=$MCP_CONFIG_DIGEST
+              attestation_digest=$MCP_ATTESTATION_DIGEST
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"
+          observed_digest=$("$RUNNER_TEMP/cardrag-release-registry-tools/crane" digest "$image")
+          test "$observed_digest" = "$digest"
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest "$image" \
+            > /tmp/candidate-index.json
+          python3 .github/scripts/validate-strict-json.py /tmp/candidate-index.json
+          jq -e --arg platform_digest "$platform_digest" \
+            --arg attestation_digest "$attestation_digest" \
+            -f .github/scripts/validate-candidate-oci-index.jq \
+            /tmp/candidate-index.json >/dev/null
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest \
+            "${CANDIDATE_IMAGE_REPOSITORY}@${platform_digest}" \
+            > /tmp/candidate-platform.json
+          python3 .github/scripts/validate-strict-json.py /tmp/candidate-platform.json
+          jq -e --arg config_digest "$config_digest" \
+            -f .github/scripts/validate-candidate-platform-manifest.jq \
+            /tmp/candidate-platform.json >/dev/null
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest \
+            "${CANDIDATE_IMAGE_REPOSITORY}@${attestation_digest}" \
+            > /tmp/candidate-attestation.json
+          python3 .github/scripts/validate-strict-json.py /tmp/candidate-attestation.json
+          jq -e --arg platform_digest "$platform_digest" \
+            -f .github/scripts/validate-candidate-attestation-manifest.jq \
+            /tmp/candidate-attestation.json >/dev/null
+          provenance_layer_digest=$(jq -er '
+            [.layers[] | select(
+              .mediaType == "application/vnd.in-toto+json"
+              and .annotations["in-toto.io/predicate-type"]
+                == "https://slsa.dev/provenance/v0.2"
+            )] | if length == 1 then .[0].digest else error("provenance layer count") end
+          ' /tmp/candidate-attestation.json)
+          sbom_layer_digest=$(jq -er '
+            [.layers[] | select(
+              .mediaType == "application/vnd.in-toto+json"
+              and .annotations["in-toto.io/predicate-type"] == "https://spdx.dev/Document"
+            )] | if length == 1 then .[0].digest else error("SBOM layer count") end
+          ' /tmp/candidate-attestation.json)
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" blob \
+            "${CANDIDATE_IMAGE_REPOSITORY}@${provenance_layer_digest}" \
+            > "provenance-${TARGET}.json"
+          test "$(sha256sum "provenance-${TARGET}.json" | cut -d' ' -f1)" = \
+            "${provenance_layer_digest#sha256:}"
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" blob \
+            "${CANDIDATE_IMAGE_REPOSITORY}@${sbom_layer_digest}" \
+            > "sbom-${TARGET}.json"
+          test "$(sha256sum "sbom-${TARGET}.json" | cut -d' ' -f1)" = \
+            "${sbom_layer_digest#sha256:}"
+          python3 .github/scripts/validate-strict-json.py \
+            "provenance-${TARGET}.json" "sbom-${TARGET}.json"
+          platform_digest_hex=${platform_digest#sha256:}
+          source_uri="https://github.com/Kanu-Coffee/MCP_card_prd_detail.git#${CANDIDATE_SOURCE_COMMIT}"
+          jq -e \
+            --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
+            --arg source_uri "$source_uri" \
+            --arg platform_digest_hex "$platform_digest_hex" \
+            --arg role "$TARGET" \
+            -f .github/scripts/validate-candidate-provenance.jq \
+            "provenance-${TARGET}.json" >/dev/null
+          jq -e \
+            --arg platform_digest_hex "$platform_digest_hex" \
+            -f .github/scripts/validate-candidate-sbom.jq \
+            "sbom-${TARGET}.json" >/dev/null
+          docker pull --platform linux/amd64 "$image" >/dev/null
+          test "$(docker image inspect "$image" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = \
+            "$CANDIDATE_SOURCE_COMMIT"
+          test "$(docker image inspect "$image" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = \
+            "$VERSION"
+          test "$(docker image inspect "$image" --format '{{ json .Config.Entrypoint }}')" = \
+            "[\"cardrag-${TARGET}\"]"
+          test "$(docker image inspect "$image" --format '{{ .Config.User }}')" = \
+            "10001:10001"
+          test "$(docker image inspect "$image" --format '{{ .Os }}/{{ .Architecture }}')" = \
+            "linux/amd64"
+          test "$(docker image inspect "$image" --format '{{ .Id }}')" = "$config_digest"
+          {
+            echo "image=$image"
+            echo "digest=$digest"
+            echo "platform_digest=$platform_digest"
+            echo "config_digest=$config_digest"
+            echo "attestation_digest=$attestation_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reject every HIGH or CRITICAL image finding, including unfixed findings
+        env:
+          IMAGE: ${{ steps.accepted-image.outputs.image }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cardrag-release-audit-tools/trivy" image \
+            --scanners vuln,secret \
+            --platform linux/amd64 \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output "trivy-${TARGET}.json" \
+            "$IMAGE"
+          "$RUNNER_TEMP/cardrag-release-audit-tools/trivy" --version --format json \
+            > "trivy-version-${TARGET}.json"
+          python - "trivy-version-${TARGET}.json" <<'PY'
+          import json
+          import sys
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+
+          metadata = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert metadata["Version"] == "0.74.0"
+          database = metadata["VulnerabilityDB"]
+
+          def timestamp(name: str) -> datetime:
+              value = database[name]
+              assert isinstance(value, str) and value.endswith("Z")
+              return datetime.fromisoformat(value[:-1] + "+00:00")
+
+          now = datetime.now(UTC)
+          updated_at = timestamp("UpdatedAt")
+          downloaded_at = timestamp("DownloadedAt")
+          assert updated_at <= now + timedelta(minutes=5)
+          assert downloaded_at <= now + timedelta(minutes=5)
+          assert now - updated_at <= timedelta(hours=36)
+          assert now - downloaded_at <= timedelta(hours=2)
+          PY
+
+      - name: Seal the successful exact-digest scan result
+        env:
+          DIGEST: ${{ steps.accepted-image.outputs.digest }}
+          PLATFORM_DIGEST: ${{ steps.accepted-image.outputs.platform_digest }}
+          CONFIG_DIGEST: ${{ steps.accepted-image.outputs.config_digest }}
+          ATTESTATION_DIGEST: ${{ steps.accepted-image.outputs.attestation_digest }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          jq -cnS \
+            --arg schema cardrag.strict-image-scan.v1 \
+            --arg role "$TARGET" \
+            --arg repository "$CANDIDATE_IMAGE_REPOSITORY" \
+            --arg digest "$DIGEST" \
+            --arg platform_manifest_digest "$PLATFORM_DIGEST" \
+            --arg platform_config_digest "$CONFIG_DIGEST" \
+            --arg attestation_manifest_digest "$ATTESTATION_DIGEST" \
+            --arg trivy_version 0.74.0 \
+            --arg db_updated_at "$(jq -r '.VulnerabilityDB.UpdatedAt' \
+              "trivy-version-${TARGET}.json")" \
+            --arg db_downloaded_at "$(jq -r '.VulnerabilityDB.DownloadedAt' \
+              "trivy-version-${TARGET}.json")" \
+            --arg report_sha256 "$(sha256sum "trivy-${TARGET}.json" | cut -d' ' -f1)" \
+            --arg version_metadata_sha256 \
+              "$(sha256sum "trivy-version-${TARGET}.json" | cut -d' ' -f1)" \
+            --arg sbom_sha256 "$(sha256sum "sbom-${TARGET}.json" | cut -d' ' -f1)" \
+            --arg provenance_sha256 \
+              "$(sha256sum "provenance-${TARGET}.json" | cut -d' ' -f1)" \
+            '{schema: $schema, role: $role, repository: $repository,
+              digest: $digest, platform_manifest_digest: $platform_manifest_digest,
+              platform_config_digest: $platform_config_digest,
+              attestation_manifest_digest: $attestation_manifest_digest,
+              trivy_version: $trivy_version,
+              db_updated_at: $db_updated_at, db_downloaded_at: $db_downloaded_at,
+              report_sha256: $report_sha256,
+              version_metadata_sha256: $version_metadata_sha256,
+              sbom_sha256: $sbom_sha256, provenance_sha256: $provenance_sha256,
+              scanners: ["vuln", "secret"], severities: ["HIGH", "CRITICAL"],
+              ignore_unfixed: false, result: "passed"}' \
+            > "strict-scan-${TARGET}.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: strict-scan-${{ needs.validate.outputs.version }}-${{ matrix.target }}
+          path: |
+            strict-scan-${{ matrix.target }}.json
+            trivy-${{ matrix.target }}.json
+            trivy-version-${{ matrix.target }}.json
+            sbom-${{ matrix.target }}.json
+            provenance-${{ matrix.target }}.json
+          if-no-files-found: error
+
+  registry-preflight:
+    runs-on: ubuntu-24.04
+    needs: [validate, strict-filesystem-scan, strict-image-scan]
     environment: dockerhub-public
     steps:
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Install checksum-pinned OCI digest reader
+        run: |
+          set -euo pipefail
+          registry_tools_dir="$RUNNER_TEMP/cardrag-release-registry-tools"
+          mkdir -p "$registry_tools_dir/unpack"
+          curl --fail --location --silent --show-error \
+            --output "$registry_tools_dir/go-containerregistry.tar.gz" \
+            https://github.com/google/go-containerregistry/releases/download/v0.22.0/go-containerregistry_Linux_x86_64.tar.gz
+          echo "edb74d53fad9a596860f59d1c5d04a43dfb5f441dc71f57060dd0bf39483c833  $registry_tools_dir/go-containerregistry.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$registry_tools_dir/go-containerregistry.tar.gz" \
+            -C "$registry_tools_dir/unpack" crane
+          install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
+          "$registry_tools_dir/crane" version
 
       - name: Authenticate for immutable-tag preflight
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -217,14 +718,19 @@ jobs:
         env:
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+          WORKER_DIGEST: ${{ needs.validate.outputs.worker_digest }}
+          WORKER_CONFIG_DIGEST: ${{ needs.validate.outputs.worker_config_digest }}
+          MCP_DIGEST: ${{ needs.validate.outputs.mcp_digest }}
+          MCP_CONFIG_DIGEST: ${{ needs.validate.outputs.mcp_config_digest }}
         shell: bash
         run: |
           set -euo pipefail
           resolve_digest() {
             local reference=$1 observed="" _attempt
             for _attempt in $(seq 1 24); do
-              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
-                  | awk '$1 == "Digest:" {print $2; exit}'); then
+              if observed=$("$RUNNER_TEMP/cardrag-release-registry-tools/crane" \
+                  digest "$reference" 2>/tmp/crane-error); then
                 if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                   printf '%s\n' "$observed"
                   return 0
@@ -233,7 +739,7 @@ jobs:
               sleep 5
             done
             echo "registry digest did not become readable for ${reference}" >&2
-            cat /tmp/imagetools-error >&2 || true
+            cat /tmp/crane-error >&2 || true
             return 1
           }
           pull_linux_amd64() {
@@ -248,17 +754,23 @@ jobs:
             return 1
           }
           validate_image() {
-            local reference=$1 role=$2 revision version entrypoint expected_entrypoint
+            local reference=$1 role=$2 expected_config=$3 revision version entrypoint user
+            local expected_entrypoint
             pull_linux_amd64 "$reference"
             revision=$(docker image inspect "$reference" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
             version=$(docker image inspect "$reference" \
               --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
             entrypoint=$(docker image inspect "$reference" --format '{{ json .Config.Entrypoint }}')
+            user=$(docker image inspect "$reference" --format '{{ .Config.User }}')
             expected_entrypoint="[\"cardrag-${role}\"]"
-            test "$revision" = "$GITHUB_SHA"
+            test "$revision" = "$CANDIDATE_SOURCE_COMMIT"
             test "$version" = "$VERSION"
             test "$entrypoint" = "$expected_entrypoint"
+            test "$user" = "10001:10001"
+            test "$(docker image inspect "$reference" --format '{{ .Os }}/{{ .Architecture }}')" = \
+              "linux/amd64"
+            test "$(docker image inspect "$reference" --format '{{ .Id }}')" = "$expected_config"
           }
 
           repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
@@ -269,7 +781,19 @@ jobs:
             <<<"$repository" >/dev/null
 
           for role in worker mcp; do
-            digest=""
+            case "$role" in
+              worker)
+                expected_digest=$WORKER_DIGEST
+                expected_config=$WORKER_CONFIG_DIGEST
+                ;;
+              mcp)
+                expected_digest=$MCP_DIGEST
+                expected_config=$MCP_CONFIG_DIGEST
+                ;;
+              *) exit 1 ;;
+            esac
+            [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$expected_config" =~ ^sha256:[0-9a-f]{64}$ ]]
             for tag in "$VERSION-$role" "$VERSION-$role-sha-$SHORT_SHA"; do
               reference="${IMAGE_NAME}:${tag}"
               status=$(curl --silent --show-error --retry 3 --retry-all-errors \
@@ -284,12 +808,11 @@ jobs:
                   ;;
               esac
               observed=$(resolve_digest "$reference")
-              validate_image "$reference" "$role"
-              if [[ -n "$digest" && "$digest" != "$observed" ]]; then
-                echo "immutable aliases disagree for ${role}: ${digest} != ${observed}" >&2
+              if [[ "$observed" != "$expected_digest" ]]; then
+                echo "immutable alias is not the accepted ${role} digest: ${observed}" >&2
                 exit 1
               fi
-              digest=$observed
+              validate_image "$reference" "$role" "$expected_config"
             done
           done
 
@@ -304,31 +827,91 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
         with:
           cosign-release: v3.1.3
+
+      - name: Install checksum-pinned recursive OCI copier
+        run: |
+          set -euo pipefail
+          registry_tools_dir="$RUNNER_TEMP/cardrag-release-registry-tools"
+          mkdir -p "$registry_tools_dir/unpack"
+          curl --fail --location --silent --show-error \
+            --output "$registry_tools_dir/go-containerregistry.tar.gz" \
+            https://github.com/google/go-containerregistry/releases/download/v0.22.0/go-containerregistry_Linux_x86_64.tar.gz
+          echo "edb74d53fad9a596860f59d1c5d04a43dfb5f441dc71f57060dd0bf39483c833  $registry_tools_dir/go-containerregistry.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$registry_tools_dir/go-containerregistry.tar.gz" \
+            -C "$registry_tools_dir/unpack" crane
+          install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
+          "$registry_tools_dir/crane" version
+
+      - name: Reconfirm the candidate package is still private and repository-scoped
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            /orgs/Kanu-Coffee/packages/container/mcp-card-prd-detail-candidate \
+            | jq -e '
+                .package_type == "container"
+                and .visibility == "private"
+                and .repository.full_name == env.GITHUB_REPOSITORY
+              ' >/dev/null
+
+      - name: Authenticate read-only to the private candidate registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Reuse only an interrupted release from this exact tag and commit
-        id: existing
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: strict-scan-${{ needs.validate.outputs.version }}-${{ matrix.target }}
+          path: strict-scan
+
+      - name: Download the strict filesystem scan evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
+          path: strict-filesystem-scan
+
+      - name: Publish only the receipt-bound and successfully scanned digest
+        id: resolved
         env:
+          GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+          WORKER_DIGEST: ${{ needs.validate.outputs.worker_digest }}
+          WORKER_PLATFORM_DIGEST: ${{ needs.validate.outputs.worker_platform_digest }}
+          WORKER_CONFIG_DIGEST: ${{ needs.validate.outputs.worker_config_digest }}
+          WORKER_ATTESTATION_DIGEST: ${{ needs.validate.outputs.worker_attestation_digest }}
+          MCP_DIGEST: ${{ needs.validate.outputs.mcp_digest }}
+          MCP_PLATFORM_DIGEST: ${{ needs.validate.outputs.mcp_platform_digest }}
+          MCP_CONFIG_DIGEST: ${{ needs.validate.outputs.mcp_config_digest }}
+          MCP_ATTESTATION_DIGEST: ${{ needs.validate.outputs.mcp_attestation_digest }}
         shell: bash
         run: |
           set -euo pipefail
           resolve_digest() {
             local reference=$1 observed="" _attempt
             for _attempt in $(seq 1 24); do
-              if observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
-                  | awk '$1 == "Digest:" {print $2; exit}'); then
+              if observed=$("$RUNNER_TEMP/cardrag-release-registry-tools/crane" \
+                  digest "$reference" 2>/tmp/crane-error); then
                 if [[ "$observed" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                   printf '%s\n' "$observed"
                   return 0
@@ -337,90 +920,194 @@ jobs:
               sleep 5
             done
             echo "registry digest did not become readable for ${reference}" >&2
-            cat /tmp/imagetools-error >&2 || true
+            cat /tmp/crane-error >&2 || true
             return 1
           }
-          pull_linux_amd64() {
-            local reference=$1 _attempt
-            for _attempt in $(seq 1 24); do
-              if docker pull --platform linux/amd64 "$reference" >/dev/null 2>&1; then
-                return 0
-              fi
-              sleep 5
-            done
-            echo "registry image did not become pullable for ${reference}" >&2
-            return 1
-          }
+          case "$TARGET" in
+            worker)
+              digest=$WORKER_DIGEST
+              platform_digest=$WORKER_PLATFORM_DIGEST
+              config_digest=$WORKER_CONFIG_DIGEST
+              attestation_digest=$WORKER_ATTESTATION_DIGEST
+              ;;
+            mcp)
+              digest=$MCP_DIGEST
+              platform_digest=$MCP_PLATFORM_DIGEST
+              config_digest=$MCP_CONFIG_DIGEST
+              attestation_digest=$MCP_ATTESTATION_DIGEST
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          scan_receipt="strict-scan/strict-scan-${TARGET}.json"
+          scan_report="strict-scan/trivy-${TARGET}.json"
+          version_metadata="strict-scan/trivy-version-${TARGET}.json"
+          sbom="strict-scan/sbom-${TARGET}.json"
+          provenance="strict-scan/provenance-${TARGET}.json"
+          scan_report_sha256=$(sha256sum "$scan_report" | cut -d' ' -f1)
+          version_metadata_sha256=$(sha256sum "$version_metadata" | cut -d' ' -f1)
+          sbom_sha256=$(sha256sum "$sbom" | cut -d' ' -f1)
+          provenance_sha256=$(sha256sum "$provenance" | cut -d' ' -f1)
+          jq -e --arg role "$TARGET" --arg repository "$CANDIDATE_IMAGE_REPOSITORY" \
+            --arg digest "$digest" \
+            --arg platform_manifest_digest "$platform_digest" \
+            --arg platform_config_digest "$config_digest" \
+            --arg attestation_manifest_digest "$attestation_digest" \
+            --arg report_sha256 "$scan_report_sha256" \
+            --arg version_metadata_sha256 "$version_metadata_sha256" \
+            --arg sbom_sha256 "$sbom_sha256" \
+            --arg provenance_sha256 "$provenance_sha256" \
+            --arg db_updated_at "$(jq -r '.VulnerabilityDB.UpdatedAt' "$version_metadata")" \
+            --arg db_downloaded_at \
+              "$(jq -r '.VulnerabilityDB.DownloadedAt' "$version_metadata")" '
+            type == "object"
+            and (keys == ["attestation_manifest_digest", "db_downloaded_at", "db_updated_at",
+              "digest", "ignore_unfixed", "platform_config_digest",
+              "platform_manifest_digest", "provenance_sha256", "report_sha256",
+              "repository", "result", "role", "sbom_sha256", "scanners", "schema",
+              "severities", "trivy_version", "version_metadata_sha256"])
+            and .schema == "cardrag.strict-image-scan.v1"
+            and .role == $role
+            and .repository == $repository
+            and .digest == $digest
+            and .platform_manifest_digest == $platform_manifest_digest
+            and .platform_config_digest == $platform_config_digest
+            and .attestation_manifest_digest == $attestation_manifest_digest
+            and .trivy_version == "0.74.0"
+            and .db_updated_at == $db_updated_at
+            and .db_downloaded_at == $db_downloaded_at
+            and .report_sha256 == $report_sha256
+            and .version_metadata_sha256 == $version_metadata_sha256
+            and .sbom_sha256 == $sbom_sha256
+            and .provenance_sha256 == $provenance_sha256
+            and .scanners == ["vuln", "secret"]
+            and .severities == ["HIGH", "CRITICAL"]
+            and .ignore_unfixed == false
+            and .result == "passed"
+          ' "$scan_receipt" >/dev/null
+          filesystem_receipt="strict-filesystem-scan/strict-filesystem-scan.json"
+          filesystem_report="strict-filesystem-scan/trivy-filesystem.json"
+          filesystem_version="strict-filesystem-scan/trivy-filesystem-version.json"
+          jq -e \
+            --arg tag_commit "$GITHUB_SHA" \
+            --arg candidate_source_commit "$CANDIDATE_SOURCE_COMMIT" \
+            --arg report_sha256 "$(sha256sum "$filesystem_report" | cut -d' ' -f1)" \
+            --arg version_metadata_sha256 \
+              "$(sha256sum "$filesystem_version" | cut -d' ' -f1)" \
+            --arg db_updated_at "$(jq -r '.VulnerabilityDB.UpdatedAt' "$filesystem_version")" \
+            --arg db_downloaded_at \
+              "$(jq -r '.VulnerabilityDB.DownloadedAt' "$filesystem_version")" '
+            type == "object"
+            and .schema == "cardrag.strict-filesystem-scan.v1"
+            and .tag_commit == $tag_commit
+            and .candidate_source_commit == $candidate_source_commit
+            and .scope == "tagged-worktree-and-release-evidence.trivy-default-skips"
+            and .report_sha256 == $report_sha256
+            and .version_metadata_sha256 == $version_metadata_sha256
+            and .db_updated_at == $db_updated_at
+            and .db_downloaded_at == $db_downloaded_at
+            and .scanners == ["vuln", "secret", "misconfig"]
+            and .severities == ["HIGH", "CRITICAL"]
+            and .ignore_unfixed == false
+            and .language_dependency_completion == "exact-final-image-scans"
+            and .result == "passed"
+          ' "$filesystem_receipt" >/dev/null
+          jq -e '
+            ([.Results[]?.Vulnerabilities[]?
+              | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length == 0)
+            and ([.Results[]?.Secrets[]?
+              | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length == 0)
+            and ([.Results[]?.Misconfigurations[]?
+              | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length == 0)
+          ' "$filesystem_report" >/dev/null
+          python - "$version_metadata" <<'PY'
+          import json
+          import sys
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
 
-          digest=""
-          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
-            reference="${IMAGE_NAME}:${tag}"
-            status=$(curl --silent --show-error --retry 3 --retry-all-errors \
-              --output /tmp/dockerhub-tag.json --write-out '%{http_code}' \
-              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
-            case "$status" in
-              404) continue ;;
-              200) ;;
-              *)
-                echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
-                exit 1
-                ;;
-            esac
-            observed=$(resolve_digest "$reference")
-            pull_linux_amd64 "$reference"
-            revision=$(docker image inspect "$reference" \
-              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-            image_version=$(docker image inspect "$reference" \
-              --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
-            entrypoint=$(docker image inspect "$reference" --format '{{ json .Config.Entrypoint }}')
-            test "$revision" = "$GITHUB_SHA"
-            test "$image_version" = "$VERSION"
-            test "$entrypoint" = "[\"cardrag-${TARGET}\"]"
-            if [[ -n "$digest" && "$digest" != "$observed" ]]; then
-              echo "immutable aliases disagree for ${TARGET}: ${digest} != ${observed}" >&2
-              exit 1
-            fi
-            digest=$observed
-          done
-          if [[ -n "$digest" ]]; then
-            echo "reuse=true" >> "$GITHUB_OUTPUT"
-            echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          else
-            echo "reuse=false" >> "$GITHUB_OUTPUT"
-          fi
+          metadata = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert metadata["Version"] == "0.74.0"
+          database = metadata["VulnerabilityDB"]
 
-      - name: Build and push role image
-        id: build
-        if: steps.existing.outputs.reuse != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: Dockerfile
-          target: ${{ matrix.target }}
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.version }}-${{ matrix.target }}
-            ${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.version }}-${{ matrix.target }}-sha-${{ needs.validate.outputs.short_sha }}
-          labels: |
-            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          build-args: |
-            APP_VERSION=${{ needs.validate.outputs.version }}
-            VCS_REF=${{ github.sha }}
-          provenance: mode=max
-          sbom: true
+          def timestamp(name: str) -> datetime:
+              value = database[name]
+              assert isinstance(value, str) and value.endswith("Z")
+              return datetime.fromisoformat(value[:-1] + "+00:00")
 
-      - name: Restore a missing immutable alias after an interrupted run
-        if: steps.existing.outputs.reuse == 'true'
-        env:
-          DIGEST: ${{ steps.existing.outputs.digest }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          now = datetime.now(UTC)
+          updated_at = timestamp("UpdatedAt")
+          downloaded_at = timestamp("DownloadedAt")
+          assert updated_at <= now + timedelta(minutes=5)
+          assert downloaded_at <= now + timedelta(minutes=5)
+          assert now - updated_at <= timedelta(hours=36)
+          assert now - downloaded_at <= timedelta(hours=2)
+          PY
+          python - "$filesystem_version" <<'PY'
+          import json
+          import sys
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+
+          metadata = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert metadata["Version"] == "0.74.0"
+          database = metadata["VulnerabilityDB"]
+
+          def timestamp(name: str) -> datetime:
+              value = database[name]
+              assert isinstance(value, str) and value.endswith("Z")
+              return datetime.fromisoformat(value[:-1] + "+00:00")
+
+          now = datetime.now(UTC)
+          updated_at = timestamp("UpdatedAt")
+          downloaded_at = timestamp("DownloadedAt")
+          assert updated_at <= now + timedelta(minutes=5)
+          assert downloaded_at <= now + timedelta(minutes=5)
+          assert now - updated_at <= timedelta(hours=36)
+          assert now - downloaded_at <= timedelta(hours=2)
+          PY
+          source_reference="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"
+          test "$(resolve_digest "$source_reference")" = "$digest"
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest \
+            "${CANDIDATE_IMAGE_REPOSITORY}@${platform_digest}" \
+            > /tmp/source-platform.json
+          python3 .github/scripts/validate-strict-json.py /tmp/source-platform.json
+          jq -e --arg config_digest "$config_digest" \
+            -f .github/scripts/validate-candidate-platform-manifest.jq \
+            /tmp/source-platform.json >/dev/null
+          docker pull --platform linux/amd64 "$source_reference" >/dev/null
+          test "$(docker image inspect "$source_reference" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = \
+            "$CANDIDATE_SOURCE_COMMIT"
+          test "$(docker image inspect "$source_reference" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = \
+            "$VERSION"
+          test "$(docker image inspect "$source_reference" \
+            --format '{{ json .Config.Entrypoint }}')" = "[\"cardrag-${TARGET}\"]"
+          test "$(docker image inspect "$source_reference" --format '{{ .Config.User }}')" = \
+            "10001:10001"
+          test "$(docker image inspect "$source_reference" --format '{{ .Id }}')" = "$config_digest"
+
+          test "$(git cat-file -t "refs/tags/v$VERSION")" = tag
+          local_tag_object=$(git rev-parse "refs/tags/v${VERSION}")
+          test "$(git rev-parse "refs/tags/v${VERSION}^{commit}")" = "$GITHUB_SHA"
+          remote_tag_ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}")
+          test "$(jq -r '.object.type' <<<"$remote_tag_ref")" = tag
+          remote_tag_object=$(jq -r '.object.sha' <<<"$remote_tag_ref")
+          test "$remote_tag_object" = "$local_tag_object"
+          remote_tag=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/tags/${remote_tag_object}")
+          test "$(jq -r '.object.type' <<<"$remote_tag")" = commit
+          remote_tag_commit=$(jq -r '.object.sha' <<<"$remote_tag")
+          test "$remote_tag_commit" = "$GITHUB_SHA"
+          repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
+            "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
+          jq -e --arg rule "$IMMUTABLE_TAG_RULE" \
+            '.immutable_tags_settings.enabled == true
+             and .immutable_tags_settings.rules == [$rule]' \
+            <<<"$repository" >/dev/null
+
           for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
             reference="${IMAGE_NAME}:${tag}"
             status=$(curl --silent --show-error --retry 3 --retry-all-errors \
@@ -428,52 +1115,67 @@ jobs:
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
             case "$status" in
               404)
-                docker buildx imagetools create --tag "$reference" "${IMAGE_NAME}@${DIGEST}"
+                "$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy \
+                  "$source_reference" "$reference"
                 ;;
-              200) ;;
+              200)
+                test "$(resolve_digest "$reference")" = "$digest"
+                ;;
               *)
                 echo "Docker Hub tag lookup failed for ${reference}: HTTP ${status}" >&2
                 exit 1
                 ;;
             esac
+            test "$(resolve_digest "$reference")" = "$digest"
           done
-
-      - name: Resolve and verify both immutable aliases
-        id: resolved
-        env:
-          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
-          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
-          REUSED: ${{ steps.existing.outputs.reuse }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$REUSED" = true ]]; then
-            digest=$EXISTING_DIGEST
-          else
-            digest=$BUILT_DIGEST
-          fi
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          for tag in "$VERSION-$TARGET" "$VERSION-$TARGET-sha-$SHORT_SHA"; do
-            reference="${IMAGE_NAME}:${tag}"
-            observed=""
-            for _attempt in $(seq 1 24); do
-              observed=$(docker buildx imagetools inspect "$reference" 2>/tmp/imagetools-error \
-                | awk '$1 == "Digest:" {print $2; exit}') || true
-              if [[ "$observed" == "$digest" ]]; then
-                break
-              fi
-              sleep 5
-            done
-            if [[ "$observed" != "$digest" ]]; then
-              echo "immutable alias mismatch for ${reference}: ${observed:-missing}" >&2
-              cat /tmp/imagetools-error >&2 || true
-              exit 1
-            fi
-          done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest \
+            "${IMAGE_NAME}@${digest}" \
+            > /tmp/published-index.json
+          python3 .github/scripts/validate-strict-json.py /tmp/published-index.json
+          jq -e --arg platform_digest "$platform_digest" \
+            --arg attestation_digest "$attestation_digest" \
+            -f .github/scripts/validate-candidate-oci-index.jq \
+            /tmp/published-index.json >/dev/null
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest \
+            "${IMAGE_NAME}@${platform_digest}" > /tmp/published-platform.json
+          python3 .github/scripts/validate-strict-json.py /tmp/published-platform.json
+          jq -e --arg config_digest "$config_digest" \
+            -f .github/scripts/validate-candidate-platform-manifest.jq \
+            /tmp/published-platform.json >/dev/null
+          cmp --silent /tmp/source-platform.json /tmp/published-platform.json
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" manifest \
+            "${IMAGE_NAME}@${attestation_digest}" > /tmp/published-attestation.json
+          python3 .github/scripts/validate-strict-json.py /tmp/published-attestation.json
+          jq -e --arg platform_digest "$platform_digest" \
+            -f .github/scripts/validate-candidate-attestation-manifest.jq \
+            /tmp/published-attestation.json >/dev/null
+          published_provenance_digest=$(jq -er '
+            [.layers[] | select(
+              .annotations["in-toto.io/predicate-type"]
+                == "https://slsa.dev/provenance/v0.2"
+            )] | if length == 1 then .[0].digest else error("provenance layer count") end
+          ' /tmp/published-attestation.json)
+          published_sbom_digest=$(jq -er '
+            [.layers[] | select(
+              .annotations["in-toto.io/predicate-type"] == "https://spdx.dev/Document"
+            )] | if length == 1 then .[0].digest else error("SBOM layer count") end
+          ' /tmp/published-attestation.json)
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" blob \
+            "${IMAGE_NAME}@${published_provenance_digest}" > /tmp/published-provenance.json
+          "$RUNNER_TEMP/cardrag-release-registry-tools/crane" blob \
+            "${IMAGE_NAME}@${published_sbom_digest}" > /tmp/published-sbom.json
+          cmp --silent "$provenance" /tmp/published-provenance.json
+          cmp --silent "$sbom" /tmp/published-sbom.json
+          docker pull --platform linux/amd64 "${IMAGE_NAME}@${digest}" >/dev/null
+          test "$(docker image inspect "${IMAGE_NAME}@${digest}" --format '{{ .Id }}')" = \
+            "$config_digest"
+          {
+            echo "digest=$digest"
+            echo "platform_digest=$platform_digest"
+            echo "config_digest=$config_digest"
+            echo "attestation_digest=$attestation_digest"
+            echo "scan_receipt_sha256=$(sha256sum "$scan_receipt" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Ensure and verify exact-source keyless signature
         id: signature
@@ -531,9 +1233,14 @@ jobs:
       - name: Record role digest
         env:
           DIGEST: ${{ steps.resolved.outputs.digest }}
+          PLATFORM_DIGEST: ${{ steps.resolved.outputs.platform_digest }}
+          CONFIG_DIGEST: ${{ steps.resolved.outputs.config_digest }}
+          ATTESTATION_DIGEST: ${{ steps.resolved.outputs.attestation_digest }}
+          SCAN_RECEIPT_SHA256: ${{ steps.resolved.outputs.scan_receipt_sha256 }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
           SIGNATURE_SHA256: ${{ steps.signature.outputs.sha256 }}
         run: |
           python - <<'PY'
@@ -543,19 +1250,47 @@ jobs:
 
           role = os.environ["TARGET"]
           digest = os.environ["DIGEST"]
+          scan_receipt_path = Path("strict-scan") / f"strict-scan-{role}.json"
+          scan_receipt = json.loads(scan_receipt_path.read_text(encoding="utf-8"))
+          assert scan_receipt["role"] == role
+          assert scan_receipt["digest"] == digest
+          assert scan_receipt["platform_manifest_digest"] == os.environ["PLATFORM_DIGEST"]
+          assert scan_receipt["platform_config_digest"] == os.environ["CONFIG_DIGEST"]
+          assert scan_receipt["attestation_manifest_digest"] == os.environ[
+              "ATTESTATION_DIGEST"
+          ]
           manifest = {
-              "schema": "cardrag.container-release-part.v4",
+              "schema": "cardrag.container-release-part.v5",
               "role": role,
               "version": os.environ["VERSION"],
               "git_sha": os.environ["GITHUB_SHA"],
+              "candidate_source_commit": os.environ["CANDIDATE_SOURCE_COMMIT"],
+              "candidate_image_repository": os.environ["CANDIDATE_IMAGE_REPOSITORY"],
               "image": os.environ["IMAGE_NAME"],
               "digest": digest,
+              "platform_manifest_digest": os.environ["PLATFORM_DIGEST"],
+              "platform_config_digest": os.environ["CONFIG_DIGEST"],
+              "attestation_manifest_digest": os.environ["ATTESTATION_DIGEST"],
               "platforms": ["linux/amd64"],
               "tags": [
                   f'{os.environ["VERSION"]}-{role}',
                   f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
               ],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "strict_scan": {
+                  "receipt_path": scan_receipt_path.as_posix(),
+                  "receipt_sha256": os.environ["SCAN_RECEIPT_SHA256"],
+                  "report_path": f"strict-scan/trivy-{role}.json",
+                  "report_sha256": scan_receipt["report_sha256"],
+                  "version_metadata_path": f"strict-scan/trivy-version-{role}.json",
+                  "version_metadata_sha256": scan_receipt["version_metadata_sha256"],
+                  "sbom_path": f"strict-scan/sbom-{role}.json",
+                  "sbom_sha256": scan_receipt["sbom_sha256"],
+                  "provenance_path": f"strict-scan/provenance-{role}.json",
+                  "provenance_sha256": scan_receipt["provenance_sha256"],
+                  "db_updated_at": scan_receipt["db_updated_at"],
+                  "db_downloaded_at": scan_receipt["db_downloaded_at"],
+              },
               "signature": {
                   "kind": "github-actions-oidc-keyless-cosign",
                   "evidence_path": f"cosign-{role}.json",
@@ -578,12 +1313,17 @@ jobs:
           path: |
             release-${{ matrix.target }}.json
             cosign-${{ matrix.target }}.json
+            strict-scan/strict-scan-${{ matrix.target }}.json
+            strict-scan/trivy-${{ matrix.target }}.json
+            strict-scan/trivy-version-${{ matrix.target }}.json
+            strict-scan/sbom-${{ matrix.target }}.json
+            strict-scan/provenance-${{ matrix.target }}.json
           if-no-files-found: error
           overwrite: true
 
   release:
     runs-on: ubuntu-24.04
-    needs: [validate, publish]
+    needs: [validate, publish, strict-filesystem-scan]
     permissions:
       actions: read
       contents: write
@@ -604,10 +1344,25 @@ jobs:
           name: release-${{ needs.validate.outputs.version }}-mcp
           path: release-parts
 
+      - name: Download strict filesystem scan evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
+          path: release-parts/filesystem
+
       - name: Revalidate tag and assemble deterministic release metadata
         env:
           VERSION: ${{ needs.validate.outputs.version }}
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+          WORKER_DIGEST: ${{ needs.validate.outputs.worker_digest }}
+          WORKER_PLATFORM_DIGEST: ${{ needs.validate.outputs.worker_platform_digest }}
+          WORKER_CONFIG_DIGEST: ${{ needs.validate.outputs.worker_config_digest }}
+          WORKER_ATTESTATION_DIGEST: ${{ needs.validate.outputs.worker_attestation_digest }}
+          MCP_DIGEST: ${{ needs.validate.outputs.mcp_digest }}
+          MCP_PLATFORM_DIGEST: ${{ needs.validate.outputs.mcp_platform_digest }}
+          MCP_CONFIG_DIGEST: ${{ needs.validate.outputs.mcp_config_digest }}
+          MCP_ATTESTATION_DIGEST: ${{ needs.validate.outputs.mcp_attestation_digest }}
         run: |
           set -euo pipefail
           test "$(git cat-file -t "refs/tags/v$VERSION")" = tag
@@ -634,16 +1389,90 @@ jobs:
           expected_roles = {"worker", "mcp"}
           assert len(parts) == 2, role_paths
           assert set(roles) == expected_roles, roles
-          assert all(part["schema"] == "cardrag.container-release-part.v4" for part in parts)
+          assert all(part["schema"] == "cardrag.container-release-part.v5" for part in parts)
           assert all(part["version"] == os.environ["VERSION"] for part in parts)
           assert all(part["git_sha"] == os.environ["GITHUB_SHA"] for part in parts)
+          assert all(
+              part["candidate_source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
+              for part in parts
+          )
           assert all(part["image"] == os.environ["IMAGE_NAME"] for part in parts)
+          assert all(
+              part["candidate_image_repository"] == os.environ["CANDIDATE_IMAGE_REPOSITORY"]
+              for part in parts
+          )
           assert all(part["workflow"] == os.environ["GITHUB_WORKFLOW_REF"] for part in parts)
           assert len({part["digest"] for part in parts}) == 2
 
           assets = Path("release-assets")
           assets.mkdir()
+          filesystem_source = source / "filesystem"
+          filesystem_receipt_path = filesystem_source / "strict-filesystem-scan.json"
+          filesystem_report_path = filesystem_source / "trivy-filesystem.json"
+          filesystem_version_path = filesystem_source / "trivy-filesystem-version.json"
+          filesystem_receipt = json.loads(
+              filesystem_receipt_path.read_text(encoding="utf-8")
+          )
+          assert filesystem_receipt["schema"] == "cardrag.strict-filesystem-scan.v1"
+          assert filesystem_receipt["tag_commit"] == os.environ["GITHUB_SHA"]
+          assert filesystem_receipt["candidate_source_commit"] == (
+              os.environ["CANDIDATE_SOURCE_COMMIT"]
+          )
+          assert filesystem_receipt["scope"] == (
+              "tagged-worktree-and-release-evidence.trivy-default-skips"
+          )
+          assert filesystem_receipt["scanners"] == ["vuln", "secret", "misconfig"]
+          assert filesystem_receipt["severities"] == ["HIGH", "CRITICAL"]
+          assert filesystem_receipt["ignore_unfixed"] is False
+          assert filesystem_receipt["language_dependency_completion"] == (
+              "exact-final-image-scans"
+          )
+          assert filesystem_receipt["result"] == "passed"
+          assert hashlib.sha256(filesystem_report_path.read_bytes()).hexdigest() == (
+              filesystem_receipt["report_sha256"]
+          )
+          assert hashlib.sha256(filesystem_version_path.read_bytes()).hexdigest() == (
+              filesystem_receipt["version_metadata_sha256"]
+          )
+          filesystem_version = json.loads(
+              filesystem_version_path.read_text(encoding="utf-8")
+          )
+          assert filesystem_version["Version"] == "0.74.0"
+          assert filesystem_version["VulnerabilityDB"]["UpdatedAt"] == (
+              filesystem_receipt["db_updated_at"]
+          )
+          assert filesystem_version["VulnerabilityDB"]["DownloadedAt"] == (
+              filesystem_receipt["db_downloaded_at"]
+          )
+          filesystem_scan = {
+              "receipt_path": filesystem_receipt_path.name,
+              "receipt_sha256": hashlib.sha256(
+                  filesystem_receipt_path.read_bytes()
+              ).hexdigest(),
+              "report_path": filesystem_report_path.name,
+              "report_sha256": filesystem_receipt["report_sha256"],
+              "version_metadata_path": filesystem_version_path.name,
+              "version_metadata_sha256": filesystem_receipt["version_metadata_sha256"],
+              "db_updated_at": filesystem_receipt["db_updated_at"],
+              "db_downloaded_at": filesystem_receipt["db_downloaded_at"],
+          }
+          for filesystem_path in (
+              filesystem_receipt_path,
+              filesystem_report_path,
+              filesystem_version_path,
+          ):
+              (assets / filesystem_path.name).write_bytes(filesystem_path.read_bytes())
           for role, part in roles.items():
+              assert part["digest"] == os.environ[f"{role.upper()}_DIGEST"], role
+              assert part["platform_manifest_digest"] == os.environ[
+                  f"{role.upper()}_PLATFORM_DIGEST"
+              ], role
+              assert part["platform_config_digest"] == os.environ[
+                  f"{role.upper()}_CONFIG_DIGEST"
+              ], role
+              assert part["attestation_manifest_digest"] == os.environ[
+                  f"{role.upper()}_ATTESTATION_DIGEST"
+              ], role
               assert part["platforms"] == ["linux/amd64"], role
               assert part["tags"] == [
                   f'{os.environ["VERSION"]}-{role}',
@@ -674,17 +1503,51 @@ jobs:
                   and item["critical"]["type"] == "https://sigstore.dev/cosign/sign/v1"
                   for item in verified
               ), role
+              strict_scan = part["strict_scan"]
+              scan_receipt_path = source / strict_scan["receipt_path"]
+              scan_report_path = source / strict_scan["report_path"]
+              version_metadata_path = source / strict_scan["version_metadata_path"]
+              sbom_path = source / strict_scan["sbom_path"]
+              provenance_path = source / strict_scan["provenance_path"]
+              for scan_path, expected_sha256 in (
+                  (scan_receipt_path, strict_scan["receipt_sha256"]),
+                  (scan_report_path, strict_scan["report_sha256"]),
+                  (version_metadata_path, strict_scan["version_metadata_sha256"]),
+                  (sbom_path, strict_scan["sbom_sha256"]),
+                  (provenance_path, strict_scan["provenance_sha256"]),
+              ):
+                  assert scan_path.is_file(), (role, scan_path)
+                  assert hashlib.sha256(scan_path.read_bytes()).hexdigest() == expected_sha256
+              scan_receipt = json.loads(scan_receipt_path.read_text(encoding="utf-8"))
+              assert scan_receipt["role"] == role
+              assert scan_receipt["repository"] == os.environ["CANDIDATE_IMAGE_REPOSITORY"]
+              assert scan_receipt["digest"] == part["digest"]
+              assert scan_receipt["result"] == "passed"
+              assert scan_receipt["ignore_unfixed"] is False
+              assert scan_receipt["db_updated_at"] == strict_scan["db_updated_at"]
+              assert scan_receipt["db_downloaded_at"] == strict_scan["db_downloaded_at"]
               (assets / f"release-{role}.json").write_bytes(
                   (source / f"release-{role}.json").read_bytes()
               )
               (assets / f"cosign-{role}.json").write_bytes(evidence.read_bytes())
+              for scan_path in (
+                  scan_receipt_path,
+                  scan_report_path,
+                  version_metadata_path,
+                  sbom_path,
+                  provenance_path,
+              ):
+                  (assets / scan_path.name).write_bytes(scan_path.read_bytes())
 
           manifest = {
-              "schema": "cardrag.container-release.v4",
+              "schema": "cardrag.container-release.v5",
               "version": os.environ["VERSION"],
               "git_sha": os.environ["GITHUB_SHA"],
+              "candidate_source_commit": os.environ["CANDIDATE_SOURCE_COMMIT"],
+              "candidate_image_repository": os.environ["CANDIDATE_IMAGE_REPOSITORY"],
               "image": os.environ["IMAGE_NAME"],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "strict_filesystem_scan": filesystem_scan,
               "roles": {role: roles[role] for role in ("worker", "mcp")},
           }
           (assets / "release-manifest.json").write_text(
@@ -703,9 +1566,11 @@ jobs:
               [
                   "",
                   f"Git commit: `{os.environ['GITHUB_SHA']}`",
+                  f"Candidate source commit: `{os.environ['CANDIDATE_SOURCE_COMMIT']}`",
                   "",
-                  "첨부된 `release-manifest.json`, 역할별 manifest, Cosign 검증 결과와 "
-                  "`SHA256SUMS`에서 게시 증거를 확인할 수 있습니다.",
+                  "첨부된 `release-manifest.json`, 역할별 manifest, strict image/filesystem "
+                  "Trivy JSON/DB metadata, Cosign 검증 결과와 `SHA256SUMS`에서 게시 증거를 "
+                  "확인할 수 있습니다.",
               ]
           )
           Path("release-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
@@ -718,7 +1583,20 @@ jobs:
               cosign-worker.json \
               release-manifest.json \
               release-mcp.json \
-              release-worker.json > SHA256SUMS
+              release-worker.json \
+              provenance-mcp.json \
+              provenance-worker.json \
+              sbom-mcp.json \
+              sbom-worker.json \
+              strict-scan-mcp.json \
+              strict-scan-worker.json \
+              strict-filesystem-scan.json \
+              trivy-filesystem.json \
+              trivy-filesystem-version.json \
+              trivy-mcp.json \
+              trivy-version-mcp.json \
+              trivy-version-worker.json \
+              trivy-worker.json > SHA256SUMS
           )
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -742,6 +1620,19 @@ jobs:
             release-assets/release-mcp.json
             release-assets/cosign-worker.json
             release-assets/cosign-mcp.json
+            release-assets/sbom-worker.json
+            release-assets/sbom-mcp.json
+            release-assets/provenance-worker.json
+            release-assets/provenance-mcp.json
+            release-assets/strict-scan-worker.json
+            release-assets/strict-scan-mcp.json
+            release-assets/strict-filesystem-scan.json
+            release-assets/trivy-filesystem.json
+            release-assets/trivy-filesystem-version.json
+            release-assets/trivy-worker.json
+            release-assets/trivy-mcp.json
+            release-assets/trivy-version-worker.json
+            release-assets/trivy-version-mcp.json
             release-assets/SHA256SUMS
           )
           (cd release-assets && sha256sum --check SHA256SUMS)
@@ -884,6 +1775,19 @@ jobs:
             release-assets/release-mcp.json
             release-assets/cosign-worker.json
             release-assets/cosign-mcp.json
+            release-assets/sbom-worker.json
+            release-assets/sbom-mcp.json
+            release-assets/provenance-worker.json
+            release-assets/provenance-mcp.json
+            release-assets/strict-scan-worker.json
+            release-assets/strict-scan-mcp.json
+            release-assets/strict-filesystem-scan.json
+            release-assets/trivy-filesystem.json
+            release-assets/trivy-filesystem-version.json
+            release-assets/trivy-worker.json
+            release-assets/trivy-mcp.json
+            release-assets/trivy-version-worker.json
+            release-assets/trivy-version-mcp.json
             release-assets/SHA256SUMS
           )
           (cd release-assets && sha256sum --check SHA256SUMS)

@@ -1,4 +1,4 @@
-"""FastAPI edge and the eight public MCP tools."""
+"""FastAPI edge with eight default MCP tools and one optional experimental tool."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,6 +21,7 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from cardrag_mcp.config import Settings
+from cardrag_mcp.experimental_map_reduce import ExperimentalMapReduceLane
 from cardrag_mcp.models import (
     ContractSearchRequest,
     SearchFilters,
@@ -102,6 +103,7 @@ def build_mcp_server(
     repository: ServingRepository,
     store: GenerationStore,
     settings: Settings,
+    experimental_map_reduce: ExperimentalMapReduceLane | None = None,
 ) -> MCPServer:
     server = MCPServer(
         "CardRAG",
@@ -247,6 +249,19 @@ def build_mcp_server(
             raise ValueError("source page not found")
         return value.model_dump(mode="json")
 
+    if experimental_map_reduce is not None:
+
+        @server.tool()
+        async def experimental_long_context_audit(
+            query: str,
+            action: Literal["start", "poll", "cancel"] = "start",
+            job_id: str | None = None,
+        ) -> dict[str, Any]:
+            """Start, poll, or cancel a default-off audit-only LLM job."""
+
+            result = await experimental_map_reduce.run(query, action=action, job_id=job_id)
+            return result.model_dump(mode="json")
+
     @server.resource("cardrag://issuers", mime_type="application/json")
     async def issuers_resource() -> str:
         import json
@@ -305,11 +320,17 @@ def build_app(
     *,
     updater: WebDAVUpdater | None = None,
     metrics: Metrics | None = None,
+    experimental_map_reduce: ExperimentalMapReduceLane | None = None,
 ) -> FastAPI:
     """Build the complete ASGI app around already-created runtime dependencies."""
 
     metrics = metrics or Metrics.create()
-    server = build_mcp_server(repository, store, settings)
+    server = build_mcp_server(
+        repository,
+        store,
+        settings,
+        experimental_map_reduce,
+    )
     public = urlsplit(str(settings.mcp_public_base_url))
     public_origin = urlunsplit((public.scheme, public.netloc, "", "", ""))
     mcp_app = server.streamable_http_app(
@@ -363,7 +384,11 @@ def build_app(
                     if repository.reranker_shadow is not None:
                         await repository.reranker_shadow.close()
                 finally:
-                    await repository.embedder.close()
+                    try:
+                        if experimental_map_reduce is not None:
+                            await experimental_map_reduce.close()
+                    finally:
+                        await repository.embedder.close()
 
     app = FastAPI(
         title="CardRAG MCP",
@@ -535,6 +560,7 @@ def build_app(
     app.mount("/", mcp_app)
     app.state.mcp_server = server
     app.state.metrics = metrics
+    app.state.experimental_map_reduce = experimental_map_reduce
     return app
 
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -86,6 +90,7 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
         assert name in worker
     assert "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-2147483648" in worker_base
     assert 'CARDRAG_WORKER_MINIMUM_START_FREE_BYTES: "34359738368"' in worker
+    assert "CARDRAG_ENABLED_ISSUERS: kb,samsung,shinhan,woori" in worker
     assert "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-34359738368" not in worker
     assert "CARDRAG_MCP_STATE_VOLUME" in mcp_base
     assert "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES" in mcp_base
@@ -96,10 +101,141 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "CARDRAG_RERANKER_SHADOW_MAX_CANDIDATES" in mcp_base
     assert "CARDRAG_RERANKER_SHADOW_TIMEOUT_SECONDS" in mcp_base
     assert "CARDRAG_RERANKER_SHADOW_ENABLED" in mcp
+    assert 'CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED: "false"' in mcp
     assert "cardrag-worker_worker-state" not in worker_base
     assert "cardrag-mcp_mcp-state" not in mcp_base
     assert "cardrag-worker-v110-state" in worker_base
     assert "cardrag-mcp-v110-state" in mcp_base
+
+
+def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise AssertionError("docker compose is required to verify the release candidate config")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CARDRAG_CANDIDATE_WEBDAV_BASE_URL": "https://candidate.invalid/webdav",
+            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18010",
+            "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST": "sha256:" + "a" * 64,
+            "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST": "sha256:" + "b" * 64,
+            "CARDRAG_WORKER_IMAGE": "attacker.invalid/worker:local",
+            "CARDRAG_MCP_IMAGE": "attacker.invalid/mcp:local",
+            "CARDRAG_ENABLED_ISSUERS": "woori",
+            "CARDRAG_STABLE_PUBLICATION_APPROVED": "true",
+            "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED": "true",
+            "CARDRAG_REMOTE_GC_APPROVED": "true",
+            "CARDRAG_COLLECT_REMOTE_GARBAGE": "true",
+            "CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED": "true",
+        }
+    )
+    capacity = {
+        "CARDRAG_WORKER_MAX_STATE_BYTES": "68719476736",
+        "CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES": "2147483648",
+        "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES": "17179869184",
+        "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES": "4294967296",
+        "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES": "34359738368",
+        "CARDRAG_MCP_MAX_VECTOR_BYTES": "1073741824",
+        "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES": "1073741824",
+        "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES": "17179869184",
+        "CARDRAG_MCP_MAX_SERVING_DATABASE_BYTES": "4294967296",
+        "CARDRAG_MCP_MAX_GENERATION_DOWNLOAD_BYTES": "34359738368",
+        "CARDRAG_MCP_MAX_STATE_BYTES": "68719476736",
+        "CARDRAG_MCP_RESERVED_FREE_SPACE_BYTES": "2147483648",
+        "CARDRAG_MCP_EXHAUSTIVE_AUDIT_MAX_JOBS": "32",
+        "CARDRAG_MCP_EXHAUSTIVE_AUDIT_MAX_TOTAL_BYTES": "2147483648",
+        "CARDRAG_MCP_EXHAUSTIVE_AUDIT_MAX_ARTIFACT_BYTES": "268435456",
+        "CARDRAG_MCP_RERANKER_AUDIT_MAX_JOBS": "1024",
+        "CARDRAG_MCP_RERANKER_AUDIT_MAX_TOTAL_BYTES": "536870912",
+        "CARDRAG_MCP_RERANKER_AUDIT_MAX_ARTIFACT_BYTES": "8388608",
+    }
+    environment.update({name: "1" for name in capacity})
+
+    def render(role: str) -> dict[str, object]:
+        result = subprocess.run(  # noqa: S603 - executable and role are test-controlled
+            [
+                docker,
+                "compose",
+                "-f",
+                f"deploy/{role}/compose.yaml",
+                "-f",
+                f"deploy/{role}/compose.candidate.yaml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    worker_service = render("worker")["services"]["worker"]
+    worker_environment = worker_service["environment"]
+    assert worker_service["image"] == (
+        "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@"
+        + environment["CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST"]
+    )
+    assert worker_service.get("build") is None
+    assert worker_service["pull_policy"] == "always"
+    assert worker_service["user"] == "10001:10001"
+    assert worker_service["read_only"] is True
+    assert worker_service["cap_drop"] == ["ALL"]
+    assert worker_service["security_opt"] == ["no-new-privileges:true"]
+    assert worker_environment["CARDRAG_ENABLED_ISSUERS"] == "kb,samsung,shinhan,woori"
+    assert worker_environment["CARDRAG_STABLE_PUBLICATION_APPROVED"] == "false"
+    assert worker_environment["CARDRAG_OCR_CACHE_PUBLICATION_APPROVED"] == "false"
+    assert worker_environment["CARDRAG_REMOTE_GC_APPROVED"] == "false"
+    assert worker_environment["CARDRAG_COLLECT_REMOTE_GARBAGE"] == "false"
+    for name, expected in capacity.items():
+        if name.startswith("CARDRAG_WORKER_"):
+            assert worker_environment[name] == expected
+
+    mcp_service = render("mcp")["services"]["mcp"]
+    mcp_environment = mcp_service["environment"]
+    assert mcp_service["image"] == (
+        "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@"
+        + environment["CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"]
+    )
+    assert mcp_service.get("build") is None
+    assert mcp_service["pull_policy"] == "always"
+    assert mcp_service["user"] == "10001:10001"
+    assert mcp_service["read_only"] is True
+    assert mcp_service["cap_drop"] == ["ALL"]
+    assert mcp_service["security_opt"] == ["no-new-privileges:true"]
+    assert mcp_environment["CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED"] == "false"
+    for name, expected in capacity.items():
+        if name.startswith("CARDRAG_MCP_"):
+            assert mcp_environment[name] == expected
+
+    for role, required_name in (
+        ("worker", "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST"),
+        ("mcp", "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"),
+    ):
+        missing_image_environment = environment.copy()
+        missing_image_environment.pop(required_name)
+        result = subprocess.run(  # noqa: S603 - executable and role are test-controlled
+            [
+                docker,
+                "compose",
+                "-f",
+                f"deploy/{role}/compose.yaml",
+                "-f",
+                f"deploy/{role}/compose.candidate.yaml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=missing_image_environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "receipt-bound" in result.stderr
 
 
 def test_worker_service_keeps_terminal_and_progress_output_in_journal() -> None:

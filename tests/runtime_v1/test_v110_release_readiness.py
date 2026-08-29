@@ -426,15 +426,24 @@ def test_sealed_v109_kb_regression_baseline_is_canonical_and_self_bound() -> Non
         load_audit_artifact,
         validate_audit_artifact,
         validate_historical_artifact,
+        validate_historical_source_artifact,
     )
 
     evidence = ROOT / "release-evidence/v1.0.10"
     historical = load_audit_artifact(evidence / "v109-kb-real-regression-baseline.json")
+    historical_source = load_audit_artifact(evidence / "v109-structure-audit-execution.json")
     sealed = load_audit_artifact(evidence / "v109-kb-v4-structure-reaudit.json")
 
-    validate_historical_artifact(historical)
+    validate_historical_source_artifact(historical_source)
+    validate_historical_artifact(
+        historical,
+        require_source_binding=True,
+        source_artifact=historical_source,
+    )
     validate_audit_artifact(sealed, require_release_binding=True)
-    assert historical["provenance"]["binding"] == "observation_only"
-    assert historical["provenance"]["source_artifact_sha256"] is None
+    assert historical["provenance"]["binding"] == "execution_record_hash_bound"
+    assert historical["provenance"]["source_artifact_sha256"] == (
+        "260b8e5302f368e6f37b2e2556b0acfdcd4ee24b4b17c159bcb6f02bc1f7b1fe"
+    )
     assert sealed["comparison_to_historical_run"]["match"] is False
     assert sealed["comparison_to_historical_run"]["mismatched_metrics"] == ["titleless_continuations"]

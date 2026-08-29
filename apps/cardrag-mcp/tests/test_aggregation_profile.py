@@ -291,6 +291,7 @@ def test_release_profile_is_hash_bound_recomputed_and_passes_only_with_full_gold
         gold_path,
         scores_path,
         expected_gold_sha256=gold_sha256,
+        expected_source_commit=SOURCE_COMMIT,
         bootstrap_samples=2_000,
         bootstrap_seed=1010,
     )
@@ -311,6 +312,7 @@ def test_release_profile_is_hash_bound_recomputed_and_passes_only_with_full_gold
         scores_path,
         manifests,
         expected_profile_sha256=profile_sha256,
+        expected_source_commit=SOURCE_COMMIT,
         bootstrap_samples=2_000,
         bootstrap_seed=1010,
     )
@@ -363,6 +365,23 @@ def test_score_artifact_is_canonical_profile_bound_and_symlink_safe(tmp_path: Pa
         count=1,
         generation_manifest_sha256=hashlib.sha256(b"generation").hexdigest(),
     )
+
+    with pytest.raises(AggregationProfileError, match="candidate_source_commit_mismatch"):
+        build_aggregation_profile(
+            gold_path,
+            scores_path,
+            release_gate=False,
+            expected_source_commit="2" * 40,
+            bootstrap_samples=100,
+        )
+    with pytest.raises(AggregationProfileError, match="expected_source_commit_invalid"):
+        build_aggregation_profile(
+            gold_path,
+            scores_path,
+            release_gate=False,
+            expected_source_commit="not-a-commit",
+            bootstrap_samples=100,
+        )
     link_path.symlink_to(scores_path)
 
     with pytest.raises(AggregationProfileError, match="score_artifact_not_regular"):
@@ -403,3 +422,16 @@ def test_release_workflow_recomputes_the_external_hash_bound_profile() -> None:
         "--bootstrap-seed 1010",
     ):
         assert contract in workflow
+    for source_binding in (
+        "candidate_source_commit:",
+        "CANDIDATE_SOURCE_COMMIT: ${{ inputs.candidate_source_commit }}",
+        '[[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]',
+        'test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"',
+        'git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
+        'git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
+        "((${#candidate_evidence_paths[@]} > 0))",
+        "release-evidence/v1.0.10/*) ;;",
+    ):
+        assert source_binding in workflow
+    assert workflow.count('--expected-source-commit "$CANDIDATE_SOURCE_COMMIT"') >= 3
+    assert '--expected-source-commit "$GITHUB_SHA"' not in workflow

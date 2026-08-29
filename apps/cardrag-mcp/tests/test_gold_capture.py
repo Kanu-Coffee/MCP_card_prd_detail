@@ -74,17 +74,70 @@ def test_gold_capture_provider_url_is_normalized_before_credentials() -> None:
         "http://openrouter.ai/api/v1",
         "https://user:secret@openrouter.ai/api/v1",
         "https://openrouter.ai/api/v1?redirect=1",
+        "https://openrouter.ai/api/v1?",
         "https://openrouter.ai/api/v1#fragment",
+        "https://openrouter.ai/api/v1#",
         "https://openrouter.ai:invalid/api/v1",
         "//openrouter.ai/api/v1",
         " https://openrouter.ai/api/v1",
         "https://openrouter.ai/api/v1\n",
+        "https://openrouter.ai/api/\x00v1",
+        "https://openrouter.ai/api/\x01v1",
+        "https://openrouter.ai/api/\x1fv1",
+        "https://openrouter.ai/api/\x7fv1",
+        "https://openrouter.ai/api/\x85v1",
+        "https://openrouter.ai/api/\u200bv1",
         "https:\\evil.example\\api",
     ),
 )
 def test_gold_capture_rejects_unsafe_provider_url(value: str) -> None:
     with pytest.raises(GoldCaptureError, match="openrouter_base_url_invalid"):
         capture_module._validated_openrouter_base_url(value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    (
+        "http://openrouter.ai/api/v1",
+        "https://user:secret@openrouter.ai/api/v1",
+        "https://openrouter.ai/api/v1?redirect=1",
+        "https://openrouter.ai/api/v1?",
+        "https://openrouter.ai/api/v1#fragment",
+        "https://openrouter.ai/api/v1#",
+        "https://openrouter.ai/api/\x00v1",
+        "https://openrouter.ai/api/\u200bv1",
+    ),
+)
+async def test_native_cli_rejects_provider_url_before_secret_or_client_construction(
+    value: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def forbidden_secret(_path: Path) -> str:
+        calls.append("secret")
+        raise AssertionError("provider URL must be rejected before reading credentials")
+
+    def forbidden_client(*_args: object, **_kwargs: object) -> object:
+        calls.append("client")
+        raise AssertionError("provider URL must be rejected before client construction")
+
+    monkeypatch.setattr(capture_module, "_read_secret", forbidden_secret)
+    monkeypatch.setattr(capture_module, "OpenRouterEmbedder", forbidden_client)
+    monkeypatch.setattr(capture_module, "OpenRouterReranker", forbidden_client)
+    arguments = SimpleNamespace(
+        expected_source_commit="1" * 40,
+        fixture_mode=True,
+        openrouter_api_key_file=tmp_path / "unused-key",
+        openrouter_base_url=value,
+        source_commit="1" * 40,
+    )
+
+    with pytest.raises(GoldCaptureError, match="openrouter_base_url_invalid"):
+        await capture_module._run_native(arguments)
+    assert calls == []
 
 
 def _write_jsonl(path: Path, records: list[object]) -> ArtifactBinding:
@@ -341,6 +394,7 @@ def test_external_qwen_page_capture_recomputes_every_score_and_is_atomic(tmp_pat
         vector_path=fixture["vectors"],
         output_path=output,
         receipt_path=receipt_path,
+        expected_source_commit="1" * 40,
         release_gate=False,
     )
     resumed = seal_external_observation(
@@ -355,6 +409,7 @@ def test_external_qwen_page_capture_recomputes_every_score_and_is_atomic(tmp_pat
         vector_path=fixture["vectors"],
         output_path=output,
         receipt_path=receipt_path,
+        expected_source_commit="1" * 40,
         release_gate=False,
     )
 
@@ -362,6 +417,23 @@ def test_external_qwen_page_capture_recomputes_every_score_and_is_atomic(tmp_pat
     assert receipt.capture_mode == "external_reproducible"
     assert not receipt.release_eligible
     assert receipt.run_artifact.sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
+
+    with pytest.raises(GoldCaptureError, match="candidate_source_commit_mismatch"):
+        seal_external_observation(
+            gold_path=fixture["gold"],
+            expected_gold_sha256=fixture["gold_binding"].sha256,
+            observation_path=fixture["observation"],
+            expected_observation_sha256=fixture["observation_binding"].sha256,
+            inventory_path=fixture["inventory"],
+            expected_inventory_sha256=fixture["inventory_binding"].sha256,
+            generation_manifest_path=fixture["manifest"],
+            database_path=fixture["database"],
+            vector_path=fixture["vectors"],
+            output_path=tmp_path / "stale-qwen-page.jsonl",
+            receipt_path=tmp_path / "stale-qwen-page.receipt.json",
+            expected_source_commit="2" * 40,
+            release_gate=False,
+        )
 
 
 def test_external_qwen_page_capture_rejects_raw_score_tamper_and_symlink(tmp_path: Path) -> None:
@@ -802,6 +874,7 @@ async def test_native_v5_capture_calls_actual_apis_resumes_and_revalidates(
         source_commit=source_commit,
         embedder=embedder,
         reranker_lane=reranker_lane,
+        expected_source_commit=source_commit,
         release_gate=False,
     )
     calls_after_first = len(embedder.calls)
@@ -820,6 +893,7 @@ async def test_native_v5_capture_calls_actual_apis_resumes_and_revalidates(
         source_commit=source_commit,
         embedder=embedder,
         reranker_lane=reranker_lane,
+        expected_source_commit=source_commit,
         release_gate=False,
     )
 
@@ -846,10 +920,28 @@ async def test_native_v5_capture_calls_actual_apis_resumes_and_revalidates(
         run_paths=first.run_paths,
         receipt_paths=first.receipt_paths,
         reranker_state_root=state,
+        expected_source_commit=source_commit,
         release_gate=False,
     )
     assert set(receipts) == {"qwen_structure_exact", "lexical_shadow", "reranker_shadow"}
     assert all(not receipt.release_eligible for receipt in receipts.values())
+
+    with pytest.raises(GoldCaptureError, match="candidate_source_commit_mismatch"):
+        validate_native_v5_capture(
+            gold_path=gold_path,
+            expected_gold_sha256=gold_binding.sha256,
+            score_artifact_path=score_path,
+            answer_artifact_path=answer_path,
+            generation_manifest_path=tmp_path / "manifest.json",
+            generation_directory=fixture.database.parent,
+            object_root=handle.object_root,
+            attestation_path=first.attestation_path,
+            run_paths=first.run_paths,
+            receipt_paths=first.receipt_paths,
+            reranker_state_root=state,
+            expected_source_commit="2" * 40,
+            release_gate=False,
+        )
 
     shard = state / "query-000.json"
     raw = json.loads(shard.read_bytes())
@@ -872,6 +964,7 @@ async def test_native_v5_capture_calls_actual_apis_resumes_and_revalidates(
             source_commit=source_commit,
             embedder=embedder,
             reranker_lane=reranker_lane,
+            expected_source_commit=source_commit,
             release_gate=False,
         )
 
@@ -987,7 +1080,7 @@ def test_capture_set_revalidates_all_attestations_and_complete_query_coverage(
             query_count=1,
             source_version="v1.0.9" if lane == "v109_baseline" else "v1.0.10-candidate",
             source_commit=(
-                "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113" if lane == "v109_baseline" else "6" * 40
+                "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113" if lane == "v109_baseline" else "a" * 40
             ),
             generation_id=str(binding["generation_id"]),
             generation_manifest=binding["generation"],  # type: ignore[arg-type]
@@ -1192,9 +1285,7 @@ def test_capture_set_revalidates_all_attestations_and_complete_query_coverage(
             query_count=1,
             source_version="v1.0.10-candidate" if lane != "v109_baseline" else "v1.0.9",
             source_commit=(
-                "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113"
-                if lane == "v109_baseline"
-                else ("a" * 40 if native else "6" * 40)
+                "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113" if lane == "v109_baseline" else "a" * 40
             ),
             generation_id=generation_id,
             generation_manifest_sha256=generation_sha256,
@@ -1262,9 +1353,23 @@ def test_capture_set_revalidates_all_attestations_and_complete_query_coverage(
         native_score_artifact_path=native_score_path,
         expected_receipt_sha256=expected_receipts,  # type: ignore[arg-type]
         output_path=tmp_path / "capture-set.json",
+        expected_source_commit="a" * 40,
         release_gate=False,
     )
     assert tuple(receipt.lane for receipt in set_receipt.lanes) == capture_module.LANES
+
+    with pytest.raises(GoldCaptureError, match="candidate_source_commit_mismatch"):
+        validate_capture_set(
+            gold_path=gold_path,
+            expected_gold_sha256=gold_binding.sha256,
+            run_paths=run_paths,  # type: ignore[arg-type]
+            receipt_paths=receipt_paths,  # type: ignore[arg-type]
+            attestation_paths=attestation_paths,  # type: ignore[arg-type]
+            native_score_artifact_path=native_score_path,
+            expected_receipt_sha256=expected_receipts,  # type: ignore[arg-type]
+            expected_source_commit="b" * 40,
+            release_gate=False,
+        )
 
     unsafe_attestation = tmp_path / "qwen-page-attestation-link.jsonl"
     unsafe_attestation.symlink_to(attestation_paths["qwen_page"])
@@ -1278,5 +1383,6 @@ def test_capture_set_revalidates_all_attestations_and_complete_query_coverage(
             attestation_paths=attestation_paths,  # type: ignore[arg-type]
             native_score_artifact_path=native_score_path,
             expected_receipt_sha256=expected_receipts,  # type: ignore[arg-type]
+            expected_source_commit="a" * 40,
             release_gate=False,
         )

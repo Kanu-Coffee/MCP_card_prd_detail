@@ -52,6 +52,12 @@ source commit을 가리켜야 합니다. 각 query의 primary contracts/spans/an
 둡니다. 따라서 `influenced_primary_ordering=false`라는 주장만으로 불변성을 통과할 수
 없습니다.
 
+`v109_baseline`은 위 historical commit에 계속 고정하지만 나머지 네 candidate lane은
+생성·재검증·release에서 모두 명시적인 `--expected-source-commit`과 일치해야 합니다.
+release workflow는 별도 승인 입력 `candidate_source_commit`을 이 값으로 전달하므로,
+내부적으로 서로 일관되더라도 다른 candidate commit에서 생성한 run·score·attestation은 새
+tag의 evidence로 재사용할 수 없습니다.
+
 ```json
 {"answer":{"citation_span_ids":["benefit-1","condition-1"],"no_answer":false,"numeric_facts":["월 10,000원"],"selected_revision_ids":["contract_current"],"text":"월 10,000원 한도와 적용 조건을 함께 확인해야 합니다."},"contracts":[{"contract_revision_id":"contract_current","rank":1,"score":0.93}],"lane":"lexical_shadow","query_id":"gold-001","schema_version":"cardrag.gold-run-result.v1","shadow":{"contracts":[{"contract_revision_id":"contract_current","rank":1,"score":0.93}],"influenced_primary_ordering":false,"kind":"lexical","spans":[{"contract_revision_id":"contract_current","rank":1,"score":1.0,"span_id":"benefit-1"},{"contract_revision_id":"contract_current","rank":2,"score":0.9,"span_id":"condition-1"}]},"spans":[{"contract_revision_id":"contract_current","rank":1,"score":0.93,"span_id":"benefit-1"},{"contract_revision_id":"contract_current","rank":2,"score":0.91,"span_id":"condition-1"}]}
 ```
@@ -124,9 +130,11 @@ release evidence로 인정되지 않습니다.
 ### Capture 명령
 
 native v5 세 lane은 다음처럼 생성합니다. API key 파일은 regular file이어야 하고 값은
-출력하지 않습니다.
+출력하지 않습니다. provider base URL은 credential을 읽거나 embedding/reranker client를 만들기
+전에 검증하며 HTTPS가 아니거나 userinfo, query, fragment, 제어문자를 포함하면 중단합니다.
 
 ```bash
+SOURCE_COMMIT=$(git rev-parse HEAD)
 uv run cardrag-gold-capture native-v5 \
   --gold /candidate-evidence/gold.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
@@ -137,7 +145,8 @@ uv run cardrag-gold-capture native-v5 \
   --generation-manifest /candidate-generation/manifest.json \
   --generation-dir /candidate-generation/GENERATION_ID \
   --object-root /candidate-state/objects \
-  --source-commit SOURCE_COMMIT \
+  --source-commit "$SOURCE_COMMIT" \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --openrouter-api-key-file /run/secrets/openrouter_api_key \
   --state-dir /candidate-evidence/gold-capture-state \
   --output-dir /candidate-evidence
@@ -150,6 +159,7 @@ v1.0.9 또는 Qwen page observation은 각각 다음 명령으로 독립 검산�
 uv run cardrag-gold-capture external \
   --gold /candidate-evidence/gold.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --observation /candidate-evidence/qwen_page.capture-attestation.jsonl \
   --expected-observation-sha256 OBSERVATION_SHA256 \
   --inventory /candidate-evidence/raw/qwen-page-corpus.jsonl \
@@ -168,6 +178,7 @@ query shard/reranker artifacts를 원점에서 다시 읽을 수 있습니다.
 uv run cardrag-gold-capture validate-native-v5 \
   --gold /candidate-evidence/gold.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --score-artifact /candidate-evidence/document-aggregation-scores.jsonl \
   --answer-artifact /candidate-evidence/qwen-structure-answers.jsonl \
   --generation-manifest /candidate-generation/manifest.json \
@@ -191,16 +202,19 @@ uv run cardrag-gold-capture validate-native-v5 \
 `native-v5-attestation.jsonl`을 가리켜야 합니다. `validate-set`은 모든 gold query의 순서와
 전건 coverage, query vector/raw-row hash, expected/scored equality, source generation/DB/sidecar,
 run 결과 hash, source commit/profile 및 shadow primary 불변성의 canonical cross-binding을
-다시 확인합니다. 이 명령 자체는 대용량 source DB/vector를 다시 열거나 provider를 다시
-호출하지 않습니다. source 재검산은 바로 앞의 `external` 재실행과
-`validate-native-v5`가 담당하며, 그 절차가 완료된 뒤 독립 승인한 set receipt 전체 SHA가
-release workflow의 명시적 trust root입니다. 승인되지 않은 self-asserted receipt만으로는
-release할 수 없습니다.
+다시 확인합니다. 이 명령은 binding validator이지 source replay가 아니며, 대용량 source
+DB/vector를 다시 열거나 provider를 다시 호출하지 않습니다. 따라서 `validate-set` 출력만으로는
+source가 실제로 재생·재검산되었다는 사실을 증명하지 못합니다. source 재검산은 바로 앞의
+`external` 재실행과 `validate-native-v5`가 담당합니다. 그 절차를 실제로 수행한 뒤 별도
+승인자가 set receipt 전체 SHA를 승인했을 때만 그 digest가 release workflow의 명시적 trust
+root가 됩니다. source replay를 생략했거나 승인되지 않은 self-asserted receipt는 단순 binding
+receipt일 뿐 release evidence가 될 수 없습니다.
 
 ```bash
 uv run cardrag-gold-capture validate-set \
   --gold /candidate-evidence/gold.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --native-score-artifact /candidate-evidence/document-aggregation-scores.jsonl \
   --output /candidate-evidence/gold-capture-set-receipt.json \
   --run v109_baseline=/candidate-evidence/v109_baseline.jsonl \
@@ -262,6 +276,7 @@ sha256sum /candidate-evidence/gold-v110.jsonl
 uv run python -m cardrag_mcp.evaluation \
   --gold /candidate-evidence/gold-v110.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --blind-evaluation /candidate-evidence/blind-evaluation.jsonl \
   --run v109_baseline=/candidate-evidence/v109-baseline.jsonl \
   --run qwen_page=/candidate-evidence/qwen-page.jsonl \
@@ -292,6 +307,15 @@ gold/run/blind file hash, answer hash, generation manifest hash를 모두 다시
 어느 파일도 없거나 hash/schema/canonical encoding/gate가 다르면 publish 전에
 중단합니다. 합성 테스트 fixture를 이 경로에 복사해 release 증거로 사용해서는 안 됩니다.
 
+Git commit SHA를 그 commit에 포함될 evidence bytes 안에 기록하는 자기참조를 피하기 위해
+release source와 evidence commit을 분리합니다. 먼저 코드·workflow·문서가 모두 확정된 40자리
+`candidate_source_commit`에서 candidate를 실행하고 모든 candidate artifact의 source commit을
+그 값으로 봉인합니다. 그 뒤 `release-evidence/v1.0.10/`만 추가·변경한 별도 descendant commit에
+tag를 생성합니다. dispatch에는 원래 candidate commit을 명시합니다. workflow는 그 값이 tag
+commit의 strict ancestor인지 확인하고 두 commit 사이의 변경 경로가 정확히
+`release-evidence/v1.0.10/` 아래에만 있는지 NUL-safe로 검사합니다. code, workflow, docs 또는
+다른 version evidence가 하나라도 바뀌면 validation 전에 중단합니다.
+
 구조형 exact lane의 계약 집계 방식은 별도
 [`document aggregation profile`](V1_0_10_AGGREGATION_PROFILE.md) 절차로 평가합니다.
 `document-aggregation-scores.jsonl`과 `document-aggregation-profile.json`도 같은 evidence
@@ -308,6 +332,7 @@ uv run python -m cardrag_mcp.evaluation \
   --blind-evaluation release-evidence/v1.0.10/blind-evaluation.jsonl \
   --validate-report release-evidence/v1.0.10/gold-evaluation-report.json \
   --expected-report-sha256 REPORT_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --generation-manifest-dir release-evidence/v1.0.10/generation-manifests \
   --run v109_baseline=release-evidence/v1.0.10/v109_baseline.jsonl \
   --run qwen_page=release-evidence/v1.0.10/qwen_page.jsonl \

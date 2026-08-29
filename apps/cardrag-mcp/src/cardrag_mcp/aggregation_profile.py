@@ -88,6 +88,7 @@ ViewType = Literal[
 ]
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 class AggregationProfileError(RuntimeError):
@@ -97,6 +98,20 @@ class AggregationProfileError(RuntimeError):
         self.code = code
         self.line = line
         super().__init__(code)
+
+
+def _validated_expected_source_commit(
+    value: str | None,
+    *,
+    release_gate: bool,
+) -> str | None:
+    if value is None:
+        if release_gate:
+            raise AggregationProfileError("expected_source_commit_required")
+        return None
+    if _SOURCE_COMMIT.fullmatch(value) is None:
+        raise AggregationProfileError("expected_source_commit_invalid")
+    return value
 
 
 class _StrictModel(BaseModel):
@@ -707,6 +722,7 @@ def build_aggregation_profile(
     *,
     release_gate: bool = True,
     expected_gold_sha256: str | None = None,
+    expected_source_commit: str | None = None,
     bootstrap_samples: int = 2_000,
     bootstrap_seed: int = 1010,
 ) -> AggregationProfileArtifact:
@@ -727,8 +743,17 @@ def build_aggregation_profile(
             raise AggregationProfileError("gold_sha256_mismatch")
     elif release_gate:
         raise AggregationProfileError("sealed_gold_sha256_required")
+    candidate_source_commit = _validated_expected_source_commit(
+        expected_source_commit,
+        release_gate=release_gate,
+    )
 
     scores = _parse_scores(score_artifact_path, gold)
+    if (
+        candidate_source_commit is not None
+        and scores.manifest.source_commit != candidate_source_commit
+    ):
+        raise AggregationProfileError("candidate_source_commit_mismatch")
     query_ids = tuple(query.query_id for query in gold.queries)
     slice_ids = _slice_query_ids(gold.queries)
     policy_payloads: dict[str, Any] = {}
@@ -940,6 +965,7 @@ def validate_aggregation_profile(
     generation_manifest_directory: Path,
     *,
     expected_profile_sha256: str,
+    expected_source_commit: str | None = None,
     serving_generation_manifest_path: Path | None = None,
     bootstrap_samples: int = 2_000,
     bootstrap_seed: int = 1010,
@@ -957,6 +983,7 @@ def validate_aggregation_profile(
         score_artifact_path,
         release_gate=True,
         expected_gold_sha256=hashlib.sha256(gold_bytes).hexdigest(),
+        expected_source_commit=expected_source_commit,
         bootstrap_samples=bootstrap_samples,
         bootstrap_seed=bootstrap_seed,
     )
@@ -988,6 +1015,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--gold", type=Path, required=True)
     parser.add_argument("--scores", type=Path, required=True)
     parser.add_argument("--expected-gold-sha256")
+    parser.add_argument("--expected-source-commit")
     parser.add_argument("--validate-profile", type=Path)
     parser.add_argument("--expected-profile-sha256")
     parser.add_argument("--generation-manifest-dir", type=Path)
@@ -1000,6 +1028,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_profile = cast(Path | None, arguments.validate_profile)
         generation_directory = cast(Path | None, arguments.generation_manifest_dir)
         expected_profile_sha256 = cast(str | None, arguments.expected_profile_sha256)
+        expected_source_commit = cast(str | None, arguments.expected_source_commit)
         serving_generation_manifest = cast(
             Path | None,
             arguments.serving_generation_manifest,
@@ -1011,6 +1040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or generation_directory is None
                 or serving_generation_manifest is None
                 or expected_profile_sha256 is None
+                or expected_source_commit is None
                 or cast(str | None, arguments.expected_gold_sha256) is not None
             ):
                 raise AggregationProfileError("invalid_profile_validation_arguments")
@@ -1020,6 +1050,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cast(Path, arguments.scores),
                 generation_directory,
                 expected_profile_sha256=expected_profile_sha256,
+                expected_source_commit=expected_source_commit,
                 serving_generation_manifest_path=serving_generation_manifest,
                 bootstrap_samples=cast(int, arguments.bootstrap_samples),
                 bootstrap_seed=cast(int, arguments.bootstrap_seed),
@@ -1041,6 +1072,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cast(Path, arguments.scores),
             release_gate=not fixture_mode,
             expected_gold_sha256=cast(str | None, arguments.expected_gold_sha256),
+            expected_source_commit=expected_source_commit,
             bootstrap_samples=cast(int, arguments.bootstrap_samples),
             bootstrap_seed=cast(int, arguments.bootstrap_seed),
         )

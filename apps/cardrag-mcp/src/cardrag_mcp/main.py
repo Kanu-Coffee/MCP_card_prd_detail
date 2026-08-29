@@ -10,6 +10,11 @@ from fastapi import FastAPI
 from cardrag_mcp.app import build_app
 from cardrag_mcp.config import Settings
 from cardrag_mcp.embeddings import OpenRouterEmbedder
+from cardrag_mcp.experimental_map_reduce import (
+    ExperimentalMapReduceLane,
+    ExperimentalMapReduceProfile,
+    OpenRouterExperimentalReasoner,
+)
 from cardrag_mcp.observability import Metrics, configure_logging
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.reranker import OpenRouterReranker, RerankerShadowLane, RerankerShadowStore
@@ -66,6 +71,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
             maximum_candidates=settings.reranker_shadow_max_candidates,
         )
+    experimental_map_reduce = None
+    if settings.experimental_map_reduce_enabled:
+        reasoning_api_key = settings.openrouter_api_key_value()
+        model = settings.experimental_map_reduce_model
+        provider_id = settings.experimental_map_reduce_provider_id
+        evaluation_sha256 = settings.experimental_map_reduce_evaluation_sha256
+        if (
+            reasoning_api_key is None
+            or model is None
+            or provider_id is None
+            or evaluation_sha256 is None
+        ):  # guarded by Settings validation
+            raise RuntimeError("experimental map-reduce profile is unavailable")
+        profile = ExperimentalMapReduceProfile.seal(
+            model=model,
+            provider_id=provider_id,
+            evaluation_artifact_sha256=evaluation_sha256,
+            maximum_input_characters=(settings.experimental_map_reduce_max_input_characters),
+            maximum_completion_tokens=(settings.experimental_map_reduce_max_completion_tokens),
+            maximum_response_bytes=settings.experimental_map_reduce_max_response_bytes,
+            maximum_job_provider_calls=(settings.experimental_map_reduce_max_job_provider_calls),
+            maximum_job_input_characters=(
+                settings.experimental_map_reduce_max_job_input_characters
+            ),
+            maximum_job_output_tokens=(settings.experimental_map_reduce_max_job_output_tokens),
+        )
+        experimental_map_reduce = ExperimentalMapReduceLane(
+            store,
+            OpenRouterExperimentalReasoner(
+                base_url=str(settings.openrouter_base_url),
+                api_key=reasoning_api_key,
+                timeout_seconds=settings.experimental_map_reduce_timeout_seconds,
+                profile=profile,
+            ),
+            profile,
+            maximum_jobs=settings.mcp_exhaustive_audit_max_jobs,
+            maximum_total_bytes=settings.mcp_exhaustive_audit_max_total_bytes,
+            maximum_artifact_bytes=settings.mcp_exhaustive_audit_max_artifact_bytes,
+            maximum_concurrent_provider_calls=(
+                settings.experimental_map_reduce_max_concurrent_provider_calls
+            ),
+        )
     repository = ServingRepository(
         store,
         embedder,
@@ -86,7 +133,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             maximum_database_bytes=settings.mcp_max_serving_database_bytes,
             maximum_generation_download_bytes=settings.mcp_max_generation_download_bytes,
         )
-    return build_app(repository, store, settings, updater=updater, metrics=metrics)
+    return build_app(
+        repository,
+        store,
+        settings,
+        updater=updater,
+        metrics=metrics,
+        experimental_map_reduce=experimental_map_reduce,
+    )
 
 
 def main() -> None:

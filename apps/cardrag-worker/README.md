@@ -54,11 +54,15 @@ absolute, non-symlink regular file, opens SQLite with `immutable=1` and
 python -m cardrag_worker.legacy_v4_audit --database /absolute/index.sqlite3
 python -m cardrag_worker.legacy_v4_audit \
   --validate-release-artifact /absolute/v109-kb-v4-structure-reaudit.json \
-  --historical-artifact /absolute/v109-kb-real-regression-baseline.json
+  --historical-artifact /absolute/v109-kb-real-regression-baseline.json \
+  --historical-source-artifact /absolute/v109-structure-audit-execution.json
 ```
 
-The second command remains fail-closed while the historical Worker-run source
-artifact has no independently preserved SHA-256 binding.
+The second command binds the historical counters to the exact preserved
+read-only command-execution record and parses that record's stdout again. This
+is a repository-review integrity record, not an independent timestamp or a
+hash snapshot of the underlying in-progress Worker run. The separate sealed-v4
+DB audit remains authoritative for its database-bound corpus counts.
 
 Issuer activation is explicit:
 

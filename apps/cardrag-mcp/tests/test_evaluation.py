@@ -660,6 +660,29 @@ def test_expected_gold_sha_and_bootstrap_floor_fail_closed(
             expected_gold_sha256="0" * 64,
             bootstrap_samples=100,
         )
+    evaluate_gold_runs(
+        gold,
+        paths,
+        release_gate=False,
+        expected_source_commit="1" * 40,
+        bootstrap_samples=100,
+    )
+    with pytest.raises(EvaluationError, match="candidate_source_commit_mismatch"):
+        evaluate_gold_runs(
+            gold,
+            paths,
+            release_gate=False,
+            expected_source_commit="2" * 40,
+            bootstrap_samples=100,
+        )
+    with pytest.raises(EvaluationError, match="expected_source_commit_invalid"):
+        evaluate_gold_runs(
+            gold,
+            paths,
+            release_gate=False,
+            expected_source_commit="not-a-commit",
+            bootstrap_samples=100,
+        )
     with pytest.raises(EvaluationError, match="bootstrap_samples_too_small"):
         evaluate_gold_runs(gold, paths, release_gate=False, bootstrap_samples=99)
     with pytest.raises(EvaluationError, match="bootstrap_samples_too_large"):
@@ -793,11 +816,26 @@ def test_strict_report_validator_recomputes_every_artifact_and_rejects_tampering
         blind,
         manifests,
         expected_report_sha256=report_sha256,
+        expected_source_commit="1" * 40,
         release_gate=False,
         bootstrap_samples=100,
         bootstrap_seed=77,
     )
     assert validated.canonical_bytes == report.canonical_bytes
+
+    with pytest.raises(EvaluationError, match="candidate_source_commit_mismatch"):
+        validate_evaluation_report(
+            report_path,
+            gold,
+            paths,
+            blind,
+            manifests,
+            expected_report_sha256=report_sha256,
+            expected_source_commit="2" * 40,
+            release_gate=False,
+            bootstrap_samples=100,
+            bootstrap_seed=77,
+        )
 
     with pytest.raises(EvaluationError, match="report_sha256_mismatch"):
         validate_evaluation_report(
@@ -902,6 +940,8 @@ def test_fixture_mode_cli_emits_canonical_report(
         "--blind-evaluation",
         str(blind),
         "--fixture-mode",
+        "--expected-source-commit",
+        "1" * 40,
         "--bootstrap-samples",
         "100",
     ]

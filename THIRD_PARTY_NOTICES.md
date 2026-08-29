@@ -17,8 +17,11 @@ license files. Notable runtime components include:
   declared in their installed package metadata
 - the OpenAI Codex CLI in the Worker image, distributed under its upstream
   project terms
-- Debian base-image packages and `bubblewrap` in the Worker image, with their
-  notices retained under the image's standard `/usr/share/doc` paths
+- Chainguard Python and Wolfi base-image packages, with package license and SBOM
+  metadata retained in the image
+- Wolfi `bubblewrap` and `libcap` in the Worker image, installed from the
+  official signed Wolfi package index at the exact versions recorded in the
+  Dockerfile
 
 The release workflow attaches an SBOM attestation to each Worker and MCP image.
 This notice is copied into both images at

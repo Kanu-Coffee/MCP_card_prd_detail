@@ -32,17 +32,38 @@ the updater downloads any artifact. Before creating a new local object, the
 updater also requires the whole state tree to remain within 64 GiB and the
 filesystem to retain 2 GiB free after peak temporary growth. State accounting
 accepts regular non-symlink files only; quota pressure never deletes an existing
-immutable object automatically. These defaults are configured with the
+immutable object automatically. The canonical quota policy and in-flight
+reservation records are durable, counted state bytes; a restart with a different
+policy fails closed, and an interrupted reservation remains charged. Policy,
+lock, and reservation records live under
+`audit-reports/.state-quota/`, and their regular bytes are included in the
+whole-state limit. Each v2 reservation holds an exclusive flock on its exact
+published inode for its complete lifetime. Startup never guesses that a record
+is abandoned. The explicit
+`cardrag_mcp.quota.reconcile_abandoned_state_reservations(state_root)` operator
+API takes the global quota lock, revalidates canonical token/inode identity, and
+removes only records whose nonblocking exclusive lease proves the creator is
+gone; live reservations are left untouched and already materialized partial or
+complete files remain counted by tree usage. Operators should quiesce MCP and
+updater processes before invoking recovery so the returned removed-token list
+is an auditable maintenance boundary. These
+defaults are configured with the
 `CARDRAG_MCP_MAX_SERVING_DATABASE_BYTES`,
 `CARDRAG_MCP_MAX_GENERATION_DOWNLOAD_BYTES`, `CARDRAG_MCP_MAX_STATE_BYTES`, and
 `CARDRAG_MCP_RESERVED_FREE_SPACE_BYTES` settings. They are independent of the
 sidecar and resident-memory limits above.
 
 Durable audit storage is independently bounded before a new unique query is
-written. Exhaustive jobs default to 32 jobs, 2 GiB total, and 256 MiB per
+written. Primary exhaustive audits and default-off experimental map-reduce
+audits share one cap: 32 unique jobs and 2 GiB total by default, with 256 MiB
+per
 artifact; reranker shadow jobs default to 1,024 jobs, 512 MiB total, and 8 MiB
 per artifact. Existing immutable audit artifacts remain readable when a limit
-is reached, and no quota performs automatic cleanup. The embedding and reranker
+is reached, and no quota performs automatic cleanup. Shared accounting includes
+both job subtrees, unique root-only map claims, generation-root JSON, and the
+map-reduce provider-coordination policy; zero-byte bounded slot files have zero
+logical-byte charge. All count/byte/temporary-peak checks and their writes share
+one cross-process quota transaction. The embedding and reranker
 provider responses are streamed with a 1 MiB maximum, including an early
 `Content-Length` gate and an incremental body limit before JSON parsing.
 
@@ -76,6 +97,43 @@ failures are isolated into bounded shadow diagnostics and do not fail primary
 search. Configure only candidate MCP env files with
 `CARDRAG_RERANKER_SHADOW_ENABLED=true`; model/provider/max-count and timeout have
 dedicated `CARDRAG_RERANKER_SHADOW_*` settings.
+
+The additional long-context LLM map-reduce lane is also disabled by default and
+candidate-only. Enabling it requires an explicit reasoning model, provider ID,
+and SHA-256 of the gold evaluation artifact; those values, prompt policy, input
+characters, per-call completion-token cap, per-job provider-call/input/output
+budgets, and response-byte cap derive an immutable profile ID. The separate
+`experimental_long_context_audit` tool advances at most one provider call per
+poll. It reads a whole contract when bounded, otherwise sequential major
+sections packed at canonical leaf boundaries; an individually oversized leaf is
+deterministically subdivided at exact paragraph/character offsets. Strict JSON
+rejects duplicate keys and nonstandard constants, and only byte-for-byte OCR spans at the declared
+page/character offsets survive. Reduce starts only after every active contract
+map completes and uses resumable, bounded hierarchical batches whose outputs
+must remain subsets of accepted map spans. Jobs are generation + query hash +
+profile bound, quota-limited, cancellable, and completed through an immutable
+artifact. Every attempted call permanently charges its full sealed completion
+cap, and durable cross-process quota reservations plus a slot policy bound state
+growth and global provider concurrency. The policy is restart-immutable; a
+different configured concurrency fails closed. Its bounded provider/job flock
+slots are regular, non-symlink, zero-byte coordination files, while their
+canonical policy bytes remain part of state quota accounting. A nonterminal job publishes a durable
+generation GC root before its first ledger. Selection reads the authoritative
+durable current pointer and atomically resumes the unique query/profile root
+across generation rollover; a handled pre-ledger failure under the exclusive
+job lease releases the exact still-unstarted root, while a hard crash
+intentionally leaves a bounded,
+cancelable recovery root. Lifecycle mutations share one
+cross-process lock, so polling/cancellation pins that exact inactive generation
+even after active-generation rollover and process restart.
+If a provider returns bytes that fail strict decision parsing, those untrusted
+bytes cannot form a valid receipt: the charged call remains durably ambiguous,
+is never retried automatically, and subsequent start/poll calls return its
+stable pending job ID so the caller can cancel it. This is an intentional
+forensic boundary rather than treating invalid JSON as evidence.
+This lane never mutates, reorders, removes, or augments primary exact
+search results; when disabled, its provider client and ninth MCP tool are not
+constructed.
 
 `cardrag-gold-capture` is an offline/candidate-only CLI and is not imported by
 the server. It produces the five evaluation lane JSONLs from hash-bound raw

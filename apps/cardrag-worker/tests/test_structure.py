@@ -325,6 +325,55 @@ def test_kb_multpage_table_footnote_continuation_and_header_relationships() -> N
     )
 
 
+def test_common_notice_container_applies_to_every_prior_benefit_item() -> None:
+    artifact = _artifact(
+        "kb",
+        (
+            """## 주요 혜택
+### 교통 할인
+버스 이용 시 10%를 할인합니다.
+※ 월 할인 한도는 1만원입니다.
+### 카페 할인
+커피 이용 시 5%를 할인합니다.
+""",
+            """## 공통 유의사항
+### 제외 대상
+상품권 구매는 전월 실적에서 제외됩니다.
+""",
+        ),
+    )
+    by_id = {node.node_id: node for node in artifact.nodes}
+    benefit_items = {
+        node.node_id for node in artifact.nodes if node.node_type == "ITEM" and node.major_class == "BENEFIT"
+    }
+    notice_major = next(
+        node
+        for node in artifact.nodes
+        if node.node_type == "MAJOR_SECTION" and node.raw_heading == "## 공통 유의사항"
+    )
+    notice_heading_leaf = next(
+        node
+        for node in artifact.nodes
+        if node.parent_id == notice_major.node_id and node.display_text == "## 공통 유의사항\n"
+    )
+    common_notice_links = {
+        link.to_node_id
+        for link in artifact.links
+        if link.link_type == "APPLIES_TO" and link.from_node_id == notice_major.node_id
+    }
+
+    assert len(benefit_items) == 2
+    assert common_notice_links == benefit_items
+    assert all(by_id[target].node_type == "ITEM" for target in common_notice_links)
+    assert not any(
+        link.link_type == "APPLIES_TO" and link.from_node_id == notice_heading_leaf.node_id
+        for link in artifact.links
+    )
+    footnote = next(node for node in artifact.nodes if node.node_type == "FOOTNOTE")
+    footnote_links = {link.link_type for link in artifact.links if link.from_node_id == footnote.node_id}
+    assert {"FOOTNOTE_OF", "APPLIES_TO"} <= footnote_links
+
+
 def test_page_leading_table_with_own_header_is_not_false_continuation() -> None:
     artifact = _artifact(
         "kb",

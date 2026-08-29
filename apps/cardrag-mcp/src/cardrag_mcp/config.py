@@ -115,6 +115,59 @@ class Settings(BaseSettings):
         ge=1024,
         le=DEFAULT_RERANKER_AUDIT_MAX_ARTIFACT_BYTES,
     )
+    experimental_map_reduce_enabled: bool = False
+    experimental_map_reduce_model: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$",
+    )
+    experimental_map_reduce_provider_id: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$",
+    )
+    experimental_map_reduce_evaluation_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    experimental_map_reduce_max_input_characters: BoundedInteger = Field(
+        default=262_144,
+        ge=16_384,
+        le=2_000_000,
+    )
+    experimental_map_reduce_max_completion_tokens: BoundedInteger = Field(
+        default=4_096,
+        ge=16,
+        le=16_384,
+    )
+    experimental_map_reduce_max_job_provider_calls: BoundedInteger = Field(
+        default=4_096,
+        ge=1,
+        le=1_000_000,
+    )
+    experimental_map_reduce_max_job_input_characters: BoundedInteger = Field(
+        default=268_435_456,
+        ge=16_384,
+        le=2_000_000_000,
+    )
+    experimental_map_reduce_max_job_output_tokens: BoundedInteger = Field(
+        default=16_777_216,
+        ge=16,
+        le=2_000_000_000,
+    )
+    experimental_map_reduce_max_concurrent_provider_calls: BoundedInteger = Field(
+        default=1,
+        ge=1,
+        le=32,
+    )
+    experimental_map_reduce_timeout_seconds: float = Field(
+        default=120.0,
+        ge=1,
+        le=300,
+    )
+    experimental_map_reduce_max_response_bytes: BoundedInteger = Field(
+        default=DEFAULT_RERANKER_MAX_RESPONSE_BYTES,
+        ge=1_024,
+        le=DEFAULT_RERANKER_AUDIT_MAX_ARTIFACT_BYTES,
+    )
 
     webdav_base_url: AnyHttpUrl | None = None
     webdav_username: str | None = Field(default=None, max_length=512)
@@ -218,6 +271,28 @@ class Settings(BaseSettings):
                 raise ValueError("reranker shadow is restricted to the candidate-v1.0.10 channel")
             if not self.openrouter_api_key_value():
                 raise ValueError("reranker shadow requires an OpenRouter API key")
+        if self.experimental_map_reduce_enabled:
+            if self.channel != "candidate-v1.0.10":
+                raise ValueError(
+                    "experimental map-reduce is restricted to the candidate-v1.0.10 channel"
+                )
+            if not self.openrouter_api_key_value():
+                raise ValueError("experimental map-reduce requires an OpenRouter API key")
+            if (
+                self.experimental_map_reduce_model is None
+                or self.experimental_map_reduce_provider_id is None
+                or self.experimental_map_reduce_evaluation_sha256 is None
+            ):
+                raise ValueError(
+                    "experimental map-reduce requires a sealed model, provider, and evaluation hash"
+                )
+            if (
+                self.experimental_map_reduce_max_job_output_tokens
+                < self.experimental_map_reduce_max_completion_tokens
+            ):
+                raise ValueError(
+                    "experimental map-reduce job output budget is smaller than one call"
+                )
         if self.webdav_username is not None and self.webdav_username_file is not None:
             raise ValueError("configure only one WebDAV username source")
         if self.webdav_password is not None and self.webdav_password_file is not None:

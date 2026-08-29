@@ -22,7 +22,7 @@ from cardrag_mcp.aggregation import aggregate_document_view_scores, exhaustive_p
 from cardrag_mcp.models import DocumentAggregationPolicy, ViewType
 from cardrag_mcp.quota import (
     StorageQuotaError,
-    safe_subtree_usage,
+    safe_shared_exhaustive_audit_usage,
     state_quota_guard,
     state_quota_policy,
     validate_byte_limit,
@@ -436,7 +436,7 @@ class ExhaustiveAuditStore:
         with self._write_quota_guard(
             logical_growth,
             peak_growth_bytes=peak_growth,
-            new_job=new_job,
+            new_job_id=identity.job_id if new_job else None,
         ):
             directory = self._job_directory(identity, create=True)
             if directory is None:  # pragma: no cover - create=True always returns a path
@@ -599,24 +599,13 @@ class ExhaustiveAuditStore:
         ):
             self._atomic_write(path, payload)
 
-    def _job_count(self) -> int:
-        if not self._root.exists() and not self._root.is_symlink():
-            return 0
-        root = self._ensure_root()
-        count = 0
-        for path in sorted(root.iterdir(), key=lambda item: item.name):
-            if path.is_symlink() or not path.is_dir() or _JOB_ID.fullmatch(path.name) is None:
-                raise ExhaustiveAuditError("audit-jobs contains an unsafe entry")
-            count += 1
-        return count
-
     @contextmanager
     def _write_quota_guard(
         self,
         logical_growth_bytes: int,
         *,
         peak_growth_bytes: int | None = None,
-        new_job: bool = False,
+        new_job_id: str | None = None,
     ) -> Iterator[None]:
         peak = logical_growth_bytes if peak_growth_bytes is None else peak_growth_bytes
         try:
@@ -625,13 +614,17 @@ class ExhaustiveAuditStore:
                 logical_growth_bytes,
                 peak_growth_bytes=peak,
             ):
-                total = safe_subtree_usage(self._state_root, self._root)
+                total, jobs = safe_shared_exhaustive_audit_usage(
+                    self._state_root,
+                    prospective_audit_job_id=new_job_id,
+                )
                 if (
                     total > self.maximum_total_bytes
                     or logical_growth_bytes > self.maximum_total_bytes - total
+                    or peak > self.maximum_total_bytes - total
                 ):
                     raise ExhaustiveAuditError("exhaustive audit total quota rejected this write")
-                if new_job and self._job_count() >= self.maximum_jobs:
+                if jobs > self.maximum_jobs:
                     raise ExhaustiveAuditError("exhaustive audit job quota rejected this query")
                 yield
         except StorageQuotaError:

@@ -756,6 +756,7 @@ def parse_structure_artifact(
     previous_page_last_semantic: int | None = None
     previous_page_last_table: int | None = None
     previous_reference_leaf: int | None = None
+    benefit_item_indices: list[int] = []
 
     def add_node(
         *,
@@ -794,6 +795,8 @@ def parse_structure_artifact(
                 node_type="ITEM",
                 major_class=drafts[parent].major_class,
             )
+            if drafts[current_item].major_class in {"BENEFIT", "MIXED"}:
+                benefit_item_indices.append(current_item)
         return current_item
 
     for lines in source_lines:
@@ -906,6 +909,11 @@ def parse_structure_artifact(
                     spans=(_span_with_ordinal(line.span, 0, is_canonical=False),),
                 )
                 current_item = None
+                if own_class in {"NOTICE", "MIXED"}:
+                    link_drafts.extend(
+                        _LinkDraft(current_major, benefit_item, "APPLIES_TO")
+                        for benefit_item in benefit_item_indices
+                    )
                 parent = current_major
                 node_type: NodeType = "PARAGRAPH"
                 node_class = own_class
@@ -923,6 +931,15 @@ def parse_structure_artifact(
                     raw_heading=visible,
                     spans=(_span_with_ordinal(line.span, 0, is_canonical=False),),
                 )
+                prior_benefit_item = benefit_item_indices[-1] if benefit_item_indices else None
+                if (
+                    item_class in {"NOTICE", "MIXED"}
+                    and drafts[parent_for_item].major_class not in {"NOTICE", "MIXED"}
+                    and prior_benefit_item is not None
+                ):
+                    link_drafts.append(_LinkDraft(current_item, prior_benefit_item, "APPLIES_TO"))
+                if item_class in {"BENEFIT", "MIXED"}:
+                    benefit_item_indices.append(current_item)
                 parent = current_item
                 node_type = "PARAGRAPH"
                 node_class = item_class
@@ -955,7 +972,8 @@ def parse_structure_artifact(
                     )
                 )
             elif (
-                node_class in {"NOTICE", "MIXED"}
+                not is_heading
+                and node_class in {"NOTICE", "MIXED"}
                 and previous_reference_leaf is not None
                 and drafts[previous_reference_leaf].major_class in {"BENEFIT", "MIXED"}
             ):

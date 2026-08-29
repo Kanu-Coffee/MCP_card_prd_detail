@@ -169,6 +169,7 @@ RetrievalPolicy = Literal[
 ]
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 class EvaluationError(RuntimeError):
@@ -178,6 +179,20 @@ class EvaluationError(RuntimeError):
         self.code = code
         self.line = line
         super().__init__(code)
+
+
+def _validated_expected_source_commit(
+    value: str | None,
+    *,
+    release_gate: bool,
+) -> str | None:
+    if value is None:
+        if release_gate:
+            raise EvaluationError("expected_source_commit_required")
+        return None
+    if _SOURCE_COMMIT.fullmatch(value) is None:
+        raise EvaluationError("expected_source_commit_invalid")
+    return value
 
 
 class _StrictModel(BaseModel):
@@ -1276,6 +1291,7 @@ def evaluate_gold_runs(
     blind_evaluation_path: Path | None = None,
     release_gate: bool = True,
     expected_gold_sha256: str | None = None,
+    expected_source_commit: str | None = None,
     bootstrap_samples: int = 2_000,
     bootstrap_seed: int = 1010,
 ) -> EvaluationReport:
@@ -1295,6 +1311,10 @@ def evaluate_gold_runs(
             raise EvaluationError("gold_sha256_mismatch")
     elif release_gate:
         raise EvaluationError("sealed_gold_sha256_required")
+    candidate_source_commit = _validated_expected_source_commit(
+        expected_source_commit,
+        release_gate=release_gate,
+    )
 
     gold_by_id = {query.query_id: query for query in gold.queries}
     query_ids = tuple(query.query_id for query in gold.queries)
@@ -1306,6 +1326,12 @@ def evaluate_gold_runs(
         dataset = load_run_jsonl(run_paths[lane_name], lane=lane)
         if dataset.manifest.gold_sha256 != gold.sha256:
             raise EvaluationError("run_manifest_gold_mismatch")
+        if (
+            lane != "v109_baseline"
+            and candidate_source_commit is not None
+            and dataset.manifest.source_commit != candidate_source_commit
+        ):
+            raise EvaluationError("candidate_source_commit_mismatch")
         by_id = {item.query_id: item for item in dataset.results}
         if set(by_id) != set(gold_by_id):
             raise EvaluationError("run_query_coverage_mismatch")
@@ -1542,6 +1568,7 @@ def validate_evaluation_report(
     generation_manifest_directory: Path,
     *,
     expected_report_sha256: str,
+    expected_source_commit: str | None = None,
     release_gate: bool = True,
     bootstrap_samples: int = 2_000,
     bootstrap_seed: int = 1010,
@@ -1560,6 +1587,7 @@ def validate_evaluation_report(
         blind_evaluation_path=blind_evaluation_path,
         release_gate=release_gate,
         expected_gold_sha256=gold_sha256,
+        expected_source_commit=expected_source_commit,
         bootstrap_samples=bootstrap_samples,
         bootstrap_seed=bootstrap_seed,
     )
@@ -1582,6 +1610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--run", action="append", default=[], metavar="LANE=PATH")
     parser.add_argument("--blind-evaluation", type=Path)
     parser.add_argument("--expected-gold-sha256")
+    parser.add_argument("--expected-source-commit")
     parser.add_argument("--validate-report", type=Path)
     parser.add_argument("--expected-report-sha256")
     parser.add_argument("--generation-manifest-dir", type=Path)
@@ -1595,12 +1624,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         blind_evaluation = cast(Path | None, arguments.blind_evaluation)
         generation_manifest_dir = cast(Path | None, arguments.generation_manifest_dir)
         expected_report_sha256 = cast(str | None, arguments.expected_report_sha256)
+        expected_source_commit = cast(str | None, arguments.expected_source_commit)
         if validate_report is not None:
             if (
                 cast(bool, arguments.fixture_mode)
                 or blind_evaluation is None
                 or generation_manifest_dir is None
                 or expected_report_sha256 is None
+                or expected_source_commit is None
                 or cast(str | None, arguments.expected_gold_sha256) is not None
             ):
                 raise EvaluationError("invalid_report_validation_arguments")
@@ -1611,6 +1642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 blind_evaluation,
                 generation_manifest_dir,
                 expected_report_sha256=expected_report_sha256,
+                expected_source_commit=expected_source_commit,
                 bootstrap_samples=cast(int, arguments.bootstrap_samples),
                 bootstrap_seed=cast(int, arguments.bootstrap_seed),
             )
@@ -1629,6 +1661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             blind_evaluation_path=blind_evaluation,
             release_gate=not cast(bool, arguments.fixture_mode),
             expected_gold_sha256=cast(str | None, arguments.expected_gold_sha256),
+            expected_source_commit=expected_source_commit,
             bootstrap_samples=cast(int, arguments.bootstrap_samples),
             bootstrap_seed=cast(int, arguments.bootstrap_seed),
         )

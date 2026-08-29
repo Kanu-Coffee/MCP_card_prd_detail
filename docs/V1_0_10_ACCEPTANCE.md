@@ -211,8 +211,13 @@ generation, 구조 coverage, MCP smoke와 gold gate의 합격 증거로 확대 �
 서로 다른 provenance를 한 관측으로 합치지 않습니다.
 
 - [historical Worker-run observation](../release-evidence/v1.0.10/v109-kb-real-regression-baseline.json)은
-  sanitized run ID와 원래 알고리즘/KB·Samsung count를 보존합니다. 원 run artifact의
-  SHA-256이 보존되지 않았으므로 `binding=observation_only`이고 release blocker입니다.
+  sanitized run ID와 원래 알고리즘/KB·Samsung count를 보존합니다. 함께 봉인한
+  [contemporaneous CommandExecution record](../release-evidence/v1.0.10/v109-structure-audit-execution.json)의
+  full-file SHA-256은
+  `260b8e5302f368e6f37b2e2556b0acfdcd4ee24b4b17c159bcb6f02bc1f7b1fe`이고 baseline은
+  `binding=execution_record_hash_bound`로 이를 직접 참조합니다. validator는 record의
+  canonical envelope와 raw event hash를 검증하고 stdout을 다시 parse해 baseline의 모든
+  관측 필드와 대조합니다.
 - [sealed v4 DB re-audit](../release-evidence/v1.0.10/v109-kb-v4-structure-reaudit.json)은
   generation `g-2208f0c6076649c4be915be1-d11f80f9af71`, serving schema v4,
   DB SHA/size, corpus/contract SHA에 직접 결속됩니다. 독립 CLI가 DB를
@@ -225,18 +230,22 @@ span으로 정의하며 2,779개 중 45개가 단일 chunk에 완전히 포함�
 historical 관측의 titleless 389와 sealed 재감사의 388은 원 source provenance와
 알고리즘이 다르므로 꾸미거나 합치지 않고 `match=false`로 봉인합니다. table count 45는
 일치하며 historical table-block denominator 3,065는 historical artifact에 별도로
-보존합니다. 이 차이 자체는 release blocker가 아니지만, historical source artifact
-SHA 부재와 v1.0.10 candidate zero-defect 구조 감사 미완료는 blocker입니다.
+보존합니다. 지원하지 않던 historical `body_chunks=3710` 주장은 baseline에서 제거했고,
+3,710은 별도 sealed DB 재감사 문맥에서만 authority입니다. 이 차이 자체는 release
+blocker가 아니지만 v1.0.10 candidate zero-defect 구조 감사 미완료는 별도 blocker입니다.
 
 ```bash
 python -m cardrag_worker.legacy_v4_audit \
   --validate-release-artifact "$PWD/release-evidence/v1.0.10/v109-kb-v4-structure-reaudit.json" \
-  --historical-artifact "$PWD/release-evidence/v1.0.10/v109-kb-real-regression-baseline.json"
+  --historical-artifact "$PWD/release-evidence/v1.0.10/v109-kb-real-regression-baseline.json" \
+  --historical-source-artifact "$PWD/release-evidence/v1.0.10/v109-structure-audit-execution.json"
 ```
 
-현재 위 release-mode 명령은 historical source SHA가 없으므로 의도대로 non-zero로
-종료합니다. 일반 artifact validation은 schema, canonical bytes/self-hash, exact observed
-counts와 DB binding을 검증하며 self-asserted boolean을 신뢰하지 않습니다.
+위 3-artifact release-mode 검증은 성공합니다. 이 결속은 보존된 execution record의
+무결성과 stdout-derived count만 증명합니다. underlying run files의 hash/completeness, 명령이
+실제로 끝까지 수행된 사실, 당시 stable snapshot identity, 누락된 입력이 없다는 사실은
+증명하지 않습니다. sealed v4 DB 재감사는 별도 provenance이며 candidate zero-defect gate를
+대신하지 않습니다.
 
 ## exact 검색
 
@@ -275,6 +284,25 @@ object여야 하며 lightweight tag는 local `git cat-file -t`와 remote peeled 
 거부됩니다.
 
 ## 자동·통합·운영 gate
+
+[Candidate acceptance receipt](V1_0_10_CANDIDATE_ACCEPTANCE.md)는 exact candidate source
+commit, 격리 effective config와 image identity, generation/Worker/MCP/native-cache/CAS/rollback,
+v1.0.9 before/after identity를 12개 canonical evidence file로 결속합니다. release workflow는
+독립 승인된 receipt SHA-256을 필수 입력으로 받고, candidate source 이후 tag까지의 변경이
+`release-evidence/v1.0.10/**`에만 있는 evidence-only commit인지 fail-closed 검증합니다.
+Receipt verifier는 source replay를 대신하지 않으며 실제 receipt가 없으면 release는
+의도대로 차단됩니다.
+
+수락 image는 public Docker Hub에 선게시하지 않고 repository-scoped private GHCR candidate
+package에서만 읽습니다. receipt는 Worker/MCP OCI index, 유일한 linux/amd64 child와
+platform config, SBOM/SLSA attestation manifest digest를 봉인하고, rendered Compose
+`repository@index`, 실제 container config ID/RepoDigest 및 dispatch의 두 image digest 입력과
+다시 대조합니다. candidate overlay는 exact private digest 없이 render하지 않고 local build
+fallback을 제거합니다. release strict job은 바로 그 digest의 scanner JSON·fresh DB
+metadata·SBOM·provenance를 해시로 보존합니다. public environment 승인 후 checksum-pinned
+recursive OCI copy를 수행하고 destination index/child/config/attestation digest를
+재검증하므로 `accepted == runtime-tested == scanned == published`가 아니면 tag나 release를
+게시하지 않습니다.
 
 다음 검사를 모두 통과시킵니다.
 

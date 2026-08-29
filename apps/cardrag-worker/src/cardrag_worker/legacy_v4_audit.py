@@ -9,6 +9,9 @@ also an independent CLI::
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -26,6 +29,7 @@ from cardrag_core import canonical_json_bytes, canonical_sha256
 
 AUDIT_SCHEMA: Final = "cardrag.v109-sealed-v4-structure-reaudit.v1"
 HISTORICAL_SCHEMA: Final = "cardrag.v109-historical-structure-observation.v1"
+HISTORICAL_SOURCE_SCHEMA: Final = "cardrag.v109-historical-structure-audit-execution.v1"
 ALGORITHM_VERSION: Final = "cardrag.v109-sealed-v4-structure-audit.v1"
 HISTORICAL_ALGORITHM_VERSION: Final = "cardrag.v109-worker-run-structure-audit.v1"
 CANONICAL_HEADING_PATTERN: Final = r"(?m)^#{1,6}[ \t]+\S"
@@ -35,6 +39,13 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID = re.compile(r"^g-[A-Za-z0-9._-]{1,126}$")
 _MAX_DATABASE_BYTES: Final = 2 * 1024 * 1024 * 1024
 _MAX_ARTIFACT_BYTES: Final = 2 * 1024 * 1024
+_HISTORICAL_SESSION_BASENAME: Final = "rollout-2026-08-29T13-25-25-01a04bc3-eace-7960-aefd-3c7a8f7b7b84.jsonl"
+_HISTORICAL_SESSION_SHA256: Final = "59652d065795fea554863b34c41c2a4e3330fde7948287f142a1857718c7754e"
+_HISTORICAL_RECORD_SHA256: Final = "b253ffb58eacf8e38d59575cf7d23acee462701a32176ecd5ffdd16c3ce45095"
+_HISTORICAL_COMMAND_SHA256: Final = "a39bf5c05028ddd7ecde1915fa84736747a9e2573e87590654adbbf45a8a327a"
+_HISTORICAL_STDOUT_SHA256: Final = "ef683584c5699139fa81dba888ac1bd9b84cd02af5353ced421fc0aa582c8ff1"
+_HISTORICAL_RECORD_SIZE: Final = 10_164
+_HISTORICAL_RECORD_LINE: Final = 207
 
 METRIC_NAMES: Final = (
     "continuation_chunks",
@@ -514,10 +525,210 @@ def load_audit_artifact(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _historical_observations_from_stdout(stdout: str) -> dict[str, Any]:
+    lines = stdout.splitlines()
+    if (
+        len(lines) != 4
+        or lines[1] != " lengths median/p75/p90/max 1177 1595 1598 1600"
+        or lines[3] != " lengths median/p75/p90/max 742 1176 1497 1599"
+    ):
+        raise LegacyV4AuditError("historical source stdout layout is invalid")
+    raw_counts: dict[str, dict[str, int]] = {}
+    for issuer, line in (("kb", lines[0]), ("samsung", lines[2])):
+        prefix = f"{issuer} "
+        if not line.startswith(prefix):
+            raise LegacyV4AuditError("historical source stdout issuer is invalid")
+        try:
+            parsed = ast.literal_eval(line[len(prefix) :])
+        except (SyntaxError, ValueError):
+            raise LegacyV4AuditError("historical source stdout counts are invalid") from None
+        if (
+            not isinstance(parsed, dict)
+            or any(not isinstance(key, str) for key in parsed)
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in parsed.values())
+        ):
+            raise LegacyV4AuditError("historical source stdout counts are invalid")
+        raw_counts[issuer] = cast(dict[str, int], parsed)
+    if raw_counts != {
+        "kb": {
+            "chunks": 4175,
+            "contains_heading_labeled_body": 1467,
+            "continuation_chunks": 1379,
+            "docs": 747,
+            "ends_mid_line": 1326,
+            "headings": 6078,
+            "long_pages": 1278,
+            "no_heading_context": 389,
+            "pages": 2796,
+            "starts_mid_line": 1293,
+            "table_blocks": 3065,
+            "table_blocks_not_whole_in_one_chunk": 45,
+            "table_pages": 1887,
+        },
+        "samsung": {
+            "chunks": 806,
+            "contains_heading_labeled_body": 395,
+            "continuation_chunks": 74,
+            "docs": 65,
+            "ends_mid_line": 66,
+            "headings": 1953,
+            "long_pages": 73,
+            "no_heading_context": 35,
+            "pages": 732,
+            "starts_mid_line": 69,
+            "table_blocks": 421,
+            "table_blocks_not_whole_in_one_chunk": 12,
+            "table_pages": 332,
+        },
+    }:
+        raise LegacyV4AuditError("historical source stdout exact counts differ")
+    return {
+        issuer: {
+            "chunks": counts["chunks"],
+            "continuation_chunks": counts["continuation_chunks"],
+            "documents": counts["docs"],
+            "ends_mid_line": counts["ends_mid_line"],
+            "fragmented_tables": counts["table_blocks_not_whole_in_one_chunk"],
+            "mid_line_continuations": counts["starts_mid_line"],
+            "pages": counts["pages"],
+            "table_blocks": counts["table_blocks"],
+            "titled_body_chunks": counts["contains_heading_labeled_body"],
+            "titleless_continuations": counts["no_heading_context"],
+        }
+        for issuer, counts in raw_counts.items()
+    }
+
+
+def _validated_historical_source(
+    payload: object,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate and decode the exact contemporaneous read-only execution record."""
+
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "evidence_scope",
+        "evidence_sha256",
+        "raw_record_base64",
+        "schema_version",
+        "source_session",
+    }:
+        raise LegacyV4AuditError("historical source artifact has an unknown contract")
+    normalized = cast(dict[str, Any], json.loads(canonical_json_bytes(payload)))
+    claimed = normalized.pop("evidence_sha256")
+    if not isinstance(claimed, str) or claimed != canonical_sha256(normalized):
+        raise LegacyV4AuditError("historical source artifact self-hash is invalid")
+    normalized["evidence_sha256"] = claimed
+    if normalized["schema_version"] != HISTORICAL_SOURCE_SCHEMA:
+        raise LegacyV4AuditError("historical source artifact identity is invalid")
+    if normalized["evidence_scope"] != {
+        "authentication_material_included": False,
+        "card_document_text_included": False,
+        "external_timestamp_attestation": False,
+        "full_session_included": False,
+        "independent_session_inclusion_proof": False,
+        "missing_inputs_fail_closed": False,
+        "operational_identifiers_and_local_paths_included": True,
+        "run_completion_attested": False,
+        "session_reference_locally_verified": True,
+        "stable_snapshot_attested": False,
+        "trust_root": "repository_review",
+        "underlying_run_artifacts_hash_bound": False,
+    }:
+        raise LegacyV4AuditError("historical source evidence scope is invalid")
+    source_session = normalized["source_session"]
+    if source_session != {
+        "file_name": _HISTORICAL_SESSION_BASENAME,
+        "record_line": _HISTORICAL_RECORD_LINE,
+        "record_sha256": _HISTORICAL_RECORD_SHA256,
+        "session_sha256": _HISTORICAL_SESSION_SHA256,
+    }:
+        raise LegacyV4AuditError("historical source session binding is invalid")
+    encoded = normalized["raw_record_base64"]
+    if not isinstance(encoded, str) or len(encoded) > 16_384:
+        raise LegacyV4AuditError("historical source record encoding is invalid")
+    try:
+        raw_record = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise LegacyV4AuditError("historical source record encoding is invalid") from None
+    if (
+        len(raw_record) != _HISTORICAL_RECORD_SIZE
+        or not raw_record.endswith(b"\n")
+        or hashlib.sha256(raw_record).hexdigest() != _HISTORICAL_RECORD_SHA256
+        or base64.b64encode(raw_record).decode("ascii") != encoded
+    ):
+        raise LegacyV4AuditError("historical source record bytes are invalid")
+    lowered = raw_record.lower()
+    if any(
+        forbidden in lowered
+        for forbidden in (
+            b"authorization:",
+            b"bearer ",
+            b"api-key",
+            b"api_key",
+            b"credential",
+            b"openrouter_api_key",
+            b"password",
+            b"secret",
+            b"token",
+            b"webdav_password",
+            b"webdav_username",
+        )
+    ):
+        raise LegacyV4AuditError("historical source record contains sensitive material")
+    record = _json_object(raw_record)
+    if (
+        record.get("timestamp") != "2026-08-29T04:31:04.015Z"
+        or record.get("ordinal") != 206
+        or record.get("type") != "event_msg"
+    ):
+        raise LegacyV4AuditError("historical source record envelope is invalid")
+    record_payload = record.get("payload")
+    if not isinstance(record_payload, dict) or record_payload.get("type") != "item_completed":
+        raise LegacyV4AuditError("historical source record payload is invalid")
+    item = record_payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "CommandExecution":
+        raise LegacyV4AuditError("historical source command record is invalid")
+    command = item.get("command")
+    stdout = item.get("stdout")
+    if (
+        not isinstance(command, list)
+        or len(command) != 3
+        or command[:2] != ["/bin/bash", "-lc"]
+        or not isinstance(command[2], str)
+        or hashlib.sha256(command[2].encode()).hexdigest() != _HISTORICAL_COMMAND_SHA256
+        or not isinstance(stdout, str)
+        or hashlib.sha256(stdout.encode()).hexdigest() != _HISTORICAL_STDOUT_SHA256
+        or item.get("aggregated_output") != stdout
+        or item.get("formatted_output") != stdout
+        or item.get("stderr") != ""
+        or item.get("exit_code") != 0
+        or item.get("status") != "completed"
+        or item.get("source") != "unified_exec_startup"
+        or item.get("cwd") != "file:///home/lee/projects/MCP_card_prd_detail"
+        or item.get("duration") != {"nanos": 897_307_195, "secs": 0}
+    ):
+        raise LegacyV4AuditError("historical source command result is invalid")
+    _historical_observations_from_stdout(stdout)
+    return normalized, item
+
+
+def validate_historical_source_artifact(payload: object) -> dict[str, Any]:
+    """Validate the exact, contemporaneous read-only audit execution record.
+
+    The embedded JSONL record is the original Codex command-execution event,
+    not a later transcription of its counters. Its record hash, command hash,
+    stdout hash, parsed observations, session identity, exit status, and
+    read-only audit script are fixed so resealing a different claim cannot pass.
+    """
+
+    normalized, _ = _validated_historical_source(payload)
+    return normalized
+
+
 def validate_historical_artifact(
     payload: object,
     *,
     require_source_binding: bool = False,
+    source_artifact: object | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or set(payload) != {
         "algorithm",
@@ -550,23 +761,37 @@ def validate_historical_artifact(
     source_hash = provenance["source_artifact_sha256"]
     if (
         provenance["run_id"] != "e63725b579b5405fb03c6dc7e3d2b061"
-        or provenance["source_kind"] != "worker_run_artifacts"
-        or (source_hash is None and provenance["binding"] != "observation_only")
+        or (
+            source_hash is None
+            and (
+                provenance["binding"] != "observation_only"
+                or provenance["source_kind"] != "worker_run_artifacts"
+            )
+        )
         or (
             source_hash is not None
             and (
                 not isinstance(source_hash, str)
                 or _SHA256.fullmatch(source_hash) is None
-                or provenance["binding"] != "source_hash_bound"
+                or provenance["binding"] != "execution_record_hash_bound"
+                or provenance["source_kind"] != "codex_command_execution"
             )
         )
     ):
         raise LegacyV4AuditError("historical observation provenance binding is invalid")
-    if require_source_binding and source_hash is None:
-        raise LegacyV4AuditError("historical source artifact hash is required for release")
+    if source_artifact is not None:
+        validated_source, source_item = _validated_historical_source(source_artifact)
+        actual_source_hash = hashlib.sha256(canonical_json_bytes(validated_source) + b"\n").hexdigest()
+        if source_hash != actual_source_hash:
+            raise LegacyV4AuditError("historical source artifact does not match its observation")
+        if normalized["observations"] != _historical_observations_from_stdout(
+            cast(str, source_item["stdout"])
+        ):
+            raise LegacyV4AuditError("historical observations differ from source stdout")
+    if require_source_binding and (source_hash is None or source_artifact is None):
+        raise LegacyV4AuditError("historical source artifact is required for release")
     expected_observations = {
         "kb": {
-            "body_chunks": 3710,
             "chunks": 4175,
             "continuation_chunks": 1379,
             "documents": 747,
@@ -596,6 +821,38 @@ def validate_historical_artifact(
     return normalized
 
 
+def validate_release_evidence(
+    sealed_payload: object,
+    historical_payload: object,
+    historical_source_payload: object,
+) -> None:
+    """Cross-bind the two deliberately distinct legacy provenance domains."""
+
+    sealed = validate_audit_artifact(sealed_payload, require_release_binding=True)
+    historical = validate_historical_artifact(
+        historical_payload,
+        require_source_binding=True,
+        source_artifact=historical_source_payload,
+    )
+    counts = sealed["corpus_counts"]
+    historical_kb = historical["observations"]["kb"]
+    expected = {
+        "continuation_chunks": _measurement(historical_kb["continuation_chunks"], historical_kb["chunks"]),
+        "fragmented_markdown_tables": _measurement(
+            historical_kb["fragmented_tables"], counts["canonical_markdown_tables"]
+        ),
+        "mid_line_continuations": _measurement(
+            historical_kb["mid_line_continuations"], historical_kb["continuation_chunks"]
+        ),
+        "titled_body_chunks": _measurement(historical_kb["titled_body_chunks"], counts["body_chunks"]),
+        "titleless_continuations": _measurement(
+            historical_kb["titleless_continuations"], historical_kb["continuation_chunks"]
+        ),
+    }
+    if sealed["comparison_to_historical_run"]["expected"] != expected:
+        raise LegacyV4AuditError("sealed and historical audit evidence are not cross-bound")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit a local legacy v4 CardRAG database read-only")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -603,6 +860,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--validate-artifact", type=Path)
     mode.add_argument("--validate-release-artifact", type=Path)
     parser.add_argument("--historical-artifact", type=Path)
+    parser.add_argument("--historical-source-artifact", type=Path)
     return parser
 
 
@@ -621,12 +879,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             require_release_binding=arguments.validate_release_artifact is not None,
         )
         if arguments.validate_release_artifact is not None:
-            if arguments.historical_artifact is None:
-                raise LegacyV4AuditError("release validation requires the historical artifact")
+            if arguments.historical_artifact is None or arguments.historical_source_artifact is None:
+                raise LegacyV4AuditError("release validation requires both historical artifacts")
             historical = load_audit_artifact(arguments.historical_artifact)
-            validate_historical_artifact(historical, require_source_binding=True)
-        elif arguments.historical_artifact is not None:
-            raise LegacyV4AuditError("historical artifact is only valid for release validation")
+            historical_source = load_audit_artifact(arguments.historical_source_artifact)
+            validate_release_evidence(
+                artifact,
+                historical,
+                historical_source,
+            )
+        elif arguments.historical_artifact is not None or arguments.historical_source_artifact is not None:
+            raise LegacyV4AuditError("historical artifacts are only valid for release validation")
         return 0
     except LegacyV4AuditError:
         print("legacy v4 audit validation failed", file=sys.stderr)
@@ -642,6 +905,7 @@ __all__ = [
     "AUDIT_SCHEMA",
     "HISTORICAL_ALGORITHM_VERSION",
     "HISTORICAL_SCHEMA",
+    "HISTORICAL_SOURCE_SCHEMA",
     "LegacyV4AuditError",
     "audit_database",
     "historical_algorithm_payload",
@@ -650,4 +914,6 @@ __all__ = [
     "sealed_algorithm_payload",
     "validate_audit_artifact",
     "validate_historical_artifact",
+    "validate_historical_source_artifact",
+    "validate_release_evidence",
 ]

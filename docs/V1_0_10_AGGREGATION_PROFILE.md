@@ -27,6 +27,12 @@ Manifest는 다음 항목에 결속됩니다.
 - `exact=true`, `approximate=false`, `temporal_scope_policy=gold-query.v1`
 - 점수 생성 당시 runtime aggregation status/policy/sealed profile SHA-256
 
+profile 생성과 release 재검증은 `--expected-source-commit`을 필수 trust input으로 받아 score
+manifest의 source commit과 비교합니다. release workflow는 승인된 40자리
+`candidate_source_commit`을 전달하므로 다른 candidate commit에서 캡처한 점수는 hash와 내부
+결속이 모두 유효해도 재사용할 수 없습니다. tag commit은 이 candidate의 evidence-only
+descendant여야 하며 허용 diff는 `release-evidence/v1.0.10/` 아래로 제한됩니다.
+
 질의 coverage record는 `query_id`, 질문 원문의 SHA-256, 실제 little-endian float32
 query vector SHA-256, `expected_rows`, `scored_rows`, `active_contracts`를 기록합니다.
 `expected_rows != scored_rows`이면 즉시 실패합니다. 각
@@ -81,6 +87,7 @@ query별 immutable shard, canonical progress hash chain, generation/DB/vector/ex
 `--fixture-mode`를 사용할 수 있습니다.
 
 ```bash
+SOURCE_COMMIT=$(git rev-parse HEAD)
 uv run cardrag-aggregation-capture \
   --gold release-evidence/v1.0.10/gold.jsonl \
   --generation-manifest /candidate/generation.json \
@@ -88,7 +95,7 @@ uv run cardrag-aggregation-capture \
   --object-root /candidate/objects \
   --output release-evidence/v1.0.10/document-aggregation-scores.jsonl \
   --state-dir /candidate/aggregation-capture-state \
-  --source-commit "$(git rev-parse HEAD)" \
+  --source-commit "$SOURCE_COMMIT" \
   --openrouter-api-key-file /run/secrets/openrouter_api_key
 ```
 
@@ -100,6 +107,7 @@ uv run python -m cardrag_mcp.aggregation_profile \
   --gold release-evidence/v1.0.10/gold.jsonl \
   --scores release-evidence/v1.0.10/document-aggregation-scores.jsonl \
   --expected-gold-sha256 "$GOLD_SHA256" \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --generation-manifest-dir release-evidence/v1.0.10/generation-manifests \
   --bootstrap-samples 2000 \
   --bootstrap-seed 1010 \
@@ -158,6 +166,7 @@ uv run python -m cardrag_mcp.aggregation_profile \
   --scores release-evidence/v1.0.10/document-aggregation-scores.jsonl \
   --validate-profile release-evidence/v1.0.10/document-aggregation-profile.json \
   --expected-profile-sha256 "$PROFILE_SHA256" \
+  --expected-source-commit "$SOURCE_COMMIT" \
   --generation-manifest-dir release-evidence/v1.0.10/generation-manifests \
   --serving-generation-manifest \
     release-evidence/v1.0.10/serving-generation-manifest.json \
