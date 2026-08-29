@@ -33,6 +33,7 @@ from cardrag_core import (
 )
 from helpers import pdf_bytes
 
+import cardrag_worker.ocr as ocr_module
 from cardrag_worker.ocr import (
     OCR_CACHE_PUBLICATION_DIAGNOSTIC,
     OCR_OUTPUT_POLICY,
@@ -395,10 +396,55 @@ async def test_sparse_page_wrapper_accepts_twelve_visible_lines(
 
 
 @pytest.mark.asyncio
+async def test_logo_only_sparse_page_wrapper_is_canonical_without_transcribed_characters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class LogoOnlySparseProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, target_page_numbers, total_pages, prompt
+            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n\n"
+
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=LogoOnlySparseProvider(), state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        result = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_logo_only_sparse",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "ocr",
+        )
+
+        expected = f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n".encode()
+        assert result.pages == (OCR_SPARSE_PAGE_PREFIX,)
+        assert result.ocr_bytes == expected
+        assert verify_ocr_bytes(expected, expected_page_count=1).sha256 == result.ocr_sha256
+        checkpoint = state.checkpoint(run_id, "doc_logo_only_sparse", "ocr", 0)
+        assert checkpoint is not None
+        assert Path(checkpoint["artifact_path"]).read_bytes() == expected
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",
     [
-        OCR_SPARSE_PAGE_PREFIX,
         f"{OCR_SPARSE_PAGE_PREFIX} trailing\nTANTUM",
         f"ordinary\n{OCR_SPARSE_PAGE_PREFIX}\nTANTUM",
         f"{OCR_SPARSE_PAGE_PREFIX}\n  ## Page 9",
@@ -406,7 +452,6 @@ async def test_sparse_page_wrapper_accepts_twelve_visible_lines(
         f"{OCR_SPARSE_PAGE_PREFIX}\n{OCR_SPARSE_PAGE_PREFIX}",
     ],
     ids=[
-        "empty",
         "text-on-wrapper-line",
         "wrapper-after-ordinary-body",
         "nested-page-marker",
@@ -1690,6 +1735,141 @@ async def test_chunk_checkpoint_resumes_after_provider_failure(
         assert _canonical_ocr_body(result) == result.ocr_bytes
         assert b"## Page 1\n\n" in result.ocr_bytes
         assert b"## Page 2\n\n" in result.ocr_bytes
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_twenty_four_page_logo_only_chunk_reuses_first_ten_checkpoints_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class ProductionShapeSparseProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            self.calls.append(target_page_numbers[0])
+            self.requests.append(
+                {
+                    "image_names": tuple(path.name for path in images),
+                    "page_numbers": page_numbers,
+                    "target_page_numbers": target_page_numbers,
+                    "total_pages": total_pages,
+                    "prompt": prompt,
+                }
+            )
+            bodies: list[str] = []
+            for page_number in target_page_numbers:
+                if page_number == 22:
+                    body = OCR_SPARSE_PAGE_PREFIX
+                else:
+                    body = f"페이지 {page_number} 카드 혜택 조건과 제외 사항 본문입니다."
+                bodies.append(f"## Page {page_number}\n\n{body}")
+            return "\n\n".join(bodies) + "\n"
+
+    provider = ProductionShapeSparseProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(
+        provider=provider,
+        state=state,
+        webdav=None,
+        chunk_pages=2,
+        whole_document_max_pages=4,
+        context_pages_before=1,
+        context_pages_after=1,
+    )  # type: ignore[arg-type]
+    try:
+        current_validator = ocr_module._validate_and_normalize_target_page_values
+
+        def legacy_validator(
+            page_numbers: tuple[int, ...],
+            values: tuple[str, ...],
+        ) -> tuple[str, ...]:
+            if OCR_SPARSE_PAGE_PREFIX in values:
+                raise OCRValidationError("OCR sparse-page wrapper is invalid")
+            return current_validator(page_numbers, values)
+
+        monkeypatch.setattr(
+            ocr_module,
+            "_validate_and_normalize_target_page_values",
+            legacy_validator,
+        )
+        run_id = state.start_run(run_id="run")
+        document_id = "doc_24_page_logo_only"
+        already_succeeded_document_id = "doc_already_succeeded"
+        state.ensure_stage(run_id, document_id, "ocr", max_attempts=1)
+        state.ensure_stage(run_id, already_succeeded_document_id, "ocr", max_attempts=1)
+        assert state.stage_started(run_id, already_succeeded_document_id, "ocr") == 1
+        state.stage_succeeded(run_id, already_succeeded_document_id, "ocr")
+        assert state.stage_started(run_id, document_id, "ocr") == 1
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("24", encoding="utf-8")
+        arguments = dict(
+            run_id=run_id,
+            document_id=document_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=24,
+            output_dir=tmp_path / "ocr",
+        )
+
+        with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid") as captured:
+            await resolver.resolve(**arguments)
+        assert state.stage_failed(run_id, document_id, "ocr", captured.value, delay_seconds=0) == "failed"
+        assert provider.calls == [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21]
+        assert provider.requests[-1]["page_numbers"] == (20, 21, 22, 23)
+        assert provider.requests[-1]["target_page_numbers"] == (21, 22)
+        checkpoint_rows = [state.checkpoint(run_id, document_id, "ocr", index) for index in range(12)]
+        assert all(row is not None for row in checkpoint_rows[:10])
+        assert checkpoint_rows[10:] == [None, None]
+        retained_checkpoint_identity = tuple(
+            (row["input_sha256"], row["output_sha256"], row["artifact_path"])
+            for row in checkpoint_rows[:10]
+            if row is not None
+        )
+
+        state.finish_run(run_id, "failed", error="sparse_page_wrapper_invalid")
+        state.assert_resumable(run_id)
+        failed_stage = state.get_stage(run_id, document_id, "ocr")
+        succeeded_stage = state.get_stage(run_id, already_succeeded_document_id, "ocr")
+        assert failed_stage is not None
+        assert succeeded_stage is not None
+        assert (failed_stage.status, failed_stage.attempt_count) == ("retry", 0)
+        assert (succeeded_stage.status, succeeded_stage.attempt_count) == ("succeeded", 1)
+        assert state.stage_started(run_id, document_id, "ocr") == 1
+
+        monkeypatch.setattr(
+            ocr_module,
+            "_validate_and_normalize_target_page_values",
+            current_validator,
+        )
+        result = await resolver.resolve(**arguments)
+        state.stage_succeeded(run_id, document_id, "ocr")
+
+        assert provider.calls == [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 21, 23]
+        assert result.pages[21] == OCR_SPARSE_PAGE_PREFIX
+        assert len(result.pages) == 24
+        assert result.cache_reused is True
+        assert result.provider_called is True
+        resumed_checkpoint_identity = tuple(
+            (
+                state.checkpoint(run_id, document_id, "ocr", index)["input_sha256"],
+                state.checkpoint(run_id, document_id, "ocr", index)["output_sha256"],
+                state.checkpoint(run_id, document_id, "ocr", index)["artifact_path"],
+            )
+            for index in range(10)
+        )
+        assert resumed_checkpoint_identity == retained_checkpoint_identity
+        assert all(state.checkpoint(run_id, document_id, "ocr", index) is not None for index in range(12))
+        assert verify_ocr_bytes(result.ocr_bytes, expected_page_count=24).sha256 == result.ocr_sha256
     finally:
         state.close()
 

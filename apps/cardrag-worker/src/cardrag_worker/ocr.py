@@ -299,7 +299,7 @@ def _validate_and_normalize_target_page_values(
         if OCR_SPARSE_PAGE_PREFIX in value:
             lines = value.splitlines()
             visible_lines = tuple(line.strip() for line in lines[1:] if line.strip())
-            if lines[:1] != [OCR_SPARSE_PAGE_PREFIX] or not visible_lines:
+            if lines[:1] != [OCR_SPARSE_PAGE_PREFIX]:
                 raise OCRValidationError("OCR sparse-page wrapper is invalid")
             if any(
                 PAGE_MARKER.fullmatch(line) or line in {OCR_BLANK_PAGE_SENTINEL, OCR_SPARSE_PAGE_PREFIX}
@@ -307,13 +307,17 @@ def _validate_and_normalize_target_page_values(
             ):
                 raise OCRValidationError("OCR sparse-page wrapper is invalid")
             visible_character_count = sum(len("".join(line.split())) for line in visible_lines)
-            if not 1 <= visible_character_count <= OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS:
+            if visible_character_count > OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS:
                 raise OCRValidationError("OCR sparse-page wrapper is invalid")
             # Markdown generators commonly insert one blank line after the
-            # wrapper or between disconnected logo elements. Blank-only lines
-            # carry no source information, so persist one stable representation
-            # while retaining every visible transcription line in source order.
-            value = f"{OCR_SPARSE_PAGE_PREFIX}\n{'\n'.join(visible_lines)}"
+            # wrapper or between disconnected logo elements. A logo/pictogram-
+            # only page can also contain zero source characters. Blank-only
+            # lines carry no source information, so persist one stable
+            # representation while retaining every visible transcription line
+            # in source order.
+            value = OCR_SPARSE_PAGE_PREFIX
+            if visible_lines:
+                value += f"\n{'\n'.join(visible_lines)}"
         elif value.startswith(OCR_BLANK_PAGE_SENTINEL) and value != OCR_BLANK_PAGE_SENTINEL:
             raise OCRValidationError("OCR blank-page sentinel must be exact")
         if len(f"## Page {page_number}\n\n{value}") < 20:
