@@ -131,6 +131,7 @@ jobs:
             config --quiet
           CARDRAG_LEGACY_ADOPTION_EXPORT_DIR=/tmp/cardrag-adoption-v2-export \
           CARDRAG_LEGACY_SOURCE_ROOT=/tmp/cardrag-legacy-source \
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag \
             docker compose \
               -f deploy/worker/compose.yaml \
               -f deploy/worker/compose.secrets.yaml \
