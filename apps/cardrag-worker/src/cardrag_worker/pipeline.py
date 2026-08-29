@@ -64,6 +64,15 @@ from cardrag_core import (
 from .aggregation_profile_v5 import VerifiedAggregationProfileV5
 from .async_utils import to_thread_fenced
 from .cache_seed_v109 import load_v109_seed_pins
+from .capacity_v5 import (
+    V5CapacityError,
+    V5CapacityPolicy,
+    build_v5_database_ledger,
+    predict_serving_database_bytes,
+    predict_v5_local_artifacts,
+    preflight_v5_capacity,
+    preflight_v5_remaining_free_capacity,
+)
 from .contracts import (
     GENERATION_SCHEMA_ID,
     SERVING_SCHEMA_ID,
@@ -97,6 +106,7 @@ from .exporter_v5 import (
     EmbeddingProfileInput,
     EmbeddingViewInput,
     IssuerInput,
+    LazyEmbeddingVector,
     NodeLinkInput,
     NodeSpanInput,
     OCRFailedProductInput,
@@ -133,7 +143,7 @@ from .revision_history_v5 import (
     plan_revision_history_v5,
     unresolved_revision_ledger_sha256_v5,
 )
-from .state import WorkerState, retry_delay, worker_lock
+from .state import WorkerState, WorkerStateWALCapacityError, retry_delay, worker_lock
 from .structure import (
     DerivedView,
     StructureArtifact,
@@ -1681,6 +1691,7 @@ class WorkerPipeline:
         garbage_grace_days: int = 30,
         retained_incomplete_runs: int = 2,
         document_aggregation: VerifiedAggregationProfileV5 | None = None,
+        capacity_policy_v5: V5CapacityPolicy | None = None,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
@@ -1711,6 +1722,8 @@ class WorkerPipeline:
                 raise ValueError("sealed document aggregation requires the Qwen v5 pipeline")
             if document_aggregation.profile.embedding_profile_id != v5_profile.profile_id:
                 raise ValueError("sealed document aggregation uses another embedding profile")
+        if capacity_policy_v5 is not None and not isinstance(capacity_policy_v5, V5CapacityPolicy):
+            raise TypeError("capacity_policy_v5 must be a V5CapacityPolicy")
         if collect_remote_garbage and (
             webdav.channel != "stable" or not stable_publication_approved or not remote_gc_approved
         ):
@@ -1744,6 +1757,7 @@ class WorkerPipeline:
         self.retained_incomplete_runs = retained_incomplete_runs
         self.exporter = ServingDatabaseExporter()
         self.exporter_v5 = ServingDatabaseExporterV5()
+        self.capacity_policy_v5 = None if v5_profile is None else capacity_policy_v5 or V5CapacityPolicy()
         self.limiters = {
             adapter.spec.code: IssuerRateLimiter(adapter.spec.minimum_interval_seconds)
             for adapter in self.adapters
@@ -2003,6 +2017,7 @@ class WorkerPipeline:
                 OCRSystemicFailureError,
                 ProtectedDocumentError,
                 StructureDocumentFailuresError,
+                V5CapacityError,
             ) as exc:
                 self.state.finish_run_if_running(run_id, "failed", error=str(exc))
                 raise
@@ -3914,88 +3929,9 @@ class WorkerPipeline:
         structure_fallback_ledger_sha256 = canonical_sha256(structure_fallback_ledger)
         empty_structure_failure_ledger_sha256 = _structure_failure_ledger_sha256(())
 
-        embedding_cache_hit_counts: Counter[str] = Counter()
-        embedding_cache_miss_counts: Counter[str] = Counter()
-        embedding_download_counts: Counter[str] = Counter()
-        embedding_provider_call_count = 0
-
-        async def embed_views() -> list[bytes]:
-            nonlocal embedding_provider_call_count
-            vectors: list[bytes | None] = [None] * len(ordered_view_pairs)
-            misses: list[int] = []
-            cache_bindings: list[tuple[str, str]] = []
-            formatted_token_counts: list[int] = []
-            for index, (_document, view) in enumerate(ordered_view_pairs):
-                formatted = format_embedding_input("document", view.embedding_input)
-                token_count = provider.token_counter(formatted)
-                if (
-                    isinstance(token_count, bool)
-                    or not isinstance(token_count, int)
-                    or token_count < 1
-                    or token_count > profile.maximum_tokens
-                ):
-                    raise RuntimeError(
-                        "derived view exceeds the sealed exact-token limit; truncation is forbidden"
-                    )
-                cache_key, input_sha256 = embedding_cache_key(
-                    profile,
-                    kind="document",
-                    formatted_input=formatted,
-                )
-                if input_sha256 != view.input_sha256:
-                    raise RuntimeError("derived view hash differs from its exact document input")
-                cache_bindings.append((cache_key, input_sha256))
-                formatted_token_counts.append(token_count)
-                cached = self.state.get_embedding_v5(
-                    cache_key,
-                    profile_id=profile.profile_id,
-                    input_sha256=input_sha256,
-                    dimension=profile.dimension,
-                    dtype=profile.dtype,
-                    normalization=profile.normalization,
-                )
-                if cached is None:
-                    misses.append(index)
-                    embedding_cache_miss_counts[view.view_type] += 1
-                else:
-                    vectors[index] = cached.embedding
-                    embedding_cache_hit_counts[view.view_type] += 1
-            miss_batches = _embedding_miss_batches(
-                misses,
-                formatted_token_counts,
-                maximum_tokens=profile.maximum_tokens,
-            )
-            for batch_indices in miss_batches:
-                embedding_provider_call_count += 1
-                generated = await provider.embed_documents(
-                    [ordered_view_pairs[index][1].embedding_input for index in batch_indices]
-                )
-                if len(generated) != len(batch_indices):
-                    raise RuntimeError("Qwen provider returned the wrong view batch count")
-                for index, vector in zip(batch_indices, generated, strict=True):
-                    cache_key, input_sha256 = cache_bindings[index]
-                    cached = self.state.put_embedding_v5(
-                        cache_key=cache_key,
-                        profile_id=profile.profile_id,
-                        input_sha256=input_sha256,
-                        dimension=profile.dimension,
-                        dtype=profile.dtype,
-                        normalization=profile.normalization,
-                        values=vector,
-                    )
-                    vectors[index] = cached.embedding
-                    embedding_download_counts[ordered_view_pairs[index][1].view_type] += 1
-            complete = [vector for vector in vectors if vector is not None]
-            if len(complete) != len(ordered_view_pairs):
-                raise RuntimeError("v5 embedding cache/provider left incomplete views")
-            return complete
-
-        vectors = await self._finite_stage(
-            run_id=run_id,
-            document_id="corpus-v5",
-            name="embedding-v5",
-            operation=embed_views,
-        )
+        # Materialize the exact non-vector exporter DTO set before embedding.
+        # The capacity ledger below therefore cannot drift from the rows later
+        # handed to ServingDatabaseExporterV5.
         parser_profiles_by_issuer = {
             adapter.spec.code: issuer_parser_profile(adapter.spec.code) for adapter in self.adapters
         }
@@ -4026,7 +3962,6 @@ class WorkerPipeline:
             }
         )
         retrieval_policy_sha256 = canonical_sha256(self.v5_retrieval_policy)
-
         issuer_rows = tuple(
             IssuerInput(
                 code=adapter.spec.code,
@@ -4155,29 +4090,6 @@ class WorkerPipeline:
             query_policy=profile.query_policy,
             maximum_tokens=profile.maximum_tokens,
         )
-        view_rows = tuple(
-            EmbeddingViewInput(
-                row_index=index,
-                node_id=view.node_id,
-                contract_revision_id=view.contract_revision_id,
-                view_type=view.view_type,
-                embedding_input=view.embedding_input,
-                input_sha256=view.input_sha256,
-                profile_id=profile.profile_id,
-                display_text=view.display_text,
-                source_spans=tuple(
-                    ViewSourceSpanInput(
-                        page=span.page,
-                        source_start=span.source_start,
-                        source_end=span.source_end,
-                        text_sha256=span.text_sha256,
-                    )
-                    for span in view.spans
-                ),
-                vector=vector,
-            )
-            for index, ((_document, view), vector) in enumerate(zip(ordered_view_pairs, vectors, strict=True))
-        )
         unsupported_rows = tuple(
             UnsupportedProductInput(
                 issuer=row.source.issuer,
@@ -4210,10 +4122,405 @@ class WorkerPipeline:
             )
             for row in failed_documents
         )
+        extra_metadata = {
+            "embedding_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+            "embedding_endpoint_name": profile.endpoint_name,
+            "embedding_policy_sha256": embedding_policy_sha256,
+            "parser_policy_sha256": parser_policy_sha256,
+            "retrieval_policy_sha256": retrieval_policy_sha256,
+            "revision_history_policy_version": REVISION_HISTORY_POLICY_VERSION,
+            "historical_revision_unresolved_count": str(len(unresolved_revision_ledger)),
+            "historical_revision_unresolved_sha256": unresolved_revision_sha256,
+            "structure_fallback_document_count": str(len(structure_fallback_documents)),
+            "structure_fallback_documents_sha256": structure_fallback_ledger_sha256,
+            "structure_fallback_policy_version": str(
+                unclassified_fallback_policy_payload()["schema_version"]
+            ),
+            "structure_failed_document_count": "0",
+            "structure_failed_documents_sha256": empty_structure_failure_ledger_sha256,
+            "tokenizer_revision": QWEN_TOKENIZER_REVISION,
+            "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
+            **{
+                f"parser_profile_id.{issuer}": parser_profiles_by_issuer[issuer].profile_id
+                for issuer in sorted(parser_profiles_by_issuer)
+            },
+            **{
+                f"parser_profile_sha256.{issuer}": parser_profiles_by_issuer[issuer].sha256
+                for issuer in sorted(parser_profiles_by_issuer)
+            },
+            **(
+                {"aggregation_profile_artifact_sha256": self.document_aggregation.artifact_sha256}
+                if self.document_aggregation is not None
+                else {}
+            ),
+        }
+        database_ledger = build_v5_database_ledger(
+            issuers=issuer_rows,
+            product_lineages=lineage_rows,
+            unsupported_products=unsupported_rows,
+            ocr_failed_products=failed_rows,
+            contract_revisions=revision_rows,
+            document_pages=page_rows,
+            structure_nodes=node_rows,
+            node_spans=span_rows,
+            node_links=link_rows,
+            embedding_profiles=(exported_profile,),
+            derived_views=tuple(view for _document, view in ordered_view_pairs),
+            primary_embedding_profile_id=profile.profile_id,
+            extra_metadata=extra_metadata,
+            sealed_profile=self.document_aggregation is not None,
+        )
+        predicted_database_bytes = predict_serving_database_bytes(
+            payload_bytes=database_ledger.payload_bytes,
+            row_count=database_ledger.row_count,
+            fts_indexed_text_bytes=database_ledger.fts_indexed_text_bytes,
+            secondary_index_text_bytes=database_ledger.secondary_index_text_bytes,
+        )
+
+        embedding_cache_hit_counts: Counter[str] = Counter()
+        embedding_cache_miss_counts: Counter[str] = Counter()
+        embedding_download_counts: Counter[str] = Counter()
+        embedding_provider_call_count = 0
+        sealed_cache_bindings: tuple[tuple[str, str, str], ...] | None = None
+
+        async def embed_views() -> None:
+            nonlocal embedding_provider_call_count, sealed_cache_bindings
+            embedding_cache_hit_counts.clear()
+            embedding_cache_miss_counts.clear()
+            embedding_download_counts.clear()
+            embedding_provider_call_count = 0
+            sealed_cache_bindings = None
+            cache_bindings: list[tuple[str, str]] = []
+            vector_sha256_by_cache_key: dict[str, str] = {}
+            formatted_token_counts: list[int] = []
+            indices_by_cache_key: dict[str, list[int]] = {}
+            for index, (_document, view) in enumerate(ordered_view_pairs):
+                formatted = format_embedding_input("document", view.embedding_input)
+                token_count = provider.token_counter(formatted)
+                if (
+                    isinstance(token_count, bool)
+                    or not isinstance(token_count, int)
+                    or token_count < 1
+                    or token_count > profile.maximum_tokens
+                ):
+                    raise RuntimeError(
+                        "derived view exceeds the sealed exact-token limit; truncation is forbidden"
+                    )
+                cache_key, input_sha256 = embedding_cache_key(
+                    profile,
+                    kind="document",
+                    formatted_input=formatted,
+                )
+                if input_sha256 != view.input_sha256:
+                    raise RuntimeError("derived view hash differs from its exact document input")
+                cache_bindings.append((cache_key, input_sha256))
+                formatted_token_counts.append(token_count)
+                bound_indices = indices_by_cache_key.setdefault(cache_key, [])
+                if bound_indices and cache_bindings[bound_indices[0]][1] != input_sha256:
+                    raise RuntimeError("v5 embedding cache key collision changed its exact input")
+                bound_indices.append(index)
+
+            unique_misses: list[int] = []
+            for cache_key, bound_indices in indices_by_cache_key.items():
+                representative = bound_indices[0]
+                input_sha256 = cache_bindings[representative][1]
+                cached = self.state.get_embedding_v5(
+                    cache_key,
+                    profile_id=profile.profile_id,
+                    input_sha256=input_sha256,
+                    dimension=profile.dimension,
+                    dtype=profile.dtype,
+                    normalization=profile.normalization,
+                )
+                if cached is None:
+                    unique_misses.append(representative)
+                    for index in bound_indices:
+                        embedding_cache_miss_counts[ordered_view_pairs[index][1].view_type] += 1
+                else:
+                    vector_sha256_by_cache_key[cache_key] = hashlib.sha256(cached.embedding).hexdigest()
+                    for index in bound_indices:
+                        embedding_cache_hit_counts[ordered_view_pairs[index][1].view_type] += 1
+
+            try:
+                try:
+                    wal_baseline = self.state.observe_embedding_cache_v5_wal()
+                except WorkerStateWALCapacityError as exc:
+                    raise V5CapacityError(
+                        "Worker v5 embedding cache WAL baseline could not be sealed"
+                    ) from exc
+                prediction = predict_v5_local_artifacts(
+                    derived_view_count=len(ordered_view_pairs),
+                    database_payload_bytes=database_ledger.payload_bytes,
+                    database_row_count=database_ledger.row_count,
+                    database_fts_indexed_text_bytes=database_ledger.fts_indexed_text_bytes,
+                    database_secondary_index_text_bytes=(database_ledger.secondary_index_text_bytes),
+                    embedding_cache_miss_count=len(unique_misses),
+                    embedding_cache_wal_baseline_bytes=wal_baseline.size_bytes,
+                )
+
+                def check_cache_wal_capacity(*, boundary: str) -> None:
+                    try:
+                        wal_capacity = self.state.check_embedding_cache_v5_wal_capacity(
+                            baseline=wal_baseline,
+                            maximum_wal_growth_bytes=(
+                                prediction.embedding_cache_transaction_bytes
+                                - prediction.embedding_cache_wal_baseline_bytes
+                            ),
+                        )
+                    except WorkerStateWALCapacityError as exc:
+                        LOGGER.error(
+                            "reason_code=v5_embedding_cache_wal_capacity_failed boundary=%s",
+                            boundary,
+                        )
+                        raise V5CapacityError(
+                            "Worker v5 embedding cache WAL exceeded its predicted capacity bound"
+                        ) from exc
+                    LOGGER.info(
+                        "V5 embedding cache WAL capacity boundary=%s baseline_bytes=%d "
+                        "wal_size_bytes=%d wal_limit_bytes=%d",
+                        boundary,
+                        wal_capacity.baseline_wal_size_bytes,
+                        wal_capacity.wal_size_bytes,
+                        wal_capacity.maximum_wal_bytes,
+                    )
+
+                capacity_policy = self.capacity_policy_v5
+                if capacity_policy is None:
+                    raise V5CapacityError("v5 generation lost its local capacity policy")
+                capacity_snapshot = await to_thread_fenced(
+                    preflight_v5_capacity,
+                    self.state_dir,
+                    prediction,
+                    policy=capacity_policy,
+                )
+            except V5CapacityError:
+                LOGGER.error(
+                    "reason_code=v5_capacity_preflight_failed derived_views=%d "
+                    "unique_cache_misses=%d database_payload_bytes=%d database_rows=%d",
+                    len(ordered_view_pairs),
+                    len(unique_misses),
+                    database_ledger.payload_bytes,
+                    database_ledger.row_count,
+                )
+                raise
+            LOGGER.info(
+                "V5 capacity preflight passed derived_views=%d unique_cache_misses=%d "
+                "wal_baseline_bytes=%d sidecar_bytes=%d database_bytes=%d "
+                "logical_growth_bytes=%d peak_growth_bytes=%d "
+                "state_usage_bytes=%d filesystem_free_bytes=%d",
+                len(ordered_view_pairs),
+                len(unique_misses),
+                prediction.embedding_cache_wal_baseline_bytes,
+                prediction.vector_sidecar_bytes,
+                prediction.serving_database_bytes,
+                prediction.logical_growth_bytes,
+                prediction.peak_growth_bytes,
+                capacity_snapshot.state_usage_bytes,
+                capacity_snapshot.filesystem_free_bytes,
+            )
+            miss_batches = _embedding_miss_batches(
+                unique_misses,
+                formatted_token_counts,
+                maximum_tokens=profile.maximum_tokens,
+            )
+            remaining_unique_misses = len(unique_misses)
+            for batch_indices in miss_batches:
+                check_cache_wal_capacity(boundary="before-provider-batch")
+                try:
+                    await to_thread_fenced(
+                        preflight_v5_remaining_free_capacity,
+                        self.state_dir,
+                        prediction,
+                        remaining_embedding_cache_miss_count=remaining_unique_misses,
+                        policy=capacity_policy,
+                    )
+                except V5CapacityError:
+                    LOGGER.error(
+                        "reason_code=v5_remaining_capacity_failed remaining_unique_cache_misses=%d",
+                        remaining_unique_misses,
+                    )
+                    raise
+                embedding_provider_call_count += 1
+                generated = await provider.embed_documents(
+                    [ordered_view_pairs[index][1].embedding_input for index in batch_indices]
+                )
+                if len(generated) != len(batch_indices):
+                    raise RuntimeError("Qwen provider returned the wrong view batch count")
+                for representative, vector in zip(batch_indices, generated, strict=True):
+                    cache_key, input_sha256 = cache_bindings[representative]
+                    cached = self.state.put_embedding_v5(
+                        cache_key=cache_key,
+                        profile_id=profile.profile_id,
+                        input_sha256=input_sha256,
+                        dimension=profile.dimension,
+                        dtype=profile.dtype,
+                        normalization=profile.normalization,
+                        values=vector,
+                    )
+                    vector_sha256_by_cache_key[cache_key] = hashlib.sha256(cached.embedding).hexdigest()
+                    # Downloads count unique cache keys, attributed
+                    # deterministically to the key's first view type. Hits and
+                    # misses above remain per derived sidecar row.
+                    embedding_download_counts[ordered_view_pairs[representative][1].view_type] += 1
+                check_cache_wal_capacity(boundary="after-provider-batch")
+                remaining_unique_misses -= len(batch_indices)
+            if remaining_unique_misses != 0:
+                raise RuntimeError("v5 embedding batching left unprocessed unique cache misses")
+            if len(vector_sha256_by_cache_key) != len(indices_by_cache_key):
+                raise RuntimeError("v5 embedding cache rows were not all digest-sealed")
+            sealed_cache_bindings = tuple(
+                (cache_key, input_sha256, vector_sha256_by_cache_key[cache_key])
+                for cache_key, input_sha256 in cache_bindings
+            )
+
+        await self._finite_stage(
+            run_id=run_id,
+            document_id="corpus-v5",
+            name="embedding-v5",
+            operation=embed_views,
+            non_retryable_predicate=lambda exc: isinstance(exc, V5CapacityError),
+            non_retryable_error_formatter=lambda _exc: (
+                "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+            ),
+        )
+        if sealed_cache_bindings is None or len(sealed_cache_bindings) != len(ordered_view_pairs):
+            raise RuntimeError("v5 embedding cache/provider left incomplete view bindings")
+        try:
+            final_wal_baseline = self.state.observe_embedding_cache_v5_wal()
+        except WorkerStateWALCapacityError as exc:
+            raise V5CapacityError("Worker v5 embedding cache WAL baseline could not be resealed") from exc
+        final_prediction = predict_v5_local_artifacts(
+            derived_view_count=len(ordered_view_pairs),
+            database_payload_bytes=database_ledger.payload_bytes,
+            database_row_count=database_ledger.row_count,
+            database_fts_indexed_text_bytes=database_ledger.fts_indexed_text_bytes,
+            database_secondary_index_text_bytes=database_ledger.secondary_index_text_bytes,
+            embedding_cache_miss_count=0,
+            embedding_cache_wal_baseline_bytes=final_wal_baseline.size_bytes,
+        )
+        capacity_policy = self.capacity_policy_v5
+        if capacity_policy is None:
+            raise V5CapacityError("v5 generation lost its local capacity policy")
+        try:
+            final_capacity_snapshot = await to_thread_fenced(
+                preflight_v5_capacity,
+                self.state_dir,
+                final_prediction,
+                policy=capacity_policy,
+            )
+        except V5CapacityError:
+            LOGGER.error(
+                "reason_code=v5_preexport_capacity_failed derived_views=%d",
+                len(ordered_view_pairs),
+            )
+            raise
+        LOGGER.info(
+            "V5 pre-export capacity recheck passed state_usage_bytes=%d "
+            "filesystem_free_bytes=%d peak_growth_bytes=%d",
+            final_capacity_snapshot.state_usage_bytes,
+            final_capacity_snapshot.filesystem_free_bytes,
+            final_prediction.peak_growth_bytes,
+        )
+
+        def lazy_cache_vector(
+            *,
+            cache_key: str,
+            input_sha256: str,
+            expected_vector_sha256: str,
+        ) -> LazyEmbeddingVector:
+            def load() -> bytes:
+                cached = self.state.get_embedding_v5(
+                    cache_key,
+                    profile_id=profile.profile_id,
+                    input_sha256=input_sha256,
+                    dimension=profile.dimension,
+                    dtype=profile.dtype,
+                    normalization=profile.normalization,
+                )
+                if cached is None:
+                    raise RuntimeError("sealed v5 embedding cache row disappeared before export")
+                expected_identity = (
+                    cache_key,
+                    profile.profile_id,
+                    input_sha256,
+                    profile.dimension,
+                    profile.dtype,
+                    profile.normalization,
+                )
+                actual_identity = (
+                    cached.cache_key,
+                    cached.profile_id,
+                    cached.input_sha256,
+                    cached.dimension,
+                    cached.dtype,
+                    cached.normalization,
+                )
+                if actual_identity != expected_identity:
+                    raise RuntimeError("sealed v5 embedding cache row changed identity before export")
+                if hashlib.sha256(cached.embedding).hexdigest() != expected_vector_sha256:
+                    raise RuntimeError("sealed v5 embedding cache row changed bytes before export")
+                return cached.embedding
+
+            return LazyEmbeddingVector(
+                cache_identity=cache_key,
+                profile_id=profile.profile_id,
+                input_sha256=input_sha256,
+                expected_vector_sha256=expected_vector_sha256,
+                loader=load,
+                dimension=profile.dimension,
+                dtype=profile.dtype,
+                normalization=profile.normalization,
+            )
+
+        view_rows = tuple(
+            EmbeddingViewInput(
+                row_index=index,
+                node_id=view.node_id,
+                contract_revision_id=view.contract_revision_id,
+                view_type=view.view_type,
+                embedding_input=view.embedding_input,
+                input_sha256=view.input_sha256,
+                profile_id=profile.profile_id,
+                display_text=view.display_text,
+                source_spans=tuple(
+                    ViewSourceSpanInput(
+                        page=span.page,
+                        source_start=span.source_start,
+                        source_end=span.source_end,
+                        text_sha256=span.text_sha256,
+                    )
+                    for span in view.spans
+                ),
+                vector=lazy_cache_vector(
+                    cache_key=cache_binding[0],
+                    input_sha256=cache_binding[1],
+                    expected_vector_sha256=cache_binding[2],
+                ),
+            )
+            for index, ((_document, view), cache_binding) in enumerate(
+                zip(ordered_view_pairs, sealed_cache_bindings, strict=True)
+            )
+        )
 
         generation_id = f"g-{run_id[:24]}-{corpus_sha256[:12]}"
         database_path = run_dir / "sealed" / "index.sqlite3"
         vector_path = run_dir / "sealed" / "vectors.f32"
+        publication_seal = run_dir / "sealed" / "publish.json"
+        run_status = self.state.connection.execute(
+            "SELECT status FROM run WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        publish_status = self.state.connection.execute(
+            "SELECT status FROM publish WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if (
+            run_status is None
+            or str(run_status["status"]) != "running"
+            or publish_status is not None
+            or os.path.lexists(publication_seal)
+        ):
+            raise RuntimeError("v5 incomplete-target replacement requires an unsealed running run")
         export = self.exporter_v5.export(
             database_path,
             vector_path,
@@ -4245,38 +4552,12 @@ class WorkerPipeline:
                 if self.document_aggregation is not None
                 else None
             ),
-            extra_metadata={
-                "embedding_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
-                "embedding_endpoint_name": profile.endpoint_name,
-                "embedding_policy_sha256": embedding_policy_sha256,
-                "parser_policy_sha256": parser_policy_sha256,
-                "retrieval_policy_sha256": retrieval_policy_sha256,
-                "revision_history_policy_version": REVISION_HISTORY_POLICY_VERSION,
-                "historical_revision_unresolved_count": str(len(unresolved_revision_ledger)),
-                "historical_revision_unresolved_sha256": unresolved_revision_sha256,
-                "structure_fallback_document_count": str(len(structure_fallback_documents)),
-                "structure_fallback_documents_sha256": structure_fallback_ledger_sha256,
-                "structure_fallback_policy_version": str(
-                    unclassified_fallback_policy_payload()["schema_version"]
-                ),
-                "structure_failed_document_count": "0",
-                "structure_failed_documents_sha256": empty_structure_failure_ledger_sha256,
-                "tokenizer_revision": QWEN_TOKENIZER_REVISION,
-                "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
-                **{
-                    f"parser_profile_id.{issuer}": parser_profiles_by_issuer[issuer].profile_id
-                    for issuer in sorted(parser_profiles_by_issuer)
-                },
-                **{
-                    f"parser_profile_sha256.{issuer}": parser_profiles_by_issuer[issuer].sha256
-                    for issuer in sorted(parser_profiles_by_issuer)
-                },
-                **(
-                    {"aggregation_profile_artifact_sha256": (self.document_aggregation.artifact_sha256)}
-                    if self.document_aggregation is not None
-                    else {}
-                ),
-            },
+            predicted_serving_database_bytes=predicted_database_bytes,
+            maximum_serving_database_bytes=capacity_policy.maximum_serving_database_bytes,
+            maximum_vector_sidecar_bytes=capacity_policy.maximum_vector_sidecar_bytes,
+            reserved_free_space_bytes=capacity_policy.reserved_free_space_bytes,
+            replace_incomplete_owned_targets=True,
+            extra_metadata=extra_metadata,
         )
         previous_id: str | None
         if self.document_aggregation is not None:

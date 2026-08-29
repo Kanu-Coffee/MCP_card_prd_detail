@@ -1,11 +1,195 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
 
-from cardrag_worker.state import AlreadyRunning, WorkerState, worker_lock
+import cardrag_worker.state as state_module
+from cardrag_worker.capacity_v5 import predict_v5_local_artifacts
+from cardrag_worker.state import (
+    WORKER_STATE_SQLITE_PAGE_BYTES,
+    WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES,
+    AlreadyRunning,
+    WorkerState,
+    WorkerStateWALCapacityError,
+    worker_lock,
+)
+
+
+def _state_tree_bytes(path: Path) -> int:
+    return sum(
+        candidate.stat().st_size
+        for candidate in (path, path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm"))
+        if candidate.exists()
+    )
+
+
+def test_state_rejects_existing_non_4096_page_database(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA page_size=8192")
+        connection.execute("VACUUM")
+        connection.execute("CREATE TABLE sentinel(value TEXT)")
+
+    with pytest.raises(RuntimeError, match="4096-byte"):
+        WorkerState(path)
+
+
+def test_state_and_lock_reject_symlink_leaves_without_mutating_targets(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"preserve")
+    state_link = tmp_path / "state.sqlite3"
+    state_link.symlink_to(victim)
+
+    with pytest.raises(RuntimeError, match="unavailable or not a regular file"):
+        WorkerState(state_link)
+
+    lock_link = tmp_path / "worker.lock"
+    lock_link.symlink_to(victim)
+    with pytest.raises(RuntimeError, match="unavailable or not a regular file"), worker_lock(lock_link):
+        pass
+
+    assert victim.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-shm"))
+def test_state_rejects_existing_sqlite_sidecar_symlink_without_mutating_target(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"preserve-sidecar-victim")
+    path = tmp_path / "state.sqlite3"
+    path.with_name(f"{path.name}{suffix}").symlink_to(victim)
+
+    with pytest.raises(RuntimeError, match="unavailable or not a regular file"):
+        WorkerState(path)
+
+    assert victim.read_bytes() == b"preserve-sidecar-victim"
+
+
+def test_state_revalidates_sqlite_created_wal_and_shm_as_regular_files(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+
+    with WorkerState(path):
+        for suffix in ("-wal", "-shm"):
+            sidecar = path.with_name(f"{path.name}{suffix}")
+            observed = sidecar.stat(follow_symlinks=False)
+            assert stat.S_ISREG(observed.st_mode)
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-shm"))
+def test_state_fails_closed_when_sqlite_sidecar_is_swapped_before_postcheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"preserve-postcheck-victim")
+    original_open = state_module._open_nofollow_regular
+    injected = False
+
+    def swap_then_open(candidate: Path, *, create: bool) -> tuple[int, os.stat_result]:
+        nonlocal injected
+        if not create and candidate.name.endswith(suffix) and candidate.exists() and not injected:
+            candidate.unlink()
+            candidate.symlink_to(victim)
+            injected = True
+        return original_open(candidate, create=create)
+
+    monkeypatch.setattr(state_module, "_open_nofollow_regular", swap_then_open)
+
+    with pytest.raises(RuntimeError, match="WAL/SHM identity|SQLite files changed"):
+        WorkerState(path)
+
+    assert injected
+    assert victim.read_bytes() == b"preserve-postcheck-victim"
+
+
+def test_embedding_cache_prediction_and_hard_wal_cap_cover_a_pinned_reader(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    miss_count = WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES + 1
+    values = (1.0, *([0.0] * 4095))
+    with WorkerState(path) as state, sqlite3.connect(path, isolation_level=None) as reader:
+        tree_baseline = _state_tree_bytes(path)
+        wal_baseline = state.observe_embedding_cache_v5_wal()
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM embedding_cache_v5").fetchone()
+
+        for index in range(miss_count):
+            state.put_embedding_v5(
+                cache_key=hashlib.sha256(f"cache-{index}".encode()).hexdigest(),
+                profile_id="profile-v5",
+                input_sha256=hashlib.sha256(f"input-{index}".encode()).hexdigest(),
+                dimension=4096,
+                values=values,
+            )
+
+        prediction = predict_v5_local_artifacts(
+            derived_view_count=miss_count,
+            database_payload_bytes=0,
+            database_row_count=0,
+            embedding_cache_miss_count=miss_count,
+            embedding_cache_wal_baseline_bytes=wal_baseline.size_bytes,
+        )
+        actual_growth = _state_tree_bytes(path) - tree_baseline
+        modeled_cache_peak = (
+            prediction.embedding_cache_growth_bytes + prediction.embedding_cache_transaction_bytes
+        )
+        assert actual_growth <= modeled_cache_peak
+
+        wal_capacity = state.check_embedding_cache_v5_wal_capacity(
+            baseline=wal_baseline,
+            maximum_wal_growth_bytes=(
+                prediction.embedding_cache_transaction_bytes - prediction.embedding_cache_wal_baseline_bytes
+            ),
+        )
+        assert wal_capacity.wal_size_bytes <= wal_capacity.maximum_wal_bytes
+        too_small_growth = wal_capacity.wal_size_bytes - wal_baseline.size_bytes - 1
+        assert too_small_growth > 0
+        with pytest.raises(WorkerStateWALCapacityError, match="predicted hard limit"):
+            state.check_embedding_cache_v5_wal_capacity(
+                baseline=wal_baseline,
+                maximum_wal_growth_bytes=too_small_growth,
+            )
+
+        reader.execute("ROLLBACK")
+        later_baseline = state.observe_embedding_cache_v5_wal()
+        one_miss = predict_v5_local_artifacts(
+            derived_view_count=1,
+            database_payload_bytes=0,
+            database_row_count=0,
+            embedding_cache_miss_count=1,
+            embedding_cache_wal_baseline_bytes=later_baseline.size_bytes,
+        )
+        later = state.check_embedding_cache_v5_wal_capacity(
+            baseline=later_baseline,
+            maximum_wal_growth_bytes=(
+                one_miss.embedding_cache_transaction_bytes - one_miss.embedding_cache_wal_baseline_bytes
+            ),
+        )
+        assert later.maximum_wal_bytes == one_miss.embedding_cache_transaction_bytes
+        assert later.wal_size_bytes <= later.maximum_wal_bytes
+
+        all_hit_baseline = state.observe_embedding_cache_v5_wal()
+        all_hit = predict_v5_local_artifacts(
+            derived_view_count=1,
+            database_payload_bytes=0,
+            database_row_count=0,
+            embedding_cache_miss_count=0,
+            embedding_cache_wal_baseline_bytes=all_hit_baseline.size_bytes,
+        )
+        before_bookkeeping = _state_tree_bytes(path)
+        state.start_run(run_id="all-hit-bookkeeping")
+        bookkeeping_growth = _state_tree_bytes(path) - before_bookkeeping
+        assert bookkeeping_growth <= all_hit.embedding_cache_transaction_bytes
 
 
 def test_stage_terminal_failure_does_not_require_exhausted_attempts(tmp_path: Path) -> None:
@@ -27,6 +211,10 @@ def test_stage_terminal_failure_does_not_require_exhausted_attempts(tmp_path: Pa
 def test_state_uses_wal_and_resume_resets_attempts_and_refreshes_discovery(tmp_path: Path) -> None:
     with WorkerState(tmp_path / "state.sqlite3") as state:
         assert state.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert state.connection.execute("PRAGMA page_size").fetchone()[0] == (WORKER_STATE_SQLITE_PAGE_BYTES)
+        assert state.connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == (
+            WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES
+        )
         run_id = state.start_run(run_id="run-1")
         state.ensure_stage(run_id, "doc", "ocr", max_attempts=1)
         state.ensure_stage(run_id, "protected", "download", max_attempts=1)

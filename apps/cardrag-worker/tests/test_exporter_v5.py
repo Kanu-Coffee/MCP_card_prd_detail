@@ -22,6 +22,7 @@ from cardrag_core.embedding import (
     qwen3_embedding_profile_id,
 )
 
+import cardrag_worker.exporter_v5 as exporter_module
 from cardrag_worker.exporter_v5 import (
     SERVING_SCHEMA_ID_V5,
     VECTOR_ROW_BYTES,
@@ -30,6 +31,7 @@ from cardrag_worker.exporter_v5 import (
     EmbeddingProfileInput,
     EmbeddingViewInput,
     IssuerInput,
+    LazyEmbeddingVector,
     NodeLinkInput,
     NodeSpanInput,
     OCRFailedProductInput,
@@ -252,6 +254,543 @@ def test_v5_export_accepts_already_encoded_rows_without_corpus_float_expansion(
     )
 
     assert vectors.read_bytes() == encoded
+
+
+def test_v5_export_rejects_exact_vector_cap_before_creating_targets(tmp_path: Path) -> None:
+    target_root = tmp_path / "not-created"
+
+    with pytest.raises(ServingDatabaseV5Error, match="vector sidecar exceeds"):
+        ServingDatabaseExporterV5().export(
+            target_root / "index.sqlite3",
+            target_root / "vectors.f32",
+            maximum_vector_sidecar_bytes=VECTOR_ROW_BYTES - 1,
+            **_records(),
+        )
+
+    assert not target_root.exists()
+
+
+def test_v5_export_rejects_working_database_cap_and_cleans_temporary_files(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+
+    with pytest.raises(ServingDatabaseV5Error, match="working serving database"):
+        ServingDatabaseExporterV5().export(
+            database,
+            vectors,
+            maximum_serving_database_bytes=4096,
+            reserved_free_space_bytes=0,
+            **_records(),
+        )
+
+    assert not database.exists()
+    assert not vectors.exists()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+def test_v5_export_rejects_vacuum_free_shortfall_without_replacing_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    maximum = 100 * 1024 * 1024
+    reserve = 17
+    monkeypatch.setattr(
+        exporter_module,
+        "_directory_free_bytes",
+        lambda _path: maximum + reserve - 1,
+    )
+
+    with pytest.raises(ServingDatabaseV5Error, match="reserved free space"):
+        ServingDatabaseExporterV5().export(
+            database,
+            vectors,
+            maximum_serving_database_bytes=maximum,
+            reserved_free_space_bytes=reserve,
+            **_records(),
+        )
+
+    assert not database.exists()
+    assert not vectors.exists()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+def test_v5_export_rejects_actual_database_above_prediction_before_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = ServingDatabaseExporterV5().export(
+        tmp_path / "baseline.sqlite3",
+        tmp_path / "baseline.f32",
+        **_records(),
+    )
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    monkeypatch.setattr(exporter_module, "_directory_free_bytes", lambda _path: 1 << 40)
+
+    with pytest.raises(ServingDatabaseV5Error, match="preflight prediction"):
+        ServingDatabaseExporterV5().export(
+            database,
+            vectors,
+            predicted_serving_database_bytes=baseline.database_size_bytes - 1,
+            maximum_serving_database_bytes=baseline.database_size_bytes * 2,
+            maximum_vector_sidecar_bytes=VECTOR_ROW_BYTES,
+            reserved_free_space_bytes=0,
+            **_records(),
+        )
+
+    assert not database.exists()
+    assert not vectors.exists()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+def test_v5_export_removes_installed_sidecar_when_database_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    original_replace = exporter_module.os.replace
+
+    def fail_database_replace(source: Path, target: Path) -> None:
+        if Path(target) == database:
+            raise OSError("injected database replace failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(exporter_module.os, "replace", fail_database_replace)
+
+    with pytest.raises(OSError, match="injected database replace failure"):
+        ServingDatabaseExporterV5().export(database, vectors, **_records())
+
+    assert not database.exists()
+    assert not vectors.exists()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+@pytest.mark.parametrize(
+    ("artifact", "append_size"),
+    (("vector", VECTOR_ROW_BYTES), ("database", 4096)),
+)
+def test_v5_export_rejects_temp_artifact_mutated_inside_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+    append_size: int,
+) -> None:
+    records = _records()
+    baseline = ServingDatabaseExporterV5().export(
+        tmp_path / "baseline.sqlite3",
+        tmp_path / "baseline.f32",
+        **records,
+    )
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    mutated_target = vectors if artifact == "vector" else database
+    original_replace = exporter_module.os.replace
+    mutated = False
+
+    def mutate_source_then_replace(source: Path, target: Path) -> None:
+        nonlocal mutated
+        if Path(target) == mutated_target and not mutated:
+            with Path(source).open("ab") as stream:
+                stream.write(b"\0" * append_size)
+            mutated = True
+        original_replace(source, target)
+
+    monkeypatch.setattr(exporter_module.os, "replace", mutate_source_then_replace)
+
+    with pytest.raises(ServingDatabaseV5Error, match="changed from its sealed artifact"):
+        ServingDatabaseExporterV5().export(
+            database,
+            vectors,
+            maximum_serving_database_bytes=baseline.database_size_bytes,
+            maximum_vector_sidecar_bytes=baseline.vector_size_bytes,
+            **records,
+        )
+
+    assert mutated
+    assert not database.exists()
+    assert not vectors.exists()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+@pytest.mark.parametrize(
+    ("field", "append_size"),
+    (("vector sidecar", VECTOR_ROW_BYTES), ("serving database", 4096)),
+)
+def test_v5_export_preserves_owned_previous_targets_when_temp_changes_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    append_size: int,
+) -> None:
+    records = _records()
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    baseline = ServingDatabaseExporterV5().export(database, vectors, **records)
+    database_before = database.read_bytes()
+    vectors_before = vectors.read_bytes()
+    original_revalidate = exporter_module._revalidate_sealed_artifact
+    mutated = False
+
+    def mutate_before_revalidation(
+        path: Path,
+        sealed: Any,
+        *,
+        field: str,
+        maximum_size_bytes: int | None = None,
+    ) -> None:
+        nonlocal mutated
+        if field == test_field and not mutated:
+            with Path(path).open("ab") as stream:
+                stream.write(b"\0" * append_size)
+            mutated = True
+        original_revalidate(
+            path,
+            sealed,
+            field=field,
+            maximum_size_bytes=maximum_size_bytes,
+        )
+
+    test_field = field
+    monkeypatch.setattr(exporter_module, "_revalidate_sealed_artifact", mutate_before_revalidation)
+
+    with pytest.raises(ServingDatabaseV5Error, match="changed from its sealed artifact"):
+        ServingDatabaseExporterV5().export(
+            database,
+            vectors,
+            maximum_serving_database_bytes=baseline.database_size_bytes,
+            maximum_vector_sidecar_bytes=baseline.vector_size_bytes,
+            replace_incomplete_owned_targets=True,
+            **records,
+        )
+
+    assert mutated
+    assert database.read_bytes() == database_before
+    assert vectors.read_bytes() == vectors_before
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+def test_v5_export_rejects_same_size_database_mutation_after_final_verify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    original_verify = exporter_module._verify_database
+    mutated = False
+
+    def mutate_after_verify(connection: sqlite3.Connection, **kwargs: Any) -> None:
+        nonlocal mutated
+        original_verify(connection, **kwargs)
+        if kwargs.get("run_fts_integrity_check", False) or mutated:
+            return
+        database_row = connection.execute("PRAGMA database_list").fetchone()
+        assert database_row is not None
+        vacuumed = Path(str(database_row[2]))
+        size_before = vacuumed.stat().st_size
+        with vacuumed.open("r+b") as stream:
+            stream.seek(-150, 2)
+            original_byte = stream.read(1)
+            assert len(original_byte) == 1
+            stream.seek(-1, 1)
+            stream.write(bytes((original_byte[0] ^ 1,)))
+        assert vacuumed.stat().st_size == size_before
+        mutated = True
+
+    monkeypatch.setattr(exporter_module, "_verify_database", mutate_after_verify)
+
+    with pytest.raises(ServingDatabaseV5Error, match="serving database changed from its sealed artifact"):
+        ServingDatabaseExporterV5().export(database, vectors, **_records())
+
+    assert mutated
+    assert not database.exists()
+    assert not vectors.exists()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+
+def test_v5_export_owned_incomplete_targets_are_overwritten_on_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    original_replace = exporter_module.os.replace
+    failed_once = False
+
+    def fail_first_database_replace(source: Path, target: Path) -> None:
+        nonlocal failed_once
+        if Path(target) == database and not failed_once:
+            failed_once = True
+            raise OSError("injected process-death window")
+        original_replace(source, target)
+
+    monkeypatch.setattr(exporter_module.os, "replace", fail_first_database_replace)
+
+    with pytest.raises(OSError, match="process-death window"):
+        ServingDatabaseExporterV5().export(
+            database,
+            vectors,
+            replace_incomplete_owned_targets=True,
+            **_records(),
+        )
+
+    assert not database.exists()
+    assert vectors.is_file()
+    assert not tuple(tmp_path.glob(".index.sqlite3.*"))
+    assert not tuple(tmp_path.glob(".vectors.f32.*"))
+
+    resumed = ServingDatabaseExporterV5().export(
+        database,
+        vectors,
+        replace_incomplete_owned_targets=True,
+        **_records(),
+    )
+
+    assert resumed.database_path == database
+    assert resumed.vector_path == vectors
+    assert database.is_file()
+    assert vectors.is_file()
+
+    rerun = ServingDatabaseExporterV5().export(
+        database,
+        vectors,
+        replace_incomplete_owned_targets=True,
+        **_records(),
+    )
+    assert rerun.database_sha256 == resumed.database_sha256
+    assert rerun.vector_sha256 == resumed.vector_sha256
+
+
+def test_v5_export_rejects_product_lineage_without_revision(tmp_path: Path) -> None:
+    records = _records()
+    records["product_lineages"] = (
+        *records["product_lineages"],
+        ProductLineageInput(
+            product_lineage_id="lineage_orphan",
+            issuer="kb",
+            product_code="orphan-card",
+            document_type="product_description",
+            name="Orphan card",
+        ),
+    )
+
+    with pytest.raises(ServingDatabaseV5Error, match="every product lineage"):
+        ServingDatabaseExporterV5().export(
+            tmp_path / "index.sqlite3",
+            tmp_path / "vectors.f32",
+            **records,
+        )
+
+    assert not tuple(tmp_path.iterdir())
+
+
+def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(tmp_path: Path) -> None:
+    records = _records()
+    original = records["embedding_views"][0]
+    encoded = struct.pack("<4096f", 1.0, *([0.0] * 4095))
+    tracker = {"live": 0, "maximum": 0}
+    calls: list[int] = []
+
+    class TrackedRow(bytes):
+        def __new__(cls, payload: bytes) -> TrackedRow:
+            instance = super().__new__(cls, payload)
+            tracker["live"] += 1
+            tracker["maximum"] = max(tracker["maximum"], tracker["live"])
+            return instance
+
+        def __del__(self) -> None:
+            tracker["live"] -= 1
+
+    def lazy_vector(row_index: int) -> LazyEmbeddingVector:
+        def load() -> bytes:
+            calls.append(row_index)
+            return TrackedRow(encoded)
+
+        return LazyEmbeddingVector(
+            cache_identity=hashlib.sha256(f"cache-{row_index}".encode()).hexdigest(),
+            profile_id=original.profile_id,
+            input_sha256=original.input_sha256,
+            expected_vector_sha256=hashlib.sha256(encoded).hexdigest(),
+            loader=load,
+        )
+
+    records["embedding_views"] = (
+        replace(original, row_index=0, vector=lazy_vector(0)),
+        replace(original, row_index=1, view_type="RAW_ITEM", vector=lazy_vector(1)),
+    )
+    vectors = tmp_path / "vectors.f32"
+
+    ServingDatabaseExporterV5().export(
+        tmp_path / "index.sqlite3",
+        vectors,
+        **records,
+    )
+
+    # Each row is independently proved before artifact creation and again as
+    # it is streamed into the sidecar.
+    assert calls == [0, 1, 0, 1]
+    assert tracker == {"live": 0, "maximum": 1}
+    assert vectors.read_bytes() == encoded + encoded
+
+
+@pytest.mark.parametrize(
+    "encoded,match",
+    [
+        (b"\0" * (VECTOR_ROW_BYTES - 4), "byte length"),
+        (struct.pack("<4096f", *([0.0] * 4096)), "not L2 normalized"),
+    ],
+)
+def test_v5_export_rejects_invalid_lazy_rows(
+    tmp_path: Path,
+    encoded: bytes,
+    match: str,
+) -> None:
+    records = _records()
+    original = records["embedding_views"][0]
+    records["embedding_views"] = (
+        replace(
+            original,
+            vector=LazyEmbeddingVector(
+                cache_identity="d" * 64,
+                profile_id=original.profile_id,
+                input_sha256=original.input_sha256,
+                expected_vector_sha256=hashlib.sha256(encoded).hexdigest(),
+                loader=lambda: encoded,
+            ),
+        ),
+    )
+
+    with pytest.raises(ServingDatabaseV5Error, match=match):
+        ServingDatabaseExporterV5().export(
+            tmp_path / "index.sqlite3",
+            tmp_path / "vectors.f32",
+            **records,
+        )
+
+
+@pytest.mark.parametrize("failure", ("cache row missing", "cache row tampered"))
+def test_v5_export_propagates_lazy_cache_failures_during_sidecar_write(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    records = _records()
+    original = records["embedding_views"][0]
+    encoded = struct.pack("<4096f", 1.0, *([0.0] * 4095))
+    calls = 0
+
+    def load() -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError(failure)
+        return encoded
+
+    records["embedding_views"] = (
+        replace(
+            original,
+            vector=LazyEmbeddingVector(
+                cache_identity="d" * 64,
+                profile_id=original.profile_id,
+                input_sha256=original.input_sha256,
+                expected_vector_sha256=hashlib.sha256(encoded).hexdigest(),
+                loader=load,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=failure):
+        ServingDatabaseExporterV5().export(
+            tmp_path / "index.sqlite3",
+            tmp_path / "vectors.f32",
+            **records,
+        )
+
+    assert calls == 2
+    assert not (tmp_path / "index.sqlite3").exists()
+    assert not (tmp_path / "vectors.f32").exists()
+    assert not tuple(tmp_path.glob(".*.build"))
+
+
+def test_v5_export_rejects_valid_vector_bytes_changed_between_lazy_loads(
+    tmp_path: Path,
+) -> None:
+    records = _records()
+    original = records["embedding_views"][0]
+    first = struct.pack("<4096f", 1.0, *([0.0] * 4095))
+    second = struct.pack("<4096f", 0.0, 1.0, *([0.0] * 4094))
+    calls = 0
+
+    def load() -> bytes:
+        nonlocal calls
+        calls += 1
+        return first if calls == 1 else second
+
+    records["embedding_views"] = (
+        replace(
+            original,
+            vector=LazyEmbeddingVector(
+                cache_identity="d" * 64,
+                profile_id=original.profile_id,
+                input_sha256=original.input_sha256,
+                expected_vector_sha256=hashlib.sha256(first).hexdigest(),
+                loader=load,
+            ),
+        ),
+    )
+
+    with pytest.raises(ServingDatabaseV5Error, match="changed after"):
+        ServingDatabaseExporterV5().export(
+            tmp_path / "index.sqlite3",
+            tmp_path / "vectors.f32",
+            **records,
+        )
+
+    assert calls == 2
+    assert not (tmp_path / "index.sqlite3").exists()
+    assert not (tmp_path / "vectors.f32").exists()
+
+
+def test_v5_export_validates_lazy_cache_binding_before_invoking_loader(tmp_path: Path) -> None:
+    records = _records()
+    original = records["embedding_views"][0]
+    calls = 0
+
+    def must_not_load() -> bytes:
+        nonlocal calls
+        calls += 1
+        return struct.pack("<4096f", 1.0, *([0.0] * 4095))
+
+    records["embedding_views"] = (
+        replace(
+            original,
+            vector=LazyEmbeddingVector(
+                cache_identity="d" * 64,
+                profile_id=original.profile_id,
+                input_sha256="e" * 64,
+                expected_vector_sha256="f" * 64,
+                loader=must_not_load,
+            ),
+        ),
+    )
+
+    with pytest.raises(ServingDatabaseV5Error, match="input_sha256"):
+        ServingDatabaseExporterV5().export(
+            tmp_path / "index.sqlite3",
+            tmp_path / "vectors.f32",
+            **records,
+        )
+    assert calls == 0
 
 
 @pytest.mark.parametrize(

@@ -39,6 +39,11 @@ from .cache_seed_v109 import (
 from .cache_seed_v109 import (
     paths_overlap as v109_paths_overlap,
 )
+from .capacity_v5 import (
+    V5CapacityPolicy,
+    preflight_worker_start_capacity,
+    revalidate_worker_start_capacity,
+)
 from .embedding_v5 import (
     OpenRouterQwenEmbeddingProviderV5,
     preflight_openrouter_qwen_providers,
@@ -271,6 +276,15 @@ async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
     _guard_v110_publication_channel(settings)
+    startup_capacity = preflight_worker_start_capacity(
+        settings.state_dir,
+        minimum_free_bytes=settings.minimum_start_free_bytes,
+    )
+    logging.getLogger("cardrag_worker.cli").info(
+        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d",
+        startup_capacity.filesystem_free_bytes,
+        startup_capacity.minimum_free_bytes,
+    )
     document_aggregation = None
     if settings.document_aggregation_profile_path is not None:
         expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
@@ -284,6 +298,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # Preserve the unsealed M0 startup order byte-for-byte and behaviorally:
         # candidate state precedes construction of its WebDAV client.
         settings.state_dir.mkdir(parents=True, exist_ok=True)
+        startup_capacity = revalidate_worker_start_capacity(startup_capacity)
     webdav = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
     try:
         if document_aggregation is not None:
@@ -291,6 +306,10 @@ async def _run(resume: str | None) -> dict[str, Any]:
             # until GET-only proof identifies the evaluated M0 or its sealed M1.
             await validate_document_aggregation_head(webdav, document_aggregation)
             settings.state_dir.mkdir(parents=True, exist_ok=True)
+        # Narrow the descriptor-walk-to-use window for both M0 and M1.  This
+        # remains immediately before SQLite opens the path, after any allowed
+        # WebDAV construction/GET-only aggregation validation.
+        startup_capacity = revalidate_worker_start_capacity(startup_capacity)
         with WorkerState(settings.state_database) as state:
             primary = OCRResolver(
                 provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
@@ -346,6 +365,12 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 garbage_grace_days=settings.garbage_grace_days,
                 pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
                 document_aggregation=document_aggregation,
+                capacity_policy_v5=V5CapacityPolicy(
+                    maximum_state_bytes=settings.maximum_state_bytes,
+                    reserved_free_space_bytes=settings.reserved_free_space_bytes,
+                    maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
+                    maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
+                ),
             ).run(resume_run_id=resume)
             return _pipeline_result_payload(result)
     finally:

@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 import cardrag_worker.cli as cli_module
 import cardrag_worker.providers as providers_module
 from cardrag_worker.adoption import AdoptionError
+from cardrag_worker.capacity_v5 import V5CapacityError, WorkerStartCapacitySnapshot
 from cardrag_worker.gc import GCPartialFailure
 from cardrag_worker.pipeline import (
     OCRDocumentFailuresError,
@@ -404,6 +405,7 @@ def test_run_verifies_supplied_aggregation_profile_before_state_mutation(
         document_aggregation_profile_path = profile_path
         document_aggregation_profile_artifact_sha256 = "a" * 64
         state_dir = state_root
+        minimum_start_free_bytes = 0
 
     def reject_profile(path: Path, *, expected_artifact_sha256: str) -> None:
         observed.update(path=path, expected_artifact_sha256=expected_artifact_sha256)
@@ -421,6 +423,116 @@ def test_run_verifies_supplied_aggregation_profile_before_state_mutation(
         "expected_artifact_sha256": "a" * 64,
     }
     assert not state_root.exists()
+
+
+def test_run_rejects_startup_capacity_before_state_provider_or_webdav_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "missing-state"
+    events: list[str] = []
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        state_dir = state_root
+        minimum_start_free_bytes = 32 * 1024**3
+
+    def reject_capacity(path: Path, *, minimum_free_bytes: int) -> None:
+        assert path == state_root
+        assert minimum_free_bytes == 32 * 1024**3
+        assert not state_root.exists()
+        events.append("capacity_preflight")
+        raise V5CapacityError("injected startup capacity rejection")
+
+    def must_not_run(*_args: object, **_kwargs: object) -> None:
+        events.append("forbidden_mutation")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module, "preflight_worker_start_capacity", reject_capacity)
+    monkeypatch.setattr(cli_module, "load_verified_aggregation_profile_v5", must_not_run)
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", must_not_run)
+    monkeypatch.setattr(cli_module, "WorkerState", must_not_run)
+    monkeypatch.setattr(cli_module, "_qwen_embedding_provider", must_not_run)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(V5CapacityError, match="startup capacity rejection"):
+        asyncio.run(cli_module._run(None))
+
+    assert events == ["capacity_preflight"]
+    assert not state_root.exists()
+
+
+def test_run_rejects_nested_state_database_symlink_before_any_runtime_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    victim = tmp_path / "victim.sqlite3"
+    victim.write_bytes(b"preserve-victim")
+    (state_root / "worker-state.sqlite3").symlink_to(victim)
+    events: list[str] = []
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        document_aggregation_profile_path = None
+        document_aggregation_profile_artifact_sha256 = None
+        state_dir = state_root
+        state_database = state_root / "worker-state.sqlite3"
+        minimum_start_free_bytes = 0
+
+    def must_not_run(*_args: object, **_kwargs: object) -> None:
+        events.append("forbidden_runtime_client")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", must_not_run)
+    monkeypatch.setattr(cli_module, "WorkerState", must_not_run)
+    monkeypatch.setattr(cli_module, "_qwen_embedding_provider", must_not_run)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(V5CapacityError, match="contains a symlink"):
+        asyncio.run(cli_module._run(None))
+
+    assert events == []
+    assert victim.read_bytes() == b"preserve-victim"
+
+
+def test_run_revalidation_failure_precedes_webdav_state_and_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    events: list[str] = []
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        document_aggregation_profile_path = None
+        document_aggregation_profile_artifact_sha256 = None
+        state_dir = state_root
+        minimum_start_free_bytes = 0
+
+    def reject_revalidation(_snapshot: object) -> None:
+        assert state_root.is_dir()
+        events.append("startup_revalidation")
+        raise V5CapacityError("injected startup revalidation rejection")
+
+    def must_not_run(*_args: object, **_kwargs: object) -> None:
+        events.append("forbidden_runtime_client")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", reject_revalidation)
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", must_not_run)
+    monkeypatch.setattr(cli_module, "WorkerState", must_not_run)
+    monkeypatch.setattr(cli_module, "_qwen_embedding_provider", must_not_run)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(V5CapacityError, match="startup revalidation rejection"):
+        asyncio.run(cli_module._run(None))
+
+    assert events == ["startup_revalidation"]
 
 
 @pytest.mark.parametrize(
@@ -447,6 +559,7 @@ def test_run_rejects_aggregation_head_before_provider_or_state_creation(
         document_aggregation_profile_path = profile_path
         document_aggregation_profile_artifact_sha256 = "a" * 64
         state_dir = state_root
+        minimum_start_free_bytes = 0
 
     class Client:
         async def close(self) -> None:
@@ -504,6 +617,7 @@ def test_run_without_aggregation_profile_preserves_m0_state_then_webdav_order(
         document_aggregation_profile_path = None
         document_aggregation_profile_artifact_sha256 = None
         state_dir = state_root
+        minimum_start_free_bytes = 0
 
     def stop_at_webdav(**_kwargs: object) -> None:
         assert state_root.is_dir()
@@ -515,6 +629,58 @@ def test_run_without_aggregation_profile_preserves_m0_state_then_webdav_order(
 
     with pytest.raises(RuntimeError, match="m0_webdav_stop"):
         asyncio.run(cli_module._run(None))
+
+
+def test_run_revalidates_a_new_m0_state_root_twice_before_state_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "missing" / "state"
+    events: list[str] = []
+    original_revalidate = cli_module.revalidate_worker_start_capacity
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        document_aggregation_profile_path = None
+        document_aggregation_profile_artifact_sha256 = None
+        state_dir = state_root
+        state_database = state_root / "worker-state.sqlite3"
+        minimum_start_free_bytes = 0
+
+    class Client:
+        async def close(self) -> None:
+            events.append("webdav_close")
+
+    def revalidate(snapshot: WorkerStartCapacitySnapshot) -> WorkerStartCapacitySnapshot:
+        events.append("startup_revalidation")
+        return original_revalidate(snapshot)
+
+    def webdav_from_env(**_kwargs: object) -> Client:
+        events.append("webdav_constructed")
+        return Client()
+
+    def stop_at_state(path: Path) -> None:
+        assert path == state_root / "worker-state.sqlite3"
+        events.append("worker_state_open")
+        raise RuntimeError("state_open_after_double_revalidation")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", revalidate)
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", webdav_from_env)
+    monkeypatch.setattr(cli_module, "WorkerState", stop_at_state)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(RuntimeError, match="state_open_after_double_revalidation"):
+        asyncio.run(cli_module._run(None))
+
+    assert events == [
+        "startup_revalidation",
+        "webdav_constructed",
+        "startup_revalidation",
+        "worker_state_open",
+        "webdav_close",
+    ]
 
 
 def test_cli_ocr_failure_aggregate_is_safe_bounded_and_exits_one(
@@ -742,6 +908,23 @@ def test_production_openrouter_base_url_requires_https_without_credentials(
     assert WorkerSettings.from_env().openrouter_base_url == "https://openrouter.example/api/v1"
 
 
+def test_worker_settings_preserves_unresolved_state_path_for_symlink_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    configured = linked / "state"
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(configured))
+
+    settings = WorkerSettings.from_env()
+
+    assert settings.state_dir == configured.absolute()
+    assert settings.state_dir != configured.resolve()
+
+
 def test_ocr_quality_defaults_and_configuration_are_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -796,6 +979,77 @@ def test_embedding_response_caps_are_bounded_canonical_integers(
             WorkerSettings.from_env()
         monkeypatch.delenv(name)
         monkeypatch.delenv(name, raising=False)
+
+
+def test_worker_capacity_defaults_and_zero_allowed_floors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = (
+        "CARDRAG_WORKER_MAX_STATE_BYTES",
+        "CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES",
+        "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES",
+        "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES",
+        "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES",
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+
+    settings = WorkerSettings.from_env()
+    assert settings.maximum_state_bytes == 64 * 1024**3
+    assert settings.reserved_free_space_bytes == 2 * 1024**3
+    assert settings.maximum_vector_sidecar_bytes == 16 * 1024**3
+    assert settings.maximum_serving_database_bytes == 4 * 1024**3
+    assert settings.minimum_start_free_bytes == 2 * 1024**3
+
+    monkeypatch.setenv("CARDRAG_WORKER_MAX_STATE_BYTES", "100")
+    monkeypatch.setenv("CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES", "0")
+    monkeypatch.setenv("CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES", "101")
+    monkeypatch.setenv("CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES", "102")
+    monkeypatch.setenv("CARDRAG_WORKER_MINIMUM_START_FREE_BYTES", "0")
+    configured = WorkerSettings.from_env()
+    assert configured.maximum_state_bytes == 100
+    assert configured.reserved_free_space_bytes == 0
+    assert configured.maximum_vector_sidecar_bytes == 101
+    assert configured.maximum_serving_database_bytes == 102
+    assert configured.minimum_start_free_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "CARDRAG_WORKER_MAX_STATE_BYTES",
+        "CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES",
+        "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES",
+        "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES",
+        "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES",
+    ),
+)
+@pytest.mark.parametrize("value", ("true", "-1", str(1 << 63)))
+def test_worker_capacity_settings_reject_bool_negative_and_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        WorkerSettings.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "CARDRAG_WORKER_MAX_STATE_BYTES",
+        "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES",
+        "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES",
+    ),
+)
+def test_worker_positive_capacity_settings_reject_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ValueError, match=name):
+        WorkerSettings.from_env()
 
 
 def test_candidate_channel_and_two_generation_retention_are_validated(

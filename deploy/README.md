@@ -54,6 +54,12 @@ CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v110-candidate
 CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://candidate-cardrag.example
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung
 CARDRAG_EMBEDDING_PROVIDER_ID=deepinfra
+CARDRAG_WORKER_MAX_STATE_BYTES=68719476736
+CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES=2147483648
+CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES=17179869184
+CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES=4294967296
+# Candidate startup floor: 32 GiB. Set it explicitly when copying the shared env example.
+CARDRAG_WORKER_MINIMUM_START_FREE_BYTES=34359738368
 # Off by default. Enable only in the candidate MCP env after provider preflight.
 CARDRAG_RERANKER_SHADOW_ENABLED=false
 ```
@@ -86,6 +92,21 @@ hit는 GET으로 재사용하지만 native/adopted cache manifest와 READY를 �
 `CARDRAG_PDF_CACHE_REFRESH_HOURS`는 양의 유한 시간만 허용하며 기본값 168시간입니다.
 그 주기 전에는 검증된 로컬 CAS를 재사용하고, 만료 뒤에는 validator 조건부 확인 또는
 validator가 없는 원본의 전체 재다운로드를 수행합니다.
+
+v5 Worker는 provider나 WebDAV 접근 전에 state 경로가 속할 filesystem의 free bytes를
+read-only로 확인합니다. 기본 Compose floor는 2 GiB이고 candidate overlay 기본값은
+32 GiB입니다. 모든 derived view와 embedding cache hit가 확정된 뒤에는 embedding miss를
+받기 전에 state 64 GiB, peak 뒤 reserved free space 2 GiB, 단일 vector sidecar 16 GiB,
+단일 serving DB 4 GiB의 기본 한도를 각각 검사합니다. 이 설정은 부호나 단위 suffix가
+없는 canonical decimal bytes이며 state/sidecar/DB는 양수, 두 free-space 값은 0 이상이어야
+합니다. 이 gate는 v5에만 적용되고 v1-v4 rollback 경로는 그대로 유지됩니다.
+
+Worker와 MCP volume이 같은 host filesystem에 있으면 remote generation을 한 벌로만
+계산하면 안 됩니다. Worker의 PDF/OCR/cache와 생성 DB/sidecar에 더해 MCP가 별도로
+download/stage/retain하는 PDF/source CAS, DB, sidecar 복사본 및 두 runtime의 reserved
+free-space 약속을 합산해 host 여유 공간과
+`CARDRAG_WORKER_MINIMUM_START_FREE_BYTES`를 정합니다. candidate 32 GiB는 조기 floor일
+뿐이며 corpus 기반 Worker preflight나 MCP 자체 quota/download gate를 대신하지 않습니다.
 
 stable publication 승인과 remote object 삭제 승인은 서로 다른 작업입니다. 기본
 Compose는 `CARDRAG_COLLECT_REMOTE_GARBAGE=false`와

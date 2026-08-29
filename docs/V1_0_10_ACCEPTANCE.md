@@ -25,6 +25,48 @@ candidate는 아래 gate가 모두 증거로 남기 전에는 release-ready가 �
 - v1.0.9 1,536D와 legacy Qwen cache read는 0건입니다.
 - sidecar size는 `row_count × 4096 × 4`이고 SHA, finite, L2 norm을 검증합니다.
 
+## Worker local capacity
+
+- `CARDRAG_WORKER_MAX_STATE_BYTES=68719476736`,
+  `CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES=2147483648`,
+  `CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES=17179869184`,
+  `CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES=4294967296`의 기본값과 signed-64-bit
+  overflow, boolean text, 음수 거부를 검증합니다. state/sidecar/DB의 0도 거부하고
+  reserved free space의 0은 허용합니다.
+- startup은 state path를 생성하지 않고 가장 가까운 기존 ancestor filesystem을
+  확인합니다. `CARDRAG_WORKER_MINIMUM_START_FREE_BYTES`는 base 2 GiB, candidate
+  32 GiB이며 0은 허용하지만 boolean text, 음수와 overflow는 거부합니다. floor 미달은
+  provider, WebDAV client, tokenizer, state DB보다 먼저 fail-closed해야 합니다.
+- startup snapshot은 no-follow probe의 device/inode/filesystem identity를 봉인하고 기존
+  state tree의 symlink/non-regular entry를 전부 거부합니다. state root 생성 직후
+  WorkerState 이전에 같은 ancestry/filesystem/free floor를 재검사하며 DB/WAL/SHM/lock
+  leaf도 `O_NOFOLLOW` regular-file 검사를 통과해야 합니다. SQLite가 생성한 WAL/SHM은
+  WAL mode 설정 직후와 schema 초기화 후 다시 identity/regular-file 검사를 수행합니다.
+  전용 Compose user·단일 Worker·flock 경계를 벗어나 SQLite pathname-open 순간에 ancestor
+  또는 leaf를 계속 교체할 수 있는 hostile same-UID process는 이 gate의 명시적
+  threat-boundary 밖이며, 사후 탐지된 교체는 fail-closed합니다.
+- 모든 실제 derived view와 read-only embedding cache miss count가 정해진 뒤, 첫 embedding
+  miss나 export mutation 전에 sidecar=`views × 4096 × 4`, embedding cache growth,
+  serving DB, VACUUM 동시 peak 및 기존 state usage를 checked arithmetic으로 평가합니다.
+  각 quota/free-space 실패에서 embedding/provider call, export, cleanup, publication은
+  0건이고 기존 state bytes는 그대로여야 합니다.
+- SQLite 예측치는 exporter의 실제 UTF-8 binding/row ledger와 검증 fixture로 보정한
+  FTS/index/page/WAL envelope이며 SQLite 최종 크기의 형식적 증명으로 취급하지 않습니다.
+  working DB page cap, VACUUM 결과와 sidecar actual size를 final target replace 전에 다시
+  검사하고, 예측치 자체가 cap을 넘으면 explicit resume 전까지 fail-closed합니다.
+- embedding cache WAL은 auto-checkpoint threshold만 믿지 않고 unique miss당 growth와
+  기존 WAL allocation 1회 복제 가능성을 예측합니다. initial preflight는 checkpoint나
+  truncate 없이 baseline identity/size를 봉인하고, 각 provider batch 직전·직후 stat-only
+  검사로 actual WAL이 baseline+growth hard limit을 넘으면 다음 유료 호출 전에
+  non-retryable capacity failure로 종료합니다.
+- Worker와 MCP state volume이 같은 host filesystem이면 Worker PDF/OCR/cache와 생성
+  DB/sidecar, MCP가 별도로 download/stage/retain하는 PDF/source CAS·DB·sidecar 및 두
+  reserved-free-space 값을 중복 합산한 capacity evidence를 남깁니다. candidate 32 GiB
+  startup floor만으로 충분하다고 판정하지 않고 Worker corpus preflight와 MCP quota도
+  각각 통과시킵니다.
+- 같은 fixture의 v4 generation/rollback 경로는 새 v5 capacity policy 유무와 관계없이
+  기존 결과를 유지합니다.
+
 ### 2026-08-29 sanitized live preflight 증거
 
 [봉인된 JSON evidence](../release-evidence/v1.0.10/qwen-provider-preflight.json)는

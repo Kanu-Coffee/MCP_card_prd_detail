@@ -6,8 +6,10 @@ import fcntl
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
+import stat
 import struct
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -23,10 +25,16 @@ StageStatus = Literal["pending", "running", "retry", "succeeded", "failed", "ski
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
 _INTERRUPTED_ERROR = "worker process ended before the run reached a terminal state"
+WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES = 1000
+WORKER_STATE_SQLITE_PAGE_BYTES = 4096
 
 
 class AlreadyRunning(RuntimeError):
     pass
+
+
+class WorkerStateWALCapacityError(RuntimeError):
+    """The embedding-cache WAL cannot be kept inside its predicted hard bound."""
 
 
 def _now() -> datetime:
@@ -37,10 +45,74 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
 
 
+def _open_nofollow_regular(path: Path, *, create: bool) -> tuple[int, os.stat_result]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise RuntimeError("Worker state requires no-follow file descriptors")
+    flags = os.O_RDWR | nofollow | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags | (os.O_CREAT | os.O_EXCL if create else 0), 0o600)
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise RuntimeError("Worker state file is unavailable or not a regular file") from exc
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise RuntimeError("Worker state file is unavailable or not a regular file") from exc
+    try:
+        observed = os.fstat(descriptor)
+        try:
+            linked = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError("Worker state file path identity is unavailable") from exc
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or not stat.S_ISREG(linked.st_mode)
+            or (observed.st_dev, observed.st_ino) != (linked.st_dev, linked.st_ino)
+        ):
+            raise RuntimeError("Worker state file is not a regular file")
+        return descriptor, observed
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _require_nofollow_regular_identity(
+    path: Path,
+    *,
+    expected: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    descriptor, observed = _open_nofollow_regular(path, create=False)
+    os.close(descriptor)
+    identity = (observed.st_dev, observed.st_ino)
+    if expected is not None and identity != expected:
+        raise RuntimeError("Worker state file identity changed while opening SQLite")
+    return identity
+
+
+def _revalidate_sqlite_sidecars(
+    paths: tuple[Path, Path],
+    identities: dict[Path, tuple[int, int] | None],
+    *,
+    require_present: bool,
+) -> None:
+    for path in paths:
+        try:
+            identity = _require_nofollow_regular_identity(path, expected=identities[path])
+        except FileNotFoundError:
+            if require_present:
+                raise RuntimeError("Worker state WAL/SHM file was not created as a regular file") from None
+            continue
+        identities[path] = identity
+
+
 @contextmanager
 def worker_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
+    descriptor, _observed = _open_nofollow_regular(path, create=True)
+    with os.fdopen(descriptor, "a+b") as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -61,6 +133,23 @@ class StageRow:
     max_attempts: int
     available_at: str
     last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerStateWALObservation:
+    exists: bool
+    device: int | None
+    inode: int | None
+    size_bytes: int
+    mtime_ns: int | None
+    ctime_ns: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerStateWALCapacitySnapshot:
+    baseline_wal_size_bytes: int
+    wal_size_bytes: int
+    maximum_wal_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,9 +463,55 @@ class WorkerState:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        descriptor, sealed_database = _open_nofollow_regular(path, create=True)
+        os.close(descriptor)
+        sidecar_paths = (
+            path.with_name(f"{path.name}-wal"),
+            path.with_name(f"{path.name}-shm"),
+        )
+        sidecar_identities: dict[Path, tuple[int, int] | None] = {}
+        for sidecar in sidecar_paths:
+            try:
+                sidecar_descriptor, sidecar_stat = _open_nofollow_regular(sidecar, create=False)
+            except FileNotFoundError:
+                sidecar_identities[sidecar] = None
+            else:
+                os.close(sidecar_descriptor)
+                sidecar_identities[sidecar] = (sidecar_stat.st_dev, sidecar_stat.st_ino)
         self.connection = sqlite3.connect(path, timeout=30, isolation_level=None)
+        try:
+            _require_nofollow_regular_identity(
+                path,
+                expected=(sealed_database.st_dev, sealed_database.st_ino),
+            )
+        except (OSError, RuntimeError):
+            self.connection.close()
+            raise RuntimeError("Worker state database identity is unavailable") from None
         self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute(f"PRAGMA page_size={WORKER_STATE_SQLITE_PAGE_BYTES}")
+        page_size = self.connection.execute("PRAGMA page_size").fetchone()
+        if page_size is None or int(page_size[0]) != WORKER_STATE_SQLITE_PAGE_BYTES:
+            self.connection.close()
+            raise RuntimeError("Worker state SQLite page size is not the sealed 4096-byte contract")
+        journal_mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()
+        if journal_mode is None or str(journal_mode[0]).casefold() != "wal":
+            self.connection.close()
+            raise RuntimeError("Worker state SQLite journal mode could not be sealed as WAL")
+        try:
+            _revalidate_sqlite_sidecars(
+                sidecar_paths,
+                sidecar_identities,
+                require_present=False,
+            )
+        except (OSError, RuntimeError):
+            self.connection.close()
+            raise RuntimeError("Worker state WAL/SHM identity changed while enabling WAL") from None
+        wal_checkpoint = self.connection.execute(
+            f"PRAGMA wal_autocheckpoint={WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES}"
+        ).fetchone()
+        if wal_checkpoint is None or int(wal_checkpoint[0]) != WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES:
+            self.connection.close()
+            raise RuntimeError("Worker state WAL checkpoint policy could not be sealed")
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.execute("PRAGMA busy_timeout=30000")
         # Keep foreign-key rewriting disabled while upgrading the v1.0.8 run
@@ -390,6 +525,19 @@ class WorkerState:
         if violation is not None:
             self.connection.close()
             raise RuntimeError("worker state failed its foreign-key integrity check")
+        try:
+            _require_nofollow_regular_identity(
+                path,
+                expected=(sealed_database.st_dev, sealed_database.st_ino),
+            )
+            _revalidate_sqlite_sidecars(
+                sidecar_paths,
+                sidecar_identities,
+                require_present=True,
+            )
+        except (OSError, RuntimeError):
+            self.connection.close()
+            raise RuntimeError("Worker state SQLite files changed during initialization") from None
 
     def _migrate_run_status_constraint(self) -> None:
         row = self.connection.execute(
@@ -1276,6 +1424,96 @@ class WorkerState:
             raise RuntimeError("v5 embedding cache key is bound to a different profile or input")
         _validate_embedding_cache_v5_blob(cached.embedding, dimension=cached.dimension)
         return cached
+
+    def observe_embedding_cache_v5_wal(self) -> WorkerStateWALObservation:
+        """Seal the current regular WAL identity and size without checkpointing it."""
+
+        wal_path = self.path.with_name(f"{self.path.name}-wal")
+        try:
+            wal_stat = os.stat(wal_path, follow_symlinks=False)
+        except FileNotFoundError:
+            return WorkerStateWALObservation(
+                exists=False,
+                device=None,
+                inode=None,
+                size_bytes=0,
+                mtime_ns=None,
+                ctime_ns=None,
+            )
+        except OSError as exc:
+            raise WorkerStateWALCapacityError("Worker state WAL size is unavailable") from exc
+        if not stat.S_ISREG(wal_stat.st_mode):
+            raise WorkerStateWALCapacityError("Worker state WAL is not a regular file")
+        if wal_stat.st_size < 0 or wal_stat.st_size > (1 << 63) - 1:
+            raise WorkerStateWALCapacityError("Worker state WAL size is outside the supported range")
+        return WorkerStateWALObservation(
+            exists=True,
+            device=wal_stat.st_dev,
+            inode=wal_stat.st_ino,
+            size_bytes=wal_stat.st_size,
+            mtime_ns=wal_stat.st_mtime_ns,
+            ctime_ns=wal_stat.st_ctime_ns,
+        )
+
+    def check_embedding_cache_v5_wal_capacity(
+        self,
+        *,
+        baseline: WorkerStateWALObservation,
+        maximum_wal_growth_bytes: int,
+    ) -> WorkerStateWALCapacitySnapshot:
+        """Read-only hard bound for the WAL around paid v5 embedding batches.
+
+        Auto-checkpoint is a trigger rather than a size cap when another reader
+        pins old frames. The capacity model separately reserves one baseline
+        WAL allocation for a possible automatic checkpoint into the main DB;
+        this method never induces that mutation itself.
+        """
+
+        if not isinstance(baseline, WorkerStateWALObservation):
+            raise TypeError("Worker state WAL baseline must be a sealed observation")
+        if (
+            type(maximum_wal_growth_bytes) is not int
+            or maximum_wal_growth_bytes < 1
+            or maximum_wal_growth_bytes > (1 << 63) - 1
+        ):
+            raise ValueError("maximum Worker state WAL growth must be a positive bounded integer")
+        if maximum_wal_growth_bytes > (1 << 63) - 1 - baseline.size_bytes:
+            raise WorkerStateWALCapacityError("Worker state WAL hard limit overflows")
+        maximum_wal_bytes = baseline.size_bytes + maximum_wal_growth_bytes
+
+        def require_same_wal_identity(observed: WorkerStateWALObservation) -> None:
+            if baseline.exists and (
+                not observed.exists or (observed.device, observed.inode) != (baseline.device, baseline.inode)
+            ):
+                raise WorkerStateWALCapacityError("Worker state WAL identity changed after preflight")
+
+        before_checkpoint = self.observe_embedding_cache_v5_wal()
+        require_same_wal_identity(before_checkpoint)
+        if before_checkpoint.size_bytes > maximum_wal_bytes:
+            raise WorkerStateWALCapacityError("Worker state WAL exceeds its predicted hard limit")
+
+        try:
+            page_size = self.connection.execute("PRAGMA page_size").fetchone()
+            autocheckpoint = self.connection.execute("PRAGMA wal_autocheckpoint").fetchone()
+            if page_size is None or int(page_size[0]) != WORKER_STATE_SQLITE_PAGE_BYTES:
+                raise WorkerStateWALCapacityError("Worker state SQLite page-size contract changed")
+            if autocheckpoint is None or int(autocheckpoint[0]) != WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES:
+                raise WorkerStateWALCapacityError("Worker state WAL auto-checkpoint contract changed")
+        except WorkerStateWALCapacityError:
+            raise
+        except sqlite3.Error as exc:
+            raise WorkerStateWALCapacityError("Worker state WAL capacity evidence failed") from exc
+
+        observed = self.observe_embedding_cache_v5_wal()
+        require_same_wal_identity(observed)
+        if observed.size_bytes > maximum_wal_bytes:
+            raise WorkerStateWALCapacityError("Worker state WAL exceeds its predicted hard limit")
+
+        return WorkerStateWALCapacitySnapshot(
+            baseline_wal_size_bytes=baseline.size_bytes,
+            wal_size_bytes=observed.size_bytes,
+            maximum_wal_bytes=maximum_wal_bytes,
+        )
 
     def put_embedding_v5(
         self,

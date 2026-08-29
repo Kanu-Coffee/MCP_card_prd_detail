@@ -92,6 +92,62 @@ state; the MCP never reads them. Candidate runs use a separate channel, WebDAV
 root, and state volume and never perform remote GC. Unit tests use local
 deterministic fakes.
 
+The v5 path has fail-closed local capacity gates; legacy v1-v4 behavior is
+unchanged. Before provider or WebDAV work, the Worker checks the filesystem
+containing its state path without creating the configured directory and
+requires `CARDRAG_WORKER_MINIMUM_START_FREE_BYTES` free (2 GiB by default; the
+candidate Compose overlay fixes release launches at 32 GiB). After all derived views and
+read-only embedding-cache hits are known, but before downloading an embedding
+miss, it conservatively checks the projected state and peak filesystem growth.
+The SQLite forecast counts exact UTF-8 bindings and logical rows plus calibrated
+FTS, secondary-index, overflow-page, and WAL envelopes; it is a fail-closed
+planning estimate, not a proof of SQLite's final byte size. The exporter also
+hard-limits the working database, checks the vacuumed database and vector
+sidecar before either final target is installed, and removes only its own temp
+artifacts on failure. A forecast above a configured cap therefore rejects the
+attempt until an operator explicitly resumes with a fitting corpus or policy.
+The defaults are 64 GiB for `CARDRAG_WORKER_MAX_STATE_BYTES`, 2 GiB for
+`CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES`, 16 GiB for
+`CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES`, and 4 GiB for
+`CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES`. Values must be canonical decimal
+integers in the supported signed-64-bit byte range. The state, sidecar, and DB
+limits must be positive; the two free-space settings may be zero.
+
+Startup walks path components with no-follow directory descriptors and scans
+an existing state tree for regular files only. It seals the deepest existing
+ancestor's device/inode and filesystem identity, then revalidates the created
+or existing state root immediately before WorkerState opens it. The database,
+WAL, SHM, and lock leaves are opened with `O_NOFOLLOW` and rechecked as regular
+files; SQLite-created WAL/SHM leaves are checked again immediately after WAL
+mode is enabled and after schema initialization. Compose runs one Worker under
+its dedicated UID and the Worker lock. A hostile process already running as
+that same UID that can continuously swap an ancestor or leaf during SQLite's
+unavoidable pathname-open window remains outside this local gate's threat
+boundary; detected replacements still fail closed.
+
+V5 cache hit/miss metrics count derived sidecar rows. Equal exact embedding
+inputs share one cache key, so the provider is called once per unique miss and
+`downloads` counts unique keys (attributed to the first canonical view type),
+while export still writes one 4,096D row for every derived view. Counters are
+attempt-local: retry or explicit-resume metrics describe only the last
+completed attempt.
+
+The cache forecast includes per-unique-miss persistent/WAL growth and one copy
+of the sealed existing WAL allocation in case SQLite's automatic checkpoint
+extends the main database. Before and after every paid provider batch, the
+Worker performs a stat-only identity/size check and rejects a WAL larger than
+the sealed baseline plus that attempt's predicted growth; the capacity gate
+does not trigger a checkpoint or truncate operator state.
+
+When Worker and MCP state live on the same host filesystem, capacity planning
+must count their local copies separately. The Worker retains PDF/OCR and
+embedding-cache bytes plus its generated DB and sidecar; the MCP independently
+downloads/stages the serving DB, sidecar, and source CAS/PDF bytes. Size the
+startup floor for those duplicate sidecar/PDF/DB bytes and both services'
+reserved-free-space commitments. The candidate 32 GiB floor is an early guard,
+not a replacement for the Worker's corpus-derived preflight or the MCP's own
+state/download gates.
+
 Qwen provider bodies are bounded before JSON parsing: embedding responses are
 streamed with a 32 MiB default maximum and model-metadata responses with a 2 MiB
 default maximum. Both enforce `Content-Length` when present and an incremental

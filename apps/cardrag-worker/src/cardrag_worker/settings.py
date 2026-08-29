@@ -19,6 +19,14 @@ from cardrag_core import (
     resolve_env_secret,
 )
 
+from .capacity_v5 import (
+    DEFAULT_MAX_SERVING_DATABASE_BYTES,
+    DEFAULT_MAX_STATE_BYTES,
+    DEFAULT_MAX_VECTOR_SIDECAR_BYTES,
+    DEFAULT_MINIMUM_START_FREE_BYTES,
+    DEFAULT_RESERVED_FREE_SPACE_BYTES,
+    MAX_SAFE_BYTES,
+)
 from .tokenizer_v5 import QWEN_TOKENIZER_SHA256
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -92,6 +100,11 @@ def _provider_base_url(name: str, default: str) -> str:
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     state_dir: Path
+    maximum_state_bytes: int
+    reserved_free_space_bytes: int
+    maximum_vector_sidecar_bytes: int
+    maximum_serving_database_bytes: int
+    minimum_start_free_bytes: int
     channel: str
     stable_publication_approved: bool
     ocr_cache_publication_approved: bool
@@ -156,7 +169,10 @@ class WorkerSettings:
             minimum=1,
             maximum=32_768,
         )
-        state_dir = Path(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")).resolve()
+        # Keep the unresolved absolute spelling so the startup capacity gate
+        # can descriptor-walk and reject every symlinked ancestor. Resolving
+        # here would erase that security evidence before the gate runs.
+        state_dir = Path(os.path.abspath(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")))
         tokenizer_path_raw = os.environ.get("CARDRAG_QWEN_TOKENIZER_PATH")
         tokenizer_path = (
             Path(tokenizer_path_raw).resolve()
@@ -221,6 +237,36 @@ class WorkerSettings:
             )
         return cls(
             state_dir=state_dir,
+            maximum_state_bytes=_bounded_int(
+                "CARDRAG_WORKER_MAX_STATE_BYTES",
+                DEFAULT_MAX_STATE_BYTES,
+                minimum=1,
+                maximum=MAX_SAFE_BYTES,
+            ),
+            reserved_free_space_bytes=_bounded_int(
+                "CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES",
+                DEFAULT_RESERVED_FREE_SPACE_BYTES,
+                minimum=0,
+                maximum=MAX_SAFE_BYTES,
+            ),
+            maximum_vector_sidecar_bytes=_bounded_int(
+                "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES",
+                DEFAULT_MAX_VECTOR_SIDECAR_BYTES,
+                minimum=1,
+                maximum=MAX_SAFE_BYTES,
+            ),
+            maximum_serving_database_bytes=_bounded_int(
+                "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES",
+                DEFAULT_MAX_SERVING_DATABASE_BYTES,
+                minimum=1,
+                maximum=MAX_SAFE_BYTES,
+            ),
+            minimum_start_free_bytes=_bounded_int(
+                "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES",
+                DEFAULT_MINIMUM_START_FREE_BYTES,
+                minimum=0,
+                maximum=MAX_SAFE_BYTES,
+            ),
             channel=channel,
             stable_publication_approved=stable_publication_approved,
             ocr_cache_publication_approved=ocr_cache_publication_approved,

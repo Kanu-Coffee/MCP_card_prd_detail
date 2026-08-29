@@ -76,6 +76,17 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED:-false" in worker_base
     assert "CARDRAG_REMOTE_GC_APPROVED:-false" in worker_base
     assert "CARDRAG_OCR_CACHE_MODE:-read-only" in worker_base
+    for name in (
+        "CARDRAG_WORKER_MAX_STATE_BYTES",
+        "CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES",
+        "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES",
+        "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES",
+    ):
+        assert name in worker_base
+        assert name in worker
+    assert "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-2147483648" in worker_base
+    assert 'CARDRAG_WORKER_MINIMUM_START_FREE_BYTES: "34359738368"' in worker
+    assert "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-34359738368" not in worker
     assert "CARDRAG_MCP_STATE_VOLUME" in mcp_base
     assert "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES" in mcp_base
     assert "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES" in mcp_base
@@ -131,6 +142,11 @@ def test_public_environment_contract_is_documented_exactly() -> None:
         "CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS",
         "CARDRAG_OCR_CACHE_MODE",
         "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED",
+        "CARDRAG_WORKER_MAX_STATE_BYTES",
+        "CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES",
+        "CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES",
+        "CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES",
+        "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES",
         "CARDRAG_MCP_BEARER_TOKEN_FILE",
         "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES",
         "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES",

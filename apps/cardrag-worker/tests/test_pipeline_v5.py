@@ -29,6 +29,7 @@ from helpers import pdf_bytes
 
 import cardrag_worker.pipeline as pipeline_module
 from cardrag_worker.aggregation_profile_v5 import VerifiedAggregationProfileV5
+from cardrag_worker.capacity_v5 import V5CapacityError
 from cardrag_worker.contracts import (
     DownloadRequest,
     IssuerSpec,
@@ -42,6 +43,7 @@ from cardrag_worker.embedding_v5 import (
     OpenRouterQwenEmbeddingProviderV5,
     QwenEmbeddingProfileV5,
 )
+from cardrag_worker.exporter_v5 import LazyEmbeddingVector
 from cardrag_worker.ocr import OCRResult
 from cardrag_worker.pipeline import (
     StructureDocumentFailuresError,
@@ -612,6 +614,144 @@ async def test_v5_unavailable_fallback_continues_documents_then_blocks_publicati
         assert state.get_stage(error.run_id, second_document_id, "views").status == "succeeded"
 
 
+@pytest.mark.asyncio
+async def test_v5_capacity_rejection_is_non_retryable_and_explicit_resume_restarts_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [pdf_bytes()]
+    pdf_requests: list[str] = []
+    _install_pdf_http(monkeypatch, payload, pdf_requests)
+    embedding_requests: list[dict[str, Any]] = []
+    embeddings = _test_qwen_embeddings(embedding_requests)
+    source = _test_source("capacity-resume")
+    ocr = _OCR()
+    webdav = _FakeCandidateWebDAV()
+    webdav.fail_pointer_once = False
+    real_preflight = pipeline_module.preflight_v5_capacity
+    allow_capacity = False
+    preflight_calls = 0
+    export_calls = 0
+
+    def gated_preflight(*args: Any, **kwargs: Any) -> Any:
+        nonlocal preflight_calls
+        preflight_calls += 1
+        if not allow_capacity:
+            raise V5CapacityError("injected capacity shortfall")
+        return real_preflight(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "preflight_v5_capacity", gated_preflight)
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(source)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=3,
+            retry_cap_seconds=0,
+        )
+        real_export = pipeline.exporter_v5.export
+
+        def counted_export(*args: Any, **kwargs: Any) -> Any:
+            nonlocal export_calls
+            export_calls += 1
+            return real_export(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline.exporter_v5, "export", counted_export)
+
+        with pytest.raises(V5CapacityError, match="injected capacity shortfall"):
+            await pipeline.run()
+
+        run_id = str(state.connection.execute("SELECT run_id FROM run").fetchone()[0])
+        stage = state.get_stage(run_id, "corpus-v5", "embedding-v5")
+        assert stage is not None
+        assert (stage.status, stage.attempt_count, stage.max_attempts) == ("failed", 1, 3)
+        assert stage.last_error is not None
+        assert "v5_capacity_preflight_failed" in stage.last_error
+        assert embedding_requests == []
+        assert export_calls == 0
+        assert webdav.objects == {}
+        assert state.connection.execute("SELECT count(*) FROM embedding_cache_v5").fetchone()[0] == 0
+        assert not (tmp_path / "runs" / run_id / "sealed").exists()
+
+        allow_capacity = True
+        resumed = await pipeline.run(resume_run_id=run_id)
+
+        assert resumed.status == "succeeded"
+        assert resumed.v5_metrics is not None
+        assert resumed.v5_metrics["embedding_provider_call_count"] == len(embedding_requests) == 1
+        assert export_calls == 1
+        assert preflight_calls >= 3  # rejected initial, resumed initial, resumed final.
+
+
+@pytest.mark.asyncio
+async def test_v5_pipeline_resume_overwrites_run_owned_partial_export_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [pdf_bytes()]
+    pdf_requests: list[str] = []
+    _install_pdf_http(monkeypatch, payload, pdf_requests)
+    embedding_requests: list[dict[str, Any]] = []
+    embeddings = _test_qwen_embeddings(embedding_requests)
+    source = _test_source("partial-export-resume")
+    ocr = _OCR()
+    webdav = _FakeCandidateWebDAV()
+    webdav.fail_pointer_once = False
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(source)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        real_export = pipeline.exporter_v5.export
+        failed_once = False
+
+        def fail_after_sidecar_install(
+            database_target: Path,
+            vectors_target: Path,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            nonlocal failed_once
+            assert kwargs["replace_incomplete_owned_targets"] is True
+            if not failed_once:
+                failed_once = True
+                vectors_target.parent.mkdir(parents=True, exist_ok=True)
+                vectors_target.write_bytes(b"simulated-partial-sidecar")
+                raise RuntimeError("injected process-death export window")
+            return real_export(database_target, vectors_target, *args, **kwargs)
+
+        monkeypatch.setattr(pipeline.exporter_v5, "export", fail_after_sidecar_install)
+
+        with pytest.raises(WorkerUnexpectedFailureError) as failed:
+            await pipeline.run()
+
+        run_id = failed.value.run_id
+        sealed = tmp_path / "runs" / run_id / "sealed"
+        assert (sealed / "vectors.f32").read_bytes() == b"simulated-partial-sidecar"
+        assert not (sealed / "index.sqlite3").exists()
+        provider_calls = len(embedding_requests)
+
+        resumed = await pipeline.run(resume_run_id=run_id)
+
+        assert resumed.status == "succeeded"
+        assert (sealed / "index.sqlite3").is_file()
+        assert (sealed / "vectors.f32").stat().st_size == resumed.evidence_count * 4096 * 4
+        assert len(embedding_requests) == provider_calls
+
+
 def _install_pdf_http(
     monkeypatch: pytest.MonkeyPatch,
     payload: list[bytes],
@@ -772,6 +912,7 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         embedding_requests.append(body)
         inputs = body["input"]
         assert isinstance(inputs, list)
+        assert len(inputs) == 1
         vector = [1.0] + [0.0] * 4095
         return httpx.Response(
             200,
@@ -813,14 +954,36 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         category="credit",
         discovered_at=datetime(2026, 8, 29, tzinfo=UTC),
     )
+    second_source = replace(
+        source,
+        product_code="test-002",
+        source_url="https://cards.example/second.pdf",
+        source_post_id="post-test-002",
+        file_name="second.pdf",
+    )
     ocr = _OCR()
     webdav = _FakeCandidateWebDAV()
+
+    original_build_derived_views = pipeline_module.build_derived_views
+
+    def build_two_duplicate_inputs(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        generated = original_build_derived_views(*args, **kwargs)
+        selected = next(view for view in generated if view.view_type == "TITLE")
+        provisional = replace(selected, view_id="", ordinal=0)
+        return (
+            replace(
+                provisional,
+                view_id="view_" + canonical_sha256(provisional.identity_payload),
+            ),
+        )
+
+    monkeypatch.setattr(pipeline_module, "build_derived_views", build_two_duplicate_inputs)
 
     with WorkerState(tmp_path / "state.sqlite3") as state:
         pipeline = WorkerPipeline(
             state=state,
             state_dir=tmp_path,
-            adapters=[_Adapter(source)],
+            adapters=[_MultiAdapter((source, second_source))],
             ocr=ocr,  # type: ignore[arg-type]
             embeddings=embeddings,
             webdav=webdav,  # type: ignore[arg-type]
@@ -868,7 +1031,8 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         def record_export(*args: Any, **kwargs: Any) -> Any:
             views = kwargs["embedding_views"]
             vector_representations.append(tuple(type(view.vector) for view in views))
-            assert all(isinstance(view.vector, bytes) for view in views)
+            assert len(views) in {2, 4}
+            assert all(isinstance(view.vector, LazyEmbeddingVector) for view in views)
             return real_export(*args, **kwargs)
 
         monkeypatch.setattr(pipeline.exporter_v5, "export", record_export)
@@ -879,9 +1043,11 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         api_calls_after_seal = len(embedding_requests)
         assert api_calls_after_seal == 1
         assert vector_representations and all(
-            vector_type is bytes for invocation in vector_representations for vector_type in invocation
+            vector_type is LazyEmbeddingVector
+            for invocation in vector_representations
+            for vector_type in invocation
         )
-        assert ocr.calls == 1
+        assert ocr.calls == 2
         assert (tmp_path / "runs" / run_id / "sealed" / "publish.json").is_file()
         document_id = source.document_id(hashlib.sha256(payload[0]).hexdigest())
         structure_checkpoint = (
@@ -893,24 +1059,20 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert structure_payload["product_name"] == source.product_name
         assert structure_payload["source_version"] == source.source_version
         assert structure_payload["effective_date"] == source.effective_date.isoformat()
-        contextual_payload = next(
-            row for row in views_payload["views"] if row["view_type"] == "CONTEXTUAL_ITEM"
-        )
-        assert f"product_name: {source.product_name}" in contextual_payload["context"]
-        assert f"source_version: {source.source_version}" in contextual_payload["context"]
-        assert f"effective_date: {source.effective_date.isoformat()}" in contextual_payload["context"]
-        assert source.product_name not in contextual_payload["display_text"]
+        assert len(views_payload["views"]) == 1
+        assert views_payload["views"][0]["view_type"] == "TITLE"
+        assert views_payload["views"][0]["context"] == []
 
         resumed = await pipeline.run(resume_run_id=run_id)
         assert resumed.status == "succeeded"
         assert resumed.generation_id is not None
-        assert resumed.evidence_count > 0
+        assert resumed.evidence_count == 2
         assert resumed.v5_metrics is not None
         metrics = resumed.v5_metrics
         assert metrics["schema_version"] == "cardrag.worker-v5-metrics.v2"
         assert metrics["source_coverage_percent"] == 100.0
-        assert metrics["contract_revision_count"] == 1
-        assert metrics["current_revision_count"] == 1
+        assert metrics["contract_revision_count"] == 2
+        assert metrics["current_revision_count"] == 2
         assert metrics["superseded_revision_count"] == 0
         assert metrics["historical_revision_unresolved_count"] == 0
         assert metrics["historical_revision_unresolved_identities"] == []
@@ -918,13 +1080,10 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert metrics["historical_revision_unresolved_sha256"] == (unresolved_revision_ledger_sha256_v5(()))
         assert metrics["embedding_provider_call_count"] == 1
         assert metrics["embedding_dimension"] == 4096
-        assert (
-            sum(row["downloads"] for row in metrics["embedding_view_counts"].values())
-            == resumed.evidence_count
-        )
+        assert sum(row["downloads"] for row in metrics["embedding_view_counts"].values()) == 1
         assert len(embedding_requests) == api_calls_after_seal
-        assert ocr.calls == 1
-        assert resumed.pdf_cache_hits == 1
+        assert ocr.calls == 2
+        assert resumed.pdf_cache_hits == 2
         assert resumed.pdf_downloads == 0
 
         sealed_path = tmp_path / "runs" / run_id / "sealed" / "publish.json"
@@ -969,9 +1128,7 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
             document.ocr is None or document.ocr.path in webdav.objects for document in manifest.documents
         )
         assert state.connection.execute("SELECT count(*) FROM embedding_cache").fetchone()[0] == 0
-        assert state.connection.execute("SELECT count(*) FROM embedding_cache_v5").fetchone()[0] == (
-            resumed.evidence_count
-        )
+        assert state.connection.execute("SELECT count(*) FROM embedding_cache_v5").fetchone()[0] == (1)
 
         local_database = tmp_path / "runs" / run_id / "sealed" / "index.sqlite3"
         with sqlite3.connect(f"{local_database.as_uri()}?mode=ro&immutable=1", uri=True) as connection:
@@ -993,9 +1150,9 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         fresh = await pipeline.run()
         assert fresh.status == "succeeded"
         assert fresh.generation_id is not None and fresh.generation_id != generation_id
-        assert fresh.pdf_cache_hits == 1
+        assert fresh.pdf_cache_hits == 2
         assert fresh.pdf_downloads == 0
-        assert ocr.calls == 2
+        assert ocr.calls == 4
         assert len(embedding_requests) == api_calls_after_seal
         assert fresh.v5_metrics is not None
         assert fresh.v5_metrics["embedding_provider_call_count"] == 0
@@ -1022,11 +1179,11 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert revised.status == "succeeded"
         assert revised.generation_id is not None
         assert revised.v5_metrics is not None
-        assert revised.v5_metrics["contract_revision_count"] == 2
-        assert revised.v5_metrics["current_revision_count"] == 1
-        assert revised.v5_metrics["superseded_revision_count"] == 1
+        assert revised.v5_metrics["contract_revision_count"] == 4
+        assert revised.v5_metrics["current_revision_count"] == 2
+        assert revised.v5_metrics["superseded_revision_count"] == 2
         assert revised.v5_metrics["ambiguous_revision_count"] == 0
-        assert revised.v5_metrics["historical_pdf_cache_hits"] == 1
+        assert revised.v5_metrics["historical_pdf_cache_hits"] == 2
         assert revised.v5_metrics["historical_revision_unresolved_count"] == 0
         published_run = state.connection.execute(
             "SELECT run_id FROM publish WHERE generation_id=?",
@@ -1039,10 +1196,20 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
                 """SELECT temporal_status,supersedes_revision_id
                    FROM contract_revisions ORDER BY temporal_status"""
             ).fetchall()
-        assert sorted(row[0] for row in revisions) == ["current", "superseded"]
-        assert sum(row[1] is not None for row in revisions) == 1
+        assert sorted(row[0] for row in revisions) == [
+            "current",
+            "current",
+            "superseded",
+            "superseded",
+        ]
+        assert sum(row[1] is not None for row in revisions) == 2
 
-    assert pdf_requests == [source.source_url, source.source_url]
+    assert pdf_requests == [
+        source.source_url,
+        second_source.source_url,
+        source.source_url,
+        second_source.source_url,
+    ]
 
 
 @pytest.mark.asyncio

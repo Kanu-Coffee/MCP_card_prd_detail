@@ -58,6 +58,11 @@ docker compose \
     .services.worker.environment.CARDRAG_COLLECT_REMOTE_GARBAGE == "false" and
     .services.worker.environment.CARDRAG_REMOTE_GC_APPROVED == "false" and
     .services.worker.environment.CARDRAG_EMBEDDING_DIMENSION == "4096" and
+    .services.worker.environment.CARDRAG_WORKER_MAX_STATE_BYTES == "68719476736" and
+    .services.worker.environment.CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES == "2147483648" and
+    .services.worker.environment.CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES == "17179869184" and
+    .services.worker.environment.CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES == "4294967296" and
+    .services.worker.environment.CARDRAG_WORKER_MINIMUM_START_FREE_BYTES == "34359738368" and
     .volumes["worker-state"].name == "cardrag-worker-v110-state" and
     .volumes["v109-worker-state"].name == "cardrag-worker-v109-state" and
     ([.services.worker.volumes[] |
@@ -79,7 +84,9 @@ Worker source mount의 `read_only=true`, 두 destination volume 이름, project 
 channel, port, `CARDRAG_OCR_CACHE_MODE=read-only`,
 `CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=false`,
 `CARDRAG_COLLECT_REMOTE_GARBAGE=false`,
-`CARDRAG_REMOTE_GC_APPROVED=false`와 Qwen 4,096D를 모두 assert합니다.
+`CARDRAG_REMOTE_GC_APPROVED=false`, Qwen 4,096D와 Worker capacity 기본값을 모두
+assert합니다. candidate overlay는 shared/base env의 2 GiB 값을 상속하지 않고 release
+launch에 `CARDRAG_WORKER_MINIMUM_START_FREE_BYTES=34359738368`을 고정합니다.
 
 ## 3. v1.0.9 PDF/OCR seed
 
@@ -144,6 +151,31 @@ preflight를 수행합니다. 2026-08-29 재검증에서는 `deepinfra`와 `nebi
 `order`/`only`, `allow_fallbacks=false`와 response provider 검증을 함께 요구합니다.
 설정 maximum token과 live metadata가 다르거나 어느 route라도 실패하면 corpus 처리 전에
 중단합니다. 이 preflight pass만으로 full generation/gold 합격을 주장하지 않습니다.
+
+Worker startup은 state directory를 만들기 전에 가장 가까운 기존 ancestor의 filesystem을
+read-only로 검사하며 candidate 기본 free-space floor 32 GiB보다 작으면 provider와
+WebDAV에 접근하지 않고 중단합니다. 이후 모든 derived view와 read-only embedding-cache
+hit가 확정되면 embedding miss 다운로드 전에 다음 canonical decimal byte 한도로 v5
+logical/peak growth를 검증합니다.
+
+embedding `hits`/`misses`는 sidecar derived-view 행 기준이고, 같은 exact input의
+`downloads`와 provider 입력은 unique cache key 기준입니다. 같은 key의 vector는 모든
+해당 행에 streaming fan-out되며 retry/resume metrics는 마지막 완결 attempt만 기록합니다.
+
+| 설정 | candidate 기본값 | 경계 |
+|---|---:|---|
+| `CARDRAG_WORKER_MAX_STATE_BYTES` | 68719476736 (64 GiB) | 기존 Worker state + 새 logical growth |
+| `CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES` | 2147483648 (2 GiB) | peak write 뒤 남길 filesystem 공간 |
+| `CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES` | 17179869184 (16 GiB) | 단일 sealed `vectors.f32` |
+| `CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES` | 4294967296 (4 GiB) | 단일 sealed serving DB |
+| `CARDRAG_WORKER_MINIMUM_START_FREE_BYTES` | 34359738368 (32 GiB) | provider/WebDAV 전 startup floor |
+
+Worker와 candidate MCP volume이 같은 host filesystem을 사용하면 Worker의 PDF/OCR/cache,
+DB, sidecar와 MCP가 별도로 download/stage/retain하는 PDF/source CAS, DB, sidecar를 각각
+한 벌로 계산합니다. 두 runtime의 reserved-free-space 약속까지 합산해 startup floor와
+host provisioning을 정해야 합니다. 32 GiB floor는 이 중 명백히 작은 host를 일찍
+거부하는 값이며, corpus 기반 Worker preflight와 MCP quota/download gate를 대체하지
+않습니다. 이 용량 gate는 v5 전용이고 v4 rollback artifact/reader 동작은 바뀌지 않습니다.
 
 ```bash
 docker compose \

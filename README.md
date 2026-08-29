@@ -24,6 +24,9 @@ WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable c
   추가 evidence shadow lane이고 v5 순위에 RRF나 reranker를 반영하지 않습니다.
 - v5 vectors는 `vectors.f32` sidecar에 저장하고 SQLite row, manifest와 READY에
   hash/size/profile/count를 결속합니다.
+- v5 Worker는 provider/WebDAV 접근 전 startup free-space floor를 확인하고, 모든 view가
+  정해진 뒤 embedding/export 전에 state·sidecar·serving DB·peak free-space를 예측해
+  fail-closed합니다. v1-v4 경로는 바꾸지 않습니다.
 - MCP는 `cardrag.serving-db.v4`와 `cardrag.serving-db.v5`를 dual-read하며 request
   pinning과 last-good activation으로 v4↔v5 rollback을 지원합니다.
 

@@ -13,15 +13,17 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import struct
 import uuid
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
 from numbers import Real
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, final
 
 from cardrag_core import canonical_sha256, v5_exact_row_corpus_sha256
 from cardrag_core.embedding import (
@@ -38,6 +40,7 @@ from cardrag_core.embedding import (
 SERVING_SCHEMA_ID_V5: Final = "cardrag.serving-db.v5"
 VECTOR_SIDECAR_NAME: Final = "vectors.f32"
 VECTOR_ROW_BYTES: Final = QWEN3_EMBEDDING_DIMENSION * 4
+SQLITE_PAGE_BYTES: Final = 4096
 
 TemporalStatus = Literal["current", "superseded", "ambiguous"]
 NodeType = Literal[
@@ -229,6 +232,28 @@ class EmbeddingProfileInput:
     maximum_tokens: int
 
 
+@final
+@dataclass(frozen=True, slots=True)
+class LazyEmbeddingVector:
+    """A sealed, cache-bound source for one canonical vector row.
+
+    The no-argument loader must independently resolve and validate the named
+    cache row on every call, returning its little-endian float32 bytes.  The
+    exporter deliberately calls it during both input validation and sidecar
+    writing so a missing or changed cache entry fails closed without retaining
+    a corpus of vector blobs.
+    """
+
+    cache_identity: str
+    profile_id: str
+    input_sha256: str
+    expected_vector_sha256: str
+    loader: Callable[[], bytes]
+    dimension: int = QWEN3_EMBEDDING_DIMENSION
+    dtype: str = QWEN3_EMBEDDING_DTYPE
+    normalization: str = QWEN3_EMBEDDING_NORMALIZATION
+
+
 @dataclass(frozen=True, slots=True)
 class ViewSourceSpanInput:
     page: int
@@ -248,11 +273,9 @@ class EmbeddingViewInput:
     profile_id: str
     display_text: str
     source_spans: tuple[ViewSourceSpanInput, ...]
-    # WorkerState stores the sealed little-endian float32 representation.  A
-    # caller may pass that exact row without expanding 4,096 Python float
-    # objects; Sequence[float] remains supported for tests and other bounded
-    # producers.
-    vector: Sequence[float] | bytes
+    # Callers may pass a sealed lazy cache source, WorkerState's exact
+    # little-endian float32 row, or a bounded Sequence[float] producer.
+    vector: Sequence[float] | bytes | LazyEmbeddingVector
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +549,128 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _SealedArtifact:
+    device: int
+    inode: int
+    size_bytes: int
+    sha256: str
+
+
+def _snapshot_regular_artifact(path: Path, *, field: str) -> _SealedArtifact:
+    """Hash one stable, no-follow regular-file identity."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ServingDatabaseV5Error(f"{field} sealing requires no-follow filesystem support")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow
+    try:
+        linked_before = os.lstat(path)
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise ServingDatabaseV5Error(f"{field} is not an available no-follow regular file") from None
+    try:
+        opened_before = os.fstat(descriptor)
+        linked_after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(linked_before.st_mode)
+            or not stat.S_ISREG(opened_before.st_mode)
+            or not stat.S_ISREG(linked_after_open.st_mode)
+            or (linked_before.st_dev, linked_before.st_ino) != (opened_before.st_dev, opened_before.st_ino)
+            or (linked_after_open.st_dev, linked_after_open.st_ino)
+            != (opened_before.st_dev, opened_before.st_ino)
+        ):
+            raise ServingDatabaseV5Error(f"{field} is not a stable no-follow regular file")
+
+        os.fsync(descriptor)
+        digest = hashlib.sha256()
+        while block := os.read(descriptor, 1024 * 1024):
+            digest.update(block)
+
+        opened_after = os.fstat(descriptor)
+        linked_after_read = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened_after.st_mode)
+            or not stat.S_ISREG(linked_after_read.st_mode)
+            or (
+                opened_after.st_dev,
+                opened_after.st_ino,
+                opened_after.st_size,
+                opened_after.st_mtime_ns,
+                opened_after.st_ctime_ns,
+            )
+            != (
+                opened_before.st_dev,
+                opened_before.st_ino,
+                opened_before.st_size,
+                opened_before.st_mtime_ns,
+                opened_before.st_ctime_ns,
+            )
+            or (linked_after_read.st_dev, linked_after_read.st_ino)
+            != (opened_before.st_dev, opened_before.st_ino)
+        ):
+            raise ServingDatabaseV5Error(f"{field} changed while its artifact seal was read")
+        return _SealedArtifact(
+            device=opened_before.st_dev,
+            inode=opened_before.st_ino,
+            size_bytes=opened_before.st_size,
+            sha256=digest.hexdigest(),
+        )
+    except OSError:
+        raise ServingDatabaseV5Error(f"{field} artifact seal is unavailable") from None
+    finally:
+        os.close(descriptor)
+
+
+def _seal_regular_artifact(
+    path: Path,
+    *,
+    field: str,
+    expected_size_bytes: int | None = None,
+    expected_sha256: str | None = None,
+    maximum_size_bytes: int | None = None,
+) -> _SealedArtifact:
+    sealed = _snapshot_regular_artifact(path, field=field)
+    if expected_size_bytes is not None and sealed.size_bytes != expected_size_bytes:
+        raise ServingDatabaseV5Error(f"{field} size does not match its expected seal")
+    if expected_sha256 is not None and sealed.sha256 != expected_sha256:
+        raise ServingDatabaseV5Error(f"{field} hash does not match its expected seal")
+    if maximum_size_bytes is not None and sealed.size_bytes > maximum_size_bytes:
+        raise ServingDatabaseV5Error(f"{field} exceeds its effective capacity limit")
+    return sealed
+
+
+def _revalidate_sealed_artifact(
+    path: Path,
+    sealed: _SealedArtifact,
+    *,
+    field: str,
+    maximum_size_bytes: int | None = None,
+) -> None:
+    observed = _snapshot_regular_artifact(path, field=field)
+    if observed != sealed:
+        raise ServingDatabaseV5Error(f"{field} changed from its sealed artifact")
+    if maximum_size_bytes is not None and observed.size_bytes > maximum_size_bytes:
+        raise ServingDatabaseV5Error(f"{field} exceeds its effective capacity limit")
+
+
+def _unlink_installed_artifact_if_owned(path: Path, sealed: _SealedArtifact) -> None:
+    """Remove only the inode this export installed, never a raced replacement."""
+
+    try:
+        linked = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if stat.S_ISREG(linked.st_mode) and (linked.st_dev, linked.st_ino) == (
+        sealed.device,
+        sealed.inode,
+    ):
+        with suppress(FileNotFoundError):
+            path.unlink()
+
+
 def _source_sha256(pages: Sequence[DocumentPageInput]) -> str:
     return canonical_sha256(
         {
@@ -634,6 +779,61 @@ def _encode_vector(values: Sequence[float] | bytes, *, row_index: int) -> bytes:
     ):
         raise ServingDatabaseV5Error(f"vector row {row_index} is not normalized after FP32 encoding")
     return packed
+
+
+def _encode_view_vector(view: EmbeddingViewInput) -> bytes:
+    """Resolve and validate exactly one embedding view vector."""
+
+    source = view.vector
+    if not isinstance(source, LazyEmbeddingVector):
+        return _encode_vector(source, row_index=view.row_index)
+    if source.profile_id != view.profile_id:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} profile_id does not match its embedding view"
+        )
+    if source.input_sha256 != view.input_sha256:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} input_sha256 does not match its embedding view"
+        )
+    if not isinstance(source.cache_identity, str) or _SHA256.fullmatch(source.cache_identity) is None:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} cache_identity must be a lowercase sha256"
+        )
+    if (
+        not isinstance(source.expected_vector_sha256, str)
+        or _SHA256.fullmatch(source.expected_vector_sha256) is None
+    ):
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} expected_vector_sha256 must be a lowercase sha256"
+        )
+    if source.dimension != QWEN3_EMBEDDING_DIMENSION:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} dimension is not {QWEN3_EMBEDDING_DIMENSION}"
+        )
+    if source.dtype != QWEN3_EMBEDDING_DTYPE:
+        raise ServingDatabaseV5Error(f"lazy vector row {view.row_index} dtype is not {QWEN3_EMBEDDING_DTYPE}")
+    if source.normalization != QWEN3_EMBEDDING_NORMALIZATION:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} normalization is not {QWEN3_EMBEDDING_NORMALIZATION}"
+        )
+    if not callable(source.loader):
+        raise ServingDatabaseV5Error(f"lazy vector row {view.row_index} loader is not callable")
+
+    # Loader exceptions deliberately propagate.  A cache miss, identity
+    # collision, or integrity failure must abort the export rather than be
+    # translated into an apparently valid serving artifact.
+    loaded = source.loader()
+    if not isinstance(loaded, bytes):
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} loader did not return canonical bytes"
+        )
+    if hashlib.sha256(loaded).hexdigest() != source.expected_vector_sha256:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} changed after its cache identity was sealed"
+        )
+    encoded = _encode_vector(loaded, row_index=view.row_index)
+    del loaded
+    return encoded
 
 
 def _validate_inputs(
@@ -784,6 +984,9 @@ def _validate_inputs(
             current_by_lineage.add(revision.product_lineage_id)
         revision_by_id[revision.contract_revision_id] = revision
         document_ids.add(revision.document_id)
+    revision_lineage_ids = {revision.product_lineage_id for revision in revisions}
+    if revision_lineage_ids != set(lineage_by_id):
+        raise ServingDatabaseV5Error("every product lineage must have a contract revision")
     if document_ids.intersection(failed_document_ids):
         raise ServingDatabaseV5Error("an OCR-failed document cannot also be an active revision")
     for revision in revisions:
@@ -1023,7 +1226,7 @@ def _validate_inputs(
             exact_display_parts.append(text)
         if "".join(exact_display_parts) != view.display_text:
             raise ServingDatabaseV5Error("embedding view display_text is not exact OCR source")
-        _encode_vector(view.vector, row_index=view.row_index)
+        _encode_view_vector(view)
     if used_profiles != set(profile_by_id):
         raise ServingDatabaseV5Error("every sealed embedding profile must own at least one view")
     return tuple(sorted(coverage_rows, key=lambda row: row.contract_revision_id))
@@ -1033,9 +1236,13 @@ def _write_vector_sidecar(path: Path, views: Sequence[EmbeddingViewInput]) -> tu
     digest = hashlib.sha256()
     with path.open("xb") as target:
         for row in sorted(views, key=lambda item: item.row_index):
-            encoded = _encode_vector(row.vector, row_index=row.row_index)
+            encoded = _encode_view_vector(row)
             target.write(encoded)
             digest.update(encoded)
+            # Do not retain the preceding lazy-loaded row while resolving the
+            # next one.  In particular, assignment evaluation would otherwise
+            # keep ``encoded`` alive until the following loader returned.
+            del encoded
         target.flush()
         os.fsync(target.fileno())
     size = path.stat().st_size
@@ -1071,6 +1278,7 @@ def _verify_vector_sidecar(
                 abs_tol=_VECTOR_NORM_TOLERANCE,
             ):
                 raise ServingDatabaseV5Error(f"vector sidecar row {row_index} is not normalized")
+            del raw, vector
         if source.read(1):
             raise ServingDatabaseV5Error("vector sidecar has undeclared trailing bytes")
 
@@ -1310,6 +1518,44 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+_MAX_CAPACITY_BYTES: Final = (1 << 63) - 1
+
+
+def _capacity_bound(value: int | None, *, field: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value <= 0 or value > _MAX_CAPACITY_BYTES:
+        raise ServingDatabaseV5Error(f"{field} must be a positive bounded integer")
+    return value
+
+
+def _capacity_reserve(value: int) -> int:
+    if type(value) is not int or value < 0 or value > _MAX_CAPACITY_BYTES:
+        raise ServingDatabaseV5Error("reserved free-space bytes must be a non-negative bounded integer")
+    return value
+
+
+def _directory_free_bytes(path: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ServingDatabaseV5Error("export capacity check requires no-follow filesystem support")
+    try:
+        descriptor = os.open(path, flags | nofollow)
+    except OSError:
+        raise ServingDatabaseV5Error("export filesystem capacity is unavailable") from None
+    try:
+        filesystem = os.fstatvfs(descriptor)
+    except OSError:
+        raise ServingDatabaseV5Error("export filesystem capacity is unavailable") from None
+    finally:
+        os.close(descriptor)
+    free_bytes = filesystem.f_bavail * filesystem.f_frsize
+    if free_bytes < 0 or free_bytes > _MAX_CAPACITY_BYTES:
+        raise ServingDatabaseV5Error("export filesystem capacity is outside the supported range")
+    return free_bytes
+
+
 class ServingDatabaseExporterV5:
     def export(
         self,
@@ -1335,12 +1581,45 @@ class ServingDatabaseExporterV5:
         document_aggregation_policy: (Literal["max_child", "top3_mean", "contract_plus_child"] | None) = None,
         sealed_profile_sha256: str | None = None,
         expected_exact_row_corpus_sha256: str | None = None,
+        predicted_serving_database_bytes: int | None = None,
+        maximum_serving_database_bytes: int | None = None,
+        maximum_vector_sidecar_bytes: int | None = None,
+        reserved_free_space_bytes: int = 0,
+        replace_incomplete_owned_targets: bool = False,
     ) -> ServingExportV5:
         if database_target.absolute() == vectors_target.absolute():
             raise ServingDatabaseV5Error("database and vector sidecar targets must differ")
         _required_text(generation_id, field="generation_id", maximum=512)
         _require_sha256(corpus_sha256, field="corpus_sha256")
         _require_sha256(contract_sha256, field="contract_sha256")
+        predicted_database_limit = _capacity_bound(
+            predicted_serving_database_bytes,
+            field="predicted serving database bytes",
+        )
+        database_limit = _capacity_bound(
+            maximum_serving_database_bytes,
+            field="maximum serving database bytes",
+        )
+        vector_limit = _capacity_bound(
+            maximum_vector_sidecar_bytes,
+            field="maximum vector sidecar bytes",
+        )
+        reserve = _capacity_reserve(reserved_free_space_bytes)
+        if type(replace_incomplete_owned_targets) is not bool:
+            raise ServingDatabaseV5Error("replace-incomplete-owned-targets capability must be boolean")
+        sealed_limits = tuple(
+            limit for limit in (predicted_database_limit, database_limit) if limit is not None
+        )
+        effective_database_limit = min(sealed_limits) if sealed_limits else None
+        expected_vector_size = len(embedding_views) * VECTOR_ROW_BYTES
+        if expected_vector_size > _MAX_CAPACITY_BYTES:
+            raise ServingDatabaseV5Error("vector sidecar size exceeds the supported range")
+        if vector_limit is not None and expected_vector_size > vector_limit:
+            raise ServingDatabaseV5Error("vector sidecar exceeds its configured capacity limit")
+        if (
+            os.path.lexists(database_target) or os.path.lexists(vectors_target)
+        ) and not replace_incomplete_owned_targets:
+            raise ServingDatabaseV5Error("v5 export targets must not already exist")
         coverage_rows = _validate_inputs(
             issuers=issuers,
             lineages=product_lineages,
@@ -1413,8 +1692,35 @@ class ServingDatabaseExporterV5:
         vector_size_bytes = 0
         exact_row_corpus_sha256 = ""
         connection: sqlite3.Connection | None = None
+        database_seal: _SealedArtifact | None = None
+        vector_seal: _SealedArtifact | None = None
+        installed_targets: list[tuple[Path, _SealedArtifact]] = []
+        invalid_installed_targets: set[Path] = set()
+
+        def verify_installed_artifact(
+            path: Path,
+            sealed: _SealedArtifact,
+            *,
+            field: str,
+            maximum_size_bytes: int | None,
+        ) -> None:
+            try:
+                _revalidate_sealed_artifact(
+                    path,
+                    sealed,
+                    field=field,
+                    maximum_size_bytes=maximum_size_bytes,
+                )
+            except ServingDatabaseV5Error:
+                invalid_installed_targets.add(path)
+                raise
+
         try:
             vector_sha256, vector_size_bytes = _write_vector_sidecar(vectors_working, ordered_views)
+            if vector_size_bytes != expected_vector_size:
+                raise ServingDatabaseV5Error("vector sidecar size changed from its exact prediction")
+            if vector_limit is not None and vector_size_bytes > vector_limit:
+                raise ServingDatabaseV5Error("vector sidecar exceeds its configured capacity limit")
             exact_row_corpus_sha256 = v5_exact_row_corpus_sha256(
                 embedding_profile_id=primary_profile.profile_id,
                 vector_sidecar_sha256=vector_sha256,
@@ -1553,6 +1859,19 @@ class ServingDatabaseExporterV5:
                 metadata.update(extra_metadata)
 
             connection = sqlite3.connect(database_working)
+            connection.execute(f"PRAGMA page_size={SQLITE_PAGE_BYTES}")
+            sealed_page_size = connection.execute("PRAGMA page_size").fetchone()
+            if sealed_page_size is None or int(sealed_page_size[0]) != SQLITE_PAGE_BYTES:
+                raise ServingDatabaseV5Error("working serving database SQLite page size could not be sealed")
+            if effective_database_limit is not None:
+                maximum_working_pages = (2 * effective_database_limit) // SQLITE_PAGE_BYTES
+                if maximum_working_pages < 1:
+                    raise ServingDatabaseV5Error("serving database capacity cannot fit one SQLite page")
+                sealed_maximum = connection.execute(
+                    f"PRAGMA max_page_count={maximum_working_pages}"
+                ).fetchone()
+                if sealed_maximum is None or int(sealed_maximum[0]) != maximum_working_pages:
+                    raise ServingDatabaseV5Error("working serving database page limit could not be sealed")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             connection.executescript(DDL_V5)
@@ -1851,10 +2170,41 @@ class ServingDatabaseExporterV5:
                 run_fts_integrity_check=True,
             )
             connection.commit()
+            working_database_size = database_working.stat().st_size
+            if effective_database_limit is not None and working_database_size > 2 * effective_database_limit:
+                raise ServingDatabaseV5Error(
+                    "working serving database exceeds twice its effective capacity limit"
+                )
+            if effective_database_limit is not None:
+                required_vacuum_free = 2 * effective_database_limit + reserve
+                if required_vacuum_free > _MAX_CAPACITY_BYTES:
+                    raise ServingDatabaseV5Error(
+                        "serving database vacuum capacity exceeds the supported range"
+                    )
+                if _directory_free_bytes(database_target.parent) < required_vacuum_free:
+                    raise ServingDatabaseV5Error(
+                        "serving database vacuum lacks configured reserved free space"
+                    )
             connection.execute("VACUUM INTO ?", (str(database_vacuumed),))
             connection.close()
             connection = None
+            vacuumed_database_size = database_vacuumed.stat().st_size
+            if database_limit is not None and vacuumed_database_size > database_limit:
+                raise ServingDatabaseV5Error(
+                    "vacuumed serving database exceeds its configured capacity limit"
+                )
+            if predicted_database_limit is not None and vacuumed_database_size > predicted_database_limit:
+                raise ServingDatabaseV5Error("vacuumed serving database exceeds its preflight prediction")
 
+            # Bind SQLite verification to one no-follow identity and digest.
+            # Hashing only after verification would adopt a same-size mutation
+            # made between the immutable reader closing and publication.
+            database_seal = _seal_regular_artifact(
+                database_vacuumed,
+                field="serving database",
+                expected_size_bytes=vacuumed_database_size,
+                maximum_size_bytes=effective_database_limit,
+            )
             verify = sqlite3.connect(f"file:{database_vacuumed}?mode=ro&immutable=1", uri=True)
             try:
                 _verify_database(
@@ -1864,30 +2214,124 @@ class ServingDatabaseExporterV5:
                 )
             finally:
                 verify.close()
+            _revalidate_sealed_artifact(
+                database_vacuumed,
+                database_seal,
+                field="serving database",
+                maximum_size_bytes=effective_database_limit,
+            )
             _verify_vector_sidecar(
                 vectors_working,
                 expected_sha256=vector_sha256,
                 expected_rows=len(ordered_views),
             )
-            with database_vacuumed.open("rb") as stream:
-                os.fsync(stream.fileno())
+
+            # Seal the exact identities and bytes that passed the expensive
+            # SQLite/vector verification.  Revalidate both artifacts before
+            # publishing either target so a detected source mutation cannot
+            # disturb an owned incomplete pair from an earlier attempt.
+            vector_seal = _seal_regular_artifact(
+                vectors_working,
+                field="vector sidecar",
+                expected_size_bytes=vector_size_bytes,
+                expected_sha256=vector_sha256,
+                maximum_size_bytes=vector_limit,
+            )
+            _revalidate_sealed_artifact(
+                vectors_working,
+                vector_seal,
+                field="vector sidecar",
+                maximum_size_bytes=vector_limit,
+            )
+            _revalidate_sealed_artifact(
+                database_vacuumed,
+                database_seal,
+                field="serving database",
+                maximum_size_bytes=effective_database_limit,
+            )
+
+            # The immediate source check closes the final verification-to-
+            # rename window; the target check proves os.replace installed that
+            # same inode, size, and digest rather than raced bytes.
+            _revalidate_sealed_artifact(
+                vectors_working,
+                vector_seal,
+                field="vector sidecar",
+                maximum_size_bytes=vector_limit,
+            )
             os.replace(vectors_working, vectors_target)
+            installed_targets.append((vectors_target, vector_seal))
+            verify_installed_artifact(
+                vectors_target,
+                vector_seal,
+                field="installed vector sidecar",
+                maximum_size_bytes=vector_limit,
+            )
+            _revalidate_sealed_artifact(
+                database_vacuumed,
+                database_seal,
+                field="serving database",
+                maximum_size_bytes=effective_database_limit,
+            )
             os.replace(database_vacuumed, database_target)
+            installed_targets.append((database_target, database_seal))
+            verify_installed_artifact(
+                database_target,
+                database_seal,
+                field="installed serving database",
+                maximum_size_bytes=effective_database_limit,
+            )
             for directory in {database_target.parent, vectors_target.parent}:
                 _fsync_directory(directory)
+            verify_installed_artifact(
+                vectors_target,
+                vector_seal,
+                field="installed vector sidecar",
+                maximum_size_bytes=vector_limit,
+            )
+            verify_installed_artifact(
+                database_target,
+                database_seal,
+                field="installed serving database",
+                maximum_size_bytes=effective_database_limit,
+            )
+        except sqlite3.DatabaseError as exc:
+            if not replace_incomplete_owned_targets:
+                for target, sealed in reversed(installed_targets):
+                    _unlink_installed_artifact_if_owned(target, sealed)
+            else:
+                for target, sealed in reversed(installed_targets):
+                    if target in invalid_installed_targets:
+                        _unlink_installed_artifact_if_owned(target, sealed)
+            if effective_database_limit is not None and "full" in str(exc).casefold():
+                raise ServingDatabaseV5Error(
+                    "working serving database reached its sealed page limit"
+                ) from None
+            raise
+        except BaseException:
+            if not replace_incomplete_owned_targets:
+                for target, sealed in reversed(installed_targets):
+                    _unlink_installed_artifact_if_owned(target, sealed)
+            else:
+                for target, sealed in reversed(installed_targets):
+                    if target in invalid_installed_targets:
+                        _unlink_installed_artifact_if_owned(target, sealed)
+            raise
         finally:
             if connection is not None:
                 connection.close()
             for path in temporary_paths:
                 path.unlink(missing_ok=True)
 
+        if database_seal is None or vector_seal is None:
+            raise ServingDatabaseV5Error("v5 export artifacts were not sealed")
         return ServingExportV5(
             database_path=database_target,
-            database_sha256=_sha256_file(database_target),
-            database_size_bytes=database_target.stat().st_size,
+            database_sha256=database_seal.sha256,
+            database_size_bytes=database_seal.size_bytes,
             vector_path=vectors_target,
-            vector_sha256=vector_sha256,
-            vector_size_bytes=vector_size_bytes,
+            vector_sha256=vector_seal.sha256,
+            vector_size_bytes=vector_seal.size_bytes,
             vector_row_count=len(ordered_views),
             vector_dimension=QWEN3_EMBEDDING_DIMENSION,
             issuer_count=len(ordered_issuers),
@@ -1918,6 +2362,7 @@ __all__ = [
     "EmbeddingProfileInput",
     "EmbeddingViewInput",
     "IssuerInput",
+    "LazyEmbeddingVector",
     "LinkType",
     "MajorClass",
     "NodeLinkInput",

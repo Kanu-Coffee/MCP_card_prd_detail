@@ -15,4 +15,5 @@ regexes = [
   '''tokenizer_sha256["']?\s*:\s*["']83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d["']''',
   '''reuse_key["']?\s*:\s*["']f767775733b750061bb9f0fc53aef5193d15c49ea4f336d0be7b53f01fa13ecc["']''',
   '''reuse_key["']?\s*:\s*["']39836e8749c738227463ac730bc0bb15d3785ce836683aa0122dc5533ef18e17["']''',
+  '''reuse_key["']?\s*:\s*["']cfcbc12d5f5a8c7121632f01ad5d75bdba601328839f6d5f4769ce153548d4de["']''',
 ]
