@@ -861,6 +861,92 @@ async def test_corrupt_native_control_warning_is_redacted_and_publication_fails_
 
 
 @pytest.mark.asyncio
+async def test_concurrent_native_first_writer_is_strictly_adopted_without_provider_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class RacingWinnerWebDAV(FakeWebDAV):
+        won = False
+
+        async def put_json(
+            self,
+            path: str | PurePosixPath,
+            payload: dict[str, Any],
+            *,
+            immutable: bool,
+        ) -> bytes:
+            if not self.won and str(path).endswith("/manifest.json"):
+                self.won = True
+                local = OCRArtifactManifest.model_validate_json(canonical_json_bytes(payload))
+                verified = verify_ocr_bytes(OCR_BODY, expected_page_count=1)
+                output = ArtifactRef.for_cas(
+                    sha256=verified.sha256,
+                    size_bytes=verified.size_bytes,
+                    media_type="text/markdown; charset=utf-8",
+                )
+                winner = OCRArtifactManifest(
+                    reuse_key=local.reuse_key,
+                    source=local.source,
+                    contract=local.contract,
+                    output=output,
+                    ocr_chars=verified.char_count,
+                    page_output_sha256=verified.page_sha256,
+                    created_at=NOW,
+                )
+                ready = OCRReady(
+                    reuse_key=winner.reuse_key,
+                    manifest_sha256=sha256_bytes(winner.canonical_bytes()),
+                    ocr_sha256=winner.output.sha256,
+                )
+                root = f"v1/ocr-cache/native/{winner.reuse_key[:2]}/{winner.reuse_key}"
+                self.objects[output.path] = OCR_BODY
+                self.objects[f"{root}/manifest.json"] = winner.canonical_bytes()
+                self.objects[f"{root}/READY.json"] = ready.canonical_bytes()
+                raise OCRCachePublicationError(phase="manifest", error_kind="integrity")
+            return await super().put_json(path, payload, immutable=immutable)
+
+    provider = FakeProvider()
+    webdav = RacingWinnerWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        output_dir = tmp_path / "ocr"
+        arguments = dict(
+            run_id="run",
+            document_id="doc_native_race",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=output_dir,
+        )
+
+        result = await resolver.resolve(**arguments)
+
+        assert provider.calls == [1]
+        assert result.provider_called is True
+        assert result.cache_reused is True
+        assert (result.cache_kind, result.cache_reuse_key) == ("native", result.reuse_key)
+        assert result.ocr_bytes == OCR_BODY
+        assert (output_dir / "ocr.md").read_bytes() == OCR_BODY
+        remote_manifest = webdav.objects[
+            f"v1/ocr-cache/native/{result.reuse_key[:2]}/{result.reuse_key}/manifest.json"
+        ]
+        assert (output_dir / "native-manifest.json").read_bytes() == remote_manifest
+        assert not (output_dir / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
+
+        resumed = await resolver.resolve(**arguments)
+        assert provider.calls == [1]
+        assert resumed.ocr_bytes == OCR_BODY
+        assert resumed.provider_called is False
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_transient_ready_exhaustion_is_repaired_next_run_from_fresh_output_without_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -955,7 +1041,8 @@ async def test_transient_ready_exhaustion_is_repaired_next_run_from_fresh_output
         assert root + "/READY.json" in webdav.objects
         assert diagnostic_path.exists()
         assert not (next_output_dir / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
-        assert not (next_output_dir / "ocr.md").exists()
+        assert (next_output_dir / "ocr.md").read_bytes() == first.ocr_bytes
+        assert (next_output_dir / "native-manifest.json").read_bytes() == local_manifest
         assert webdav.publish_calls == {"cas": 3, "manifest": 3, "ready": 4}
     finally:
         state.close()

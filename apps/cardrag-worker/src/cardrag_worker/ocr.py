@@ -578,6 +578,13 @@ class OCRResolver:
             )
         except Exception as exc:
             raise OCRValidationError("OCR cache bytes failed strict verification") from exc
+        if kind == "native":
+            # Keep a local, canonical copy of the exact remote winner.  Besides
+            # making ordinary cache hits restartable, this is the commit point
+            # used when two isolated workers race to populate one immutable
+            # reuse key with nondeterministic OCR output.
+            atomic_write(output_dir / "ocr.md", body)
+            atomic_write(output_dir / "native-manifest.json", manifest_body)
         return OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -627,6 +634,8 @@ class OCRResolver:
             )
         except Exception as exc:
             raise OCRValidationError("partial native OCR bytes failed strict verification") from exc
+        atomic_write(output_dir / "ocr.md", body)
+        atomic_write(output_dir / "native-manifest.json", manifest_body)
         result = OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -924,6 +933,7 @@ class OCRResolver:
         manifest: OCRArtifactManifest,
         body: bytes,
         output_dir: Path,
+        source_document_id: str,
     ) -> OCRResult:
         if body != result.ocr_bytes:
             raise OCRValidationError("local native OCR body does not match its verified result")
@@ -932,6 +942,26 @@ class OCRResolver:
         try:
             await self._publish_native_cache(manifest=manifest, body=body)
         except OCRCachePublicationError as exc:
+            winner: OCRResult | None = None
+            if exc.phase in {"manifest", "ready"} and exc.error_kind in {"contract", "integrity"}:
+                # A create-once collision can be a legitimate concurrent
+                # first-writer win.  Adopt it only after the normal native
+                # READY -> manifest -> CAS -> page-hash validation succeeds.
+                # Any incomplete, corrupt, or differently contracted entry
+                # preserves the original fail-closed publication error.
+                try:
+                    winner = await self._lookup_cache(
+                        kind="native",
+                        reuse_key=manifest.reuse_key,
+                        source=manifest.source,
+                        source_document_id=source_document_id,
+                        output_dir=output_dir,
+                    )
+                except Exception:
+                    winner = None
+            if winner is not None:
+                self._cache_publication_diagnostic_path(output_dir).unlink(missing_ok=True)
+                return replace(winner, provider_called=result.provider_called)
             if not exc.retryable:
                 raise
             self._write_cache_publication_diagnostic(
@@ -1051,6 +1081,7 @@ class OCRResolver:
                 manifest=local_manifest,
                 body=local_body,
                 output_dir=output_dir,
+                source_document_id=document_id,
             )
             shutil.rmtree(output_dir / "rendered", ignore_errors=True)
             return committed
@@ -1193,6 +1224,7 @@ class OCRResolver:
             manifest=manifest,
             body=body,
             output_dir=output_dir,
+            source_document_id=document_id,
         )
         shutil.rmtree(output_dir / "rendered", ignore_errors=True)
         return result

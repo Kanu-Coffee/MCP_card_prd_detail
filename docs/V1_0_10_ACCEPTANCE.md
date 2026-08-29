@@ -106,6 +106,13 @@ Evidence에 WebDAV URL, credential, remote object path, response body는 포함�
 않았습니다. 실제 candidate env의 WebDAV namespace와 OCR contract가 이 cache와
 정확히 같은지는 launch render와 Worker cache-hit ledger에서 다시 검증합니다.
 
+동일 OCR reuse key를 두 격리 Worker가 동시에 채울 때 provider 출력은 비결정적일 수
+있습니다. 후발 Worker의 immutable manifest commit이 충돌하면 원격 first-writer의
+READY, canonical manifest, source/contract, CAS SHA/size, 페이지 hash를 전부 다시
+검증한 경우에만 그 원격 결과를 채택합니다. 불완전하거나 다른 계약의 객체는 기존처럼
+fail-closed하며, 후발 CAS object를 삭제하거나 기존 immutable control object를
+덮어쓰지 않습니다.
+
 ### v1.0.9 구조 회귀 기준과 sealed DB 재감사
 
 서로 다른 provenance를 한 관측으로 합치지 않습니다.
