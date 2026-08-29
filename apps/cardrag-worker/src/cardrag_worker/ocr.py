@@ -62,6 +62,7 @@ OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS = (0.25, 1.0)
 OCR_CACHE_PUBLICATION_DIAGNOSTIC = "native-cache-publication-diagnostic.json"
 OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES = 4096
 
+OCRCacheMode = Literal["read-only", "read-write"]
 OCRCachePublicationPhase = Literal["cas", "manifest", "ready"]
 OCRCachePublicationErrorKind = Literal[
     "network",
@@ -456,6 +457,7 @@ class OCRResolver:
         whole_document_max_pages: int = 4,
         context_pages_before: int = 1,
         context_pages_after: int = 1,
+        cache_mode: OCRCacheMode = "read-write",
     ) -> None:
         if chunk_pages < 1:
             raise ValueError("chunk_pages must be positive")
@@ -465,6 +467,8 @@ class OCRResolver:
             raise ValueError("OCR context page counts must be non-negative")
         if render_scale_milli < 1000 or render_scale_milli > 8000:
             raise ValueError("render_scale_milli must be between 1000 and 8000")
+        if cache_mode not in {"read-only", "read-write"}:
+            raise ValueError("cache_mode must be read-only or read-write")
         self.provider = provider
         self.state = state
         self.webdav = webdav
@@ -475,6 +479,7 @@ class OCRResolver:
         self.prompt = prompt
         self.render_scale_milli = render_scale_milli
         self.adoption_policy_version = adoption_policy_version
+        self._cache_mode = cache_mode
         self.contract = NativeOCRContract(
             processor_version=OCR_PROCESSOR_VERSION,
             cache_epoch=cache_epoch,
@@ -493,6 +498,16 @@ class OCRResolver:
             output_policy=OCR_OUTPUT_POLICY,
         )
 
+    @property
+    def cache_mode(self) -> OCRCacheMode:
+        """Immutable remote-cache capability selected before provider work."""
+
+        return self._cache_mode
+
+    def _require_remote_cache_writable(self) -> None:
+        if self.cache_mode != "read-write":
+            raise OCRValidationError("remote OCR cache mutation is disabled in read-only mode")
+
     async def _lookup_cache(
         self,
         *,
@@ -510,6 +525,10 @@ class OCRResolver:
         if ready_body is None and manifest_body is None:
             return None
         if kind == "native" and ready_body is None and manifest_body is not None:
+            if self.cache_mode == "read-only":
+                raise OCRValidationError(
+                    "native OCR cache is incomplete; READY repair is disabled in read-only mode"
+                )
             return await self._repair_native_ready(
                 manifest_body=manifest_body,
                 reuse_key=reuse_key,
@@ -614,6 +633,7 @@ class OCRResolver:
     ) -> OCRResult:
         """Repair the sole safe partial state: verified manifest+CAS, absent READY."""
 
+        self._require_remote_cache_writable()
         assert self.webdav is not None
         try:
             manifest = OCRArtifactManifest.model_validate_json(manifest_body)
@@ -941,7 +961,7 @@ class OCRResolver:
     ) -> OCRResult:
         if body != result.ocr_bytes:
             raise OCRValidationError("local native OCR body does not match its verified result")
-        if self.webdav is None:
+        if self.webdav is None or self.cache_mode == "read-only":
             return result
         try:
             await self._publish_native_cache(manifest=manifest, body=body)
@@ -1239,6 +1259,7 @@ class OCRResolver:
         manifest: OCRArtifactManifest,
         body: bytes,
     ) -> None:
+        self._require_remote_cache_writable()
         attempts = len(OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(1, attempts + 1):
             try:
@@ -1253,6 +1274,7 @@ class OCRResolver:
         raise AssertionError("bounded OCR cache publication loop did not terminate")
 
     async def _publish_native_ready(self, *, manifest: OCRArtifactManifest) -> None:
+        self._require_remote_cache_writable()
         attempts = len(OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(1, attempts + 1):
             try:
@@ -1272,6 +1294,7 @@ class OCRResolver:
         manifest: OCRArtifactManifest,
         body: bytes,
     ) -> None:
+        self._require_remote_cache_writable()
         assert self.webdav is not None
         try:
             artifact_sha, artifact_path = await self.webdav.put_cas(
@@ -1294,6 +1317,7 @@ class OCRResolver:
         await self._publish_native_ready_once(manifest=manifest)
 
     async def _publish_native_ready_once(self, *, manifest: OCRArtifactManifest) -> None:
+        self._require_remote_cache_writable()
         assert self.webdav is not None
         manifest_body = manifest.canonical_bytes()
         ready = OCRReady(
@@ -1326,6 +1350,8 @@ class FailoverOCRResolver:
     def __init__(self, primary: OCRResolver, fallback: OCRResolver) -> None:
         if primary.adoption_policy_version != fallback.adoption_policy_version:
             raise ValueError("OCR resolvers must share one adoption policy")
+        if primary.cache_mode != fallback.cache_mode:
+            raise ValueError("OCR resolvers must share one cache mode")
         self.primary = primary
         self.fallback = fallback
         self.adoption_policy_version = primary.adoption_policy_version
@@ -1334,6 +1360,14 @@ class FailoverOCRResolver:
             "primary": primary.contract,
             "fallback": fallback.contract,
         }
+
+    @property
+    def cache_mode(self) -> OCRCacheMode:
+        """Return the shared child capability and reject any desynchronization."""
+
+        if self.primary.cache_mode != self.fallback.cache_mode:
+            raise ValueError("OCR resolvers no longer share one cache mode")
+        return self.primary.cache_mode
 
     async def resolve(self, **kwargs: Any) -> OCRResult:
         output_dir = Path(kwargs.pop("output_dir"))

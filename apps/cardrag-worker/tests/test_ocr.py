@@ -5,7 +5,7 @@ import json
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -63,6 +63,27 @@ OCR_BODY_SINGLE_MARKER_NEWLINE = (
     "## Page 1\n이 페이지에는 카드 혜택 조건과 제외 사항이 자세하게 적혀 있습니다.\n\n"
     "## Page 2\n두 번째 페이지는 이전 페이지의 상품 설명을 연속해서 충분히 설명합니다.\n"
 ).encode()
+
+
+def _fee8f65_validate_sparse_target_page(page_number: int, value: str) -> str:
+    """Reproduce the v1.0.9 sparse provider/checkpoint boundary exactly."""
+
+    lines = value.splitlines()
+    visible_lines = tuple(line.strip() for line in lines[1:] if line.strip())
+    if lines[:1] != [OCR_SPARSE_PAGE_PREFIX] or not visible_lines:
+        raise OCRValidationError("OCR sparse-page wrapper is invalid")
+    if any(
+        ocr_module.PAGE_MARKER.fullmatch(line) or line in {OCR_BLANK_PAGE_SENTINEL, OCR_SPARSE_PAGE_PREFIX}
+        for line in visible_lines
+    ):
+        raise OCRValidationError("OCR sparse-page wrapper is invalid")
+    visible_character_count = sum(len("".join(line.split())) for line in visible_lines)
+    if not 1 <= visible_character_count <= ocr_module.OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS:
+        raise OCRValidationError("OCR sparse-page wrapper is invalid")
+    normalized = f"{OCR_SPARSE_PAGE_PREFIX}\n{'\n'.join(visible_lines)}"
+    if len(f"## Page {page_number}\n\n{normalized}") < 20:
+        raise OCRValidationError("OCR provider returned an implausibly short page")
+    return normalized
 
 
 def wrapped_remote_protocol_error() -> WebDAVError:
@@ -442,6 +463,52 @@ async def test_logo_only_sparse_page_wrapper_is_canonical_without_transcribed_ch
 
 
 @pytest.mark.asyncio
+async def test_fee8f65_prefix_only_target_rejection_remains_sealed_cache_compatible(
+    tmp_path: Path,
+) -> None:
+    """Keep the intentional provider/checkpoint versus cache-consumer boundary stable."""
+
+    body = f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n".encode()
+    with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid"):
+        _fee8f65_validate_sparse_target_page(1, OCR_SPARSE_PAGE_PREFIX)
+    assert ocr_module._validate_and_normalize_target_page_values((1,), (OCR_SPARSE_PAGE_PREFIX,)) == (
+        OCR_SPARSE_PAGE_PREFIX,
+    )
+    cache_consumer_names = OCRResolver._lookup_cache.__code__.co_names
+    assert "verify_ocr_bytes" in cache_consumer_names
+    assert "_validate_and_normalize_target_page_values" not in cache_consumer_names
+    assert verify_ocr_bytes(body, expected_page_count=1).text == body.decode()
+
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        assert resolver.contract.processor_version == "cardrag-worker/1.0.4"
+        key = cache_native(resolver, webdav, body=body)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        result = await resolver.resolve(
+            run_id="run",
+            document_id="doc_v109_prefix_only_cache",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "ocr",
+        )
+
+        assert provider.calls == []
+        assert result.provider_called is False
+        assert result.cache_reused is True
+        assert (result.cache_kind, result.cache_reuse_key) == ("native", key)
+        assert result.pages == (OCR_SPARSE_PAGE_PREFIX,)
+        assert result.ocr_bytes == body
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",
     [
@@ -501,10 +568,23 @@ async def test_sparse_page_wrapper_rejects_malformed_or_nested_control_bodies(
 
 
 def make_resolver(
-    tmp_path: Path, provider: FakeProvider, webdav: FakeWebDAV | None
+    tmp_path: Path,
+    provider: FakeProvider,
+    webdav: FakeWebDAV | None,
+    *,
+    cache_mode: Literal["read-only", "read-write"] = "read-write",
 ) -> tuple[OCRResolver, WorkerState]:
     state = WorkerState(tmp_path / "state.sqlite3")
-    return OCRResolver(provider=provider, state=state, webdav=webdav, chunk_pages=1), state  # type: ignore[arg-type]
+    return (
+        OCRResolver(
+            provider=provider,
+            state=state,
+            webdav=webdav,
+            chunk_pages=1,
+            cache_mode=cache_mode,
+        ),
+        state,
+    )  # type: ignore[arg-type]
 
 
 def cache_native(
@@ -569,6 +649,167 @@ async def test_native_cache_hit_skips_provider_and_records_exact_reference(tmp_p
         assert result.ocr_bytes == OCR_BODY
         assert result.ocr_text == OCR_BODY.decode("utf-8")
         assert _canonical_ocr_body(result) == OCR_BODY
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_native_cache_hit_is_reused_without_any_remote_mutation(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    try:
+        key = cache_native(resolver, webdav)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        result = await resolver.resolve(
+            run_id="run",
+            document_id="doc_read_only_hit",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "ocr-hit",
+        )
+
+        assert provider.calls == []
+        assert result.provider_called is False
+        assert result.cache_reused is True
+        assert (result.cache_kind, result.cache_reuse_key) == ("native", key)
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_native_cache_miss_stays_local_and_resumes_without_remote_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        arguments = {
+            "run_id": "run",
+            "document_id": "doc_read_only_miss",
+            "pdf_path": pdf,
+            "pdf_sha256": PDF_SHA,
+            "pdf_size_bytes": 3,
+            "page_count": 1,
+            "output_dir": tmp_path / "ocr-miss",
+        }
+
+        first = await resolver.resolve(**arguments)
+        second = await resolver.resolve(**arguments)
+
+        assert provider.calls == [1]
+        assert first.provider_called is True
+        assert second.provider_called is False
+        assert second.cache_reused is True
+        assert (first.cache_kind, first.cache_reuse_key) == (None, None)
+        assert (second.cache_kind, second.cache_reuse_key) == (None, None)
+        assert first.ocr_bytes == second.ocr_bytes
+        assert webdav.objects == {}
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_native_partial_entry_is_never_repaired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        key = cache_native(resolver, webdav)
+        root = f"v1/ocr-cache/native/{key[:2]}/{key}"
+        del webdav.objects[root + "/READY.json"]
+        remote_before = dict(webdav.objects)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+
+        with pytest.warns(RuntimeWarning, match="strict validation failed"):
+            result = await resolver.resolve(
+                run_id="run",
+                document_id="doc_read_only_partial",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr-partial",
+            )
+
+        assert provider.calls == [1]
+        assert result.provider_called is True
+        assert (result.cache_kind, result.cache_reuse_key) == (None, None)
+        assert webdav.objects == remote_before
+        assert root + "/READY.json" not in webdav.objects
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+    finally:
+        state.close()
+
+
+def test_ocr_resolver_rejects_unknown_cache_mode(tmp_path: Path) -> None:
+    state = WorkerState(tmp_path / "state.sqlite3")
+    try:
+        with pytest.raises(ValueError, match="cache_mode"):
+            OCRResolver(
+                provider=FakeProvider(),
+                state=state,
+                webdav=None,
+                cache_mode="unexpected",  # type: ignore[arg-type]
+            )
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_mode_blocks_every_native_cache_mutation_sink(tmp_path: Path) -> None:
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    try:
+        key = cache_native(resolver, webdav)
+        root = f"v1/ocr-cache/native/{key[:2]}/{key}"
+        manifest_body = webdav.objects[root + "/manifest.json"]
+        manifest = OCRArtifactManifest.model_validate_json(manifest_body)
+        source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+        remote_before = dict(webdav.objects)
+
+        with pytest.raises(OCRValidationError, match="mutation is disabled"):
+            await resolver._publish_native_cache(manifest=manifest, body=OCR_BODY)  # noqa: SLF001
+        with pytest.raises(OCRValidationError, match="mutation is disabled"):
+            await resolver._publish_native_ready(manifest=manifest)  # noqa: SLF001
+        with pytest.raises(OCRValidationError, match="mutation is disabled"):
+            await resolver._publish_native_cache_once(  # noqa: SLF001
+                manifest=manifest,
+                body=OCR_BODY,
+            )
+        with pytest.raises(OCRValidationError, match="mutation is disabled"):
+            await resolver._publish_native_ready_once(manifest=manifest)  # noqa: SLF001
+        with pytest.raises(OCRValidationError, match="mutation is disabled"):
+            await resolver._repair_native_ready(  # noqa: SLF001
+                manifest_body=manifest_body,
+                reuse_key=key,
+                source=source,
+                output_dir=tmp_path / "repair",
+            )
+
+        assert webdav.objects == remote_before
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+        assert not (tmp_path / "repair").exists()
     finally:
         state.close()
 
@@ -2032,6 +2273,7 @@ async def test_failover_does_not_swallow_provider_systemic_failure(tmp_path: Pat
     class SystemicPrimary:
         adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
         contract = {"schema_version": "test-primary.v1"}
+        cache_mode = "read-write"
 
         async def resolve(self, **_kwargs: Any) -> OCRResult:
             raise ProviderSystemicError("provider_process_exit", exit_code=17)
@@ -2039,6 +2281,7 @@ async def test_failover_does_not_swallow_provider_systemic_failure(tmp_path: Pat
     class RecordingFallback:
         adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
         contract = {"schema_version": "test-fallback.v1"}
+        cache_mode = "read-write"
 
         def __init__(self) -> None:
             self.calls = 0
@@ -2065,6 +2308,7 @@ async def test_failover_cancellation_has_no_primary_provider_exception_context(t
     class FailingPrimary:
         adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
         contract = {"schema_version": "test-primary.v1"}
+        cache_mode = "read-write"
 
         async def resolve(self, **_kwargs: Any) -> OCRResult:
             failure = ProviderDocumentError()
@@ -2074,6 +2318,7 @@ async def test_failover_cancellation_has_no_primary_provider_exception_context(t
     class BlockingFallback:
         adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
         contract = {"schema_version": "test-fallback.v1"}
+        cache_mode = "read-write"
 
         async def resolve(self, **_kwargs: Any) -> OCRResult:
             fallback_started.set()

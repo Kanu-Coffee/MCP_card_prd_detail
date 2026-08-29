@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -276,6 +277,145 @@ def test_sealed_v109_cache_reuse_evidence_is_canonical_and_self_bound() -> None:
         b"https://",
         b"password",
         b"remote_path",
+        b"username",
+    ):
+        assert prohibited not in lowered
+
+
+def test_v109_prefix_only_cache_compatibility_evidence_is_live_canonical_and_self_bound() -> None:
+    path = ROOT / "release-evidence/v1.0.10/v109-prefix-only-cache-compatibility.json"
+    assert path.is_file() and not path.is_symlink()
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    assert isinstance(payload, dict)
+    assert raw == canonical_json_bytes(payload) + b"\n"
+
+    expected_keys = {
+        "artifacts",
+        "candidate_revision",
+        "compatibility_boundary",
+        "evidence_sha256",
+        "method",
+        "observed_at",
+        "ocr_contract",
+        "run_id_sha256",
+        "schema_version",
+        "sensitive_material_included",
+        "v109_worker_image",
+    }
+    assert set(payload) == expected_keys
+    claimed_sha256 = payload["evidence_sha256"]
+    hash_payload = {key: value for key, value in payload.items() if key != "evidence_sha256"}
+    assert claimed_sha256 == "a7eec6534cd30a5dd284bf03b7e41216b29113f19b71839e16a8e4af9b38d5cb"
+    assert canonical_sha256(hash_payload) == claimed_sha256
+
+    assert payload["schema_version"] == "cardrag.v109-prefix-only-cache-compatibility.v1"
+    assert payload["observed_at"] == "2026-08-29T15:07:10.351512+00:00"
+    assert payload["candidate_revision"] == "531e70e33d73cbaafb1955c712e8f2cc9547614f"
+    assert payload["run_id_sha256"] == ("6159744ade772946d17eabbb40a05b9ed0c47123c93284a0e477f970dc03a809")
+    assert payload["sensitive_material_included"] is False
+    assert payload["method"] == {
+        "candidate_volume_access": "read-only",
+        "network_operations": ["GET"],
+        "raw_response_included": False,
+        "remote_mutations": 0,
+    }
+    assert payload["v109_worker_image"] == {
+        "image_digest": "sha256:a3be8e1b74cb310c3f0d00496db440a00f31d65a0851337205e627153ea103c8",
+        "revision": "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113",
+        "version": "1.0.9",
+    }
+    assert payload["ocr_contract"] == {
+        "contract_sha256": "782fb558fd0102a01406b00009c36a5c1c1a7ce851fe388425c0003b4fff536a",
+        "model": "gpt-5.6-sol",
+        "processor_version": "cardrag-worker/1.0.4",
+        "prompt_sha256": "1448d7e530d4f8412102c67cd44dc9c9cdab9e3aa165eddb88b3a980a245b946",
+        "prompt_version": "cardrag-ocr.ko.v2",
+        "provider": "codex-exec",
+    }
+
+    boundary = payload["compatibility_boundary"]
+    assert boundary == {
+        "cache_consumer": "verify_ocr_bytes",
+        "cache_consumer_calls_target_checkpoint_validator": False,
+        "cache_namespace_bump_required": False,
+        "common_core_ocr_source_sha256": ("00bc8379e1aae489e0240ffbc275caed15b4da86cecab7d34ddc3e42bb67c681"),
+        "provider_checkpoint_validator": "_validate_and_normalize_target_page_values",
+        "v109_cache_consumer_accepts_prefix_only": True,
+        "v109_target_checkpoint_accepts_prefix_only": False,
+        "v110_target_checkpoint_accepts_prefix_only": True,
+    }
+    core_source = ROOT / "packages/cardrag-core/src/cardrag_core/ocr.py"
+    assert hashlib.sha256(core_source.read_bytes()).hexdigest() == boundary["common_core_ocr_source_sha256"]
+
+    expected = {
+        "doc_5fb7555579ad01c3e66f2777ddfbff7a47a33459656beeeeeeea230463fff1bb": {
+            "manifest_sha256": "d815b1901291d140e2dbcbc04b8ac89016fd5791006e693d77a2ba96444f6d9b",
+            "object_sha256": "16b3af55590dabc74d2d7da565840db7bc6b20b3f06db525d2b8335fdc7574a8",
+            "object_size_bytes": 26023,
+            "page_count": 24,
+            "page_number": 22,
+            "page_sha256": "ff88d687ed53d474bed4bff3f8567e63caa395f4c365deedaab9cb6ee09faa50",
+            "ready_sha256": "87c22934d637f6fdac2cab38456a7893b735d3906e7b8287c88832660b99b274",
+            "reuse_key": "f767775733b750061bb9f0fc53aef5193d15c49ea4f336d0be7b53f01fa13ecc",
+        },
+        "doc_69bd1e3d4f8686076ae0dfa27c0dc0e5cbff2eda3539be0432694285a97d6fd2": {
+            "manifest_sha256": "6e763ab66dfb0495c0ba9cf747b8f51387f72095c67502c402414154d92d5443",
+            "object_sha256": "deae37bb04dfc909bacee1a9fe1886b404e001d0b81423d5c884b5555d2910b7",
+            "object_size_bytes": 21325,
+            "page_count": 20,
+            "page_number": 18,
+            "page_sha256": "07d590ca221d1b38bf30daeaf0dd8883a8c68f17c5eeb490da0158482a6b9982",
+            "ready_sha256": "f4affc3b158b71d32646bd8f2d77f20cada1eb705711265209f8f9b3b187109d",
+            "reuse_key": "39836e8749c738227463ac730bc0bb15d3785ce836683aa0122dc5533ef18e17",
+        },
+    }
+    artifacts = payload["artifacts"]
+    assert [artifact["document_id"] for artifact in artifacts] == list(expected)
+    for artifact in artifacts:
+        sealed = expected[artifact["document_id"]]
+        reuse_key = sealed["reuse_key"]
+        object_sha256 = sealed["object_sha256"]
+        cache_root = f"v1/ocr-cache/native/{reuse_key[:2]}/{reuse_key}"
+        assert artifact["get_status"] == {"manifest": 200, "object": 200, "ready": 200}
+        assert all(artifact["bindings"].values())
+        assert artifact["reuse_key"] == reuse_key
+        assert artifact["page_count"] == sealed["page_count"]
+        assert artifact["object_size_bytes"] == sealed["object_size_bytes"]
+        assert artifact["paths"] == {
+            "manifest": f"{cache_root}/manifest.json",
+            "object": f"v1/objects/sha256/{object_sha256[:2]}/{object_sha256}",
+            "ready": f"{cache_root}/READY.json",
+        }
+        assert artifact["hashes"]["manifest_sha256"] == sealed["manifest_sha256"]
+        assert artifact["hashes"]["object_sha256"] == object_sha256
+        assert artifact["hashes"]["ready_sha256"] == sealed["ready_sha256"]
+        assert artifact["hashes"]["sparse_page_sha256"] == sealed["page_sha256"]
+        assert artifact["hashes"]["sparse_body_sha256"] == (
+            "f9a01ad3946b781e2dfbf5cde288057b2609f889ddb5670269023cb157882993"
+        )
+        assert artifact["sparse_page"] == {
+            "page_number": sealed["page_number"],
+            "prefix_only": True,
+            "visible_character_count": 0,
+        }
+        assert artifact["validation"] == {
+            "v109_cache_bytes_accept": True,
+            "v109_cache_control_accept": True,
+            "v109_target_checkpoint_accept": False,
+            "v110_target_checkpoint_accept": True,
+        }
+
+    lowered = raw.lower()
+    for prohibited in (
+        b"authorization",
+        b"api_key",
+        b"base_url",
+        b"bearer ",
+        b"credential",
+        b"http://",
+        b"https://",
+        b"password",
         b"username",
     ):
         assert prohibited not in lowered

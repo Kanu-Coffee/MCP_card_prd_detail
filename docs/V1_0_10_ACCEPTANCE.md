@@ -111,7 +111,58 @@ Evidence에 WebDAV URL, credential, remote object path, response body는 포함�
 READY, canonical manifest, source/contract, CAS SHA/size, 페이지 hash를 전부 다시
 검증한 경우에만 그 원격 결과를 채택합니다. 불완전하거나 다른 계약의 객체는 기존처럼
 fail-closed하며, 후발 CAS object를 삭제하거나 기존 immutable control object를
-덮어쓰지 않습니다.
+덮어쓰지 않습니다. 다만 이 winner-adoption은 새 Worker끼리의 안전성만 보장하며,
+동시 실행 중인 수정 전 v1.0.9 loser를 보호하지 못합니다. 실제 candidate audit에서
+공용 reuse key를 candidate가 먼저 commit한 뒤 v1.0.9 Worker가
+`ocr_cache_publication_manifest_integrity`로 종료된 인과가 확인됐습니다. 따라서
+v1.0.10 candidate는 remote OCR cache를 `read-only`로 강제하고, 검증된 READY/manifest/CAS
+GET만 재사용하며 resolver의 native-cache CAS/manifest/READY transaction과 READY repair를
+모두 0건으로 유지합니다. Generation publisher가 MCP source 제공을 위해 같은 OCR bytes를
+전역 content-addressed object path에 idempotent하게 올리는 것은 별도 artifact 단계이며,
+native manifest/READY가 없으면 공유 OCR cache entry를 만들지 않습니다.
+운영 Worker를 재시작해 동시성으로 검증하지 않습니다.
+
+[Sealed causality JSON](../release-evidence/v1.0.10/v109-ocr-cache-race-causality.json)은
+`cardrag.v109-ocr-cache-race-causality.v1`이며, `evidence_sha256`을 제외한 canonical
+payload SHA-256은
+`0f1084efc30858528c586a1b01f0c91abfa198c756c13340be7d66ac1e5fbbc5`입니다. 동일
+document/PDF/OCR contract/reuse key와 동일한 5개 chunk input 중 비결정적으로 달라진
+candidate·v1.0.9 OCR/manifest, candidate first-writer commit, v1.0.9 integrity failure 및
+exit의 순서를 직접 결속합니다. 감사 자체의 Docker/volume/WebDAV mutation과 운영
+restart/signal은 모두 0건입니다. 이 증거 때문에 이전의 “구형 Worker도 winner를
+채택한다”는 가정은 폐기하며, remote read-only live proof가 나오기 전 candidate를
+재개하지 않습니다.
+
+### v1.0.9 prefix-only OCR cache compatibility live 증거
+
+[Sealed compatibility JSON](../release-evidence/v1.0.10/v109-prefix-only-cache-compatibility.json)은
+`cardrag.v109-prefix-only-cache-compatibility.v1`이며, `evidence_sha256`을 제외한
+canonical payload SHA-256은
+`a7eec6534cd30a5dd284bf03b7e41216b29113f19b71839e16a8e4af9b38d5cb`입니다.
+관측 시각은 `2026-08-29T15:07:10.351512+00:00`입니다.
+
+- candidate volume을 read-only로 열고 정확히 계산한 두 reuse key의 READY, manifest,
+  CAS 경로만 GET했습니다. 두 cache entry 모두 HTTP 200, canonical control binding,
+  local/remote manifest 및 OCR bytes 일치, page SHA/size 검증을 통과했습니다. remote
+  mutation은 0건이며 URL, credential, OCR 원문과 raw response는 evidence에 없습니다.
+- `doc_5fb...`의 22쪽과 `doc_69bd...`의 18쪽은 visible source character가 0인
+  logo/pictogram-only page이고, canonical body는 prefix-only입니다. 각 body/page SHA와
+  전체 PDF/OCR/control SHA, reuse key, 상대 object 경로는 evidence에 봉인했습니다.
+- 실제 v1.0.9 Worker image
+  `sha256:a3be8e1b74cb310c3f0d00496db440a00f31d65a0851337205e627153ea103c8`
+  (`revision=fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113`)로 control과 bytes를 다시
+  검증했습니다. fee8f65 provider/checkpoint validator는 prefix-only target을 거부하지만,
+  v1.0.9 cache consumer는 그 validator를 호출하지 않고 공통 `verify_ocr_bytes`를 호출해
+  두 산출물을 모두 수용했습니다.
+- v1.0.9와 v1.0.10의 공통 OCR byte verifier source SHA는
+  `00bc8379e1aae489e0240ffbc275caed15b4da86cecab7d34ddc3e42bb67c681`이고,
+  실제 manifest는 기존 `processor_version=cardrag-worker/1.0.4` 및 동일 contract SHA를
+  유지합니다. 따라서 prefix-only 허용은 provider/checkpoint 입력 경계의 수정일 뿐
+  sealed cache 소비 계약 변경이 아니며 OCR cache namespace bump는 필요하지 않습니다.
+  namespace를 바꾸면 안전 이득 없이 계획이 요구한 검증된 v1.0.9 OCR 재사용만 잃습니다.
+
+이 live proof는 두 회귀 문서의 cache compatibility만 증명합니다. 전체 candidate
+generation, 구조 coverage, MCP smoke와 gold gate의 합격 증거로 확대 해석하지 않습니다.
 
 ### v1.0.9 구조 회귀 기준과 sealed DB 재감사
 
@@ -209,16 +260,27 @@ scan에서 uv workspace lockfile을 해석하지 못했다는 경고가 있으�
 완료된 것으로 간주하지 않고, 두 최종 image의 OS·Python dependency scan 결과로
 보완합니다.
 
+CI의 반복 가능한 merge gate는 `.git`을 제외하고 `--ignore-unfixed`를 사용해 현재
+수정 가능한 HIGH/CRITICAL finding을 차단합니다. 위에 적은 image 명령은 unfixed finding도
+포함하는 더 엄격한 release-acceptance gate입니다. CI scan 통과를 strict release scan
+통과로 대신 기록하지 않으며, strict scan이 nonzero이면 upstream fix 가능 여부와 별개로
+release blocker로 보고합니다.
+
 실데이터 candidate full run은 네 카드사를 포함하고 PDF/OCR cache hit와 provider call
 count, parser/node/view/revision count, sidecar size를 기록합니다. MCP health, generation
 ID, 8 tools, exact search coverage, bundle와 revision, legacy adapter, PDF range smoke를
-수행합니다.
+수행합니다. candidate Compose와 sealed worker contract는 remote OCR cache
+`read-only`를 증명하고, cache miss가 포함된 live 구간에서 resolver native-cache
+publication call이 0건이고 해당 reuse-key manifest/READY가 생성·변경되지 않았음을
+exact-path before/after GET evidence로 봉인합니다. Generation CAS는 별도 artifact
+ledger로 기록합니다.
 
 ## 승인 경계
 
 아래는 acceptance 결과 보고 뒤 별도 승인 없이는 수행하지 않습니다.
 
 - stable pointer PUT과 stable Worker/MCP 재시작 또는 교체
+- shared native/adopted OCR cache publication
 - `/opt/cardrag/current` 변경
 - 운영 v1.0.9 volume/image/snapshot cleanup
 - LibreChat endpoint 또는 tool 소비 경로 변경

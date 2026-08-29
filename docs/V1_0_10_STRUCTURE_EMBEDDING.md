@@ -10,6 +10,16 @@
 OCR processor, prompt, page marker와 reuse key는 v1.0.9 계약을 유지합니다. 구조화는
 검증된 OCR Markdown 뒤에서 실행되며 다음 계층을 만듭니다.
 
+logo/pictogram만 있고 전사할 visible character가 없는 페이지는 sparse control prefix만
+canonical body로 보존할 수 있습니다. fee8f65의 provider/checkpoint validator는 이
+prefix-only 응답을 거부했지만, v1.0.9의 sealed local/remote cache consumer는 별도의 공통
+`verify_ocr_bytes` 경계를 사용하며 prefix-only page를 포함한 canonical page bytes를
+수용합니다. [실데이터 GET-only compatibility evidence](../release-evidence/v1.0.10/v109-prefix-only-cache-compatibility.json)는
+실제 v1.0.9 Worker image로 두 cache entry의 READY/manifest/CAS, reuse key, page hash와
+local/remote byte 일치를 검증했습니다. 그러므로 이 provider/checkpoint 수정 때문에 OCR
+processor version이나 cache namespace를 바꾸지 않습니다. cache consumer 계약은 바뀌지
+않았고 namespace bump는 v1.0.9 immutable OCR seed 재사용만 불필요하게 차단합니다.
+
 ```text
 product_lineage
 └─ contract_revision

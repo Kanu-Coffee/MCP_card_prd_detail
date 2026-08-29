@@ -78,6 +78,11 @@ reranker shadow를 시험할 때는 candidate MCP env에서만
 `CARDRAG_RERANKER_SHADOW_ENABLED=true`로 바꾸며, stable은 Settings 단계에서 이를
 거부합니다. shadow artifact는 candidate MCP volume에만 기록되고 primary 검색 순위에는
 적용되지 않습니다.
+candidate Worker는 `CARDRAG_OCR_CACHE_MODE=read-only`와
+`CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=false`를 강제합니다. 검증된 remote OCR cache
+hit는 GET으로 재사용하지만 native/adopted cache manifest와 READY를 생성·repair하지
+않습니다. 이 별도 approval은 stable pointer 전환이나 remote GC approval로 대체할 수
+없습니다.
 `CARDRAG_PDF_CACHE_REFRESH_HOURS`는 양의 유한 시간만 허용하며 기본값 168시간입니다.
 그 주기 전에는 검증된 로컬 CAS를 재사용하고, 만료 뒤에는 validator 조건부 확인 또는
 validator가 없는 원본의 전체 재다운로드를 수행합니다.

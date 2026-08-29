@@ -272,10 +272,33 @@ async def test_nonblocking_current_override_can_publish(
         assert len(accepted.receipts) == 1
         return 1
 
-    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module.WorkerSettings,
+        "from_env",
+        lambda **kwargs: type("Settings", (), {"ocr_cache_mode": "read-write"})(),
+    )
     monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda: Client())
     monkeypatch.setattr(cli_module, "publish_adoptions", publish)
     assert await cli_module._publish_if_requested(result, True) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_only_cache_mode_rejects_adoption_before_webdav_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = validate_inventory([inventory_row(tmp_path)], source_kind="current")
+    monkeypatch.setattr(
+        cli_module.WorkerSettings,
+        "from_env",
+        lambda **kwargs: type("Settings", (), {"ocr_cache_mode": "read-only"})(),
+    )
+
+    def webdav_must_not_be_constructed() -> None:
+        raise AssertionError("read-only adoption must fail before WebDAV construction")
+
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", webdav_must_not_be_constructed)
+    with pytest.raises(ValueError, match="OCR_CACHE_MODE=read-write"):
+        await cli_module._publish_if_requested(result, True)
 
 
 @pytest.mark.asyncio
@@ -301,7 +324,11 @@ async def test_invalid_candidate_is_reported_while_valid_candidate_can_publish(
         assert len(accepted.errors) == 1
         return 1
 
-    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module.WorkerSettings,
+        "from_env",
+        lambda **kwargs: type("Settings", (), {"ocr_cache_mode": "read-write"})(),
+    )
     monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda: Client())
     monkeypatch.setattr(cli_module, "publish_adoptions", publish)
     assert await cli_module._publish_if_requested(result, True) == 1
@@ -564,7 +591,11 @@ async def test_cli_publication_guard_runs_before_any_adoption_write(
     async def unexpected_publish(*_args: Any, **_kwargs: Any) -> int:
         raise AssertionError("publication must not start when stable.json exists")
 
-    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module.WorkerSettings,
+        "from_env",
+        lambda **kwargs: type("Settings", (), {"ocr_cache_mode": "read-write"})(),
+    )
     monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda: client)
     monkeypatch.setattr(cli_module, "publish_adoptions", unexpected_publish)
     with pytest.raises(AdoptionError, match="stable generation pointer already exists"):
@@ -599,7 +630,11 @@ async def test_publication_rechecks_stable_pointer_after_full_preflight_before_f
             return None
 
     client = FlipClient()
-    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module.WorkerSettings,
+        "from_env",
+        lambda **kwargs: type("Settings", (), {"ocr_cache_mode": "read-write"})(),
+    )
     monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda: client)
 
     with pytest.raises(AdoptionError, match="stable generation pointer already exists"):

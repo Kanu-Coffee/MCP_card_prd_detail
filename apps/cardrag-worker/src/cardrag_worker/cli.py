@@ -303,6 +303,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 render_scale_milli=settings.ocr_render_scale_milli,
                 cache_epoch=settings.ocr_cache_epoch,
                 prompt_version=settings.ocr_prompt_version,
+                cache_mode=settings.ocr_cache_mode,
             )
             resolver: OCRResolver | FailoverOCRResolver = primary
             if settings.ocr_fallback_provider:
@@ -320,8 +321,12 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     render_scale_milli=settings.ocr_render_scale_milli,
                     cache_epoch=settings.ocr_cache_epoch,
                     prompt_version=settings.ocr_prompt_version,
+                    cache_mode=settings.ocr_cache_mode,
                 )
                 resolver = FailoverOCRResolver(primary, fallback)
+            logging.getLogger("cardrag_worker.cli").info(
+                "Remote OCR cache access mode=%s", settings.ocr_cache_mode
+            )
             embeddings = await _qwen_embedding_provider(settings)
             result = await WorkerPipeline(
                 state=state,
@@ -334,6 +339,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 retry_cap_seconds=settings.retry_cap_seconds,
                 collect_remote_garbage=settings.collect_remote_garbage,
                 stable_publication_approved=settings.stable_publication_approved,
+                ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
                 remote_gc_approved=settings.remote_gc_approved,
                 retained_generations=settings.retain_generations,
                 retained_incomplete_runs=settings.retained_incomplete_runs,
@@ -622,7 +628,9 @@ async def _publish_if_requested(result: Any, publish: bool) -> int:
     # migration contract deliberately publishes every independently verified
     # candidate and leaves rejected documents for the normal Worker run to
     # download/OCR again.
-    WorkerSettings.from_env(require_webdav=True)
+    settings = WorkerSettings.from_env(require_webdav=True)
+    if settings.ocr_cache_mode != "read-write":
+        raise ValueError("adoption publication requires CARDRAG_OCR_CACHE_MODE=read-write")
     client = WebDAVClient.from_env()
     try:
         await guard_adoption_publication(client)

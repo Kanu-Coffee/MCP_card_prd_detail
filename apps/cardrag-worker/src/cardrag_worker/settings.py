@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from cardrag_core import (
@@ -94,6 +94,7 @@ class WorkerSettings:
     state_dir: Path
     channel: str
     stable_publication_approved: bool
+    ocr_cache_publication_approved: bool
     remote_gc_approved: bool
     webdav_base_url: str | None
     webdav_username: str | None
@@ -119,6 +120,7 @@ class WorkerSettings:
     ocr_fallback_model: str | None
     ocr_reasoning_effort: str
     ocr_provider_timeout_seconds: float
+    ocr_cache_mode: Literal["read-only", "read-write"]
     ocr_cache_epoch: int
     ocr_prompt_version: str
     codex_executable: str
@@ -198,7 +200,17 @@ class WorkerSettings:
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
         stable_publication_approved = _boolean("CARDRAG_STABLE_PUBLICATION_APPROVED", False)
+        ocr_cache_publication_approved = _boolean("CARDRAG_OCR_CACHE_PUBLICATION_APPROVED", False)
         remote_gc_approved = _boolean("CARDRAG_REMOTE_GC_APPROVED", False)
+        raw_ocr_cache_mode = os.environ.get("CARDRAG_OCR_CACHE_MODE", "read-only").strip().casefold()
+        if raw_ocr_cache_mode not in {"read-only", "read-write"}:
+            raise ValueError("CARDRAG_OCR_CACHE_MODE must be read-only or read-write")
+        ocr_cache_mode = cast(Literal["read-only", "read-write"], raw_ocr_cache_mode)
+        if ocr_cache_mode == "read-write" and (channel != "stable" or not ocr_cache_publication_approved):
+            raise ValueError(
+                "CARDRAG_OCR_CACHE_MODE=read-write requires stable channel and separate "
+                "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true approval"
+            )
         collect_remote_garbage = _boolean("CARDRAG_COLLECT_REMOTE_GARBAGE", False)
         if collect_remote_garbage and (
             channel != "stable" or not stable_publication_approved or not remote_gc_approved
@@ -211,6 +223,7 @@ class WorkerSettings:
             state_dir=state_dir,
             channel=channel,
             stable_publication_approved=stable_publication_approved,
+            ocr_cache_publication_approved=ocr_cache_publication_approved,
             remote_gc_approved=remote_gc_approved,
             webdav_base_url=webdav_base.rstrip("/") if webdav_base else None,
             webdav_username=_read_secret("CARDRAG_WEBDAV_USERNAME", required=require_webdav),
@@ -248,6 +261,7 @@ class WorkerSettings:
             ocr_fallback_model=os.environ.get("CARDRAG_OCR_FALLBACK_MODEL"),
             ocr_reasoning_effort=os.environ.get("CARDRAG_OCR_REASONING_EFFORT", "high"),
             ocr_provider_timeout_seconds=_positive_float("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", 1800),
+            ocr_cache_mode=ocr_cache_mode,
             ocr_cache_epoch=_nonnegative_int("CARDRAG_OCR_CACHE_EPOCH", 0),
             ocr_prompt_version=os.environ.get("CARDRAG_OCR_PROMPT_VERSION", "cardrag-ocr.ko.v2"),
             codex_executable=os.environ.get("CARDRAG_CODEX_EXECUTABLE", "codex"),

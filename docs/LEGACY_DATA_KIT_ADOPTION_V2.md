@@ -77,10 +77,34 @@ never writes to WebDAV. If the pointer exists, or its absence cannot be proved,
 the command exits nonzero. Stop the migration without publishing anything.
 The `--publish` path repeats this guard immediately before its first write.
 
-Only after both exact gates succeed, repeat validation with publication enabled:
+Only after both exact gates succeed, repeat validation with publication enabled.
+Publication is a separate remote-mutation approval. The normal and candidate
+Compose contracts deliberately set `CARDRAG_OCR_CACHE_MODE=read-only` and
+`CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=false`, so the command below must remain
+blocked until an operator has separately approved this one-time adoption write.
+Stable generation-pointer approval does not grant OCR cache publication, and
+OCR cache publication does not grant a stable cutover. After that explicit
+approval, first render and inspect the exact write capability without printing
+credentials:
 
 ```bash
-published=$("${adoption_compose[@]}" run --rm worker adopt-legacy \
+CARDRAG_CHANNEL=stable \
+CARDRAG_OCR_CACHE_MODE=read-write \
+CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true \
+  "${adoption_compose[@]}" config --format json | jq -e '
+    .services.worker.environment.CARDRAG_CHANNEL == "stable" and
+    .services.worker.environment.CARDRAG_OCR_CACHE_MODE == "read-write" and
+    .services.worker.environment.CARDRAG_OCR_CACHE_PUBLICATION_APPROVED == "true" and
+    .services.worker.environment.CARDRAG_STABLE_PUBLICATION_APPROVED == "false"'
+```
+
+Then run the separately approved publication:
+
+```bash
+published=$(CARDRAG_CHANNEL=stable \
+  CARDRAG_OCR_CACHE_MODE=read-write \
+  CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true \
+  "${adoption_compose[@]}" run --rm worker adopt-legacy \
   "$CARDRAG_LEGACY_ADOPTION_EXPORT_DIR" \
   --receipts /var/lib/cardrag-worker/adoption-v2-published-receipts.jsonl \
   --conflicts /var/lib/cardrag-worker/adoption-v2-published-conflicts.json \

@@ -14,6 +14,7 @@ cutover, 운영 Worker 재시작, 운영 volume 정리, LibreChat 소비 경로 
 | Worker volume | `cardrag-worker-v110-state` |
 | MCP volume | `cardrag-mcp-v110-state` |
 | MCP bind | `127.0.0.1:18010` |
+| remote OCR cache | verified GET only (`read-only`) |
 | remote GC | disabled |
 
 candidate가 운영 v1.0.9 volume을 RW로 mount하거나 stable channel을 사용하면 즉시
@@ -42,20 +43,42 @@ copy와 prune을 하지 않습니다. secret 값과 tokenized URL은 inventory�
 ## 2. Compose 렌더링 gate
 
 실제 credential을 출력하지 않고 effective configuration에서 다음을 확인합니다.
+전체 Compose JSON을 터미널, 파일 또는 `tee`로 보내지 않고 아래 비민감 assertion의
+boolean 결과만 출력합니다.
 
 ```bash
 docker compose \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
-  -f deploy/worker/compose.cache-seed.yaml config --format json
+  -f deploy/worker/compose.cache-seed.yaml config --format json | jq -e '
+    .name == "cardrag-v110-candidate" and
+    .services.worker.environment.CARDRAG_CHANNEL == "candidate-v1.0.10" and
+    .services.worker.environment.CARDRAG_OCR_CACHE_MODE == "read-only" and
+    .services.worker.environment.CARDRAG_OCR_CACHE_PUBLICATION_APPROVED == "false" and
+    .services.worker.environment.CARDRAG_COLLECT_REMOTE_GARBAGE == "false" and
+    .services.worker.environment.CARDRAG_REMOTE_GC_APPROVED == "false" and
+    .services.worker.environment.CARDRAG_EMBEDDING_DIMENSION == "4096" and
+    .volumes["worker-state"].name == "cardrag-worker-v110-state" and
+    .volumes["v109-worker-state"].name == "cardrag-worker-v109-state" and
+    ([.services.worker.volumes[] |
+      select(.target == "/mnt/cardrag-v109-state")][0].read_only == true)'
 
 docker compose \
   -f deploy/mcp/compose.yaml \
-  -f deploy/mcp/compose.candidate.yaml config --format json
+  -f deploy/mcp/compose.candidate.yaml config --format json | jq -e '
+    .name == "cardrag-v110-candidate" and
+    .services.mcp.environment.CARDRAG_CHANNEL == "candidate-v1.0.10" and
+    .volumes["mcp-state"].name == "cardrag-mcp-v110-state" and
+    .services.mcp.ports == [{
+      mode: "ingress", host_ip: "127.0.0.1", target: 8000,
+      published: "18010", protocol: "tcp"
+    }]'
 ```
 
 Worker source mount의 `read_only=true`, 두 destination volume 이름, project 이름,
-channel, port, `CARDRAG_COLLECT_REMOTE_GARBAGE=false`,
+channel, port, `CARDRAG_OCR_CACHE_MODE=read-only`,
+`CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=false`,
+`CARDRAG_COLLECT_REMOTE_GARBAGE=false`,
 `CARDRAG_REMOTE_GC_APPROVED=false`와 Qwen 4,096D를 모두 assert합니다.
 
 ## 3. v1.0.9 PDF/OCR seed
@@ -92,10 +115,26 @@ seed ledger의 PDF digest는 첫 full v1.0.10 seal까지 prune pin으로 유지�
 
 동일 PDF의 native/adopted OCR object는 기존 reuse key와 READY 검증을 통과한 경우만
 재사용합니다. 재사용 문서에는 새 OCR provider checkpoint가 생성되지 않아야 합니다.
+candidate는 공용 native OCR cache를 GET-only로 사용합니다. cache miss에서 생성한 OCR은
+candidate local checkpoint와 generation에만 결속하며 native-cache publication
+transaction의 CAS, manifest, READY를 생성하거나 불완전 native entry의 READY를
+repair하지 않습니다. 여기서 CAS 금지는 OCR resolver의
+native-cache publication transaction을 뜻합니다. 성공 generation은 MCP의 source OCR
+제공을 위해 같은 bytes를 전역 content-addressed object path에 idempotent하게 upload할
+수 있지만, native manifest/READY가 없으면 그 object 자체는 공유 OCR cache entry가
+아닙니다. 이 경계는
+`CARDRAG_OCR_CACHE_MODE=read-only` 기본값, candidate Compose 강제값, Worker startup
+validation과 worker-contract hash에 함께 결속됩니다. `read-write`는 stable channel과
+별도 `CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true`가 모두 없으면 startup 전에
+거부됩니다. stable generation publication approval은 이 권한을 대신하지 않습니다.
 
 ## 4. candidate generation과 MCP
 
 candidate Worker는 v1.0.10 이미지를 사용하고 candidate channel에만 publish합니다.
+실행 로그에서 `Remote OCR cache access mode=read-only`를 확인하고, 신규 local OCR
+성공 전후 정확한 remote reuse-key의 native manifest/READY 경로가 모두 동일한 GET
+결과를 유지했는지 확인합니다. generation CAS publication은 이 control-path 증거와
+분리해 기록합니다.
 Worker는 corpus discovery/embedding 전에 두 allowlisted Qwen route의 credentialed live
 preflight를 수행합니다. 2026-08-29 재검증에서는 `deepinfra`와 `nebius`가 모두 고정
 24-sample·2회 반복·4,096D finite·cosine gate를 통과했습니다. 이때 확인된 OpenRouter

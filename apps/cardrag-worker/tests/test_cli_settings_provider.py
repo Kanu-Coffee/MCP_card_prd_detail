@@ -762,6 +762,7 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
     assert settings.ocr_reasoning_effort == "high"
     assert settings.ocr_prompt_version == "cardrag-ocr.ko.v2"
     assert settings.ocr_provider_timeout_seconds == 1800
+    assert settings.ocr_cache_mode == "read-only"
     assert settings.ocr_render_scale_milli == 6000
     assert settings.ocr_whole_document_max_pages == 4
     assert (settings.ocr_context_pages_before, settings.ocr_context_pages_after) == (1, 1)
@@ -803,6 +804,8 @@ def test_candidate_channel_and_two_generation_retention_are_validated(
     for name in (
         "CARDRAG_CHANNEL",
         "CARDRAG_STABLE_PUBLICATION_APPROVED",
+        "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED",
+        "CARDRAG_OCR_CACHE_MODE",
         "CARDRAG_REMOTE_GC_APPROVED",
         "CARDRAG_RETAIN_GENERATIONS",
         "CARDRAG_RETAIN_INCOMPLETE_RUNS",
@@ -812,10 +815,12 @@ def test_candidate_channel_and_two_generation_retention_are_validated(
     stable = WorkerSettings.from_env()
     assert stable.channel == "stable"
     assert stable.stable_publication_approved is False
+    assert stable.ocr_cache_publication_approved is False
     assert stable.remote_gc_approved is False
     assert stable.retain_generations == 2
     assert stable.retained_incomplete_runs == 2
     assert stable.collect_remote_garbage is False
+    assert stable.ocr_cache_mode == "read-only"
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.9")
     monkeypatch.setenv("CARDRAG_COLLECT_REMOTE_GARBAGE", "false")
@@ -829,6 +834,36 @@ def test_candidate_channel_and_two_generation_retention_are_validated(
     monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
     monkeypatch.setenv("CARDRAG_RETAIN_GENERATIONS", "1")
     with pytest.raises(ValueError, match="CARDRAG_RETAIN_GENERATIONS"):
+        WorkerSettings.from_env()
+
+
+def test_remote_ocr_cache_writes_require_separate_approval_on_stable_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_MODE", "read-write")
+    monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
+    monkeypatch.delenv("CARDRAG_OCR_CACHE_PUBLICATION_APPROVED", raising=False)
+    with pytest.raises(ValueError, match="OCR_CACHE_MODE=read-write requires stable"):
+        WorkerSettings.from_env()
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
+    with pytest.raises(ValueError, match="OCR_CACHE_PUBLICATION_APPROVED=true"):
+        WorkerSettings.from_env()
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_PUBLICATION_APPROVED", "true")
+    with pytest.raises(ValueError, match="OCR_CACHE_MODE=read-write requires stable"):
+        WorkerSettings.from_env()
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
+    approved = WorkerSettings.from_env()
+    assert approved.ocr_cache_mode == "read-write"
+    assert approved.ocr_cache_publication_approved is True
+    assert approved.stable_publication_approved is False
+
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_MODE", "invalid")
+    with pytest.raises(ValueError, match="CARDRAG_OCR_CACHE_MODE"):
         WorkerSettings.from_env()
 
 

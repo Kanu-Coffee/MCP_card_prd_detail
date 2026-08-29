@@ -194,6 +194,7 @@ def test_v5_corpus_identity_binds_temporal_supersession_and_unresolved_truth(
 class _OCR:
     contract = {"schema_version": "test-ocr.v1"}
     adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+    cache_mode = "read-only"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -681,6 +682,23 @@ def _test_qwen_embeddings(
     )
 
 
+def test_v5_candidate_pipeline_rejects_remote_ocr_cache_writes(tmp_path: Path) -> None:
+    ocr = _OCR()
+    ocr.cache_mode = "read-write"
+    with (
+        WorkerState(tmp_path / "state.sqlite3") as state,
+        pytest.raises(ValueError, match="requires read-only remote OCR cache"),
+    ):
+        WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(_test_source("test-001"))],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=_test_qwen_embeddings([]),
+            webdav=_FakeCandidateWebDAV(),  # type: ignore[arg-type]
+        )
+
+
 def _test_source(product_code: str) -> SourceRecord:
     return SourceRecord(
         issuer="testbank",
@@ -811,6 +829,10 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
             retry_cap_seconds=0,
         )
         original_contract_sha256 = pipeline.contract_sha256
+        ocr.cache_mode = "read-write"
+        assert pipeline.contract_sha256 != original_contract_sha256
+        ocr.cache_mode = "read-only"
+        assert pipeline.contract_sha256 == original_contract_sha256
         original_context_policy = pipeline_module.contextual_item_policy_payload
         with monkeypatch.context() as context_policy_patch:
             context_policy_patch.setattr(
@@ -942,6 +964,10 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         )
         assert ready.vector_sidecar_sha256 == manifest.vector_sidecar.artifact.sha256
         assert ready.vector_sidecar_size_bytes == manifest.vector_sidecar.artifact.size_bytes
+        assert all(not path.startswith("v1/ocr-cache/") for path in webdav.objects)
+        assert all(
+            document.ocr is None or document.ocr.path in webdav.objects for document in manifest.documents
+        )
         assert state.connection.execute("SELECT count(*) FROM embedding_cache").fetchone()[0] == 0
         assert state.connection.execute("SELECT count(*) FROM embedding_cache_v5").fetchone()[0] == (
             resumed.evidence_count

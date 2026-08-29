@@ -62,7 +62,9 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
         assert "CARDRAG_CANDIDATE_WEBDAV_BASE_URL" in manifest
         assert "candidate-v1.0.9" not in manifest
     assert 'CARDRAG_COLLECT_REMOTE_GARBAGE: "false"' in worker
+    assert 'CARDRAG_OCR_CACHE_PUBLICATION_APPROVED: "false"' in worker
     assert 'CARDRAG_REMOTE_GC_APPROVED: "false"' in worker
+    assert 'CARDRAG_OCR_CACHE_MODE: "read-only"' in worker
     assert "cardrag-worker-v110-state" in worker
     assert "cardrag-mcp-v110-state" in mcp
     assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18010" in mcp
@@ -71,7 +73,9 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "external: true" in cache_seed
     assert "CARDRAG_WORKER_STATE_VOLUME" in worker_base
     assert "CARDRAG_COLLECT_REMOTE_GARBAGE:-false" in worker_base
+    assert "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED:-false" in worker_base
     assert "CARDRAG_REMOTE_GC_APPROVED:-false" in worker_base
+    assert "CARDRAG_OCR_CACHE_MODE:-read-only" in worker_base
     assert "CARDRAG_MCP_STATE_VOLUME" in mcp_base
     assert "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES" in mcp_base
     assert "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES" in mcp_base
@@ -125,6 +129,8 @@ def test_public_environment_contract_is_documented_exactly() -> None:
         "CARDRAG_WEBDAV_PASSWORD_FILE",
         "CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS",
         "CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS",
+        "CARDRAG_OCR_CACHE_MODE",
+        "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED",
         "CARDRAG_MCP_BEARER_TOKEN_FILE",
         "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES",
         "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES",

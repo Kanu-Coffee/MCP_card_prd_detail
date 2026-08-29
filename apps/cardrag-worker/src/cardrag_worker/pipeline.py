@@ -1675,6 +1675,7 @@ class WorkerPipeline:
         pdf_cache_refresh_hours: float = 168,
         collect_remote_garbage: bool = False,
         stable_publication_approved: bool = False,
+        ocr_cache_publication_approved: bool = False,
         remote_gc_approved: bool = False,
         retained_generations: int = 2,
         garbage_grace_days: int = 30,
@@ -1696,8 +1697,15 @@ class WorkerPipeline:
             raise ValueError(
                 "embedding provider must be the legacy 1,536D rollback provider or a sealed Qwen v5 provider"
             )
+        ocr_cache_mode = getattr(ocr, "cache_mode", "read-write")
+        if v5_profile is None and ocr_cache_mode != "read-write":
+            raise ValueError("legacy v4 Worker requires its original read-write OCR cache contract")
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
             raise ValueError("stable v1.0.10 publication requires explicit approval")
+        if v5_profile is not None and webdav.channel == "candidate-v1.0.10" and ocr_cache_mode != "read-only":
+            raise ValueError("v1.0.10 candidate requires read-only remote OCR cache access")
+        if v5_profile is not None and ocr_cache_mode == "read-write" and not ocr_cache_publication_approved:
+            raise ValueError("v1.0.10 remote OCR cache publication requires separate approval")
         if document_aggregation is not None:
             if v5_profile is None:
                 raise ValueError("sealed document aggregation requires the Qwen v5 pipeline")
@@ -1729,6 +1737,7 @@ class WorkerPipeline:
         self.pdf_cache_refresh_interval = pdf_cache_refresh_interval
         self.collect_remote_garbage = collect_remote_garbage
         self.stable_publication_approved = stable_publication_approved
+        self.ocr_cache_publication_approved = ocr_cache_publication_approved
         self.remote_gc_approved = remote_gc_approved
         self.retained_generations = retained_generations
         self.garbage_grace_days = garbage_grace_days
@@ -1772,6 +1781,10 @@ class WorkerPipeline:
                 ],
                 "download_contract": "cardrag.secure-pdf-download.v2",
                 "ocr_contract": self.ocr.contract,
+                "remote_ocr_cache": {
+                    "mode": self.ocr.cache_mode,
+                    "policy_version": "cardrag.remote-ocr-cache-access.v1",
+                },
                 "adoption_policy_version": self.ocr.adoption_policy_version,
                 "structure": {
                     "schema_version": "cardrag.structure.v2",

@@ -25,8 +25,10 @@ delays. Exhaustion keeps the atomically verified local seal and returns
 generation-only OCR without claiming a native cache binding; its bounded
 diagnostic is
 `runs/<run-id>/documents/<document-id>/ocr/native-cache-publication-diagnostic.json`.
-A later run strictly validates a partial remote manifest and OCR CAS, publishes
-only the missing READY, and does not call the provider again. HTTP 401/403/407,
+A later `read-write` run strictly validates a partial remote manifest and OCR
+CAS, publishes only the missing READY, and does not call the provider again.
+The default and candidate `read-only` mode treats the partial entry as a strict
+miss and never repairs it. HTTP 401/403/407,
 local/unsupported protocol, immutable conflict, integrity, and contract
 failures remain terminal and write the secret-safe
 `runs/<run-id>/reports/ocr-systemic-failure.json` report.
@@ -73,7 +75,11 @@ Live discovery, OCR, embeddings, and WebDAV publishing require real issuer and
 provider credentials/endpoints. The v1.0.10 worker accepts
 `candidate-v1.0.10` by default; `stable` remains blocked unless the separately
 approved cutover explicitly sets `CARDRAG_STABLE_PUBLICATION_APPROVED=true`.
-No provided environment or Compose file enables that flag. A
+No provided environment or Compose file enables that flag. Shared native or
+adopted OCR cache writes independently require stable channel,
+`CARDRAG_OCR_CACHE_MODE=read-write`, and the separate
+`CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true`; candidate forces read-only and
+false. Neither approval grants the other. A
 successful/no-change approved stable run performs remote GC only when the
 independent deletion approval `CARDRAG_REMOTE_GC_APPROVED=true` and
 `CARDRAG_COLLECT_REMOTE_GARBAGE=true` are also set. Both default to false;
