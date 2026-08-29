@@ -32,7 +32,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert len(versions) == 1
+    assert versions == {"1.0.9"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -48,6 +48,52 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
     assert "postgres" not in lowered
     assert "keycloak" not in lowered
     assert "from runtime as admin" not in lowered
+
+
+def test_v109_candidate_deployment_isolated_from_stable_runtime() -> None:
+    worker_base = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
+    mcp_base = (ROOT / "deploy/mcp/compose.yaml").read_text(encoding="utf-8")
+    worker = (ROOT / "deploy/worker/compose.candidate.yaml").read_text(encoding="utf-8")
+    mcp = (ROOT / "deploy/mcp/compose.candidate.yaml").read_text(encoding="utf-8")
+    cache_seed = (ROOT / "deploy/worker/compose.cache-seed.yaml").read_text(encoding="utf-8")
+
+    for manifest in (worker, mcp):
+        assert "candidate-v1.0.9" in manifest
+        assert "CARDRAG_CANDIDATE_WEBDAV_BASE_URL" in manifest
+        assert "v1.0.8" not in manifest
+    assert 'CARDRAG_COLLECT_REMOTE_GARBAGE: "false"' in worker
+    assert "cardrag-worker-v109-candidate-state" in worker
+    assert "cardrag-mcp-v109-candidate-state" in mcp
+    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18009" in mcp
+    assert "target: /mnt/cardrag-v108-state" in cache_seed
+    assert "read_only: true" in cache_seed
+    assert "external: true" in cache_seed
+    assert "CARDRAG_WORKER_STATE_VOLUME" in worker_base
+    assert "CARDRAG_MCP_STATE_VOLUME" in mcp_base
+    assert "cardrag-worker_worker-state" not in worker_base
+    assert "cardrag-mcp_mcp-state" not in mcp_base
+    assert "cardrag-worker-v109-state" in worker_base
+    assert "cardrag-mcp-v109-state" in mcp_base
+
+
+def test_worker_service_keeps_terminal_and_progress_output_in_journal() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    service = (ROOT / "deploy/worker/cardrag-worker.service").read_text(encoding="utf-8")
+    worker_cli = (ROOT / "apps/cardrag-worker/src/cardrag_worker/cli.py").read_text(encoding="utf-8")
+
+    assert "PYTHONUNBUFFERED=1" in dockerfile
+    assert "\n    _configure_worker_logging()\n" in worker_cli
+    assert "logger.setLevel(logging.INFO)" in worker_cli
+    assert "StandardOutput=journal" in service
+    assert "StandardError=journal" in service
+    assert "SyslogIdentifier=cardrag-worker" in service
+    assert "KillSignal=SIGTERM" in service
+    assert "TimeoutStopSec=infinity" in service
+    assert "SendSIGKILL=no" in service
+    assert "SuccessExitStatus=130 143" in service
+    worker_compose = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
+    assert "init: true" in worker_compose
+    assert "stop_signal: SIGTERM" in worker_compose
 
 
 def test_new_runtime_packages_do_not_depend_on_removed_services() -> None:

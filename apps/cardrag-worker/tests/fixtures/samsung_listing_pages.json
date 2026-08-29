@@ -1,0 +1,112 @@
+{
+  "pages": [
+    {
+      "common": {"procsRsDvC": "0"},
+      "message": {"msgMarkDvC": "00"},
+      "totInqrCt": "4",
+      "blbdInqrRsList": [
+        {
+          "itgBlbdChnlDvC": "01",
+          "itgBlbdTpDvC": "19",
+          "bgdAlncPdC": "AAP100",
+          "bltnbmTitNm": "삼성 테스트 카드",
+          "itgBlbdSn": "100",
+          "bltnStrtdt": "20260825",
+          "bltnbmWrteDt": "20260820",
+          "sysFstRgTs": "20260820123456789012",
+          "sysLtChTs": "20260825150000000001",
+          "uploadFileList": [
+            {
+              "apnFileNm": "삼성 테스트 카드 이용안내장.pdf",
+              "apnFileGrpNo": "000000000000000000000100",
+              "apnFileGrpNoE": "TOKEN100%2B%2F%3D",
+              "apnFileSn": "1"
+            },
+            {
+              "apnFileNm": "삼성 테스트 카드 약관.pdf",
+              "apnFileGrpNo": "000000000000000000000100",
+              "apnFileGrpNoE": "TOKEN100%2B%2F%3D",
+              "apnFileSn": "2"
+            }
+          ]
+        },
+        {
+          "itgBlbdChnlDvC": "01",
+          "itgBlbdTpDvC": "19",
+          "bgdAlncPdC": "AAP200",
+          "bltnbmTitNm": "단일 PDF 대체 카드",
+          "itgBlbdSn": "200",
+          "bltnStrtdt": "20260824",
+          "bltnbmWrteDt": "20260819",
+          "sysFstRgTs": "20260819123456789012",
+          "sysLtChTs": "20260824150000000002",
+          "uploadFileList": [
+            {
+              "apnFileNm": "단일 상품설명.pdf",
+              "apnFileGrpNo": "000000000000000000000200",
+              "apnFileGrpNoE": "TOKEN200%2B%2F%3D",
+              "apnFileSn": "1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "common": {"procsRsDvC": "0"},
+      "message": {"msgMarkDvC": "00"},
+      "totInqrCt": "4",
+      "blbdInqrRsList": [
+        {
+          "itgBlbdChnlDvC": "01",
+          "itgBlbdTpDvC": "19",
+          "bgdAlncPdC": "AAP300",
+          "bltnbmTitNm": "복수 안내장 카드",
+          "itgBlbdSn": "300",
+          "bltnStrtdt": "20260823",
+          "bltnbmWrteDt": "20260818",
+          "sysFstRgTs": "20260818123456789012",
+          "sysLtChTs": "20260823150000000003",
+          "uploadFileList": [
+            {
+              "apnFileNm": "복수 안내장 B.pdf",
+              "apnFileGrpNo": "000000000000000000000300",
+              "apnFileGrpNoE": "TOKEN300%2B%2F%3D",
+              "apnFileSn": "2"
+            },
+            {
+              "apnFileNm": "복수 안내장 A.pdf",
+              "apnFileGrpNo": "000000000000000000000300",
+              "apnFileGrpNoE": "TOKEN300%2B%2F%3D",
+              "apnFileSn": "1"
+            },
+            {
+              "apnFileNm": "복수 카드 약관.pdf",
+              "apnFileGrpNo": "000000000000000000000300",
+              "apnFileGrpNoE": "TOKEN300%2B%2F%3D",
+              "apnFileSn": "3"
+            }
+          ]
+        },
+        {
+          "itgBlbdChnlDvC": "01",
+          "itgBlbdTpDvC": "19",
+          "bgdAlncPdC": "AAP300",
+          "bltnbmTitNm": "동일 공식코드의 다른 게시물",
+          "itgBlbdSn": "301",
+          "bltnStrtdt": "20260822",
+          "bltnbmWrteDt": "20260817",
+          "sysFstRgTs": "20260817123456789012",
+          "sysLtChTs": "20260822150000000004",
+          "uploadFileList": [
+            {
+              "apnFileNm": "다른 게시물 이용안내장.pdf",
+              "apnFileGrpNo": "000000000000000000000301",
+              "apnFileGrpNoE": "TOKEN301%2B%2F%3D",
+              "apnFileSn": "1"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

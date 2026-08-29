@@ -103,6 +103,8 @@ def build_mcp_server(
             "Read-only search over the currently active card-product snapshot. "
             "Products whose current official source is protected DRM are explicitly reported "
             "with availability=unsupported_drm and have no document or PDF. "
+            "Products whose validated PDF failed isolated OCR are reported with "
+            "availability=ocr_failed and have a PDF but no OCR pages or evidence. "
             "There is no history, version, as-of, remote-PDF, or page-image interface."
         ),
     )
@@ -149,7 +151,7 @@ def build_mcp_server(
 
     @server.tool()
     async def get_product(issuer: str, product_code: str) -> dict[str, Any]:
-        """Return the active product, or an explicit unsupported_drm availability result."""
+        """Return the product, including explicit unsupported_drm or ocr_failed availability."""
 
         value = await repository.get_product(issuer, product_code)
         if value is None:

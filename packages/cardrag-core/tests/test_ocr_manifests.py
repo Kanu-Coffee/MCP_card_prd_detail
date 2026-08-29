@@ -14,6 +14,8 @@ from cardrag_core import (
     GenerationCounts,
     GenerationDocument,
     GenerationManifest,
+    GenerationOCRFailure,
+    IssuerOCRCounts,
     LegacyAdoptionReceipt,
     LegacyAdoptionReceiptV2,
     LegacyAdoptionValidation,
@@ -409,6 +411,120 @@ def test_generation_manifest_lists_pdf_cas_and_open_issuer_codes() -> None:
                 "counts": GenerationCounts(documents=3, pdf_objects=1, ocr_objects=1, chunks=5),
             }
         )
+
+
+def test_generation_v4_records_exactly_thresholded_partial_ocr_publication() -> None:
+    pdf = ArtifactRef.for_cas(sha256=sha256_bytes(b"pdf-v4"), size_bytes=6, media_type="application/pdf")
+    ocr = ArtifactRef.for_cas(
+        sha256=sha256_bytes(b"ocr-v4"),
+        size_bytes=6,
+        media_type="text/markdown; charset=utf-8",
+    )
+    documents = tuple(
+        GenerationDocument(
+            document_id=f"doc_{index:02d}",
+            issuer="kb",
+            pdf=pdf,
+            ocr=ocr,
+            page_count=1,
+            availability="available",
+        )
+        for index in range(19)
+    ) + (
+        GenerationDocument(
+            document_id="doc_19",
+            issuer="kb",
+            pdf=pdf,
+            page_count=1,
+            availability="ocr_failed",
+            ocr_failure=GenerationOCRFailure(
+                reason_code="provider_timeout",
+                reason="The OCR provider timed out.",
+                attempts=4,
+            ),
+        ),
+    )
+    generation_id = "gen-v4-partial"
+    manifest = GenerationManifest(
+        schema_version="cardrag.generation.v4",
+        generation_id=generation_id,
+        created_at=NOW,
+        serving_schema="cardrag.serving-db.v4",
+        serving_database=ArtifactRef(
+            sha256=sha256_bytes(b"sqlite-v4"),
+            size_bytes=9,
+            media_type="application/vnd.sqlite3",
+            path=generation_database_path(generation_id).as_posix(),
+        ),
+        corpus_sha256=sha256_bytes(b"corpus-v4"),
+        contract_sha256=sha256_bytes(b"contract-v4"),
+        embedding_contract=EmbeddingContract(
+            provider="openrouter",
+            model="openai/text-embedding-3-small",
+            dimension=1536,
+            count=19,
+        ),
+        issuer_codes=("kb",),
+        counts=GenerationCounts(documents=20, pdf_objects=1, ocr_objects=1, chunks=19),
+        documents=tuple(sorted(documents, key=lambda row: row.document_id)),
+        issuer_ocr_counts=(IssuerOCRCounts(issuer="kb", acquired=20, succeeded=19, failed=1),),
+    )
+
+    restored = GenerationManifest.model_validate_json(manifest.canonical_bytes())
+    assert restored == manifest
+    assert restored.documents[-1].availability == "ocr_failed"
+    assert restored.documents[-1].ocr is None
+
+    with pytest.raises(ValidationError, match="counts differ from document availability"):
+        GenerationManifest.model_validate(
+            {
+                **manifest.model_dump(mode="python"),
+                "issuer_ocr_counts": (IssuerOCRCounts(issuer="kb", acquired=20, succeeded=18, failed=2),),
+            }
+        )
+
+
+def test_generation_v3_canonical_bytes_do_not_gain_v4_fields() -> None:
+    pdf = ArtifactRef.for_cas(
+        sha256=sha256_bytes(b"legacy-pdf"),
+        size_bytes=10,
+        media_type="application/pdf",
+    )
+    ocr = ArtifactRef.for_cas(
+        sha256=sha256_bytes(b"legacy-ocr"),
+        size_bytes=10,
+        media_type="text/markdown; charset=utf-8",
+    )
+    generation_id = "gen-v3-canonical"
+    manifest = GenerationManifest(
+        generation_id=generation_id,
+        created_at=NOW,
+        serving_database=ArtifactRef(
+            sha256=sha256_bytes(b"legacy-db"),
+            size_bytes=9,
+            media_type="application/vnd.sqlite3",
+            path=generation_database_path(generation_id).as_posix(),
+        ),
+        corpus_sha256=sha256_bytes(b"legacy-corpus"),
+        contract_sha256=sha256_bytes(b"legacy-contract"),
+        embedding_contract=EmbeddingContract(provider="openrouter", model="model", dimension=1536, count=1),
+        issuer_codes=("kb",),
+        counts=GenerationCounts(documents=1, pdf_objects=1, ocr_objects=1, chunks=1),
+        documents=(
+            GenerationDocument(
+                document_id="doc_legacy",
+                issuer="kb",
+                pdf=pdf,
+                ocr=ocr,
+                page_count=1,
+            ),
+        ),
+    )
+    body = manifest.canonical_bytes()
+    assert b"availability" not in body
+    assert b"ocr_failure" not in body
+    assert b"issuer_ocr_counts" not in body
+    assert GenerationManifest.model_validate_json(body).canonical_bytes() == body
 
 
 def test_generation_ocr_cache_identity_is_exact_and_all_or_nothing() -> None:

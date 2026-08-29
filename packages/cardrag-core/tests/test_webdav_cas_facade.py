@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
@@ -214,6 +214,52 @@ def test_immutable_publisher_accepts_verified_409_move_collision(
     assert not any(".incoming" in path for path in backend.files)
 
 
+def test_immutable_verified_commit_survives_temporary_cleanup_failure(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend, client = webdav
+    raw_sentinel = "RAW_IMMUTABLE_DELETE_SECRET_PATH"
+
+    def fail_delete(*_args: object, **_kwargs: object) -> None:
+        raise WebDAVHTTPError("DELETE", PurePosixPath(raw_sentinel), 500)
+
+    monkeypatch.setattr(client, "delete", fail_delete)
+    reference = ImmutablePublisher(client).publish_bytes(
+        "v1/objects/verified-cleanup.bin",
+        b"verified",
+    )
+
+    assert backend.files[reference.path] == b"verified"
+    assert "temporary cleanup failed after verified commit" in caplog.text
+    assert raw_sentinel not in caplog.text
+
+
+def test_immutable_publisher_cleanup_cannot_mask_primary_failure(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, client = webdav
+
+    def fail_move(*_args: object, **_kwargs: object) -> None:
+        raise WebDAVHTTPError("MOVE", PurePosixPath("v1/original-failure"), 503)
+
+    def fail_delete(*_args: object, **_kwargs: object) -> None:
+        raise WebDAVHTTPError("DELETE", PurePosixPath("v1/cleanup-failure"), 500)
+
+    monkeypatch.setattr(client, "move", fail_move)
+    monkeypatch.setattr(client, "delete", fail_delete)
+
+    with pytest.raises(WebDAVHTTPError) as captured:
+        ImmutablePublisher(client).publish_bytes(
+            "v1/objects/original.bin",
+            b"payload",
+        )
+
+    assert (captured.value.method, captured.value.status_code) == ("MOVE", 503)
+
+
 def test_stable_pointer_is_the_only_atomic_overwrite_path(
     webdav: tuple[_MemoryWebDAV, WebDAVClient],
 ) -> None:
@@ -226,6 +272,39 @@ def test_stable_pointer_is_the_only_atomic_overwrite_path(
     assert backend.files[STABLE_POINTER_PATH.as_posix()] == b'{"generation_id":"gen-two"}'
     move_requests = [request for request in backend.requests if request[0] == "MOVE"]
     assert len(move_requests) == 2
+
+
+def test_stable_pointer_verified_commit_survives_temporary_cleanup_failure(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend, client = webdav
+    raw_sentinel = "RAW_DELETE_SECRET_PATH"
+
+    def fail_delete(*_args: object, **_kwargs: object) -> None:
+        raise WebDAVHTTPError("DELETE", PurePosixPath(raw_sentinel), 500)
+
+    monkeypatch.setattr(client, "delete", fail_delete)
+    reference = StablePointerPublisher(client).atomic_replace_json({"generation_id": "committed"})
+
+    assert reference.path == STABLE_POINTER_PATH.as_posix()
+    assert backend.files[reference.path] == b'{"generation_id":"committed"}'
+    assert "temporary cleanup failed after verified replacement" in caplog.text
+    assert raw_sentinel not in caplog.text
+
+
+def test_candidate_channel_is_isolated_from_stable(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+) -> None:
+    backend, client = webdav
+    StablePointerPublisher(client).atomic_replace_json({"generation_id": "stable"})
+    candidate = StablePointerPublisher(client, channel="candidate-v1.0.9")
+    result = candidate.atomic_replace_json({"generation_id": "candidate"})
+
+    assert result.path == "v1/channels/candidate-v1.0.9.json"
+    assert backend.files[STABLE_POINTER_PATH.as_posix()] == b'{"generation_id":"stable"}'
+    assert backend.files[result.path] == b'{"generation_id":"candidate"}'
 
 
 def _publish_current_generation(

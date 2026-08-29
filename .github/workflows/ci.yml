@@ -76,6 +76,54 @@ jobs:
           CARDRAG_MCP_BEARER_TOKEN=fixture-bearer-token-with-sufficient-length \
           CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
             docker compose -f deploy/mcp/compose.yaml config --quiet
+          CARDRAG_WEBDAV_USERNAME=fixture-user \
+          CARDRAG_WEBDAV_PASSWORD=fixture-password \
+          CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v109-candidate \
+            docker compose \
+              -f deploy/worker/compose.yaml \
+              -f deploy/worker/compose.candidate.yaml \
+              config --quiet
+          CARDRAG_WEBDAV_USERNAME=fixture-user \
+          CARDRAG_WEBDAV_PASSWORD=fixture-password \
+          CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v109-candidate \
+            docker compose \
+              -f deploy/worker/compose.yaml \
+              -f deploy/worker/compose.candidate.yaml \
+              -f deploy/worker/compose.cache-seed.yaml \
+              config --quiet
+          CARDRAG_WEBDAV_USERNAME=fixture-user \
+          CARDRAG_WEBDAV_PASSWORD=fixture-password \
+          CARDRAG_MCP_BEARER_TOKEN=fixture-bearer-token-with-sufficient-length \
+          CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v109-candidate \
+          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://cardrag-v109.example \
+            docker compose \
+              -f deploy/mcp/compose.yaml \
+              -f deploy/mcp/compose.candidate.yaml \
+              config --quiet
+          CARDRAG_WEBDAV_USERNAME=fixture-user \
+          CARDRAG_WEBDAV_PASSWORD=fixture-password \
+          CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v109-candidate \
+            docker compose \
+              -f deploy/worker/compose.yaml \
+              -f deploy/worker/compose.candidate.yaml \
+              -f deploy/worker/compose.cache-seed.yaml \
+              config --format json | \
+            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["worker"]; e=s["environment"]; v=d["volumes"]; assert d["name"]=="cardrag-worker-v109-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.9"; assert e["CARDRAG_WEBDAV_BASE_URL"]=="https://webdav.example/cardrag-v109-candidate"; assert e["CARDRAG_COLLECT_REMOTE_GARBAGE"]=="false"; assert v["worker-state"]["name"]=="cardrag-worker-v109-candidate-state"; assert v["v108-worker-state"]=={"name":"cardrag-worker_worker-state","external":True}; m={x["target"]:x for x in s["volumes"]}; assert m["/mnt/cardrag-v108-state"]["read_only"] is True'
+          CARDRAG_WEBDAV_USERNAME=fixture-user \
+          CARDRAG_WEBDAV_PASSWORD=fixture-password \
+          CARDRAG_MCP_BEARER_TOKEN=fixture-bearer-token-with-sufficient-length \
+          CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v109-candidate \
+          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://cardrag-v109.example \
+            docker compose \
+              -f deploy/mcp/compose.yaml \
+              -f deploy/mcp/compose.candidate.yaml \
+              config --format json | \
+            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["mcp"]; e=s["environment"]; p=s["ports"]; assert d["name"]=="cardrag-mcp-v109-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.9"; assert e["CARDRAG_WEBDAV_BASE_URL"]=="https://webdav.example/cardrag-v109-candidate"; assert e["CARDRAG_MCP_PUBLIC_BASE_URL"]=="https://cardrag-v109.example"; assert d["volumes"]["mcp-state"]["name"]=="cardrag-mcp-v109-candidate-state"; assert p==[{"mode":"ingress","host_ip":"127.0.0.1","target":8000,"published":"18009","protocol":"tcp"}]'
           docker compose \
             -f deploy/worker/compose.yaml \
             -f deploy/worker/compose.secrets.yaml \

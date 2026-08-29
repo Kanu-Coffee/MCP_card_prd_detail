@@ -82,6 +82,24 @@ CREATE VIRTUAL TABLE evidence_fts USING fts5(
 );
 """
 
+OCR_FAILED_DDL = """
+CREATE TABLE ocr_failed_products (
+  issuer TEXT NOT NULL,
+  product_code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  document_id TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  pdf_sha256 TEXT NOT NULL CHECK(length(pdf_sha256)=64),
+  pdf_size_bytes INTEGER NOT NULL CHECK(pdf_size_bytes > 0),
+  page_count INTEGER NOT NULL CHECK(page_count > 0),
+  reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 64),
+  reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 256),
+  attempts INTEGER NOT NULL CHECK(attempts > 0),
+  PRIMARY KEY (issuer, product_code),
+  FOREIGN KEY (issuer) REFERENCES issuers(code)
+) STRICT, WITHOUT ROWID;
+"""
+
 
 class FakeEmbedder(OpenRouterEmbedder):
     def __init__(self, vector: np.ndarray | None = None, *, fail: bool = False) -> None:
@@ -215,9 +233,25 @@ def create_database(
         "unsupported_document_count": "1",
         "unsupported_documents_sha256": unsupported_sha256,
     }
+    if schema_id == "cardrag.serving-db.v4":
+        metadata.update(
+            {
+                "ocr_failed_document_count": "0",
+                "ocr_failed_documents_sha256": hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "documents": [],
+                            "schema_version": "cardrag.ocr-failed-products.v1",
+                        }
+                    )
+                ).hexdigest(),
+            }
+        )
     connection = sqlite3.connect(target)
     try:
         connection.executescript(DDL)
+        if schema_id == "cardrag.serving-db.v4":
+            connection.executescript(OCR_FAILED_DDL)
         connection.executemany(
             "INSERT INTO metadata(key,value) VALUES(?,?)", sorted(metadata.items())
         )

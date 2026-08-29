@@ -6,15 +6,17 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import sqlite3
+import stat
 import struct
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -24,27 +26,34 @@ from cardrag_core import (
     EMBEDDING_DIMENSION,
     EMBEDDING_POLICY_VERSION,
     QUERY_EMBEDDING_PREFIX,
-    STABLE_POINTER_PATH,
     ArtifactRef,
     EmbeddingContract,
     GenerationCounts,
     GenerationDocument,
     GenerationManifest,
+    GenerationOCRFailure,
+    IssuerOCRCounts,
     OCRCacheKind,
+    WebDAVError,
+    WebDAVHTTPError,
+    WebDAVIntegrityError,
     canonical_json_bytes,
     canonical_sha256,
     generation_database_path,
+    generation_manifest_path,
     object_path,
     sha256_bytes,
     sha256_file,
 )
 
+from .async_utils import to_thread_fenced
 from .contracts import (
     GENERATION_SCHEMA_ID,
     SERVING_SCHEMA_ID,
     DocumentRecord,
     EvidenceRecord,
     IssuerAdapter,
+    OCRFailedProductRecord,
     PageRecord,
     ProtectedSourceAllowance,
     SourceRecord,
@@ -54,13 +63,26 @@ from .contracts import (
 from .downloader import (
     DownloadedPDF,
     DownloadPolicy,
+    PDFNotModified,
     ProtectedDocumentError,
     SecurePDFDownloader,
-    validate_pdf,
 )
 from .exporter import ServingDatabaseExporter, encode_embedding
-from .ocr import OCRResolver, OCRResult, OCRValidationError, page_records
-from .providers import EmbeddingProvider, ProviderError
+from .ocr import (
+    OCRCachePublicationError,
+    OCRResolver,
+    OCRResult,
+    OCRValidationError,
+    PriorLocalNativeSource,
+    page_records,
+)
+from .pdf_cache import PDFCache, PDFCachePruneError, PDFSourceIdentity
+from .providers import (
+    EmbeddingProvider,
+    ProviderDocumentError,
+    ProviderError,
+    ProviderSystemicError,
+)
 from .rate_limit import IssuerRateLimiter, RateLimitedClient
 from .state import WorkerState, retry_delay, worker_lock
 from .webdav import PublishedBundle, WebDAVBundlePublisher, WebDAVClient
@@ -68,6 +90,14 @@ from .webdav import PublishedBundle, WebDAVBundlePublisher, WebDAVClient
 T = TypeVar("T")
 CHUNK_CONTRACT = "cardrag.page-window.v1"
 LOGGER = logging.getLogger(__name__)
+LOCAL_RUN_CLEANUP_ERROR = (
+    "local_run_cleanup_failed: Local diagnostic run cleanup failed after bounded retention."
+)
+PDF_CACHE_PRUNE_ERROR = "pdf_cache_prune_failed: Local PDF cache pruning failed after durable run completion."
+REMOTE_GC_ERROR = "remote_gc_failed: Remote garbage collection failed after durable run completion."
+REMOTE_GC_PARTIAL_ERROR = (
+    "remote_gc_partial_failure: Remote garbage collection stopped after partial deletion."
+)
 
 
 class CorpusConflictError(RuntimeError):
@@ -155,13 +185,122 @@ class OCRDocumentFailuresError(RuntimeError):
         super().__init__(f"{len(self.failures)} OCR document(s) failed; report={self.report}")
 
 
+@dataclass(frozen=True, slots=True)
+class OCRSystemicFailureRecord:
+    """One bounded, secret-safe incident at the OCR system boundary."""
+
+    run_id: str
+    document_id: str
+    source_id: str
+    issuer: str
+    product_code: str
+    pdf_sha256: str
+    attempt: int
+    occurred_at: datetime
+    reason_code: str
+    reason: str
+    error_class_category: str
+    phase: str | None = None
+    status_code: int | None = None
+    error_kind: str | None = None
+    retryable: bool | None = None
+    publication_attempts: int | None = None
+    exit_code: int | None = None
+
+    def __post_init__(self) -> None:
+        bounded_identity = {
+            "run_id": (self.run_id, 128),
+            "issuer": (self.issuer, 64),
+            "product_code": (self.product_code, 256),
+        }
+        for field_name, (value, maximum) in bounded_identity.items():
+            if (
+                not value
+                or len(value) > maximum
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
+                raise ValueError(f"OCR systemic failure {field_name} is invalid")
+        if not re.fullmatch(r"doc_[0-9a-f]{64}", self.document_id):
+            raise ValueError("OCR systemic failure document_id is invalid")
+        if not re.fullmatch(r"source_[0-9a-f]{64}", self.source_id):
+            raise ValueError("OCR systemic failure source_id is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.pdf_sha256):
+            raise ValueError("OCR systemic failure PDF sha256 is invalid")
+        if self.attempt < 1:
+            raise ValueError("OCR systemic failure attempt must be positive")
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("OCR systemic failure timestamp must be timezone-aware")
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", self.reason_code):
+            raise ValueError("OCR systemic failure reason_code is invalid")
+        if (
+            not self.reason
+            or len(self.reason) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in self.reason)
+        ):
+            raise ValueError("OCR systemic failure reason is invalid")
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", self.error_class_category):
+            raise ValueError("OCR systemic failure error class category is invalid")
+        if self.phase is not None and not re.fullmatch(r"[a-z0-9_]{1,32}", self.phase):
+            raise ValueError("OCR systemic failure phase is invalid")
+        if self.error_kind is not None and not re.fullmatch(r"[a-z0-9_]{1,32}", self.error_kind):
+            raise ValueError("OCR systemic failure error_kind is invalid")
+        if self.status_code is not None and not 100 <= self.status_code <= 599:
+            raise ValueError("OCR systemic failure status_code is invalid")
+        if self.retryable is not None and not isinstance(self.retryable, bool):
+            raise ValueError("OCR systemic failure retryable is invalid")
+        if self.publication_attempts is not None and not 1 <= self.publication_attempts <= 64:
+            raise ValueError("OCR systemic failure publication_attempts is invalid")
+        if self.exit_code is not None and (
+            isinstance(self.exit_code, bool) or not -255 <= self.exit_code <= 255 or self.exit_code == 0
+        ):
+            raise ValueError("OCR systemic failure exit_code is invalid")
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "attempt": self.attempt,
+            "document_id": self.document_id,
+            "error_class_category": self.error_class_category,
+            "issuer": self.issuer,
+            "occurred_at": self.occurred_at.astimezone(UTC).isoformat(),
+            "pdf_sha256": self.pdf_sha256,
+            "product_code": self.product_code,
+            "reason": self.reason,
+            "reason_code": self.reason_code,
+            "run_id": self.run_id,
+            "source_id": self.source_id,
+        }
+        if self.phase is not None:
+            payload["phase"] = self.phase
+        if self.status_code is not None:
+            payload["status_code"] = self.status_code
+        if self.error_kind is not None:
+            payload["error_kind"] = self.error_kind
+        if self.retryable is not None:
+            payload["retryable"] = self.retryable
+        if self.publication_attempts is not None:
+            payload["publication_attempts"] = self.publication_attempts
+        if self.exit_code is not None:
+            payload["exit_code"] = self.exit_code
+        return payload
+
+
 class OCRSystemicFailureError(RuntimeError):
-    """A safe terminal error for failures that are not isolated to one PDF."""
+    """A safe terminal error backed by a durable operator incident report."""
 
-    stored_error = "non_document_scoped_error: OCR failed outside a document boundary."
-
-    def __init__(self) -> None:
-        super().__init__("OCR failed with a non-document-scoped error")
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        report_path: Path,
+        failure: OCRSystemicFailureRecord,
+    ) -> None:
+        self.run_id = run_id
+        self.report_path = report_path
+        self.report = f"runs/{run_id}/reports/ocr-systemic-failure.json"
+        self.failure = failure
+        self.stored_error = f"{failure.reason_code}: {failure.reason}; report={self.report}"
+        super().__init__(self.stored_error)
 
 
 class OCRFailureBookkeepingError(RuntimeError):
@@ -169,6 +308,79 @@ class OCRFailureBookkeepingError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("OCR failure isolation bookkeeping failed")
+
+
+class OCRCacheHealingIdentityError(RuntimeError):
+    """A remote/provider OCR result differs from the retained generation OCR."""
+
+    def __init__(self) -> None:
+        super().__init__("OCR cache healing result differs from its retained generation seal")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerUnexpectedFailureRecord:
+    """One bounded diagnostic for a failure outside a typed pipeline boundary."""
+
+    run_id: str
+    occurred_at: datetime
+    error_class_category: str
+    status_code: int | None = None
+    errno: int | None = None
+    reason_code: str = "worker_unexpected_failure"
+    reason: str = "Worker pipeline failed unexpectedly."
+
+    def __post_init__(self) -> None:
+        if (
+            not self.run_id
+            or len(self.run_id) > 128
+            or any(ord(character) < 32 or ord(character) == 127 for character in self.run_id)
+        ):
+            raise ValueError("Worker failure run_id is invalid")
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("Worker failure timestamp must be timezone-aware")
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", self.error_class_category):
+            raise ValueError("Worker failure error class category is invalid")
+        if self.status_code is not None and not 100 <= self.status_code <= 599:
+            raise ValueError("Worker failure status_code is invalid")
+        if self.errno is not None and (isinstance(self.errno, bool) or not 1 <= self.errno <= 4095):
+            raise ValueError("Worker failure errno is invalid")
+        if self.reason_code != "worker_unexpected_failure":
+            raise ValueError("Worker failure reason_code is invalid")
+        if self.reason != "Worker pipeline failed unexpectedly.":
+            raise ValueError("Worker failure reason is invalid")
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "error_class_category": self.error_class_category,
+            "occurred_at": self.occurred_at.astimezone(UTC).isoformat(),
+            "reason": self.reason,
+            "reason_code": self.reason_code,
+            "run_id": self.run_id,
+        }
+        if self.status_code is not None:
+            payload["status_code"] = self.status_code
+        if self.errno is not None:
+            payload["errno"] = self.errno
+        return payload
+
+
+class WorkerUnexpectedFailureError(RuntimeError):
+    """A secret-safe terminal error for an otherwise untyped pipeline failure."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        report_path: Path,
+        failure: WorkerUnexpectedFailureRecord,
+    ) -> None:
+        self.run_id = run_id
+        self.report_path = report_path
+        self.report = f"runs/{run_id}/reports/worker-failure.json"
+        self.failure = failure
+        self.stored_error = f"{failure.reason_code}: {failure.reason}; report={self.report}"
+        super().__init__(self.stored_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +396,17 @@ class PipelineResult:
     gc_status: str | None = None
     gc_deleted: int = 0
     gc_error: str | None = None
+    pdf_cache_hits: int = 0
+    pdf_cache_misses: int = 0
+    pdf_downloads: int = 0
+    pdf_revisions: int = 0
+    pdf_cache_revalidations: int = 0
+    pdf_cache_not_modified: int = 0
+    pdf_cache_prune_status: str | None = None
+    pdf_cache_pruned_objects: int = 0
+    pdf_cache_pruned_bytes: int = 0
+    pdf_cache_prune_error: str | None = None
+    ocr_cache_publication_deferred: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,10 +428,17 @@ class _AcquiredDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class _OCRFailedDocument:
+    record: OCRFailedProductRecord
+    pdf_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class _ValidatedSeal:
     manifest: GenerationManifest
     database_path: Path
     objects: tuple[tuple[Path, str, str], ...]
+    ocr_cache_publication_deferred: int
 
 
 def _atomic_write(path: Path, body: bytes) -> None:
@@ -237,7 +467,6 @@ def _canonical_ocr_body(result: OCRResult) -> bytes:
     return result.ocr_bytes
 
 
-_CODEX_EXIT = re.compile(r"^Codex OCR exited (-?[0-9]{1,3}):")
 _DOCUMENT_SCOPED_HTTP_STATUSES = frozenset({408, 413, 422, 425, 429})
 
 
@@ -254,7 +483,10 @@ def is_isolatable_document_ocr_failure(exc: Exception) -> bool:
     across the remaining corpus.
     """
 
-    if isinstance(exc, (OCRValidationError, ProviderError, httpx.TimeoutException, TimeoutError)):
+    if isinstance(
+        exc,
+        (OCRValidationError, ProviderDocumentError, httpx.TimeoutException, TimeoutError),
+    ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
@@ -306,15 +538,12 @@ def classify_ocr_failure(exc: Exception) -> OCRFailureReason:
             "generic_validation_error",
             "The OCR output failed validation.",
         )
+    if isinstance(exc, ProviderDocumentError):
+        return OCRFailureReason(
+            "provider_document_rejected",
+            "The OCR provider could not process this document.",
+        )
     if isinstance(exc, ProviderError):
-        match = _CODEX_EXIT.match(str(exc))
-        if match is not None:
-            exit_code = match.group(1)
-            exit_reason_code = f"negative_{exit_code[1:]}" if exit_code.startswith("-") else exit_code
-            return OCRFailureReason(
-                f"provider_exit_{exit_reason_code}",
-                f"The OCR provider process exited with code {exit_code}.",
-            )
         return OCRFailureReason("provider_error", "The OCR provider failed.")
     if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
         return OCRFailureReason("provider_timeout", "The OCR provider timed out.")
@@ -332,6 +561,266 @@ def classify_ocr_failure(exc: Exception) -> OCRFailureReason:
     if isinstance(exc, OSError):
         return OCRFailureReason("local_io_error", "A local OCR file operation failed.")
     return OCRFailureReason("unexpected_error", "OCR failed unexpectedly.")
+
+
+@dataclass(frozen=True, slots=True)
+class _OCRSystemicFailureReason:
+    reason_code: str
+    reason: str
+    error_class_category: str
+    phase: str | None = None
+    status_code: int | None = None
+    error_kind: str | None = None
+    retryable: bool | None = None
+    publication_attempts: int | None = None
+    exit_code: int | None = None
+
+
+def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
+    """Classify without copying raw exception text into durable state."""
+
+    if isinstance(exc, OCRCacheHealingIdentityError):
+        return _OCRSystemicFailureReason(
+            "ocr_cache_healing_identity_mismatch",
+            "OCR cache healing returned bytes outside the retained generation identity.",
+            "ocr_cache_integrity",
+            phase="healing",
+            error_kind="integrity",
+            retryable=False,
+        )
+    if isinstance(exc, ProviderSystemicError):
+        try:
+            canonical_provider_error = ProviderSystemicError(
+                exc.reason_code,
+                exit_code=exc.exit_code,
+            )
+        except (KeyError, TypeError, ValueError):
+            canonical_provider_error = ProviderSystemicError()
+        return _OCRSystemicFailureReason(
+            canonical_provider_error.reason_code,
+            canonical_provider_error.reason,
+            "ocr_provider_systemic",
+            error_kind=canonical_provider_error.error_kind,
+            retryable=canonical_provider_error.retryable,
+            exit_code=canonical_provider_error.exit_code,
+        )
+    if isinstance(exc, ProviderError):
+        return _OCRSystemicFailureReason(
+            "provider_systemic_failure",
+            "The OCR provider failed outside a document boundary.",
+            "ocr_provider_systemic",
+            error_kind="systemic",
+            retryable=False,
+        )
+    if isinstance(exc, OCRCachePublicationError):
+        try:
+            canonical_cache_error = OCRCachePublicationError(
+                phase=exc.phase,
+                error_kind=exc.error_kind,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                attempts=exc.attempts,
+            )
+        except (KeyError, TypeError, ValueError):
+            return _OCRSystemicFailureReason(
+                "ocr_cache_publication_error",
+                "OCR cache publication failed.",
+                "ocr_cache_publication",
+            )
+        reason_code = canonical_cache_error.reason_code
+        reason = canonical_cache_error.reason
+        phase = canonical_cache_error.phase
+        error_kind = canonical_cache_error.error_kind
+        status_code = canonical_cache_error.status_code
+        retryable = canonical_cache_error.retryable
+        publication_attempts = canonical_cache_error.attempts
+        if (
+            not re.fullmatch(r"[a-z0-9_]{1,64}", reason_code)
+            or not reason
+            or len(reason) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in reason)
+            or not re.fullmatch(r"[a-z0-9_]{1,32}", phase)
+            or not re.fullmatch(r"[a-z0-9_]{1,32}", error_kind)
+            or (status_code is not None and not 100 <= status_code <= 599)
+            or not isinstance(retryable, bool)
+            or not 1 <= publication_attempts <= 64
+        ):
+            return _OCRSystemicFailureReason(
+                "ocr_cache_publication_error",
+                "OCR cache publication failed.",
+                "ocr_cache_publication",
+            )
+        return _OCRSystemicFailureReason(
+            reason_code,
+            reason,
+            "ocr_cache_publication",
+            phase=phase,
+            status_code=status_code,
+            error_kind=error_kind,
+            retryable=retryable,
+            publication_attempts=publication_attempts,
+        )
+    if isinstance(exc, WebDAVHTTPError):
+        status_code = exc.status_code
+        return _OCRSystemicFailureReason(
+            f"ocr_cache_http_{status_code}",
+            f"The OCR cache returned HTTP status {status_code}.",
+            "ocr_cache_webdav",
+            status_code=status_code,
+            error_kind="http",
+        )
+    if isinstance(exc, WebDAVIntegrityError):
+        return _OCRSystemicFailureReason(
+            "ocr_cache_integrity_error",
+            "OCR cache integrity verification failed.",
+            "ocr_cache_webdav",
+            error_kind="integrity",
+        )
+    if isinstance(exc, WebDAVError):
+        chain: list[BaseException] = []
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen and len(chain) < 8:
+            seen.add(id(current))
+            chain.append(current)
+            current = current.__cause__ or current.__context__
+        if any(isinstance(item, (httpx.TimeoutException, TimeoutError)) for item in chain):
+            return _OCRSystemicFailureReason(
+                "ocr_cache_timeout",
+                "The OCR cache request timed out.",
+                "ocr_cache_webdav",
+                error_kind="timeout",
+            )
+        if any(isinstance(item, httpx.RequestError) for item in chain):
+            return _OCRSystemicFailureReason(
+                "ocr_cache_network_error",
+                "The OCR cache could not be reached.",
+                "ocr_cache_webdav",
+                error_kind="network",
+            )
+        return _OCRSystemicFailureReason(
+            "ocr_cache_webdav_error",
+            "The OCR cache operation failed.",
+            "ocr_cache_webdav",
+            error_kind="unexpected",
+        )
+    if isinstance(exc, sqlite3.Error):
+        return _OCRSystemicFailureReason(
+            "ocr_database_error",
+            "An OCR database operation failed.",
+            "database",
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return _OCRSystemicFailureReason(
+            f"ocr_http_{status_code}",
+            f"An OCR dependency returned HTTP status {status_code}.",
+            "http_status",
+            status_code=status_code,
+        )
+    if isinstance(exc, httpx.RequestError):
+        return _OCRSystemicFailureReason(
+            "ocr_network_error",
+            "An OCR dependency could not be reached.",
+            "network",
+        )
+    if isinstance(exc, OSError):
+        return _OCRSystemicFailureReason(
+            "ocr_local_io_error",
+            "A local OCR file operation failed.",
+            "local_io",
+        )
+    return _OCRSystemicFailureReason(
+        "ocr_unexpected_error",
+        "OCR failed unexpectedly.",
+        "unexpected",
+    )
+
+
+def _write_ocr_systemic_failure_report(
+    path: Path,
+    *,
+    failure: OCRSystemicFailureRecord,
+) -> None:
+    try:
+        _atomic_write(
+            path,
+            canonical_json_bytes(
+                {
+                    **failure.payload,
+                    "schema_version": "cardrag.ocr-systemic-failure-report.v1",
+                }
+            ),
+        )
+    except Exception:
+        raise RuntimeError("OCR systemic failure report write failed") from None
+
+
+def _classify_worker_failure(exc: Exception) -> tuple[str, int | None, int | None]:
+    """Return only allowlisted diagnostic categories and bounded integers."""
+
+    if isinstance(exc, ProviderSystemicError):
+        return "provider_systemic", None, None
+    if isinstance(exc, ProviderError):
+        return "provider", None, None
+    if isinstance(exc, WebDAVHTTPError):
+        status_code = exc.status_code
+        return "remote_http", status_code if 100 <= status_code <= 599 else None, None
+    if isinstance(exc, WebDAVIntegrityError):
+        return "remote_integrity", None, None
+    if isinstance(exc, WebDAVError):
+        return "remote", None, None
+    if isinstance(exc, sqlite3.Error):
+        return "database", None, None
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return "http_status", status_code, None
+    if isinstance(exc, httpx.RequestError):
+        return "network", None, None
+    if isinstance(exc, OSError):
+        error_number = exc.errno
+        safe_errno = (
+            error_number
+            if isinstance(error_number, int)
+            and not isinstance(error_number, bool)
+            and 1 <= error_number <= 4095
+            else None
+        )
+        return "local_io", None, safe_errno
+    if isinstance(exc, (ValueError, TypeError, KeyError, AssertionError)):
+        return "contract", None, None
+    if isinstance(exc, RuntimeError):
+        return "runtime", None, None
+    return "unexpected", None, None
+
+
+def _safe_stage_error(exc: Exception) -> str:
+    category, status_code, error_number = _classify_worker_failure(exc)
+    fields = [f"category={category}"]
+    if status_code is not None:
+        fields.append(f"status_code={status_code}")
+    if error_number is not None:
+        fields.append(f"errno={error_number}")
+    return f"worker_stage_failure: Worker pipeline stage failed ({', '.join(fields)})."
+
+
+def _write_worker_failure_report(
+    path: Path,
+    *,
+    failure: WorkerUnexpectedFailureRecord,
+) -> None:
+    try:
+        _atomic_write(
+            path,
+            canonical_json_bytes(
+                {
+                    **failure.payload,
+                    "schema_version": "cardrag.worker-failure-report.v1",
+                }
+            ),
+        )
+    except Exception:
+        raise RuntimeError("Worker failure report write failed") from None
 
 
 def _write_ocr_failure_report(
@@ -494,10 +983,11 @@ class WorkerPipeline:
         webdav: WebDAVClient,
         maximum_attempts: int = 4,
         retry_cap_seconds: float = 30,
+        pdf_cache_refresh_hours: float = 168,
         collect_remote_garbage: bool = True,
-        retained_generations: int = 3,
+        retained_generations: int = 2,
         garbage_grace_days: int = 30,
-        retained_incomplete_runs: int = 10,
+        retained_incomplete_runs: int = 2,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
@@ -505,14 +995,22 @@ class WorkerPipeline:
             raise ValueError(f"embedding dimension must be {EMBEDDING_DIMENSION}")
         if retained_generations < 1 or garbage_grace_days < 1 or retained_incomplete_runs < 1:
             raise ValueError("garbage retention and grace must be positive")
+        if not math.isfinite(pdf_cache_refresh_hours) or pdf_cache_refresh_hours <= 0:
+            raise ValueError("PDF cache refresh hours must be positive and finite")
+        try:
+            pdf_cache_refresh_interval = timedelta(hours=pdf_cache_refresh_hours)
+        except OverflowError as exc:
+            raise ValueError("PDF cache refresh hours are too large") from exc
         self.state = state
         self.state_dir = state_dir
+        self.pdf_cache = PDFCache(state_dir, state)
         self.adapters = tuple(adapters)
         self.ocr = ocr
         self.embeddings = embeddings
         self.webdav = webdav
         self.maximum_attempts = maximum_attempts
         self.retry_cap_seconds = retry_cap_seconds
+        self.pdf_cache_refresh_interval = pdf_cache_refresh_interval
         self.collect_remote_garbage = collect_remote_garbage
         self.retained_generations = retained_generations
         self.garbage_grace_days = garbage_grace_days
@@ -610,7 +1108,9 @@ class WorkerPipeline:
                         base_seconds=retry_base_seconds,
                         cap_seconds=self.retry_cap_seconds,
                     )
-                    stored_error = error_formatter(exc) if error_formatter is not None else str(exc)
+                    stored_error = (
+                        error_formatter(exc) if error_formatter is not None else _safe_stage_error(exc)
+                    )
                     status = self.state.stage_failed(
                         run_id,
                         document_id,
@@ -635,23 +1135,90 @@ class WorkerPipeline:
     async def run(self, *, resume_run_id: str | None = None) -> PipelineResult:
         with worker_lock(self.state_dir / "worker.lock"):
             run_id = resume_run_id or self.state.start_run()
+            self.state.mark_stale_running_runs_interrupted(exclude_run_id=run_id)
             if resume_run_id:
                 self.state.assert_resumable(run_id)
-            self._cleanup_local_runs(exclude_run_id=run_id)
+            self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="before_run")
+            cancellation_requested = False
+            unexpected_failure: WorkerUnexpectedFailureError | None = None
             try:
                 result = await self._run_locked(
                     run_id,
                     refresh_sources=resume_run_id is not None,
                 )
-            except Exception as exc:
-                self.state.finish_run(run_id, "failed", error=str(exc))
+            except asyncio.CancelledError:
+                reconciliation = asyncio.create_task(self._reconcile_cancelled_publication(run_id))
+                while not reconciliation.done():
+                    try:
+                        await asyncio.shield(reconciliation)
+                    except asyncio.CancelledError:
+                        # A repeated service-stop request must not release the
+                        # worker lock before publication truth is reconciled.
+                        continue
+                    except BaseException:
+                        break
+                try:
+                    published = reconciliation.result()
+                except BaseException:
+                    # Retrieve every child outcome, keep diagnostics secret
+                    # safe, and conservatively retain interrupted truth.
+                    published = False
+                    LOGGER.error("Cancelled publication reconciliation failed")
+                if not published:
+                    self.state.finish_run_if_running(
+                        run_id,
+                        "interrupted",
+                        error="worker_cancelled: Pipeline execution was interrupted.",
+                    )
+                cancellation_requested = True
+            except (
+                OCRDocumentFailuresError,
+                OCRFailureBookkeepingError,
+                OCRSystemicFailureError,
+                ProtectedDocumentError,
+            ) as exc:
+                self.state.finish_run_if_running(run_id, "failed", error=str(exc))
                 raise
+            except WorkerUnexpectedFailureError as exc:
+                self.state.finish_run_if_running(run_id, "failed", error=exc.stored_error)
+                raise
+            except Exception as exc:
+                category, status_code, error_number = _classify_worker_failure(exc)
+                failure = WorkerUnexpectedFailureRecord(
+                    run_id=run_id,
+                    occurred_at=datetime.now(UTC),
+                    error_class_category=category,
+                    status_code=status_code,
+                    errno=error_number,
+                )
+                report_path = self.state_dir / "runs" / run_id / "reports" / "worker-failure.json"
+                error = WorkerUnexpectedFailureError(
+                    run_id=run_id,
+                    report_path=report_path,
+                    failure=failure,
+                )
+                try:
+                    _write_worker_failure_report(report_path, failure=failure)
+                except Exception:
+                    # The fixed DB/CLI error remains safe even if diagnostic
+                    # storage itself is unavailable.
+                    LOGGER.error("Worker failure report could not be written")
+                self.state.finish_run_if_running(run_id, "failed", error=error.stored_error)
+                unexpected_failure = error
+            if cancellation_requested:
+                # Normalize arbitrary provider/transport CancelledError args,
+                # notes and causes after the source handler has exited.
+                raise asyncio.CancelledError() from None
+            if unexpected_failure is not None:
+                # Do not retain the source exception object as implicit context
+                # on the bounded worker error exposed to CLI callers.
+                raise unexpected_failure from None
             gc_status: str | None = None
             gc_deleted = 0
             gc_error: str | None = None
-            if self.collect_remote_garbage:
+            if self.collect_remote_garbage and self.webdav.channel == "stable":
                 try:
-                    from .gc import collect_garbage
+                    from .gc import GCPartialFailure, collect_garbage
 
                     gc_result = await collect_garbage(
                         webdav=self.webdav,
@@ -659,21 +1226,50 @@ class WorkerPipeline:
                         apply=True,
                         retain_generations=self.retained_generations,
                         grace_days=self.garbage_grace_days,
+                        pointer_path=self.webdav.pointer_path,
                     )
                     gc_status = "succeeded"
                     gc_deleted = len(gc_result.deleted)
-                except Exception as exc:
+                except GCPartialFailure as exc:
+                    try:
+                        deleted_count: object = exc.deleted_count
+                    except Exception:
+                        deleted_count = None
+                    if type(deleted_count) is int and deleted_count >= 1:
+                        gc_deleted = deleted_count
+                        gc_error = REMOTE_GC_PARTIAL_ERROR
+                    else:
+                        gc_error = REMOTE_GC_ERROR
+                    gc_status = "failed"
+                    LOGGER.error("Remote garbage collection stopped after partial deletion")
+                except Exception:
                     # Publication/no-change is already durable. GC is fail-closed
                     # and reported independently rather than rewriting run truth.
                     gc_status = "failed"
-                    gc_error = str(exc)
-            self._cleanup_local_runs(exclude_run_id=run_id)
+                    gc_error = REMOTE_GC_ERROR
+                    LOGGER.error("Remote garbage collection failed after durable run completion")
+            elif self.collect_remote_garbage:
+                gc_status = "skipped_candidate"
+            self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="after_run")
             return replace(
                 result,
                 unsupported_document_count=self.state.stage_status_count(run_id, "download", "skipped"),
                 gc_status=gc_status,
                 gc_deleted=gc_deleted,
                 gc_error=gc_error,
+            )
+
+    def _cleanup_local_runs_safely(self, *, exclude_run_id: str, phase: str) -> None:
+        try:
+            self._cleanup_local_runs(exclude_run_id=exclude_run_id)
+        except Exception:
+            # Retention cleanup is diagnostic-only and runs outside durable
+            # publication truth. Never leak a raw filesystem/SQLite exception
+            # or turn a successful/no-change publication into a failed exit.
+            LOGGER.error(
+                "reason_code=local_run_cleanup_failed safe_error=%s phase=%s; continuing",
+                LOCAL_RUN_CLEANUP_ERROR,
+                phase,
             )
 
     def _cleanup_local_runs(self, *, exclude_run_id: str) -> None:
@@ -696,6 +1292,71 @@ class WorkerPipeline:
                 continue
             shutil.rmtree(resolved)
 
+    async def _reconcile_cancelled_publication(self, run_id: str) -> bool:
+        """Record an exact stable commit completed immediately before cancellation."""
+
+        try:
+            seal_path = self.state_dir / "runs" / run_id / "sealed" / "publish.json"
+            if seal_path.is_symlink() or not seal_path.is_file():
+                return False
+            sealed = json.loads(seal_path.read_bytes())
+            if not isinstance(sealed, dict) or str(sealed.get("run_id") or "") != run_id:
+                return False
+            validated = await self._validate_local_seal(sealed)
+            manifest = validated.manifest
+            if await self._reconcile_remote_bundle(manifest) is None:
+                return False
+            self.state.record_publish(
+                generation_id=manifest.generation_id,
+                run_id=run_id,
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+                serving_sha256=manifest.serving_database.sha256,
+                status="ready",
+                details={"manifest_sha256": manifest.manifest_sha256},
+            )
+            self.state.finish_run_if_running(
+                run_id,
+                "succeeded",
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+            )
+            return True
+        except Exception:
+            # Cancellation reconciliation is a strict positive proof.  Any
+            # local/remote uncertainty falls back to interrupted without raw
+            # path, transport, or response details entering logs/state.
+            LOGGER.error("Cancelled publication could not be reconciled exactly")
+            return False
+
+    async def _reconcile_remote_bundle(self, manifest: GenerationManifest) -> PublishedBundle | None:
+        """Return a bundle only when the stable remote truth exactly matches a local manifest."""
+
+        try:
+            current = await self.webdav.validated_current_generation()
+            expected_failed_documents = sum(
+                document.availability == "ocr_failed" for document in manifest.documents
+            )
+            if current is None or (
+                current.generation_id != manifest.generation_id
+                or current.corpus_sha256 != manifest.corpus_sha256
+                or current.contract_sha256 != manifest.contract_sha256
+                or current.ocr_failed_document_count != expected_failed_documents
+            ):
+                return None
+            remote_manifest = await self.webdav.get_bytes(generation_manifest_path(manifest.generation_id))
+            if remote_manifest != manifest.canonical_bytes():
+                return None
+            return PublishedBundle(
+                generation_id=manifest.generation_id,
+                index_sha256=manifest.serving_database.sha256,
+                manifest_sha256=manifest.manifest_sha256,
+            )
+        except Exception:
+            # Exact positive proof is required. Raw transport/path details are
+            # neither logged nor retained in an exception chain.
+            return None
+
     async def _run_locked(self, run_id: str, *, refresh_sources: bool = False) -> PipelineResult:
         run_dir = self.state_dir / "runs" / run_id
         seal_path = run_dir / "sealed" / "publish.json"
@@ -707,15 +1368,6 @@ class WorkerPipeline:
             if not isinstance(sealed, dict):
                 raise RuntimeError("resume publication seal is not a JSON object")
             deferred_seal = sealed
-
-        download_root = run_dir / ("resume-downloads" if refresh_sources else "downloads")
-        if refresh_sources and download_root.exists():
-            if download_root.is_symlink() or not download_root.is_dir():
-                raise RuntimeError("resume download staging is not a regular directory")
-            resolved_download_root = download_root.resolve(strict=True)
-            if resolved_download_root.parent != run_dir.resolve(strict=True):
-                raise RuntimeError("resume download staging escaped its run directory")
-            shutil.rmtree(resolved_download_root)
 
         snapshots = []
         async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
@@ -766,6 +1418,12 @@ class WorkerPipeline:
                         f"{adapter.spec.minimum_retention_ratio:.2f} of successful baseline {baseline}"
                     )
                 snapshots.append(snapshot)
+                LOGGER.info(
+                    "discovery completed issuer=%s records=%d warnings=%d",
+                    snapshot.issuer,
+                    len(snapshot.records),
+                    len(snapshot.warnings),
+                )
                 self.state.record_snapshot(
                     run_id=run_id,
                     snapshot_id=snapshot.snapshot_id,
@@ -781,25 +1439,235 @@ class WorkerPipeline:
         # insufficient because issuer URLs are sometimes reused for changed files.
         acquired: list[_AcquiredDocument] = []
         unsupported: list[UnsupportedProductRecord] = []
+        pdf_cache_hits: set[str] = set()
+        pdf_cache_misses: set[str] = set()
+        pdf_downloads: set[str] = set()
+        pdf_revisions: set[str] = set()
+        pdf_cache_revalidations: set[str] = set()
+        pdf_cache_not_modified: set[str] = set()
+
+        async def finalize_pdf_activity(result: PipelineResult) -> PipelineResult:
+            prune_status = "succeeded"
+            pruned_objects = 0
+            pruned_bytes = 0
+            prune_error: str | None = None
+            try:
+                protected_sha256s = {item.pdf.sha256 for item in acquired}
+                retained_run_ids = self.state.retained_publication_run_ids(limit=self.retained_generations)
+                runs_root = self.state_dir / "runs"
+                if retained_run_ids:
+                    try:
+                        runs_root_mode = runs_root.lstat().st_mode
+                    except FileNotFoundError as exc:
+                        raise RuntimeError("retained publication root is unavailable") from exc
+                    if stat.S_ISLNK(runs_root_mode) or not stat.S_ISDIR(runs_root_mode):
+                        raise RuntimeError("retained publication root is unsafe")
+                for retained_run_id in retained_run_ids:
+                    if not retained_run_id or Path(retained_run_id).name != retained_run_id:
+                        raise RuntimeError("retained publication run identity is unsafe")
+                    run_root = runs_root / retained_run_id
+                    sealed_root = run_root / "sealed"
+                    seal = sealed_root / "publish.json"
+                    try:
+                        run_mode = run_root.lstat().st_mode
+                        sealed_mode = sealed_root.lstat().st_mode
+                        seal_stat = seal.lstat()
+                    except FileNotFoundError as exc:
+                        raise RuntimeError("retained publication seal is unavailable") from exc
+                    if (
+                        stat.S_ISLNK(run_mode)
+                        or not stat.S_ISDIR(run_mode)
+                        or stat.S_ISLNK(sealed_mode)
+                        or not stat.S_ISDIR(sealed_mode)
+                        or stat.S_ISLNK(seal_stat.st_mode)
+                        or not stat.S_ISREG(seal_stat.st_mode)
+                    ):
+                        raise RuntimeError("retained publication seal is unavailable or unsafe")
+                    if seal.resolve(strict=True).parent.parent.parent != runs_root.resolve(strict=True):
+                        raise RuntimeError("retained publication seal escapes worker storage")
+                    sealed = json.loads(seal.read_text(encoding="utf-8"))
+                    if not isinstance(sealed, dict) or str(sealed.get("run_id") or "") != retained_run_id:
+                        raise RuntimeError("retained publication seal has the wrong run identity")
+                    validated = await self._validate_local_seal(sealed)
+                    protected_sha256s.update(
+                        document.pdf.sha256
+                        for document in validated.manifest.documents
+                        if document.pdf is not None
+                    )
+                pruned = await to_thread_fenced(self.pdf_cache.prune, protected_sha256s)
+                pruned_objects = pruned.deleted_objects
+                pruned_bytes = pruned.deleted_bytes
+            except PDFCachePruneError as exc:
+                # Preserve only constructor-bounded numeric progress. The raw
+                # filesystem error is not a result or logging trust boundary.
+                try:
+                    deleted_objects: object = exc.deleted_objects
+                    deleted_bytes: object = exc.deleted_bytes
+                except Exception:
+                    deleted_objects = None
+                    deleted_bytes = None
+                if (
+                    type(deleted_objects) is int
+                    and deleted_objects >= 1
+                    and type(deleted_bytes) is int
+                    and deleted_bytes >= 0
+                ):
+                    pruned_objects = deleted_objects
+                    pruned_bytes = deleted_bytes
+                prune_status = "failed"
+                prune_error = PDF_CACHE_PRUNE_ERROR
+                LOGGER.error("Local PDF cache pruning stopped after partial deletion")
+            except Exception:
+                # The run/publication is already durable. Cache pruning is a
+                # fail-closed storage optimization and never rewrites run truth.
+                prune_status = "failed"
+                prune_error = PDF_CACHE_PRUNE_ERROR
+                LOGGER.error("Local PDF cache pruning failed after durable run completion")
+            return replace(
+                result,
+                pdf_cache_hits=len(pdf_cache_hits),
+                pdf_cache_misses=len(pdf_cache_misses),
+                pdf_downloads=len(pdf_downloads),
+                pdf_revisions=len(pdf_revisions),
+                pdf_cache_revalidations=len(pdf_cache_revalidations),
+                pdf_cache_not_modified=len(pdf_cache_not_modified),
+                pdf_cache_prune_status=prune_status,
+                pdf_cache_pruned_objects=pruned_objects,
+                pdf_cache_pruned_bytes=pruned_bytes,
+                pdf_cache_prune_error=prune_error,
+            )
+
+        def log_pdf_progress(completed: int) -> None:
+            if completed % 25 == 0 or completed == len(records):
+                LOGGER.info(
+                    "PDF progress completed=%d total=%d cache_hits=%d cache_misses=%d "
+                    "downloads=%d revisions=%d revalidations=%d not_modified=%d unsupported=%d",
+                    completed,
+                    len(records),
+                    len(pdf_cache_hits),
+                    len(pdf_cache_misses),
+                    len(pdf_downloads),
+                    len(pdf_revisions),
+                    len(pdf_cache_revalidations),
+                    len(pdf_cache_not_modified),
+                    len(unsupported),
+                )
+
         async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
-            for source in records:
+            for pdf_index, source in enumerate(records, start=1):
                 adapter = next(item for item in self.adapters if item.spec.code == source.issuer)
                 limited = RateLimitedClient(client, self.limiters[adapter.spec.code])
                 source_key = source.source_id
-                download_path = download_root / f"{source_key}.pdf"
+                cache_identity = PDFSourceIdentity.from_source_record(source)
 
                 async def acquire(
                     adapter: IssuerAdapter = adapter,
                     source: SourceRecord = source,
-                    destination: Path = download_path,
+                    identity: PDFSourceIdentity = cache_identity,
                     current_client: RateLimitedClient = limited,
                 ) -> DownloadedPDF:
-                    if destination.exists():
-                        digest, size, pages = validate_pdf(destination)
-                        return DownloadedPDF(destination, digest, size, pages, source.source_url)
+                    cached = self.pdf_cache.lookup(identity)
+                    checked_at = datetime.now(UTC)
+                    cache_age = None if cached is None else checked_at - cached.origin_checked_at
+                    if (
+                        cached is not None
+                        and cache_age is not None
+                        and timedelta(0) <= cache_age < self.pdf_cache_refresh_interval
+                    ):
+                        pdf_cache_hits.add(source.source_id)
+                        LOGGER.debug(
+                            "PDF cache hit issuer=%s product_code=%s source_id=%s sha256=%s",
+                            source.issuer,
+                            source.product_code,
+                            source.source_id,
+                            cached.sha256,
+                        )
+                        return cached.as_downloaded_pdf()
+
+                    if cached is None:
+                        pdf_cache_misses.add(source.source_id)
+                    else:
+                        pdf_cache_hits.add(source.source_id)
+                        pdf_cache_revalidations.add(source.source_id)
+                    previous = self.state.pdf_cache_source_binding(source.source_id)
+                    LOGGER.debug(
+                        "PDF cache %s issuer=%s product_code=%s source_id=%s",
+                        "miss" if cached is None else "revalidation",
+                        source.issuer,
+                        source.product_code,
+                        source.source_id,
+                    )
                     request = await adapter.prepare_download(current_client, source)  # type: ignore[arg-type]
+                    if cached is not None and (cached.etag is not None or cached.last_modified is not None):
+                        headers = {
+                            key: value
+                            for key, value in request.headers.items()
+                            if key.casefold() not in {"if-none-match", "if-modified-since"}
+                        }
+                        if cached.etag is not None:
+                            headers["If-None-Match"] = cached.etag
+                        if cached.last_modified is not None:
+                            headers["If-Modified-Since"] = cached.last_modified
+                        request = replace(request, headers=headers)
                     downloader = SecurePDFDownloader(DownloadPolicy(allowed_hosts=adapter.spec.allowed_hosts))
-                    return await downloader.download(current_client, request, destination)  # type: ignore[arg-type]
+                    with self.pdf_cache.temporary_download_path() as destination:
+                        try:
+                            downloaded = await downloader.download(
+                                current_client,  # type: ignore[arg-type]
+                                request,
+                                destination,
+                            )
+                        except PDFNotModified as not_modified:
+                            if cached is None:  # pragma: no cover - downloader guards this too
+                                raise RuntimeError("origin returned not-modified for a cache miss") from None
+                            observed_at = datetime.now(UTC)
+                            ingested = self.pdf_cache.observe_not_modified(
+                                identity,
+                                cached,
+                                final_url=not_modified.final_url,
+                                etag=not_modified.etag,
+                                last_modified=not_modified.last_modified,
+                                observed_at=observed_at,
+                                verified_at=observed_at,
+                            )
+                            pdf_cache_not_modified.add(source.source_id)
+                            LOGGER.debug(
+                                "PDF cache origin not modified issuer=%s product_code=%s "
+                                "source_id=%s sha256=%s",
+                                source.issuer,
+                                source.product_code,
+                                source.source_id,
+                                ingested.sha256,
+                            )
+                            return ingested.as_downloaded_pdf()
+                        observed_at = datetime.now(UTC)
+                        ingested = self.pdf_cache.ingest_download(
+                            identity,
+                            downloaded,
+                            observed_at=observed_at,
+                            verified_at=observed_at,
+                        )
+                    pdf_downloads.add(source.source_id)
+                    if previous is not None and previous.pdf_sha256 != ingested.sha256:
+                        pdf_revisions.add(source.source_id)
+                        LOGGER.info(
+                            "PDF revision detected issuer=%s product_code=%s source_id=%s "
+                            "previous_sha256=%s current_sha256=%s",
+                            source.issuer,
+                            source.product_code,
+                            source.source_id,
+                            previous.pdf_sha256,
+                            ingested.sha256,
+                        )
+                    else:
+                        LOGGER.debug(
+                            "PDF download cached issuer=%s product_code=%s source_id=%s sha256=%s",
+                            source.issuer,
+                            source.product_code,
+                            source.source_id,
+                            ingested.sha256,
+                        )
+                    return ingested.as_downloaded_pdf()
 
                 allowance = next(
                     (
@@ -853,8 +1721,10 @@ class WorkerPipeline:
                             protected_magic=exc.magic,
                         )
                     )
+                    log_pdf_progress(pdf_index)
                     continue
                 acquired.append(_AcquiredDocument(source, pdf))
+                log_pdf_progress(pdf_index)
         unsupported_payload = sorted(
             (item.payload for item in unsupported),
             key=canonical_json_bytes,
@@ -874,6 +1744,12 @@ class WorkerPipeline:
                 "unsupported_documents": unsupported_payload,
             }
         )
+        current_remote = await self.webdav.validated_current_generation()
+        stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
+        cache_healing_generation_id: str | None = None
+        cache_healing_seal: dict[str, Any] | None = None
+        cache_healing_seal_path: Path | None = None
+        cache_healing_validated_seal: _ValidatedSeal | None = None
         if deferred_seal is not None:
             try:
                 validated_resume_seal = await self._validate_local_seal(deferred_seal)
@@ -886,29 +1762,108 @@ class WorkerPipeline:
                 validated_resume_seal is not None
                 and validated_resume_seal.manifest.corpus_sha256 == corpus_sha256
                 and validated_resume_seal.manifest.contract_sha256 == contract_sha256
+                and (current_remote is None or current_remote.ocr_failed_document_count == 0)
             ):
-                return await self._publish_sealed(run_id, deferred_seal)
+                if str(deferred_seal.get("run_id") or "") != run_id:
+                    raise RuntimeError("resume publication seal belongs to a different run")
+                resume_seal_is_current_deferred = (
+                    current_remote is not None
+                    and current_remote.generation_id == validated_resume_seal.manifest.generation_id
+                    and validated_resume_seal.ocr_cache_publication_deferred > 0
+                )
+                if not resume_seal_is_current_deferred:
+                    return await finalize_pdf_activity(await self._publish_sealed(run_id, deferred_seal))
+                assert current_remote is not None
+                if await self._reconcile_remote_bundle(validated_resume_seal.manifest) is None:
+                    raise RuntimeError(
+                        "remote generation does not exactly match its retained OCR healing seal"
+                    )
+                # Stable activation can finish before the local run row is
+                # terminalized. Recover that immutable publication truth, but
+                # keep running so the per-document resolver can repair partial
+                # native cache controls without trying to republish this same
+                # generation ID with a changed manifest.
+                self.state.record_publish(
+                    generation_id=current_remote.generation_id,
+                    run_id=run_id,
+                    corpus_sha256=validated_resume_seal.manifest.corpus_sha256,
+                    contract_sha256=validated_resume_seal.manifest.contract_sha256,
+                    serving_sha256=validated_resume_seal.manifest.serving_database.sha256,
+                    status="ready",
+                    details={"manifest_sha256": validated_resume_seal.manifest.manifest_sha256},
+                )
+                cache_healing_generation_id = current_remote.generation_id
+                cache_healing_seal = dict(deferred_seal)
+                cache_healing_seal_path = seal_path
+                cache_healing_validated_seal = validated_resume_seal
         existing = self.state.ready_publish(corpus_sha256, contract_sha256)
-        current_remote = await self.webdav.validated_current_generation()
-        stable_body = await self.webdav.get_bytes(STABLE_POINTER_PATH)
-        if current_remote is not None and (
+        current_is_exact_complete = current_remote is not None and (
             current_remote.corpus_sha256 == corpus_sha256
             and current_remote.contract_sha256 == contract_sha256
+            and current_remote.ocr_failed_document_count == 0
+        )
+        if (
+            current_remote is not None
+            and current_is_exact_complete
+            and cache_healing_generation_id is None
+            and existing is not None
+            and str(existing["generation_id"]) == current_remote.generation_id
         ):
+            # A successful generation-only publication deliberately omits the
+            # native cache binding. Its retained, strictly validated seal is the
+            # durable signal that an otherwise exact no-change run must enter
+            # OCRResolver once more to repair READY without calling the provider.
+            prior_seal_path = self.state_dir / "runs" / str(existing["run_id"]) / "sealed" / "publish.json"
+            if prior_seal_path.is_file() and not prior_seal_path.is_symlink():
+                try:
+                    candidate_seal = json.loads(prior_seal_path.read_text(encoding="utf-8"))
+                    candidate_count = (
+                        candidate_seal.get("ocr_cache_publication_deferred", 0)
+                        if isinstance(candidate_seal, Mapping)
+                        else 0
+                    )
+                    if type(candidate_count) is int and candidate_count > 0:
+                        validated_prior_seal = await self._validate_local_seal(candidate_seal)
+                    else:
+                        validated_prior_seal = None
+                except Exception:
+                    # The remote generation is already fully validated. An
+                    # unsafe optional local hint cannot suppress its no-change
+                    # result or authorize cache repair.
+                    validated_prior_seal = None
+                if (
+                    validated_prior_seal is not None
+                    and str(candidate_seal.get("run_id") or "") == str(existing["run_id"])
+                    and validated_prior_seal.manifest.generation_id == current_remote.generation_id
+                    and validated_prior_seal.manifest.corpus_sha256 == corpus_sha256
+                    and validated_prior_seal.manifest.contract_sha256 == contract_sha256
+                    and validated_prior_seal.ocr_cache_publication_deferred > 0
+                ):
+                    if await self._reconcile_remote_bundle(validated_prior_seal.manifest) is None:
+                        raise RuntimeError(
+                            "remote generation does not exactly match its retained OCR healing seal"
+                        )
+                    cache_healing_generation_id = current_remote.generation_id
+                    cache_healing_seal = dict(candidate_seal)
+                    cache_healing_seal_path = prior_seal_path
+                    cache_healing_validated_seal = validated_prior_seal
+        if current_remote is not None and current_is_exact_complete and cache_healing_generation_id is None:
             self.state.finish_run(
                 run_id,
                 "no_change",
                 corpus_sha256=corpus_sha256,
                 contract_sha256=contract_sha256,
             )
-            return PipelineResult(
-                run_id,
-                "no_change",
-                corpus_sha256,
-                contract_sha256,
-                current_remote.generation_id,
-                len(acquired),
-                0,
+            return await finalize_pdf_activity(
+                PipelineResult(
+                    run_id,
+                    "no_change",
+                    corpus_sha256,
+                    contract_sha256,
+                    current_remote.generation_id,
+                    len(acquired),
+                    0,
+                )
             )
         if current_remote is None and stable_body is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing publication")
@@ -927,30 +1882,123 @@ class WorkerPipeline:
                 or prior_seal.get("generation_id") != generation_id
             ):
                 raise RuntimeError("stored publication row does not match its sealed artifact")
-            await self._publish_remote_only(prior_seal)
+            _, validated_prior_seal = await self._publish_remote_only(prior_seal)
             self.state.finish_run(
                 run_id,
                 "no_change",
                 corpus_sha256=corpus_sha256,
                 contract_sha256=contract_sha256,
             )
-            return PipelineResult(
-                run_id,
-                "no_change",
-                corpus_sha256,
-                contract_sha256,
-                generation_id,
-                len(acquired),
-                0,
+            return await finalize_pdf_activity(
+                PipelineResult(
+                    run_id,
+                    "no_change",
+                    corpus_sha256,
+                    contract_sha256,
+                    generation_id,
+                    len(acquired),
+                    0,
+                    ocr_cache_publication_deferred=(validated_prior_seal.ocr_cache_publication_deferred),
+                )
             )
         # A different fully valid stable generation wins. Rebuild a new
         # generation for this recurrence and chain it to that current head;
         # OCR/embeddings are reused through their content caches below.
 
+        prior_local_native_sources: dict[str, PriorLocalNativeSource] = {}
+        if cache_healing_generation_id is not None:
+            if (
+                cache_healing_seal is None
+                or cache_healing_seal_path is None
+                or cache_healing_validated_seal is None
+            ):
+                raise RuntimeError("OCR cache healing lost its retained publication seal")
+            retained_run_id = str(cache_healing_seal.get("run_id") or "")
+            expected_seal_path = self.state_dir / "runs" / retained_run_id / "sealed" / "publish.json"
+            try:
+                if (
+                    cache_healing_seal_path.is_symlink()
+                    or not cache_healing_seal_path.is_file()
+                    or cache_healing_seal_path.resolve(strict=True) != expected_seal_path.resolve(strict=True)
+                    or cache_healing_seal_path.read_bytes() != canonical_json_bytes(cache_healing_seal)
+                ):
+                    raise RuntimeError("retained OCR cache healing seal is unavailable or unsafe")
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError("retained OCR cache healing seal is unavailable or unsafe") from exc
+            # Revalidate immediately before deriving any local reuse source so
+            # a retained object changed after the no-change decision cannot be
+            # consumed under an earlier seal validation.
+            cache_healing_validated_seal = await self._validate_local_seal(cache_healing_seal)
+            healing_manifest = cache_healing_validated_seal.manifest
+            if (
+                healing_manifest.generation_id != cache_healing_generation_id
+                or healing_manifest.corpus_sha256 != corpus_sha256
+                or healing_manifest.contract_sha256 != contract_sha256
+            ):
+                raise RuntimeError("retained OCR cache healing seal identity changed")
+            manifest_documents = {document.document_id: document for document in healing_manifest.documents}
+            acquired_by_document_id = {item.source.document_id(item.pdf.sha256): item for item in acquired}
+            if (
+                len(acquired_by_document_id) != len(acquired)
+                or set(manifest_documents) != set(acquired_by_document_id)
+                or any(document.availability != "available" for document in manifest_documents.values())
+            ):
+                raise RuntimeError("retained OCR cache healing document set is not exact")
+            unbound_documents = tuple(
+                document
+                for document in healing_manifest.documents
+                if document.ocr_cache_kind is None and document.ocr_reuse_key is None
+            )
+            if len(unbound_documents) != cache_healing_validated_seal.ocr_cache_publication_deferred:
+                raise RuntimeError("retained OCR cache healing deferred document set is ambiguous")
+            sealed_ocr_objects = {
+                (path, digest)
+                for path, media_type, digest in cache_healing_validated_seal.objects
+                if media_type == "text/markdown; charset=utf-8"
+            }
+            runs_root = self.state_dir / "runs"
+            for document in unbound_documents:
+                acquired_document = acquired_by_document_id[document.document_id]
+                pdf = acquired_document.pdf
+                source = acquired_document.source
+                if (
+                    document.issuer != source.issuer
+                    or document.pdf.sha256 != pdf.sha256
+                    or document.pdf.size_bytes != pdf.size_bytes
+                    or document.page_count != pdf.page_count
+                    or document.ocr is None
+                ):
+                    raise RuntimeError("retained OCR cache healing document identity is invalid")
+                prior_ocr_path = (
+                    runs_root / retained_run_id / "documents" / document.document_id / "ocr" / "ocr.md"
+                )
+                try:
+                    resolved_prior_ocr_path = prior_ocr_path.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    raise RuntimeError("retained OCR cache healing OCR artifact is unavailable") from exc
+                if (resolved_prior_ocr_path, document.ocr.sha256) not in sealed_ocr_objects:
+                    raise RuntimeError("retained OCR cache healing OCR artifact is not seal-bound")
+                prior_local_native_sources[document.document_id] = PriorLocalNativeSource(
+                    runs_root=runs_root,
+                    run_id=retained_run_id,
+                    generation_id=healing_manifest.generation_id,
+                    corpus_sha256=healing_manifest.corpus_sha256,
+                    contract_sha256=healing_manifest.contract_sha256,
+                    document_id=document.document_id,
+                    pdf_sha256=document.pdf.sha256,
+                    pdf_size_bytes=document.pdf.size_bytes,
+                    page_count=document.page_count,
+                    ocr_sha256=document.ocr.sha256,
+                    ocr_size_bytes=document.ocr.size_bytes,
+                )
+
         processed: list[_ProcessedDocument] = []
         ocr_failures: list[OCRFailureRecord] = []
+        failed_documents: list[_OCRFailedDocument] = []
+        ocr_cache_publication_deferred = 0
         ocr_failure_report = run_dir / "reports" / "ocr-failures.json"
-        for acquired_document in acquired:
+        ocr_systemic_failure_report = run_dir / "reports" / "ocr-systemic-failure.json"
+        for ocr_index, acquired_document in enumerate(acquired, start=1):
             source = acquired_document.source
             pdf = acquired_document.pdf
             document_id = source.document_id(pdf.sha256)
@@ -961,7 +2009,7 @@ class WorkerPipeline:
                 current_pdf: DownloadedPDF = pdf,
                 current_output_dir: Path = ocr_output_dir,
             ) -> OCRResult:
-                return await self.ocr.resolve(
+                result = await self.ocr.resolve(
                     run_id=run_id,
                     document_id=current_document_id,
                     pdf_path=current_pdf.path,
@@ -969,12 +2017,74 @@ class WorkerPipeline:
                     pdf_size_bytes=current_pdf.size_bytes,
                     page_count=current_pdf.page_count,
                     output_dir=current_output_dir,
+                    prior_local_native=prior_local_native_sources.get(current_document_id),
                 )
+                prior_local_native = prior_local_native_sources.get(current_document_id)
+                if prior_local_native is not None and (
+                    result.ocr_sha256 != prior_local_native.ocr_sha256
+                    or result.size_bytes != prior_local_native.ocr_size_bytes
+                    or len(result.ocr_bytes) != prior_local_native.ocr_size_bytes
+                    or hashlib.sha256(result.ocr_bytes).hexdigest() != prior_local_native.ocr_sha256
+                ):
+                    # A valid cache entry for the same OCR source/contract may
+                    # still carry bytes different from the already published
+                    # generation OCR (for example after an inconsistent remote
+                    # overwrite). Healing must never silently rebind that
+                    # generation to the alternate bytes.
+                    raise OCRCacheHealingIdentityError() from None
+                return result
 
             ocr_result: OCRResult | None = None
             isolated_failure: Exception | None = None
             failure_reason: OCRFailureReason | None = None
             failure_attempts: int | None = None
+            systemic_error: OCRSystemicFailureError | None = None
+            systemic_source_exception: Exception | None = None
+            terminal_systemic_error: OCRSystemicFailureError | None = None
+
+            def record_systemic_failure(
+                exc: Exception,
+                current_document_id: str = document_id,
+                current_source: SourceRecord = source,
+                current_pdf: DownloadedPDF = pdf,
+            ) -> str:
+                nonlocal systemic_error, systemic_source_exception
+                stage = self.state.get_stage(run_id, current_document_id, "ocr")
+                if stage is None or stage.status != "running" or stage.attempt_count < 1:
+                    raise RuntimeError("OCR systemic failure lost its active attempt")
+                classified = _classify_ocr_systemic_failure(exc)
+                failure = OCRSystemicFailureRecord(
+                    run_id=run_id,
+                    document_id=current_document_id,
+                    source_id=current_source.source_id,
+                    issuer=_bounded_report_text(current_source.issuer, maximum=64),
+                    product_code=_bounded_report_text(current_source.product_code, maximum=256),
+                    pdf_sha256=current_pdf.sha256,
+                    attempt=stage.attempt_count,
+                    occurred_at=datetime.now(UTC),
+                    reason_code=classified.reason_code,
+                    reason=classified.reason,
+                    error_class_category=classified.error_class_category,
+                    phase=classified.phase,
+                    status_code=classified.status_code,
+                    error_kind=classified.error_kind,
+                    retryable=classified.retryable,
+                    publication_attempts=classified.publication_attempts,
+                    exit_code=classified.exit_code,
+                )
+                error = OCRSystemicFailureError(
+                    run_id=run_id,
+                    report_path=ocr_systemic_failure_report,
+                    failure=failure,
+                )
+                _write_ocr_systemic_failure_report(
+                    ocr_systemic_failure_report,
+                    failure=failure,
+                )
+                systemic_source_exception = exc
+                systemic_error = error
+                return error.stored_error
+
             try:
                 ocr_result = await self._finite_stage(
                     run_id=run_id,
@@ -982,13 +2092,23 @@ class WorkerPipeline:
                     name="ocr",
                     operation=recognize,
                     non_retryable_predicate=lambda exc: not is_isolatable_document_ocr_failure(exc),
-                    non_retryable_error_formatter=lambda _exc: OCRSystemicFailureError.stored_error,
+                    non_retryable_error_formatter=record_systemic_failure,
                     error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
                 )
             except Exception as exc:
                 if not is_isolatable_document_ocr_failure(exc):
-                    raise OCRSystemicFailureError() from None
-                isolated_failure = exc
+                    if systemic_error is None or exc is not systemic_source_exception:
+                        raise OCRFailureBookkeepingError() from None
+                    # Even a typed exception is mutable: a caller can attach
+                    # unsafe notes, args, or context after construction. The
+                    # validated report fields above are the sole diagnostic
+                    # boundary, so never retain the source object in the
+                    # terminal exception chain.
+                    terminal_systemic_error = systemic_error
+                else:
+                    isolated_failure = exc
+            if terminal_systemic_error is not None:
+                raise terminal_systemic_error
             if isolated_failure is not None:
                 try:
                     stage = self.state.get_stage(run_id, document_id, "ocr")
@@ -1022,6 +2142,24 @@ class WorkerPipeline:
                     reason=failure_reason.reason,
                 )
                 ocr_failures.append(failure_record)
+                failed_documents.append(
+                    _OCRFailedDocument(
+                        record=OCRFailedProductRecord(
+                            document_id=document_id,
+                            issuer=source.issuer,
+                            product_code=source.product_code,
+                            product_name=source.product_name,
+                            title=source.product_name,
+                            pdf_sha256=pdf.sha256,
+                            pdf_size_bytes=pdf.size_bytes,
+                            page_count=pdf.page_count,
+                            reason_code=failure_reason.reason_code,
+                            reason=failure_reason.reason,
+                            attempts=failure_attempts,
+                        ),
+                        pdf_path=pdf.path,
+                    )
+                )
                 _write_ocr_failure_report(
                     ocr_failure_report,
                     run_id=run_id,
@@ -1033,9 +2171,27 @@ class WorkerPipeline:
                     failure_reason.reason_code,
                     failure_reason.reason,
                 )
+                if ocr_index % 25 == 0 or ocr_index == len(acquired):
+                    LOGGER.info(
+                        "OCR progress completed=%d total=%d succeeded=%d failed=%d "
+                        "cache_publication_deferred=%d",
+                        ocr_index,
+                        len(acquired),
+                        len(processed),
+                        len(failed_documents),
+                        ocr_cache_publication_deferred,
+                    )
                 continue
             if ocr_result is None:
                 raise RuntimeError("OCR stage returned no result")
+            if ocr_result.cache_publication_deferred:
+                ocr_cache_publication_deferred += 1
+                LOGGER.warning(
+                    "OCR cache publication deferred document_id=%s reason_code=%s; "
+                    "continuing with generation-local OCR",
+                    document_id,
+                    ocr_result.cache_publication_reason_code,
+                )
             verified_ocr_sha256 = ocr_result.ocr_sha256
             ocr_body = _canonical_ocr_body(ocr_result)
             if hashlib.sha256(ocr_body).hexdigest() != verified_ocr_sha256:
@@ -1138,7 +2294,33 @@ class WorkerPipeline:
                 )
             )
 
-        if ocr_failures:
+            if ocr_index % 25 == 0 or ocr_index == len(acquired):
+                LOGGER.info(
+                    "OCR progress completed=%d total=%d succeeded=%d failed=%d cache_publication_deferred=%d",
+                    ocr_index,
+                    len(acquired),
+                    len(processed),
+                    len(failed_documents),
+                    ocr_cache_publication_deferred,
+                )
+
+        raw_issuer_ocr_counts = tuple(
+            (
+                adapter.spec.code,
+                sum(item.source.issuer == adapter.spec.code for item in acquired),
+                sum(item.record.issuer == adapter.spec.code for item in processed),
+                sum(item.record.issuer == adapter.spec.code for item in failed_documents),
+            )
+            for adapter in sorted(self.adapters, key=lambda item: item.spec.code)
+        )
+        publication_gate_failed = any(
+            acquired_count < 1
+            or succeeded_count < 1
+            or succeeded_count * 100 < acquired_count * 95
+            or acquired_count != succeeded_count + failed_count
+            for _, acquired_count, succeeded_count, failed_count in raw_issuer_ocr_counts
+        )
+        if publication_gate_failed and ocr_failures:
             ordered_failures = tuple(
                 sorted(
                     ocr_failures,
@@ -1149,6 +2331,69 @@ class WorkerPipeline:
                 run_id=run_id,
                 report_path=ocr_failure_report,
                 failures=ordered_failures,
+            )
+        if publication_gate_failed:
+            raise RuntimeError(
+                "OCR publication gate failed: every enabled issuer requires at least one success "
+                "and a success rate of at least 95 percent"
+            )
+        issuer_ocr_counts = tuple(
+            IssuerOCRCounts(
+                issuer=issuer,
+                acquired=acquired_count,
+                succeeded=succeeded_count,
+                failed=failed_count,
+            )
+            for issuer, acquired_count, succeeded_count, failed_count in raw_issuer_ocr_counts
+        )
+
+        if cache_healing_generation_id is not None:
+            if (
+                cache_healing_validated_seal is None
+                or await self._reconcile_remote_bundle(cache_healing_validated_seal.manifest) is None
+            ):
+                raise RuntimeError("remote generation changed during OCR cache healing")
+            healed_current = await self.webdav.validated_current_generation()
+            if (
+                healed_current is None
+                or healed_current.generation_id != cache_healing_generation_id
+                or healed_current.corpus_sha256 != corpus_sha256
+                or healed_current.contract_sha256 != contract_sha256
+                or healed_current.ocr_failed_document_count != 0
+            ):
+                raise RuntimeError("remote generation changed during OCR cache healing")
+            if (
+                not failed_documents
+                and cache_healing_seal is not None
+                and cache_healing_seal_path is not None
+            ):
+                # The seal's deferred count is outstanding recovery state, not
+                # part of the immutable remote generation identity. Atomically
+                # advance it after every fully processed healing pass so a
+                # successful repair restores the ordinary no-change fast path.
+                healed_seal = dict(cache_healing_seal)
+                healed_seal["ocr_cache_publication_deferred"] = ocr_cache_publication_deferred
+                validated_healed_seal = await self._validate_local_seal(healed_seal)
+                if validated_healed_seal.manifest.generation_id != cache_healing_generation_id:
+                    raise RuntimeError("OCR cache healing seal changed generation identity")
+                _atomic_write(cache_healing_seal_path, canonical_json_bytes(healed_seal))
+            self.state.finish_run(
+                run_id,
+                "no_change",
+                corpus_sha256=corpus_sha256,
+                contract_sha256=contract_sha256,
+            )
+            return await finalize_pdf_activity(
+                PipelineResult(
+                    run_id=run_id,
+                    status="no_change",
+                    corpus_sha256=corpus_sha256,
+                    contract_sha256=contract_sha256,
+                    generation_id=cache_healing_generation_id,
+                    document_count=len(acquired),
+                    evidence_count=0,
+                    ocr_cache_publication_deferred=ocr_cache_publication_deferred,
+                )
             )
 
         chunk_rows = tuple(row for document in processed for row in document.chunks)
@@ -1253,14 +2498,15 @@ class WorkerPipeline:
             documents=[document.record for document in processed],
             evidence=evidence,
             unsupported_products=unsupported,
+            ocr_failed_products=[item.record for item in failed_documents],
         )
         current_remote = await self.webdav.validated_current_generation()
-        if current_remote is None and await self.webdav.get_bytes(STABLE_POINTER_PATH) is not None:
+        if current_remote is None and await self.webdav.get_bytes(self.webdav.pointer_path) is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing publication")
         previous_id = current_remote.generation_id if current_remote is not None else None
         generation_documents = tuple(
             sorted(
-                (
+                tuple(
                     GenerationDocument(
                         document_id=document.record.document_id,
                         issuer=document.record.issuer,
@@ -1277,8 +2523,28 @@ class WorkerPipeline:
                         page_count=document.record.page_count,
                         ocr_cache_kind=document.ocr_cache_kind,
                         ocr_reuse_key=document.ocr_reuse_key,
+                        availability="available",
                     )
                     for document in processed
+                )
+                + tuple(
+                    GenerationDocument(
+                        document_id=document.record.document_id,
+                        issuer=document.record.issuer,
+                        pdf=ArtifactRef.for_cas(
+                            sha256=document.record.pdf_sha256,
+                            size_bytes=document.record.pdf_size_bytes,
+                            media_type="application/pdf",
+                        ),
+                        page_count=document.record.page_count,
+                        availability="ocr_failed",
+                        ocr_failure=GenerationOCRFailure(
+                            reason_code=document.record.reason_code,
+                            reason=document.record.reason,
+                            attempts=document.record.attempts,
+                        ),
+                    )
+                    for document in failed_documents
                 ),
                 key=lambda row: row.document_id,
             )
@@ -1304,12 +2570,16 @@ class WorkerPipeline:
             ),
             issuer_codes=tuple(sorted(adapter.spec.code for adapter in self.adapters)),
             counts=GenerationCounts(
-                documents=len(processed),
-                pdf_objects=len({row.record.pdf_sha256 for row in processed}),
+                documents=len(processed) + len(failed_documents),
+                pdf_objects=len(
+                    {row.record.pdf_sha256 for row in processed}
+                    | {row.record.pdf_sha256 for row in failed_documents}
+                ),
                 ocr_objects=len({row.ocr_sha256 for row in processed}),
                 chunks=len(evidence),
             ),
             documents=generation_documents,
+            issuer_ocr_counts=issuer_ocr_counts,
             previous_generation_id=previous_id,
         )
         sealed = {
@@ -1321,6 +2591,7 @@ class WorkerPipeline:
             "database_path": str(database_path),
             "database_sha256": export.sha256,
             "database_size_bytes": export.size_bytes,
+            "ocr_cache_publication_deferred": ocr_cache_publication_deferred,
             "manifest": manifest.model_dump(mode="json"),
             "objects": [
                 {
@@ -1333,6 +2604,15 @@ class WorkerPipeline:
             ]
             + [
                 {
+                    "path": str(document.pdf_path),
+                    "sha256": document.record.pdf_sha256,
+                    "size_bytes": document.record.pdf_size_bytes,
+                    "media_type": "application/pdf",
+                }
+                for document in failed_documents
+            ]
+            + [
+                {
                     "path": str(document.ocr_path),
                     "sha256": document.ocr_sha256,
                     "size_bytes": document.ocr_size_bytes,
@@ -1342,7 +2622,13 @@ class WorkerPipeline:
             ],
         }
         _atomic_write(seal_path, canonical_json_bytes(sealed))
-        return await self._publish_sealed(run_id, sealed)
+        published_result = await self._publish_sealed(run_id, sealed)
+        return await finalize_pdf_activity(
+            replace(
+                published_result,
+                ocr_cache_publication_deferred=ocr_cache_publication_deferred,
+            )
+        )
 
     async def _align_seal_to_current(
         self,
@@ -1369,20 +2655,38 @@ class WorkerPipeline:
         if sealed.get("schema_version") != "cardrag.worker-seal.v1":
             raise RuntimeError("unknown worker publication seal schema")
         local_root = (self.state_dir / "runs").resolve(strict=True)
+        pdf_cache_root = self.pdf_cache.objects_root.resolve(strict=True)
 
-        def sealed_file(raw_path: object, *, label: str) -> Path:
+        def sealed_file(
+            raw_path: object,
+            *,
+            label: str,
+            allow_pdf_cache: bool = False,
+        ) -> Path:
             candidate = Path(str(raw_path))
             if candidate.is_symlink() or not candidate.is_file():
                 raise RuntimeError(f"sealed {label} is not a regular non-symlink file")
             resolved = candidate.resolve(strict=True)
-            if not resolved.is_relative_to(local_root):
-                raise RuntimeError(f"sealed {label} escapes the worker run directory")
+            approved_roots = (local_root, pdf_cache_root) if allow_pdf_cache else (local_root,)
+            if not any(resolved.is_relative_to(root) for root in approved_roots):
+                raise RuntimeError(f"sealed {label} escapes approved worker storage")
             return resolved
 
         database_path = sealed_file(sealed.get("database_path"), label="serving database")
         if not isinstance(sealed.get("manifest"), Mapping):
             raise RuntimeError("sealed generation manifest is not an object")
         manifest = GenerationManifest.model_validate_json(canonical_json_bytes(sealed["manifest"]))
+        available_document_count = sum(
+            document.availability == "available" for document in manifest.documents
+        )
+        raw_deferred_count = sealed.get("ocr_cache_publication_deferred", 0)
+        if (
+            type(raw_deferred_count) is not int
+            or raw_deferred_count < 0
+            or raw_deferred_count > available_document_count
+        ):
+            raise RuntimeError("sealed OCR cache publication deferred count is invalid")
+        ocr_cache_publication_deferred = raw_deferred_count
         generation_id = str(sealed.get("generation_id") or "")
         corpus_sha256 = str(sealed.get("corpus_sha256") or "")
         contract_sha256 = str(sealed.get("contract_sha256") or "")
@@ -1456,11 +2760,15 @@ class WorkerPipeline:
         for raw_row in rows:
             if not isinstance(raw_row, Mapping):
                 raise RuntimeError("sealed CAS object row is invalid")
-            path = sealed_file(raw_row.get("path"), label="CAS object")
+            media_type = str(raw_row.get("media_type") or "")
+            path = sealed_file(
+                raw_row.get("path"),
+                label="CAS object",
+                allow_pdf_cache=media_type == "application/pdf",
+            )
             digest, size = await asyncio.to_thread(sha256_file, path)
             declared_sha = str(raw_row.get("sha256") or "")
             declared_size = raw_row.get("size_bytes")
-            media_type = str(raw_row.get("media_type") or "")
             if digest != declared_sha or size != declared_size or not media_type:
                 raise RuntimeError(f"sealed CAS input changed or is unbound: {path}")
             remote_path = object_path(digest).as_posix()
@@ -1469,11 +2777,14 @@ class WorkerPipeline:
         if actual_references != expected_references:
             raise RuntimeError("sealed CAS rows do not exactly match generation manifest references")
 
-        return _ValidatedSeal(manifest, database_path, tuple(validated_objects))
+        return _ValidatedSeal(
+            manifest,
+            database_path,
+            tuple(validated_objects),
+            ocr_cache_publication_deferred,
+        )
 
-    async def _publish_remote_only(
-        self, sealed: Mapping[str, Any]
-    ) -> tuple[PublishedBundle, GenerationManifest]:
+    async def _publish_remote_only(self, sealed: Mapping[str, Any]) -> tuple[PublishedBundle, _ValidatedSeal]:
         validated = await self._validate_local_seal(sealed)
         generation_id = validated.manifest.generation_id
 
@@ -1487,14 +2798,14 @@ class WorkerPipeline:
             database=validated.database_path,
             manifest=sealed["manifest"],
         )
-        return published, validated.manifest
+        return published, validated
 
     async def _publish_sealed(self, run_id: str, sealed: Mapping[str, Any]) -> PipelineResult:
         if str(sealed.get("run_id") or "") != run_id:
             raise RuntimeError("sealed publication belongs to a different run")
         validated = await self._validate_local_seal(sealed)
         current = await self.webdav.validated_current_generation()
-        stable_body = await self.webdav.get_bytes(STABLE_POINTER_PATH)
+        stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
         if current is None and stable_body is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing sealed publication")
         sealed_manifest = validated.manifest
@@ -1503,6 +2814,12 @@ class WorkerPipeline:
             and current.contract_sha256 == sealed_manifest.contract_sha256
         ):
             if current.generation_id == sealed_manifest.generation_id:
+                # The exact sealed generation is durable even when its v4
+                # manifest explicitly contains isolated OCR failures. Record
+                # that publication truth; a later fresh run still bypasses
+                # no-change and retries the failed documents.
+                if await self._reconcile_remote_bundle(sealed_manifest) is None:
+                    raise RuntimeError("same-generation remote publication does not match its local seal")
                 self.state.record_publish(
                     generation_id=current.generation_id,
                     run_id=run_id,
@@ -1526,28 +2843,50 @@ class WorkerPipeline:
                     generation_id=current.generation_id,
                     document_count=sealed_manifest.counts.documents,
                     evidence_count=sealed_manifest.counts.chunks,
+                    ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
                 )
-            self.state.finish_run(
-                run_id,
-                "no_change",
-                corpus_sha256=sealed_manifest.corpus_sha256,
-                contract_sha256=sealed_manifest.contract_sha256,
-            )
-            return PipelineResult(
-                run_id=run_id,
-                status="no_change",
-                corpus_sha256=sealed_manifest.corpus_sha256,
-                contract_sha256=sealed_manifest.contract_sha256,
-                generation_id=current.generation_id,
-                document_count=sealed_manifest.counts.documents,
-                evidence_count=0,
-            )
+            if current.ocr_failed_document_count == 0:
+                self.state.finish_run(
+                    run_id,
+                    "no_change",
+                    corpus_sha256=sealed_manifest.corpus_sha256,
+                    contract_sha256=sealed_manifest.contract_sha256,
+                )
+                return PipelineResult(
+                    run_id=run_id,
+                    status="no_change",
+                    corpus_sha256=sealed_manifest.corpus_sha256,
+                    contract_sha256=sealed_manifest.contract_sha256,
+                    generation_id=current.generation_id,
+                    document_count=sealed_manifest.counts.documents,
+                    evidence_count=0,
+                    ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
+                )
+            # A different partial generation with the same corpus is not a
+            # no-change proof. Fall through to the predecessor fence, which
+            # prevents this stale seal from overwriting that head.
         aligned = await self._align_seal_to_current(
             sealed,
             validated=validated,
             current_generation_id=current.generation_id if current is not None else None,
         )
-        published, manifest = await self._publish_remote_only(aligned)
+        publication_failed = False
+        try:
+            published, published_seal = await self._publish_remote_only(aligned)
+        except Exception:
+            # MOVE can commit stable.json immediately before its destination
+            # readback fails. Drop the raw source exception, then reconcile
+            # against the fully validated generation and exact manifest bytes.
+            publication_failed = True
+        if publication_failed:
+            reconciled = await self._reconcile_remote_bundle(validated.manifest)
+            if reconciled is None:
+                raise RuntimeError(
+                    "remote publication failed and its stable commit could not be reconciled"
+                ) from None
+            published = reconciled
+            published_seal = validated
+        manifest = published_seal.manifest
         self.state.record_publish(
             generation_id=published.generation_id,
             run_id=run_id,
@@ -1571,4 +2910,5 @@ class WorkerPipeline:
             generation_id=published.generation_id,
             document_count=manifest.counts.documents,
             evidence_count=manifest.counts.chunks,
+            ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
         )

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from cardrag_worker.contracts import IssuerAdapter, IssuerSpec
 
 from .kb import KBAdapter
+from .samsung import SamsungAdapter
 from .shinhan import ShinhanAdapter
 from .woori import WooriAdapter
 
@@ -25,6 +26,7 @@ _REGISTRATIONS = tuple(
             Registration(WooriAdapter.spec, WooriAdapter),
             Registration(KBAdapter.spec, KBAdapter),
             Registration(ShinhanAdapter.spec, ShinhanAdapter),
+            Registration(SamsungAdapter.spec, SamsungAdapter),
         ),
         key=lambda item: item.spec.sort_order,
     )
@@ -35,7 +37,7 @@ REGISTERED_ISSUERS: Mapping[str, Registration] = {row.spec.code: row for row in 
 # Since v1.0.6, Shinhan downloads use its verified official mobile disclosure
 # endpoint, with bounded search and current-category fallback while retaining
 # the complete stable desktop discovery identity.
-DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan")
+DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan", "samsung")
 
 
 def enabled_issuer_codes(

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import os
 import tempfile
 import uuid
 from collections.abc import Mapping
@@ -23,6 +23,7 @@ from cardrag_core import (
     WebDAVHTTPError,
     WebDAVSettings,
     canonical_json_bytes,
+    channel_pointer_path,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -33,6 +34,8 @@ from cardrag_core import (
     WebDAVClient as CoreWebDAVClient,
 )
 from defusedxml import ElementTree  # type: ignore[import-untyped]
+
+from .async_utils import to_thread_fenced
 
 
 class WebDAVError(RuntimeError):
@@ -58,18 +61,24 @@ class RemoteGenerationIdentity:
         "cardrag.generation.v1",
         "cardrag.generation.v2",
         "cardrag.generation.v3",
+        "cardrag.generation.v4",
     ] = "cardrag.generation.v3"
     serving_schema: Literal[
         "cardrag.serving-db.v1",
         "cardrag.serving-db.v2",
         "cardrag.serving-db.v3",
+        "cardrag.serving-db.v4",
     ] = "cardrag.serving-db.v3"
+    ocr_failed_document_count: int = 0
 
     def __post_init__(self) -> None:
+        if self.ocr_failed_document_count < 0:
+            raise ValueError("remote OCR-failed document count must be non-negative")
         expected = {
             "cardrag.generation.v1": "cardrag.serving-db.v1",
             "cardrag.generation.v2": "cardrag.serving-db.v2",
             "cardrag.generation.v3": "cardrag.serving-db.v3",
+            "cardrag.generation.v4": "cardrag.serving-db.v4",
         }[self.generation_schema]
         if self.serving_schema != expected:
             raise ValueError("remote generation and serving schema versions must match")
@@ -78,18 +87,23 @@ class RemoteGenerationIdentity:
 class WebDAVClient:
     """Coroutine-friendly facade; all byte publication remains in cardrag-core."""
 
-    def __init__(self, client: CoreWebDAVClient) -> None:
+    def __init__(self, client: CoreWebDAVClient, *, channel: str = "stable") -> None:
         self.core = client
+        self.channel = channel
+        self.pointer_path = channel_pointer_path(channel)
         self.immutable = ImmutablePublisher(client)
         self.cas = CASPublisher(client)
-        self.stable = StablePointerPublisher(client)
+        self.stable = StablePointerPublisher(client, channel=channel)
 
     @classmethod
     def from_env(cls) -> WebDAVClient:
-        return cls(CoreWebDAVClient(WebDAVSettings.from_env()))
+        return cls(
+            CoreWebDAVClient(WebDAVSettings.from_env()),
+            channel=os.environ.get("CARDRAG_CHANNEL", "stable"),
+        )
 
     async def close(self) -> None:
-        await asyncio.to_thread(self.core.close)
+        await to_thread_fenced(self.core.close)
 
     async def get_bytes(
         self,
@@ -98,7 +112,7 @@ class WebDAVClient:
         max_bytes: int | None = CONTROL_OBJECT_MAX_BYTES,
     ) -> bytes | None:
         try:
-            response = await asyncio.to_thread(self.core.get, path, max_bytes=max_bytes)
+            response = await to_thread_fenced(self.core.get, path, max_bytes=max_bytes)
         except WebDAVHTTPError as exc:
             if exc.status_code == 404:
                 return None
@@ -108,7 +122,7 @@ class WebDAVClient:
     async def exists(self, path: str | PurePosixPath) -> bool:
         """Check object existence through the capability-limited read-only facade."""
 
-        return await asyncio.to_thread(self.core.read_only().exists, path)
+        return await to_thread_fenced(self.core.read_only().exists, path)
 
     async def get_json(
         self,
@@ -152,10 +166,10 @@ class WebDAVClient:
                     children.add(child)
             return tuple(sorted(children, key=lambda item: item.as_posix()))
 
-        return await asyncio.to_thread(propfind)
+        return await to_thread_fenced(propfind)
 
     async def delete(self, path: str | PurePosixPath, *, missing_ok: bool = False) -> None:
-        await asyncio.to_thread(self.core.delete, path, missing_ok=missing_ok)
+        await to_thread_fenced(self.core.delete, path, missing_ok=missing_ok)
 
     async def put_bytes(
         self,
@@ -167,7 +181,7 @@ class WebDAVClient:
     ) -> None:
         if not immutable:
             raise ValueError("mutable direct PUT is forbidden; use stable pointer publication")
-        await asyncio.to_thread(
+        await to_thread_fenced(
             self.immutable.publish_bytes,
             path,
             body,
@@ -188,13 +202,13 @@ class WebDAVClient:
         return body
 
     async def put_cas(self, body: bytes, *, media_type: str = "application/octet-stream") -> tuple[str, str]:
-        artifact = await asyncio.to_thread(self.cas.publish_bytes, body, media_type=media_type)
+        artifact = await to_thread_fenced(self.cas.publish_bytes, body, media_type=media_type)
         return artifact.sha256, artifact.path
 
     async def put_cas_file(
         self, path: Path, *, media_type: str = "application/octet-stream"
     ) -> tuple[str, str]:
-        artifact = await asyncio.to_thread(self.cas.publish_file, path, media_type=media_type)
+        artifact = await to_thread_fenced(self.cas.publish_file, path, media_type=media_type)
         return artifact.sha256, artifact.path
 
     async def check(self) -> WebDAVCheck:
@@ -241,13 +255,13 @@ class WebDAVClient:
                 operations.append("DELETE")
             return WebDAVCheck(True, tuple(operations), conflict_status)
 
-        return await asyncio.to_thread(probe)
+        return await to_thread_fenced(probe)
 
     async def validated_current_generation(self) -> RemoteGenerationIdentity | None:
         """Stream-hash the DB and every referenced CAS object before no-change."""
 
         def verify() -> RemoteGenerationIdentity:
-            reader = MCPArtifactReader(self.core.read_only())
+            reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
             current = reader.read_current_generation()
             with tempfile.TemporaryDirectory(prefix="cardrag-current-verify-") as directory:
                 root = Path(directory).resolve()
@@ -271,10 +285,13 @@ class WebDAVClient:
                 contract_sha256=current.manifest.contract_sha256,
                 generation_schema=current.manifest.schema_version,
                 serving_schema=current.manifest.serving_schema,
+                ocr_failed_document_count=sum(
+                    document.availability == "ocr_failed" for document in current.manifest.documents
+                ),
             )
 
         try:
-            return await asyncio.to_thread(verify)
+            return await to_thread_fenced(verify)
         except Exception:
             return None
 
@@ -319,7 +336,7 @@ class WebDAVBundlePublisher:
         if validated_manifest.generation_id != generation_id:
             raise ValueError("generation manifest ID does not match publication target")
         manifest_sha = hashlib.sha256(manifest_body).hexdigest()
-        database_sha, database_size = await asyncio.to_thread(sha256_file, database)
+        database_sha, database_size = await to_thread_fenced(sha256_file, database)
         declared = manifest.get("serving_database")
         if (
             not isinstance(declared, dict)
@@ -337,19 +354,19 @@ class WebDAVBundlePublisher:
         ready_body = ready.canonical_bytes()
 
         # A retry reuses these exact sealed bytes; core read-back verifies existing objects.
-        await asyncio.to_thread(
+        await to_thread_fenced(
             self.client.immutable.publish_file,
             generation_database_path(generation_id),
             database,
             media_type="application/vnd.sqlite3",
         )
-        await asyncio.to_thread(
+        await to_thread_fenced(
             self.client.immutable.publish_bytes,
             generation_manifest_path(generation_id),
             manifest_body,
             media_type="application/json",
         )
-        await asyncio.to_thread(
+        await to_thread_fenced(
             self.client.immutable.publish_bytes,
             generation_ready_path(generation_id),
             ready_body,
@@ -360,5 +377,5 @@ class WebDAVBundlePublisher:
             manifest_sha256=manifest_sha,
             ready_sha256=hashlib.sha256(ready_body).hexdigest(),
         )
-        await asyncio.to_thread(self.client.stable.atomic_replace_bytes, pointer.canonical_bytes())
+        await to_thread_fenced(self.client.stable.atomic_replace_bytes, pointer.canonical_bytes())
         return PublishedBundle(generation_id, database_sha, manifest_sha)

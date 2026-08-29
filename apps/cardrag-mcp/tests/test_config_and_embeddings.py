@@ -34,6 +34,25 @@ def test_exact_deployment_env_names_and_file_backed_token(
     assert settings.mcp_retain_generations == 4
 
 
+def test_channel_and_retention_defaults_are_safe() -> None:
+    settings = Settings(environment="test", mcp_bearer_token=AUTH_VALUE)
+    assert settings.channel == "stable"
+    assert settings.mcp_retain_generations == 2
+
+    candidate = Settings(
+        environment="test",
+        mcp_bearer_token=AUTH_VALUE,
+        channel="candidate-v1.0.9",
+    )
+    assert candidate.channel == "candidate-v1.0.9"
+    with pytest.raises(ValueError):
+        Settings(
+            environment="test",
+            mcp_bearer_token=AUTH_VALUE,
+            channel="../stable",
+        )
+
+
 def test_production_webdav_rejects_http_query_and_embedded_credentials() -> None:
     base = {
         "mcp_bearer_token": AUTH_VALUE,

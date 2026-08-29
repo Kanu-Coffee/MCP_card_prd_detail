@@ -43,6 +43,22 @@ class ProtectedDocumentError(PDFValidationError):
         self.size_bytes = size_bytes
 
 
+class PDFNotModified(RuntimeError):
+    """A conditional issuer request confirmed that cached PDF bytes are current."""
+
+    def __init__(
+        self,
+        *,
+        final_url: str,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> None:
+        super().__init__("conditional PDF request returned not modified")
+        self.final_url = final_url
+        self.etag = etag
+        self.last_modified = last_modified
+
+
 @dataclass(frozen=True, slots=True)
 class DownloadPolicy:
     allowed_hosts: frozenset[str]
@@ -59,6 +75,23 @@ class DownloadedPDF:
     size_bytes: int
     page_count: int
     final_url: str
+    etag: str | None = None
+    last_modified: str | None = None
+
+
+def _safe_cache_header(value: str | None) -> str | None:
+    """Keep bounded validator-safe origin metadata without affecting PDF use."""
+
+    if value is None:
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > 2048
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
+        return None
+    return normalized
 
 
 def _resolve(host: str) -> tuple[str, ...]:
@@ -183,6 +216,8 @@ class SecurePDFDownloader:
         }
         temporary: Path | None = None
         final_url: str | None = None
+        etag: str | None = None
+        last_modified: str | None = None
         try:
             with NamedTemporaryFile(
                 mode="wb", prefix=".partial-", suffix=".pdf", dir=destination.parent, delete=False
@@ -199,6 +234,17 @@ class SecurePDFDownloader:
                         follow_redirects=False,
                         timeout=self.policy.timeout_seconds,
                     ) as response:
+                        if response.status_code == 304:
+                            conditional = any(
+                                key.casefold() in {"if-none-match", "if-modified-since"} for key in headers
+                            )
+                            if not conditional:
+                                raise PDFValidationError("issuer returned 304 without a conditional request")
+                            raise PDFNotModified(
+                                final_url=str(response.url),
+                                etag=_safe_cache_header(response.headers.get("etag")),
+                                last_modified=_safe_cache_header(response.headers.get("last-modified")),
+                            )
                         if response.is_redirect:
                             if redirect_index >= self.policy.maximum_redirects:
                                 raise DownloadSecurityError("download exceeded the redirect limit")
@@ -241,6 +287,8 @@ class SecurePDFDownloader:
                         output.flush()
                         os.fsync(output.fileno())
                         final_url = str(response.url)
+                        etag = _safe_cache_header(response.headers.get("etag"))
+                        last_modified = _safe_cache_header(response.headers.get("last-modified"))
                         break
             if final_url is None or temporary is None:
                 raise DownloadSecurityError("download did not reach a final response")
@@ -258,7 +306,15 @@ class SecurePDFDownloader:
                 finally:
                     os.close(descriptor)
             temporary = None
-            return DownloadedPDF(destination, digest, size, pages, final_url)
+            return DownloadedPDF(
+                destination,
+                digest,
+                size,
+                pages,
+                final_url,
+                etag,
+                last_modified,
+            )
         finally:
             if temporary is not None and temporary.exists():
                 temporary.unlink()

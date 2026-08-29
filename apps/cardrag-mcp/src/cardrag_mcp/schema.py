@@ -24,13 +24,15 @@ from numpy.typing import NDArray
 
 from cardrag_mcp.models import ServingMetadata
 
-SCHEMA_ID = "cardrag.serving-db.v3"
-SUPPORTED_SCHEMA_IDS = frozenset({"cardrag.serving-db.v2", SCHEMA_ID})
+SCHEMA_ID = "cardrag.serving-db.v4"
+SUPPORTED_SCHEMA_IDS = frozenset({"cardrag.serving-db.v2", "cardrag.serving-db.v3", SCHEMA_ID})
 UNSUPPORTED_DOCUMENTS_SCHEMA = "cardrag.unsupported-documents.v1"
+OCR_FAILED_DOCUMENTS_SCHEMA = "cardrag.ocr-failed-products.v1"
 FLOAT32_BYTES = 4
 EMBEDDING_BYTES = EMBEDDING_DIMENSION * FLOAT32_BYTES
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
+_DOCUMENT_ID = re.compile(r"^doc_[0-9a-f]{64}$")
 _SOURCE_FIELDS = frozenset(
     {
         "category",
@@ -88,6 +90,19 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "embedding",
         ),
     }
+)
+OCR_FAILED_COLUMNS = (
+    "issuer",
+    "product_code",
+    "name",
+    "document_id",
+    "title",
+    "pdf_sha256",
+    "pdf_size_bytes",
+    "page_count",
+    "reason_code",
+    "reason",
+    "attempts",
 )
 
 
@@ -165,7 +180,7 @@ def _validate_unsupported_products(
     payloads: list[dict[str, object]] = []
     source_ids: set[str] = set()
     allowed_protected_magic = {"SCDSA002", "SCDSA004"}
-    if schema_id == "cardrag.serving-db.v3":
+    if schema_id in {"cardrag.serving-db.v3", "cardrag.serving-db.v4"}:
         allowed_protected_magic.add("FASOO_DRMONE")
     rows = connection.execute(
         """
@@ -274,6 +289,134 @@ def _validate_unsupported_products(
     return expected_count, expected_sha256
 
 
+def _validate_ocr_failed_products(
+    connection: sqlite3.Connection,
+    values: Mapping[str, str],
+    *,
+    schema_id: str,
+) -> tuple[int, str]:
+    empty_sha256 = hashlib.sha256(
+        _canonical_json_bytes({"documents": [], "schema_version": OCR_FAILED_DOCUMENTS_SCHEMA})
+    ).hexdigest()
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ocr_failed_products'"
+    ).fetchone()
+    if schema_id != SCHEMA_ID:
+        if table_exists is not None or any(
+            key in values for key in ("ocr_failed_document_count", "ocr_failed_documents_sha256")
+        ):
+            raise ServingDatabaseError("legacy serving database contains v4 OCR failure fields")
+        return 0, empty_sha256
+    if table_exists is None or _columns(connection, "ocr_failed_products") != OCR_FAILED_COLUMNS:
+        raise ServingDatabaseError("v4 OCR-failed product schema is missing or incompatible")
+
+    expected_count = _integer_metadata(values, "ocr_failed_document_count")
+    expected_sha256 = values.get("ocr_failed_documents_sha256", "")
+    if _SHA256.fullmatch(expected_sha256) is None:
+        raise ServingDatabaseError("metadata OCR-failed document hash is missing or invalid")
+    issuer_codes = {
+        str(row[0]) for row in connection.execute("SELECT code FROM issuers ORDER BY code")
+    }
+    available_products = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute("SELECT issuer,product_code FROM products")
+    }
+    unsupported_products = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute("SELECT issuer,product_code FROM unsupported_products")
+    }
+    available_document_ids = {
+        str(row[0]) for row in connection.execute("SELECT document_id FROM documents")
+    }
+    payloads: list[dict[str, object]] = []
+    failed_identities: set[tuple[str, str]] = set()
+    failed_document_ids: set[str] = set()
+    for row in connection.execute(
+        """SELECT issuer,product_code,name,document_id,title,pdf_sha256,pdf_size_bytes,
+                  page_count,reason_code,reason,attempts
+             FROM ocr_failed_products ORDER BY issuer,product_code"""
+    ):
+        issuer = str(row["issuer"])
+        product_code = str(row["product_code"])
+        name = str(row["name"])
+        document_id = str(row["document_id"])
+        title = str(row["title"])
+        pdf_sha256 = str(row["pdf_sha256"])
+        pdf_size_bytes = row["pdf_size_bytes"]
+        page_count = row["page_count"]
+        reason_code = str(row["reason_code"])
+        reason = str(row["reason"])
+        attempts = row["attempts"]
+        identity = (issuer, product_code)
+        if (
+            issuer not in issuer_codes
+            or not product_code
+            or len(product_code) > 512
+            or not name
+            or len(name) > 1_000
+            or _DOCUMENT_ID.fullmatch(document_id) is None
+            or not title
+            or len(title) > 1_000
+            or _SHA256.fullmatch(pdf_sha256) is None
+            or isinstance(pdf_size_bytes, bool)
+            or not isinstance(pdf_size_bytes, int)
+            or pdf_size_bytes < 1
+            or isinstance(page_count, bool)
+            or not isinstance(page_count, int)
+            or page_count < 1
+            or re.fullmatch(r"[a-z0-9_]{1,64}", reason_code) is None
+            or not reason
+            or len(reason) > 256
+            or "\n" in reason
+            or "\r" in reason
+            or isinstance(attempts, bool)
+            or not isinstance(attempts, int)
+            or attempts < 1
+        ):
+            raise ServingDatabaseError("OCR-failed product contains an invalid bounded value")
+        if (
+            identity in available_products
+            or identity in unsupported_products
+            or identity in failed_identities
+            or document_id in available_document_ids
+            or document_id in failed_document_ids
+        ):
+            raise ServingDatabaseError("OCR-failed product identity overlaps another disposition")
+        failed_identities.add(identity)
+        failed_document_ids.add(document_id)
+        payloads.append(
+            {
+                "attempts": attempts,
+                "document_id": document_id,
+                "issuer": issuer,
+                "page_count": page_count,
+                "pdf_sha256": pdf_sha256,
+                "pdf_size_bytes": pdf_size_bytes,
+                "product_code": product_code,
+                "product_name": name,
+                "reason": reason,
+                "reason_code": reason_code,
+                "title": title,
+            }
+        )
+    if len(payloads) != expected_count:
+        raise ServingDatabaseError("OCR-failed product count differs from metadata")
+    actual_sha256 = hashlib.sha256(
+        _canonical_json_bytes(
+            {"documents": payloads, "schema_version": OCR_FAILED_DOCUMENTS_SCHEMA}
+        )
+    ).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ServingDatabaseError("OCR-failed product hash differs from metadata")
+
+    for issuer in issuer_codes:
+        succeeded = sum(identity[0] == issuer for identity in available_products)
+        failed = sum(identity[0] == issuer for identity in failed_identities)
+        if succeeded < 1 or succeeded * 100 < (succeeded + failed) * 95:
+            raise ServingDatabaseError("issuer OCR success gate is not satisfied")
+    return expected_count, expected_sha256
+
+
 def validate_schema(
     connection: sqlite3.Connection,
     *,
@@ -340,6 +483,11 @@ def validate_schema(
         values,
         schema_id=schema_id,
     )
+    ocr_failed_count, ocr_failed_sha256 = _validate_ocr_failed_products(
+        connection,
+        values,
+        schema_id=schema_id,
+    )
     expected_vector_bytes = count * EMBEDDING_BYTES
     if maximum_vector_bytes is not None and expected_vector_bytes > maximum_vector_bytes:
         raise ServingDatabaseError(
@@ -360,6 +508,8 @@ def validate_schema(
                 "embedding_count": count,
                 "unsupported_document_count": unsupported_count,
                 "unsupported_documents_sha256": unsupported_sha256,
+                "ocr_failed_document_count": ocr_failed_count,
+                "ocr_failed_documents_sha256": ocr_failed_sha256,
             }
         )
     except Exception as exc:

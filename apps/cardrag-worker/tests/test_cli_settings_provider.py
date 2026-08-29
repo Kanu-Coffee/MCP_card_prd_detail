@@ -1,35 +1,386 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import logging
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+import traceback
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from cardrag_core import SecretResolutionError
+from cardrag_core import STABLE_POINTER_PATH, SecretResolutionError
 from typer.testing import CliRunner
 
 import cardrag_worker.cli as cli_module
+import cardrag_worker.providers as providers_module
 from cardrag_worker.adoption import AdoptionError
-from cardrag_worker.pipeline import OCRDocumentFailuresError, OCRFailureRecord
-from cardrag_worker.providers import CodexOCRProvider, ProviderError
+from cardrag_worker.gc import GCPartialFailure
+from cardrag_worker.pipeline import (
+    OCRDocumentFailuresError,
+    OCRFailureRecord,
+    OCRSystemicFailureError,
+    OCRSystemicFailureRecord,
+    PipelineResult,
+    WorkerUnexpectedFailureError,
+    WorkerUnexpectedFailureRecord,
+)
+from cardrag_worker.providers import (
+    CodexOCRProvider,
+    OpenRouterOCRProvider,
+    ProviderError,
+    ProviderSystemicError,
+)
 from cardrag_worker.settings import WorkerSettings, _read_secret
 from cardrag_worker.state import AlreadyRunning
+
+
+@pytest.mark.asyncio
+async def test_signal_requested_during_handler_install_cancels_new_pipeline_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = False
+    loop = asyncio.get_running_loop()
+
+    async def must_not_run(_resume: str | None) -> dict[str, Any]:
+        nonlocal entered
+        entered = True
+        return {"status": "unexpected"}
+
+    def eager_signal_handler(
+        signal_number: int,
+        callback: Any,
+        *args: Any,
+    ) -> None:
+        if signal_number == signal.SIGTERM:
+            callback(*args)
+
+    monkeypatch.setattr(cli_module, "_run", must_not_run)
+    monkeypatch.setattr(loop, "add_signal_handler", eager_signal_handler)
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda _signal_number: True)
+
+    with pytest.raises(cli_module.WorkerSignalShutdown) as captured:
+        await cli_module._run_with_signal_shutdown(None)
+
+    assert captured.value.signal_number == signal.SIGTERM
+    assert entered is False
+
+
+@pytest.mark.parametrize(
+    ("shutdown_signal", "expected_exit"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130)],
+    ids=["sigterm", "sigint"],
+)
+def test_run_cli_real_signal_drains_fenced_operation_and_records_terminal_truth(
+    tmp_path: Path,
+    shutdown_signal: signal.Signals,
+    expected_exit: int,
+) -> None:
+    harness = Path(__file__).parent / "fixtures" / "signal_worker_harness.py"
+    environment = os.environ.copy()
+    environment["CARDRAG_SIGNAL_TEST_STATE_DIR"] = str(tmp_path)
+    process = subprocess.Popen(  # noqa: S603
+        [sys.executable, str(harness), "run"],  # noqa: S607
+        cwd=Path(__file__).resolve().parents[3],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    started = tmp_path / "blocking-operation.started"
+    release = tmp_path / "blocking-operation.release"
+    finished = tmp_path / "blocking-operation.finished"
+    deadline = time.monotonic() + 10
+    while not started.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    try:
+        assert started.is_file(), process.communicate(timeout=1)
+        os.kill(process.pid, shutdown_signal)
+        time.sleep(0.1)
+        os.kill(process.pid, shutdown_signal)
+        time.sleep(0.1)
+        assert process.poll() is None
+
+        with (tmp_path / "worker.lock").open("a+b") as contender, pytest.raises(BlockingIOError):
+            fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        release.write_text("release", encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == expected_exit, stderr
+    assert json.loads(stdout) == {
+        "exit_code": expected_exit,
+        "reason": "Worker stopped after cancellation drain and terminal-state reconciliation.",
+        "reason_code": "worker_signal_shutdown",
+        "signal": shutdown_signal.name,
+        "status": "shutdown_complete",
+    }
+    assert stderr.count("cancellation drain started") == 1
+    assert stderr.count("Additional worker shutdown signal ignored") == 1
+    assert "Traceback" not in stderr
+    assert finished.read_text(encoding="utf-8") == started.read_text(encoding="utf-8")
+    with sqlite3.connect(tmp_path / "worker-state.sqlite3") as connection:
+        terminal = connection.execute("SELECT status,error FROM run").fetchone()
+    assert terminal == (
+        "interrupted",
+        "worker_cancelled: Pipeline execution was interrupted.",
+    )
+    with (tmp_path / "worker.lock").open("a+b") as contender:
+        fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(contender.fileno(), fcntl.LOCK_UN)
+
+
+def test_signal_shutdown_cli_rejects_mutated_signal_without_secret_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "RAW_SIGNAL_URL_TOKEN_SECRET"
+    failure = cli_module.WorkerSignalShutdown(int(signal.SIGTERM))
+    failure.signal_number = raw_sentinel  # type: ignore[assignment]
+
+    async def failed(_resume: str | None) -> dict[str, Any]:
+        raise failure from RuntimeError(raw_sentinel)
+
+    monkeypatch.setattr(cli_module, "_run_with_signal_shutdown", failed)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+
+    assert result.exit_code == 143
+    assert json.loads(result.stdout) == {
+        "exit_code": 143,
+        "reason": "Worker stopped after cancellation drain and terminal-state reconciliation.",
+        "reason_code": "worker_signal_shutdown",
+        "signal": "SIGTERM",
+        "status": "shutdown_complete",
+    }
+    assert raw_sentinel not in result.output
+    assert result.exception is not None
+    rendered = "".join(
+        traceback.format_exception(
+            type(result.exception),
+            result.exception,
+            result.exception.__traceback__,
+        )
+    )
+    assert raw_sentinel not in rendered
+
+
+def test_worker_progress_logging_is_info_and_idempotent() -> None:
+    logger = logging.getLogger("cardrag_worker")
+    prior_handlers = list(logger.handlers)
+    prior_level = logger.level
+    prior_propagate = logger.propagate
+    try:
+        logger.handlers.clear()
+        cli_module._configure_worker_logging()
+        cli_module._configure_worker_logging()
+        assert logger.level == logging.INFO
+        assert logger.propagate is False
+        assert len(logger.handlers) == 1
+    finally:
+        logger.handlers[:] = prior_handlers
+        logger.setLevel(prior_level)
+        logger.propagate = prior_propagate
 
 
 def test_cli_already_running_is_success_and_resume_passes_exact_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    raw_sentinel = "https://user:RAW_LOCK_TOKEN@example.test/private"
+
     async def already_running(resume: str | None) -> dict[str, Any]:
-        raise AlreadyRunning(f"busy:{resume}")
+        assert resume in {None, "run-123"}
+        raise AlreadyRunning(raw_sentinel)
 
     monkeypatch.setattr(cli_module, "_run", already_running)
     result = CliRunner().invoke(cli_module.app, ["run"])
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["status"] == "already_running"
+    expected = {
+        "reason": "Worker did not start because the worker lock is held.",
+        "reason_code": "worker_busy",
+        "status": "already_running",
+    }
+    assert json.loads(result.stdout) == expected
     resumed = CliRunner().invoke(cli_module.app, ["resume", "run-123"])
     assert resumed.exit_code == 0
-    assert "busy:run-123" in resumed.stdout
+    assert json.loads(resumed.stdout) == expected
+    assert raw_sentinel not in result.stdout + resumed.stdout
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (
+            RuntimeError("https://user:RAW_TOKEN@example.test/private"),
+            {
+                "reason": "Remote garbage collection failed.",
+                "reason_code": "remote_gc_failed",
+                "status": "failed",
+            },
+        ),
+        (
+            AlreadyRunning("RAW_LOCK_PATH_TOKEN"),
+            {
+                "reason": ("Remote garbage collection did not start because the worker lock is held."),
+                "reason_code": "remote_gc_busy",
+                "status": "failed",
+            },
+        ),
+    ],
+)
+def test_gc_cli_failure_boundary_emits_only_fixed_safe_json(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected: dict[str, Any],
+) -> None:
+    async def failed(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any]:
+        del apply, retain, grace_days
+        raise failure
+
+    monkeypatch.setattr(cli_module, "_run_gc", failed)
+    result = CliRunner().invoke(cli_module.app, ["gc", "--apply"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == expected
+    assert "RAW_" not in result.output
+    assert "example.test" not in result.output
+    assert result.exception is not None
+    rendered = "".join(
+        traceback.format_exception(
+            type(result.exception),
+            result.exception,
+            result.exception.__traceback__,
+        )
+    )
+    assert "RAW_" not in rendered
+    assert "example.test" not in rendered
+
+
+def test_gc_cli_partial_failure_reports_known_count_without_source_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "https://user:RAW_PARTIAL_TOKEN@example.test/private"
+
+    async def failed(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any]:
+        del apply, retain, grace_days
+        raise GCPartialFailure(deleted_count=2) from RuntimeError(raw_sentinel)
+
+    monkeypatch.setattr(cli_module, "_run_gc", failed)
+    result = CliRunner().invoke(cli_module.app, ["gc", "--apply"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "deleted_count": 2,
+        "reason": "Remote garbage collection stopped after partial deletion.",
+        "reason_code": "remote_gc_partial_failure",
+        "status": "failed",
+    }
+    assert raw_sentinel not in result.output
+    assert result.exception is not None
+    rendered = "".join(
+        traceback.format_exception(
+            type(result.exception),
+            result.exception,
+            result.exception.__traceback__,
+        )
+    )
+    assert raw_sentinel not in rendered
+
+
+def test_gc_cli_rejects_mutated_partial_count_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "https://user:RAW_MUTATED_COUNT@example.test/private"
+    failure = GCPartialFailure(deleted_count=1)
+    failure.deleted_count = raw_sentinel  # type: ignore[assignment]
+
+    async def failed(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any]:
+        del apply, retain, grace_days
+        raise failure
+
+    monkeypatch.setattr(cli_module, "_run_gc", failed)
+    result = CliRunner().invoke(cli_module.app, ["gc", "--apply"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "reason": "Remote garbage collection failed.",
+        "reason_code": "remote_gc_failed",
+        "status": "failed",
+    }
+    assert raw_sentinel not in result.output
+
+
+def test_gc_runner_close_failure_does_not_replace_partial_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "RAW_CLOSE_URL_TOKEN_SECRET"
+
+    class Settings:
+        state_dir = tmp_path
+        state_database = tmp_path / "state.sqlite3"
+        lock_file = tmp_path / "worker.lock"
+
+    class Client:
+        pointer_path = STABLE_POINTER_PATH
+
+        async def close(self) -> None:
+            raise RuntimeError(raw_sentinel)
+
+    async def partial(**_kwargs: Any) -> Any:
+        raise GCPartialFailure(deleted_count=3) from None
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda: Client())
+    monkeypatch.setattr(cli_module, "collect_garbage", partial)
+
+    with pytest.raises(GCPartialFailure) as captured:
+        asyncio.run(cli_module._run_gc(apply=True, retain=2, grace_days=30))
+
+    assert captured.value.deleted_count == 3
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value),
+            captured.value,
+            captured.value.__traceback__,
+        )
+    )
+    assert raw_sentinel not in rendered
+
+
+def test_pipeline_result_payload_exposes_pdf_cache_activity() -> None:
+    payload = cli_module._pipeline_result_payload(
+        PipelineResult(
+            run_id="run-cache-metrics",
+            status="succeeded",
+            corpus_sha256="a" * 64,
+            contract_sha256="b" * 64,
+            generation_id="gen-cache-metrics",
+            document_count=10,
+            evidence_count=20,
+            pdf_cache_hits=7,
+            pdf_cache_misses=3,
+            pdf_downloads=2,
+            pdf_revisions=1,
+            ocr_cache_publication_deferred=2,
+        )
+    )
+
+    assert payload["pdf_cache_hits"] == 7
+    assert payload["pdf_cache_misses"] == 3
+    assert payload["pdf_downloads"] == 2
+    assert payload["pdf_revisions"] == 1
+    assert payload["ocr_cache_publication_deferred"] == 2
 
 
 def test_cli_ocr_failure_aggregate_is_safe_bounded_and_exits_one(
@@ -70,6 +421,115 @@ def test_cli_ocr_failure_aggregate_is_safe_bounded_and_exits_one(
     assert len(payload["sample"]) == 5
     assert "product_name" not in payload["sample"][0]
     assert untrusted_product_name not in result.stdout
+    assert raw_sentinel not in result.stdout
+
+
+def test_cli_systemic_ocr_failure_is_structured_and_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "RAW_WEBDAV_URL_CREDENTIAL_BODY"
+    failure = OCRSystemicFailureRecord(
+        run_id="run-systemic",
+        document_id="doc_" + "a" * 64,
+        source_id="source_" + "b" * 64,
+        issuer="shinhan",
+        product_code="00870",
+        pdf_sha256="c" * 64,
+        attempt=1,
+        occurred_at=datetime(2026, 8, 28, 13, 48, 29, tzinfo=UTC),
+        reason_code="ocr_cache_publication_ready_http",
+        reason="OCR cache publication received an HTTP failure status",
+        error_class_category="ocr_cache_publication",
+        phase="ready",
+        status_code=503,
+        error_kind="http",
+        retryable=False,
+        publication_attempts=3,
+    )
+    error = OCRSystemicFailureError(
+        run_id="run-systemic",
+        report_path=tmp_path / "ocr-systemic-failure.json",
+        failure=failure,
+    )
+
+    async def failed(_resume: str | None) -> dict[str, Any]:
+        raise error from RuntimeError(raw_sentinel)
+
+    monkeypatch.setattr(cli_module, "_run", failed)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "document_id": "doc_" + "a" * 64,
+        "error_class_category": "ocr_cache_publication",
+        "error_kind": "http",
+        "issuer": "shinhan",
+        "phase": "ready",
+        "product_code": "00870",
+        "publication_attempts": 3,
+        "reason": "OCR cache publication received an HTTP failure status",
+        "reason_code": "ocr_cache_publication_ready_http",
+        "report": "runs/run-systemic/reports/ocr-systemic-failure.json",
+        "retryable": False,
+        "run_id": "run-systemic",
+        "status": "failed",
+        "status_code": 503,
+    }
+    assert raw_sentinel not in result.stdout
+
+
+@pytest.mark.parametrize("command", [("run",), ("resume", "run-resume")])
+def test_cli_worker_failure_is_structured_without_raw_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+) -> None:
+    raw_sentinel = "RAW_GENERIC_PIPELINE_URL_TOKEN_SECRET"
+    failure = WorkerUnexpectedFailureRecord(
+        run_id="run-worker-failure",
+        occurred_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        error_class_category="network",
+    )
+    error = WorkerUnexpectedFailureError(
+        run_id=failure.run_id,
+        report_path=tmp_path / "worker-failure.json",
+        failure=failure,
+    )
+
+    async def failed(_resume: str | None) -> dict[str, Any]:
+        raise error from RuntimeError(raw_sentinel)
+
+    monkeypatch.setattr(cli_module, "_run", failed)
+    result = CliRunner().invoke(cli_module.app, list(command))
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "error_class_category": "network",
+        "reason": "Worker pipeline failed unexpectedly.",
+        "reason_code": "worker_unexpected_failure",
+        "report": "runs/run-worker-failure/reports/worker-failure.json",
+        "run_id": "run-worker-failure",
+        "status": "failed",
+    }
+    assert raw_sentinel not in result.stdout
+
+
+def test_cli_pre_pipeline_failure_uses_fixed_safe_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sentinel = "RAW_SETTINGS_URL_TOKEN_SECRET"
+
+    async def failed(_resume: str | None) -> dict[str, Any]:
+        raise ValueError(raw_sentinel)
+
+    monkeypatch.setattr(cli_module, "_run", failed)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "reason": "Worker pipeline failed unexpectedly.",
+        "reason_code": "worker_unexpected_failure",
+        "status": "failed",
+    }
     assert raw_sentinel not in result.stdout
 
 
@@ -181,6 +641,37 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
         WorkerSettings.from_env()
 
 
+def test_candidate_channel_and_two_generation_retention_are_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "CARDRAG_CHANNEL",
+        "CARDRAG_RETAIN_GENERATIONS",
+        "CARDRAG_RETAIN_INCOMPLETE_RUNS",
+        "CARDRAG_COLLECT_REMOTE_GARBAGE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    stable = WorkerSettings.from_env()
+    assert stable.channel == "stable"
+    assert stable.retain_generations == 2
+    assert stable.retained_incomplete_runs == 2
+    assert stable.collect_remote_garbage is True
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.9")
+    monkeypatch.setenv("CARDRAG_COLLECT_REMOTE_GARBAGE", "false")
+    candidate = WorkerSettings.from_env()
+    assert candidate.channel == "candidate-v1.0.9"
+    assert candidate.collect_remote_garbage is False
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "../stable")
+    with pytest.raises(ValueError, match="channel"):
+        WorkerSettings.from_env()
+    monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
+    monkeypatch.setenv("CARDRAG_RETAIN_GENERATIONS", "1")
+    with pytest.raises(ValueError, match="CARDRAG_RETAIN_GENERATIONS"):
+        WorkerSettings.from_env()
+
+
 @pytest.mark.asyncio
 async def test_codex_ocr_subprocess_is_explicitly_read_only_and_env_filtered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -241,3 +732,125 @@ async def test_codex_ocr_subprocess_is_explicitly_read_only_and_env_filtered(
     assert "only these TARGET markers" in stdin
     assert provider.timeout_seconds == 1800
     assert result.startswith("## Page 3")
+
+
+@pytest.mark.asyncio
+async def test_codex_nonzero_exit_is_typed_systemic_and_discards_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    raw_sentinel = "RAW_CODEX_STDERR_URL_TOKEN_SECRET"
+
+    class Process:
+        returncode = 17
+
+        async def communicate(self, _body: bytes) -> tuple[bytes, bytes]:
+            return b"", raw_sentinel.encode()
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def create(*_args: str, **_kwargs: Any) -> Process:
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    provider = CodexOCRProvider(executable="codex", model="gpt-5.6-sol")
+    with pytest.raises(ProviderSystemicError) as captured:
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="transcribe",
+        )
+
+    error = captured.value
+    assert error.reason_code == "provider_process_exit"
+    assert error.error_kind == "process_exit"
+    assert error.scope == "systemic"
+    assert error.retryable is False
+    assert error.exit_code == 17
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert raw_sentinel not in str(error)
+    assert raw_sentinel not in rendered
+
+
+@pytest.mark.asyncio
+async def test_codex_spawn_error_is_typed_systemic_without_raw_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    raw_sentinel = "/private/RAW_CODEX_EXECUTABLE_TOKEN"
+
+    async def create(*_args: str, **_kwargs: Any) -> Any:
+        raise FileNotFoundError(raw_sentinel)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    provider = CodexOCRProvider(executable=raw_sentinel, model="gpt-5.6-sol")
+    with pytest.raises(ProviderSystemicError) as captured:
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="transcribe",
+        )
+
+    error = captured.value
+    assert error.reason_code == "provider_process_spawn_failed"
+    assert error.error_kind == "process_spawn"
+    assert error.exit_code is None
+    assert error.__cause__ is None
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert raw_sentinel not in rendered
+
+
+@pytest.mark.asyncio
+async def test_openrouter_invalid_ocr_contract_is_typed_systemic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"RAW_PRIVATE_RESPONSE_TOKEN": "secret"}
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> Response:
+            return Response()
+
+    monkeypatch.setattr(providers_module.httpx, "AsyncClient", lambda **_kwargs: Client())
+    provider = OpenRouterOCRProvider(api_key="secret", model="test-model")
+    with pytest.raises(ProviderSystemicError) as captured:
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="transcribe",
+        )
+
+    error = captured.value
+    assert error.reason_code == "provider_contract_invalid"
+    assert error.error_kind == "contract"
+    assert error.scope == "systemic"
+    assert error.__cause__ is None
+    assert "RAW_PRIVATE_RESPONSE_TOKEN" not in str(error)

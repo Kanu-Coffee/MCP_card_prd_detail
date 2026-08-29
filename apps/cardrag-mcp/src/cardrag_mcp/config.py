@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     )
 
     environment: Literal["development", "test", "production"] = "production"
+    channel: str = Field(default="stable", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
     mcp_host: str = "127.0.0.1"
     mcp_port: int = Field(default=8000, ge=1, le=65535)
     mcp_public_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8000")
@@ -85,7 +86,7 @@ class Settings(BaseSettings):
     mcp_max_vector_bytes: int = Field(default=GIB, ge=MIB, le=GIB)
     maximum_pdf_bytes: int = Field(default=100 * MIB, ge=MIB, le=100 * MIB)
     mcp_update_interval_seconds: int = Field(default=300, ge=5, le=86_400)
-    mcp_retain_generations: int = Field(default=3, ge=3, le=20)
+    mcp_retain_generations: int = Field(default=2, ge=2, le=20)
 
     @model_validator(mode="after")
     def validate_secrets_and_urls(self) -> Settings:

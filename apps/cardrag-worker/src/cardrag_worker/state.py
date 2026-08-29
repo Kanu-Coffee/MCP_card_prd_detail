@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterator, Mapping
@@ -13,8 +14,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
-RunStatus = Literal["running", "succeeded", "failed", "no_change"]
+RunStatus = Literal["running", "succeeded", "failed", "no_change", "interrupted"]
 StageStatus = Literal["pending", "running", "retry", "succeeded", "failed", "skipped"]
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
+_INTERRUPTED_ERROR = "worker process ended before the run reached a terminal state"
 
 
 class AlreadyRunning(RuntimeError):
@@ -51,12 +56,51 @@ class StageRow:
     last_error: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class PDFCacheObjectRow:
+    pdf_sha256: str
+    size_bytes: int
+    page_count: int
+    relative_path: str
+    created_at: str
+    last_verified_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PDFSourceRevisionRow:
+    revision_id: int
+    previous_revision_id: int | None
+    source_id: str
+    issuer: str
+    product_code: str
+    document_type: str
+    source_url: str
+    source_version: str
+    source_post_id: str
+    discovery_sha256: str
+    pdf_sha256: str
+    pdf_size_bytes: int
+    page_count: int
+    relative_path: str
+    final_url: str
+    etag: str | None
+    last_modified: str | None
+    source_first_observed_at: str
+    source_last_observed_at: str
+    revision_first_observed_at: str
+    revision_last_observed_at: str
+    verified_at: str
+    superseded_at: str | None
+    superseded_by_source_id: str | None
+    source_superseded_at: str | None
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run (
   run_id TEXT PRIMARY KEY,
   started_at TEXT NOT NULL,
   finished_at TEXT,
-  status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','no_change')),
+  status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','no_change','interrupted')),
   corpus_sha256 TEXT,
   contract_sha256 TEXT,
   error TEXT
@@ -128,6 +172,133 @@ CREATE TABLE IF NOT EXISTS gc_unreferenced (
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS pdf_cache_object (
+  pdf_sha256 TEXT PRIMARY KEY CHECK(length(pdf_sha256)=64),
+  size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
+  page_count INTEGER NOT NULL CHECK(page_count > 0),
+  relative_path TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_verified_at TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS pdf_cache_source (
+  source_id TEXT PRIMARY KEY CHECK(length(source_id)=71),
+  issuer TEXT NOT NULL,
+  product_code TEXT NOT NULL,
+  document_type TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  source_version TEXT NOT NULL,
+  source_post_id TEXT NOT NULL,
+  discovery_sha256 TEXT NOT NULL CHECK(length(discovery_sha256)=64),
+  first_observed_at TEXT NOT NULL,
+  last_observed_at TEXT NOT NULL,
+  last_verified_at TEXT NOT NULL,
+  superseded_by_source_id TEXT REFERENCES pdf_cache_source(source_id),
+  superseded_at TEXT
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS pdf_cache_source_product_idx
+  ON pdf_cache_source(issuer, product_code, document_type, last_observed_at);
+CREATE INDEX IF NOT EXISTS pdf_cache_source_url_idx
+  ON pdf_cache_source(source_url, last_observed_at);
+
+CREATE TABLE IF NOT EXISTS pdf_cache_source_revision (
+  revision_id INTEGER PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES pdf_cache_source(source_id),
+  pdf_sha256 TEXT NOT NULL REFERENCES pdf_cache_object(pdf_sha256),
+  pdf_size_bytes INTEGER NOT NULL CHECK(pdf_size_bytes > 0),
+  page_count INTEGER NOT NULL CHECK(page_count > 0),
+  final_url TEXT NOT NULL,
+  etag TEXT,
+  last_modified TEXT,
+  first_observed_at TEXT NOT NULL,
+  last_observed_at TEXT NOT NULL,
+  verified_at TEXT NOT NULL,
+  superseded_at TEXT,
+  previous_revision_id INTEGER REFERENCES pdf_cache_source_revision(revision_id)
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS pdf_cache_source_revision_active_idx
+  ON pdf_cache_source_revision(source_id) WHERE superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS pdf_cache_source_revision_history_idx
+  ON pdf_cache_source_revision(source_id, revision_id);
+"""
+
+
+_RUN_SCHEMA = """
+CREATE TABLE run (
+  run_id TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','no_change','interrupted')),
+  corpus_sha256 TEXT,
+  contract_sha256 TEXT,
+  error TEXT
+) STRICT
+"""
+
+
+def _utc_iso(value: datetime | None = None) -> str:
+    timestamp = value or _now()
+    if timestamp.tzinfo is None:
+        raise ValueError("cache timestamps must be timezone-aware")
+    return timestamp.astimezone(UTC).isoformat()
+
+
+def _required_text(value: str, *, field: str, maximum: int = 4096) -> str:
+    if not value or value != value.strip() or len(value) > maximum or "\x00" in value:
+        raise ValueError(f"{field} must be non-empty, trimmed, and bounded")
+    return value
+
+
+def _optional_header(value: str | None, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 2048
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field} must be a bounded single-line value")
+    return value
+
+
+def _bounded_text(value: str, *, field: str, maximum: int = 4096) -> str:
+    if value != value.strip() or len(value) > maximum or "\x00" in value:
+        raise ValueError(f"{field} must be trimmed and bounded")
+    return value
+
+
+_PDF_REVISION_SELECT = """
+SELECT
+  r.revision_id,
+  r.previous_revision_id,
+  s.source_id,
+  s.issuer,
+  s.product_code,
+  s.document_type,
+  s.source_url,
+  s.source_version,
+  s.source_post_id,
+  s.discovery_sha256,
+  r.pdf_sha256,
+  r.pdf_size_bytes,
+  r.page_count,
+  o.relative_path,
+  r.final_url,
+  r.etag,
+  r.last_modified,
+  s.first_observed_at AS source_first_observed_at,
+  s.last_observed_at AS source_last_observed_at,
+  r.first_observed_at AS revision_first_observed_at,
+  r.last_observed_at AS revision_last_observed_at,
+  r.verified_at,
+  r.superseded_at,
+  s.superseded_by_source_id,
+  s.superseded_at AS source_superseded_at
+FROM pdf_cache_source_revision r
+JOIN pdf_cache_source s ON s.source_id=r.source_id
+JOIN pdf_cache_object o ON o.pdf_sha256=r.pdf_sha256
 """
 
 
@@ -139,9 +310,46 @@ class WorkerState:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
-        self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=30000")
+        # Keep foreign-key rewriting disabled while upgrading the v1.0.8 run
+        # CHECK constraint.  ``legacy_alter_table`` preserves every existing
+        # child table's reference to ``run`` during the table replacement.
+        self.connection.execute("PRAGMA foreign_keys=OFF")
         self.connection.executescript(SCHEMA)
+        self._migrate_run_status_constraint()
+        self.connection.execute("PRAGMA foreign_keys=ON")
+        violation = self.connection.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            self.connection.close()
+            raise RuntimeError("worker state failed its foreign-key integrity check")
+
+    def _migrate_run_status_constraint(self) -> None:
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='run'"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("worker state run table was not created")
+        existing_sql = str(row["sql"])
+        if "'interrupted'" in existing_sql:
+            return
+        self.connection.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("ALTER TABLE run RENAME TO run_v108_status_migration")
+            self.connection.execute(_RUN_SCHEMA)
+            self.connection.execute(
+                """INSERT INTO run
+                   (run_id,started_at,finished_at,status,corpus_sha256,contract_sha256,error)
+                   SELECT run_id,started_at,finished_at,status,corpus_sha256,contract_sha256,error
+                   FROM run_v108_status_migration"""
+            )
+            self.connection.execute("DROP TABLE run_v108_status_migration")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        finally:
+            self.connection.execute("PRAGMA legacy_alter_table=OFF")
 
     def close(self) -> None:
         self.connection.close()
@@ -171,6 +379,39 @@ class WorkerState:
                 (identifier, _now().isoformat()),
             )
         return identifier
+
+    def mark_stale_running_runs_interrupted(
+        self,
+        *,
+        exclude_run_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Atomically terminalize runs left ``running`` by an earlier process.
+
+        The optional exclusion makes the method safe to call after a new run
+        has already been allocated.  Returning the affected IDs gives callers
+        an auditable result without requiring another racy query.
+        """
+
+        now = _now().isoformat()
+        with self.transaction() as connection:
+            if exclude_run_id is None:
+                rows = connection.execute(
+                    "SELECT run_id FROM run WHERE status='running' ORDER BY started_at,run_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT run_id FROM run
+                       WHERE status='running' AND run_id<>? ORDER BY started_at,run_id""",
+                    (exclude_run_id,),
+                ).fetchall()
+            identifiers = tuple(str(row["run_id"]) for row in rows)
+            if identifiers:
+                connection.executemany(
+                    """UPDATE run SET status='interrupted',finished_at=?,error=?
+                       WHERE run_id=? AND status='running'""",
+                    ((now, _INTERRUPTED_ERROR[:4000], run_id) for run_id in identifiers),
+                )
+        return identifiers
 
     def assert_resumable(self, run_id: str) -> None:
         row = self.connection.execute("SELECT status FROM run WHERE run_id=?", (run_id,)).fetchone()
@@ -215,6 +456,26 @@ class WorkerState:
             "UPDATE run SET status=?,finished_at=?,corpus_sha256=?,contract_sha256=?,error=? WHERE run_id=?",
             (status, _now().isoformat(), corpus_sha256, contract_sha256, error, run_id),
         )
+
+    def finish_run_if_running(
+        self,
+        run_id: str,
+        status: RunStatus,
+        *,
+        corpus_sha256: str | None = None,
+        contract_sha256: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Finish an active run without overwriting an existing terminal truth."""
+
+        if status == "running":
+            raise ValueError("finish_run_if_running cannot leave a run running")
+        cursor = self.connection.execute(
+            """UPDATE run SET status=?,finished_at=?,corpus_sha256=?,contract_sha256=?,error=?
+               WHERE run_id=? AND status='running'""",
+            (status, _now().isoformat(), corpus_sha256, contract_sha256, error, run_id),
+        )
+        return cursor.rowcount == 1
 
     def record_snapshot(
         self,
@@ -480,7 +741,7 @@ class WorkerState:
         ).fetchone()
         return None if row is None else int(row["record_count"])
 
-    def retained_publication_run_ids(self, *, limit: int = 3) -> tuple[str, ...]:
+    def retained_publication_run_ids(self, *, limit: int = 2) -> tuple[str, ...]:
         if limit < 1:
             raise ValueError("publication retention limit must be positive")
         rows = self.connection.execute(
@@ -496,15 +757,339 @@ class WorkerState:
         ).fetchall()
         return tuple(str(row["run_id"]) for row in rows)
 
-    def prunable_incomplete_run_ids(self, *, keep: int = 10) -> tuple[str, ...]:
+    def prunable_incomplete_run_ids(self, *, keep: int = 2) -> tuple[str, ...]:
         if keep < 1:
             raise ValueError("incomplete run retention must be positive")
         rows = self.connection.execute(
-            """SELECT run_id FROM run WHERE status IN ('failed','running')
+            """SELECT run_id FROM run WHERE status IN ('failed','running','interrupted')
                ORDER BY started_at DESC,run_id DESC LIMIT -1 OFFSET ?""",
             (keep,),
         ).fetchall()
         return tuple(str(row["run_id"]) for row in rows)
+
+    def record_pdf_cache_object(
+        self,
+        *,
+        pdf_sha256: str,
+        size_bytes: int,
+        page_count: int,
+        relative_path: str,
+        verified_at: datetime | None = None,
+    ) -> PDFCacheObjectRow:
+        if not _SHA256.fullmatch(pdf_sha256):
+            raise ValueError("PDF cache object sha256 is invalid")
+        if size_bytes < 1 or page_count < 1:
+            raise ValueError("PDF cache object size and page count must be positive")
+        expected_path = f"objects/sha256/{pdf_sha256[:2]}/{pdf_sha256}"
+        if relative_path != expected_path:
+            raise ValueError("PDF cache object path does not match its content identity")
+        timestamp = _utc_iso(verified_at)
+        with self.transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM pdf_cache_object WHERE pdf_sha256=?", (pdf_sha256,)
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """INSERT INTO pdf_cache_object
+                       (pdf_sha256,size_bytes,page_count,relative_path,created_at,last_verified_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    (pdf_sha256, size_bytes, page_count, relative_path, timestamp, timestamp),
+                )
+            else:
+                identity = (
+                    int(existing["size_bytes"]),
+                    int(existing["page_count"]),
+                    str(existing["relative_path"]),
+                )
+                if identity != (size_bytes, page_count, relative_path):
+                    raise RuntimeError("PDF cache object identity conflicts with durable state")
+                connection.execute(
+                    """UPDATE pdf_cache_object
+                       SET last_verified_at=CASE
+                         WHEN last_verified_at < ? THEN ? ELSE last_verified_at END
+                       WHERE pdf_sha256=?""",
+                    (timestamp, timestamp, pdf_sha256),
+                )
+        row = self.connection.execute(
+            "SELECT * FROM pdf_cache_object WHERE pdf_sha256=?", (pdf_sha256,)
+        ).fetchone()
+        if row is None:  # pragma: no cover - guarded by the transaction above
+            raise RuntimeError("PDF cache object was not persisted")
+        return PDFCacheObjectRow(**dict(row))
+
+    def pdf_cache_object(self, pdf_sha256: str) -> PDFCacheObjectRow | None:
+        if not _SHA256.fullmatch(pdf_sha256):
+            raise ValueError("PDF cache object sha256 is invalid")
+        row = self.connection.execute(
+            "SELECT * FROM pdf_cache_object WHERE pdf_sha256=?", (pdf_sha256,)
+        ).fetchone()
+        return None if row is None else PDFCacheObjectRow(**dict(row))
+
+    def bind_pdf_cache_source(
+        self,
+        *,
+        source_id: str,
+        issuer: str,
+        product_code: str,
+        document_type: str,
+        source_url: str,
+        source_version: str,
+        source_post_id: str,
+        discovery_sha256: str,
+        pdf_sha256: str,
+        pdf_size_bytes: int,
+        page_count: int,
+        final_url: str,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        replace_validators: bool = False,
+        observed_at: datetime | None = None,
+        verified_at: datetime | None = None,
+    ) -> PDFSourceRevisionRow:
+        if not _SOURCE_ID.fullmatch(source_id):
+            raise ValueError("PDF cache source_id is invalid")
+        if not _SHA256.fullmatch(discovery_sha256) or source_id != f"source_{discovery_sha256}":
+            raise ValueError("PDF cache discovery identity does not match source_id")
+        if not _SHA256.fullmatch(pdf_sha256):
+            raise ValueError("PDF cache PDF sha256 is invalid")
+        if pdf_size_bytes < 1 or page_count < 1:
+            raise ValueError("PDF cache PDF size and page count must be positive")
+        issuer = _required_text(issuer, field="issuer", maximum=64)
+        product_code = _required_text(product_code, field="product_code", maximum=512)
+        document_type = _required_text(document_type, field="document_type", maximum=128)
+        source_version = _required_text(source_version, field="source_version", maximum=512)
+        source_post_id = _bounded_text(source_post_id, field="source_post_id", maximum=512)
+        source_url = _required_text(source_url, field="source_url")
+        final_url = _required_text(final_url, field="final_url")
+        if not source_url.startswith("https://") or not final_url.startswith("https://"):
+            raise ValueError("PDF cache source URLs must use HTTPS")
+        etag = _optional_header(etag, field="etag")
+        last_modified = _optional_header(last_modified, field="last_modified")
+        observed = _utc_iso(observed_at)
+        verified = _utc_iso(verified_at)
+        static_identity = (
+            issuer,
+            product_code,
+            document_type,
+            source_url,
+            source_version,
+            source_post_id,
+            discovery_sha256,
+        )
+
+        with self.transaction() as connection:
+            cache_object = connection.execute(
+                "SELECT size_bytes,page_count FROM pdf_cache_object WHERE pdf_sha256=?",
+                (pdf_sha256,),
+            ).fetchone()
+            if cache_object is None:
+                raise KeyError("PDF cache object must be recorded before source binding")
+            if (int(cache_object["size_bytes"]), int(cache_object["page_count"])) != (
+                pdf_size_bytes,
+                page_count,
+            ):
+                raise RuntimeError("PDF source binding conflicts with its cache object")
+
+            source = connection.execute(
+                "SELECT * FROM pdf_cache_source WHERE source_id=?", (source_id,)
+            ).fetchone()
+            if source is None:
+                connection.execute(
+                    """INSERT INTO pdf_cache_source
+                       (source_id,issuer,product_code,document_type,source_url,source_version,
+                        source_post_id,discovery_sha256,first_observed_at,last_observed_at,
+                        last_verified_at,superseded_by_source_id,superseded_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)""",
+                    (
+                        source_id,
+                        *static_identity,
+                        observed,
+                        observed,
+                        verified,
+                    ),
+                )
+            else:
+                persisted_identity = tuple(
+                    str(source[field])
+                    for field in (
+                        "issuer",
+                        "product_code",
+                        "document_type",
+                        "source_url",
+                        "source_version",
+                        "source_post_id",
+                        "discovery_sha256",
+                    )
+                )
+                if persisted_identity != static_identity:
+                    raise RuntimeError("PDF cache source identity conflicts with durable state")
+
+            current = connection.execute(
+                """SELECT * FROM pdf_cache_source_revision
+                   WHERE source_id=? AND superseded_at IS NULL""",
+                (source_id,),
+            ).fetchone()
+            if current is not None and str(current["pdf_sha256"]) == pdf_sha256:
+                if (int(current["pdf_size_bytes"]), int(current["page_count"])) != (
+                    pdf_size_bytes,
+                    page_count,
+                ):
+                    raise RuntimeError("PDF cache revision identity conflicts with durable state")
+                revision_id = int(current["revision_id"])
+                if replace_validators:
+                    connection.execute(
+                        """UPDATE pdf_cache_source_revision
+                           SET final_url=?,etag=?,last_modified=?,
+                               last_observed_at=CASE
+                                 WHEN last_observed_at < ? THEN ? ELSE last_observed_at END,
+                               verified_at=CASE WHEN verified_at < ? THEN ? ELSE verified_at END
+                           WHERE revision_id=?""",
+                        (
+                            final_url,
+                            etag,
+                            last_modified,
+                            observed,
+                            observed,
+                            verified,
+                            verified,
+                            revision_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE pdf_cache_source_revision
+                           SET final_url=?,etag=COALESCE(?,etag),
+                               last_modified=COALESCE(?,last_modified),
+                               last_observed_at=CASE
+                                 WHEN last_observed_at < ? THEN ? ELSE last_observed_at END,
+                               verified_at=CASE WHEN verified_at < ? THEN ? ELSE verified_at END
+                           WHERE revision_id=?""",
+                        (
+                            final_url,
+                            etag,
+                            last_modified,
+                            observed,
+                            observed,
+                            verified,
+                            verified,
+                            revision_id,
+                        ),
+                    )
+            else:
+                previous_revision_id = None if current is None else int(current["revision_id"])
+                if current is not None:
+                    connection.execute(
+                        """UPDATE pdf_cache_source_revision SET superseded_at=?
+                           WHERE revision_id=? AND superseded_at IS NULL""",
+                        (observed, previous_revision_id),
+                    )
+                cursor = connection.execute(
+                    """INSERT INTO pdf_cache_source_revision
+                       (source_id,pdf_sha256,pdf_size_bytes,page_count,final_url,etag,last_modified,
+                        first_observed_at,last_observed_at,verified_at,superseded_at,
+                        previous_revision_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)""",
+                    (
+                        source_id,
+                        pdf_sha256,
+                        pdf_size_bytes,
+                        page_count,
+                        final_url,
+                        etag,
+                        last_modified,
+                        observed,
+                        observed,
+                        verified,
+                        previous_revision_id,
+                    ),
+                )
+                if cursor.lastrowid is None:  # pragma: no cover - SQLite INSERT invariant
+                    raise RuntimeError("PDF cache revision did not receive an identity")
+                revision_id = cursor.lastrowid
+
+            # A newly observed discovery identity supersedes an older source
+            # for the same logical product/document.  The older row and all of
+            # its byte revisions remain available as history and reusable CAS.
+            connection.execute(
+                """UPDATE pdf_cache_source
+                   SET superseded_by_source_id=?,superseded_at=?
+                   WHERE issuer=? AND product_code=? AND document_type=?
+                     AND source_id<>? AND superseded_at IS NULL""",
+                (source_id, observed, issuer, product_code, document_type, source_id),
+            )
+            connection.execute(
+                """UPDATE pdf_cache_source
+                   SET last_observed_at=CASE
+                         WHEN last_observed_at < ? THEN ? ELSE last_observed_at END,
+                       last_verified_at=CASE
+                         WHEN last_verified_at < ? THEN ? ELSE last_verified_at END,
+                       superseded_by_source_id=NULL,superseded_at=NULL
+                   WHERE source_id=?""",
+                (observed, observed, verified, verified, source_id),
+            )
+            connection.execute(
+                """UPDATE pdf_cache_object
+                   SET last_verified_at=CASE
+                     WHEN last_verified_at < ? THEN ? ELSE last_verified_at END
+                   WHERE pdf_sha256=?""",
+                (verified, verified, pdf_sha256),
+            )
+
+        binding = self.pdf_cache_source_binding(source_id)
+        if binding is None or binding.revision_id != revision_id:  # pragma: no cover
+            raise RuntimeError("PDF cache source binding was not persisted")
+        return binding
+
+    def pdf_cache_source_binding(self, source_id: str) -> PDFSourceRevisionRow | None:
+        if not _SOURCE_ID.fullmatch(source_id):
+            raise ValueError("PDF cache source_id is invalid")
+        row = self.connection.execute(
+            _PDF_REVISION_SELECT
+            + " WHERE s.source_id=? AND r.superseded_at IS NULL ORDER BY r.revision_id DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        return None if row is None else PDFSourceRevisionRow(**dict(row))
+
+    def pdf_cache_source_history(self, source_id: str) -> tuple[PDFSourceRevisionRow, ...]:
+        if not _SOURCE_ID.fullmatch(source_id):
+            raise ValueError("PDF cache source_id is invalid")
+        rows = self.connection.execute(
+            _PDF_REVISION_SELECT + " WHERE s.source_id=? ORDER BY r.revision_id",
+            (source_id,),
+        ).fetchall()
+        return tuple(PDFSourceRevisionRow(**dict(row)) for row in rows)
+
+    def mark_pdf_cache_verified(
+        self,
+        *,
+        source_id: str,
+        pdf_sha256: str,
+        verified_at: datetime | None = None,
+    ) -> bool:
+        if not _SOURCE_ID.fullmatch(source_id) or not _SHA256.fullmatch(pdf_sha256):
+            raise ValueError("PDF cache verification identity is invalid")
+        timestamp = _utc_iso(verified_at)
+        with self.transaction() as connection:
+            revision = connection.execute(
+                """SELECT revision_id FROM pdf_cache_source_revision
+                   WHERE source_id=? AND pdf_sha256=? AND superseded_at IS NULL""",
+                (source_id, pdf_sha256),
+            ).fetchone()
+            if revision is None:
+                return False
+            connection.execute(
+                "UPDATE pdf_cache_source_revision SET verified_at=? WHERE revision_id=?",
+                (timestamp, int(revision["revision_id"])),
+            )
+            connection.execute(
+                "UPDATE pdf_cache_source SET last_verified_at=? WHERE source_id=?",
+                (timestamp, source_id),
+            )
+            connection.execute(
+                "UPDATE pdf_cache_object SET last_verified_at=? WHERE pdf_sha256=?",
+                (timestamp, pdf_sha256),
+            )
+        return True
 
     def get_embedding(self, cache_key: str) -> bytes | None:
         row = self.connection.execute(

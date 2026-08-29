@@ -81,7 +81,7 @@ def test_exporter_builds_vacuumed_exact_schema_and_normalized_vectors(tmp_path: 
     connection = sqlite3.connect(f"{target.as_uri()}?mode=ro&immutable=1", uri=True)
     try:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
-        assert metadata["schema_id"] == "cardrag.serving-db.v3"
+        assert metadata["schema_id"] == "cardrag.serving-db.v4"
         assert metadata["corpus_sha256"] == "b" * 64
         assert metadata["contract_sha256"] == "c" * 64
         assert metadata["unsupported_document_count"] == "0"

@@ -26,6 +26,13 @@ def validate_identifier(value: str, *, label: str = "identifier") -> str:
     return value
 
 
+def channel_pointer_path(channel: str = "stable") -> PurePosixPath:
+    """Return the traversal-safe pointer path for one publication channel."""
+
+    value = validate_identifier(channel, label="channel")
+    return PurePosixPath("v1", "channels", f"{value}.json")
+
+
 def validate_relative_path(value: str | PurePosixPath) -> PurePosixPath:
     """Return a normalized relative path, rejecting encoded or literal traversal."""
 

@@ -54,6 +54,24 @@ class UnsupportedProduct(StrictModel):
     protected_source_size_bytes: int = Field(ge=1)
 
 
+class OCRFailedProduct(StrictModel):
+    issuer: Identifier
+    product_code: Identifier
+    name: str = Field(min_length=1, max_length=1_000)
+    availability: Literal["ocr_failed"] = "ocr_failed"
+    document: Document
+    reason_code: Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,64}$")]
+    reason: str = Field(min_length=1, max_length=256)
+    attempts: int = Field(ge=1)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_one_line(cls, value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("OCR failure reason must be one line")
+        return value
+
+
 class SourcePage(StrictModel):
     document_id: Identifier
     page: int = Field(ge=1)
@@ -115,7 +133,11 @@ class SourcePdfDescriptor(StrictModel):
 
 
 class ServingMetadata(StrictModel):
-    schema_id: Literal["cardrag.serving-db.v2", "cardrag.serving-db.v3"]
+    schema_id: Literal[
+        "cardrag.serving-db.v2",
+        "cardrag.serving-db.v3",
+        "cardrag.serving-db.v4",
+    ]
     generation_id: Identifier
     corpus_sha256: Sha256Hex
     contract_sha256: Sha256Hex
@@ -126,6 +148,8 @@ class ServingMetadata(StrictModel):
     embedding_count: int = Field(ge=0)
     unsupported_document_count: int = Field(ge=0)
     unsupported_documents_sha256: Sha256Hex
+    ocr_failed_document_count: int = Field(ge=0)
+    ocr_failed_documents_sha256: Sha256Hex
 
 
 class SearchRequest(StrictModel):

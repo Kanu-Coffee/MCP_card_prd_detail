@@ -10,6 +10,7 @@ from cardrag_worker.contracts import DownloadRequest
 from cardrag_worker.downloader import (
     DownloadPolicy,
     DownloadSecurityError,
+    PDFNotModified,
     PDFValidationError,
     ProtectedDocumentError,
     SecurePDFDownloader,
@@ -33,7 +34,12 @@ async def test_downloader_follows_allowed_redirect_and_converts_post_to_get(tmp_
             return httpx.Response(302, headers={"location": "/current.pdf"}, request=request)
         return httpx.Response(
             200,
-            headers={"content-type": "application/pdf", "content-length": str(len(payload))},
+            headers={
+                "content-type": "application/pdf",
+                "content-length": str(len(payload)),
+                "etag": '"revision-7"',
+                "last-modified": "Fri, 28 Aug 2026 01:02:03 GMT",
+            },
             content=payload,
             request=request,
         )
@@ -47,12 +53,70 @@ async def test_downloader_follows_allowed_redirect_and_converts_post_to_get(tmp_
             tmp_path / "result.pdf",
         )
     assert result.page_count == 1
+    assert result.final_url == "https://cards.example/current.pdf"
+    assert result.etag == '"revision-7"'
+    assert result.last_modified == "Fri, 28 Aug 2026 01:02:03 GMT"
     assert [(method, url) for method, url, _ in requests] == [
         ("POST", "https://cards.example/prepare"),
         ("GET", "https://cards.example/current.pdf"),
     ]
     assert requests[0][2] == b"id=7"
     assert requests[1][2] == b""
+
+
+@pytest.mark.asyncio
+async def test_downloader_surfaces_conditional_not_modified_without_creating_a_file(
+    tmp_path: Path,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["if-none-match"] == '"revision-7"'
+        return httpx.Response(
+            304,
+            headers={
+                "etag": '"revision-7"',
+                "last-modified": "Fri, 28 Aug 2026 01:02:03 GMT",
+            },
+            request=request,
+        )
+
+    destination = tmp_path / "result.pdf"
+    downloader = SecurePDFDownloader(
+        DownloadPolicy(allowed_hosts=frozenset({"cards.example"})),
+        resolver=public_ip,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PDFNotModified) as captured:
+            await downloader.download(
+                client,
+                DownloadRequest(
+                    url="https://cards.example/current.pdf",
+                    headers={"If-None-Match": '"revision-7"'},
+                ),
+                destination,
+            )
+
+    assert captured.value.final_url == "https://cards.example/current.pdf"
+    assert captured.value.etag == '"revision-7"'
+    assert captured.value.last_modified == "Fri, 28 Aug 2026 01:02:03 GMT"
+    assert not destination.exists()
+
+
+@pytest.mark.asyncio
+async def test_downloader_rejects_unexpected_unconditional_not_modified(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(304, request=request)
+
+    downloader = SecurePDFDownloader(
+        DownloadPolicy(allowed_hosts=frozenset({"cards.example"})),
+        resolver=public_ip,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PDFValidationError, match="without a conditional request"):
+            await downloader.download(
+                client,
+                DownloadRequest(url="https://cards.example/current.pdf"),
+                tmp_path / "result.pdf",
+            )
 
 
 @pytest.mark.asyncio

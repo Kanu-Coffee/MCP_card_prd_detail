@@ -11,6 +11,7 @@ from cardrag_core import (
     GenerationPaths,
     canonical_json_bytes,
     canonical_sha256,
+    channel_pointer_path,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -67,6 +68,10 @@ def test_paths_match_v1_contract_and_reject_traversal() -> None:
     )
     paths = GenerationPaths.for_generation("gen-20260825")
     assert paths.serving_database == generation_database_path(paths.generation_id)
+    assert channel_pointer_path().as_posix() == "v1/channels/stable.json"
+    assert channel_pointer_path("candidate-v1.0.9").as_posix() == ("v1/channels/candidate-v1.0.9.json")
+    with pytest.raises(ValueError, match="channel"):
+        channel_pointer_path("../candidate")
     for unsafe in ("../secret", "/absolute", "v1/%2e%2e/file", "v1\\file", "v1//file"):
         with pytest.raises(ValueError):
             validate_relative_path(unsafe)

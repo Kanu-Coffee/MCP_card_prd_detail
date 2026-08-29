@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
@@ -34,7 +35,7 @@ from cardrag_core import (
     verify_ocr_bytes,
 )
 
-from cardrag_worker.gc import GCError, collect_garbage
+from cardrag_worker.gc import GCError, GCPartialFailure, collect_garbage
 from cardrag_worker.state import WorkerState
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
@@ -47,12 +48,19 @@ class FakeWebDAV:
         self.deleted: list[str] = []
         self.stable_reads = 0
         self.replace_stable_after_first_read = False
+        self.replace_stable_after_reads: int | None = None
+        self.delete_failures: dict[str, Exception] = {}
 
     async def get_bytes(self, path: str | PurePosixPath, *, max_bytes: int | None = None) -> bytes | None:
         key = str(path)
         if key == "v1/channels/stable.json":
             self.stable_reads += 1
-            if self.replace_stable_after_first_read and self.stable_reads > 1:
+            if (
+                self.replace_stable_after_first_read
+                and self.stable_reads > 1
+                or self.replace_stable_after_reads is not None
+                and self.stable_reads > self.replace_stable_after_reads
+            ):
                 return b'{"changed":true}'
         return self.objects.get(key)
 
@@ -63,7 +71,11 @@ class FakeWebDAV:
         return self.children[key]
 
     async def delete(self, path: str | PurePosixPath, *, missing_ok: bool = False) -> None:
-        self.deleted.append(str(path))
+        key = str(path)
+        failure = self.delete_failures.get(key)
+        if failure is not None:
+            raise failure
+        self.deleted.append(key)
 
 
 def cache_control(*, cache_epoch: int, body: bytes) -> tuple[str, OCRArtifactManifest, OCRReady, ArtifactRef]:
@@ -203,6 +215,20 @@ def build_remote() -> tuple[FakeWebDAV, str, str, str]:
     return webdav, active_key, inactive_key, unused_sha
 
 
+def add_incoming_temp_leaves(webdav: FakeWebDAV) -> tuple[PurePosixPath, PurePosixPath]:
+    root = PurePosixPath("v1", ".incoming")
+    channels = root / "channels"
+    publish = root / "publish"
+    channel_leaf = channels / ("1" * 32 + ".tmp")
+    publish_leaf = publish / ("2" * 32 + ".tmp")
+    webdav.children[root.as_posix()] = (publish, channels)
+    webdav.children[channels.as_posix()] = (channel_leaf,)
+    webdav.children[publish.as_posix()] = (publish_leaf,)
+    webdav.children[channel_leaf.as_posix()] = ()
+    webdav.children[publish_leaf.as_posix()] = ()
+    return channel_leaf, publish_leaf
+
+
 @pytest.mark.asyncio
 async def test_gc_marks_exact_cache_key_and_sweeps_generation_cache_then_cas(tmp_path: Path) -> None:
     webdav, active_key, inactive_key, unused_sha = build_remote()
@@ -221,6 +247,105 @@ async def test_gc_marks_exact_cache_key_and_sweeps_generation_cache_then_cas(tmp
     cache_index = next(index for index, path in enumerate(second.deleted) if path.startswith("v1/ocr-cache"))
     object_index = next(index for index, path in enumerate(second.deleted) if path.startswith("v1/objects"))
     assert cache_index < object_index
+
+
+@pytest.mark.asyncio
+async def test_gc_incoming_temp_leaves_observe_grace_and_pointer_fence(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    incoming = add_incoming_temp_leaves(webdav)
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        first = await collect_garbage(webdav=webdav, state=state, apply=True, now=NOW)
+        assert set(path.as_posix() for path in incoming).issubset(first.candidates)
+        assert not set(path.as_posix() for path in incoming).intersection(first.deleted)
+
+        second = await collect_garbage(
+            webdav=webdav,
+            state=state,
+            apply=True,
+            now=NOW + timedelta(days=31),
+        )
+
+    assert second.deleted[:2] == tuple(path.as_posix() for path in incoming)
+    assert webdav.deleted[:2] == list(second.deleted[:2])
+
+
+@pytest.mark.asyncio
+async def test_gc_incoming_path_ambiguity_fails_before_any_delete(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        await collect_garbage(webdav=webdav, state=state, now=NOW)
+        root = PurePosixPath("v1", ".incoming")
+        publish = root / "publish"
+        webdav.children[root.as_posix()] = (publish,)
+        webdav.children[publish.as_posix()] = (publish / "not-a-publisher-uuid.tmp",)
+
+        with pytest.raises(GCError, match="unexpected incoming temporary path"):
+            await collect_garbage(
+                webdav=webdav,
+                state=state,
+                apply=True,
+                now=NOW + timedelta(days=31),
+            )
+
+    assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_gc_incoming_collection_shape_fails_closed(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    leaf, _ = add_incoming_temp_leaves(webdav)
+    webdav.children[leaf.as_posix()] = (leaf / "nested",)
+
+    with (
+        WorkerState(tmp_path / "state.sqlite3") as state,
+        pytest.raises(GCError, match="not a leaf"),
+    ):
+        await collect_garbage(webdav=webdav, state=state, apply=True, now=NOW)
+
+    assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_gc_ignores_known_nested_object_upload_namespace(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    incoming = add_incoming_temp_leaves(webdav)
+    root = PurePosixPath("v1", ".incoming")
+    objects = root / "objects"
+    webdav.children[root.as_posix()] = (*webdav.children[root.as_posix()], objects)
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        result = await collect_garbage(webdav=webdav, state=state, now=NOW)
+
+    assert set(path.as_posix() for path in incoming).issubset(result.candidates)
+    assert objects.as_posix() not in result.candidates
+
+
+@pytest.mark.asyncio
+async def test_gc_partial_delete_failure_reports_only_known_safe_count(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    incoming = add_incoming_temp_leaves(webdav)
+    raw_sentinel = "RAW_DELETE_URL_TOKEN_SECRET"
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        await collect_garbage(webdav=webdav, state=state, now=NOW)
+        webdav.delete_failures[incoming[1].as_posix()] = RuntimeError(raw_sentinel)
+
+        with pytest.raises(GCPartialFailure) as captured:
+            await collect_garbage(
+                webdav=webdav,
+                state=state,
+                apply=True,
+                now=NOW + timedelta(days=31),
+            )
+
+    error = captured.value
+    assert error.deleted_count == 1
+    assert error.reason_code == "remote_gc_partial_failure"
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert raw_sentinel not in str(error)
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert raw_sentinel not in rendered
+    assert webdav.deleted == [incoming[0].as_posix()]
 
 
 @pytest.mark.asyncio
@@ -341,6 +466,27 @@ async def test_gc_pointer_fence_deletes_nothing(tmp_path: Path) -> None:
                 now=NOW + timedelta(days=31),
             )
     assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_gc_pointer_change_after_one_delete_raises_safe_partial_count(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        await collect_garbage(webdav=webdav, state=state, now=NOW)
+        webdav.stable_reads = 0
+        webdav.replace_stable_after_reads = 3
+        with pytest.raises(GCPartialFailure) as captured:
+            await collect_garbage(
+                webdav=webdav,
+                state=state,
+                apply=True,
+                now=NOW + timedelta(days=31),
+            )
+
+    assert captured.value.deleted_count == 1
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert webdav.deleted == ["v1/generations/g-old"]
 
 
 @pytest.mark.asyncio

@@ -144,10 +144,10 @@ class GenerationStore:
         *,
         maximum_vector_bytes: int,
         maximum_pdf_bytes: int = 100 * 1024 * 1024,
-        retention: int = 3,
+        retention: int = 2,
     ) -> None:
-        if retention < 3:
-            raise ValueError("local retention must be at least three")
+        if retention < 2:
+            raise ValueError("local retention must be at least two")
         self.root = root.resolve()
         self.generations = self.root / "generations"
         self.objects = self.root / "objects"
@@ -280,6 +280,19 @@ class GenerationStore:
                         str(row[0])
                         for row in connection.execute("SELECT pdf_sha256 FROM documents")
                     )
+                    if (
+                        connection.execute(
+                            "SELECT 1 FROM sqlite_schema "
+                            "WHERE type='table' AND name='ocr_failed_products'"
+                        ).fetchone()
+                        is not None
+                    ):
+                        referenced.update(
+                            str(row[0])
+                            for row in connection.execute(
+                                "SELECT pdf_sha256 FROM ocr_failed_products"
+                            )
+                        )
         except Exception:
             return
         sha_root = self.objects / "sha256"
@@ -329,7 +342,12 @@ class GenerationStore:
 
     def verify_handle_pdfs(self, handle: GenerationHandle) -> None:
         with handle.connect() as connection:
-            rows = connection.execute("SELECT * FROM documents ORDER BY document_id").fetchall()
+            sql = "SELECT * FROM documents"
+            if handle.metadata.schema_id == "cardrag.serving-db.v4":
+                sql += """ UNION ALL
+                    SELECT document_id,issuer,product_code,title,pdf_sha256,
+                           pdf_size_bytes,page_count FROM ocr_failed_products"""
+            rows = connection.execute(sql + " ORDER BY document_id").fetchall()
         for row in rows:
             self.verify_pdf_for_handle(
                 handle,

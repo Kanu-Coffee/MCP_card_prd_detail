@@ -1,0 +1,14 @@
+name: cardrag-mcp-v109-candidate
+
+services:
+  mcp:
+    environment:
+      CARDRAG_CHANNEL: candidate-v1.0.9
+      CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_CANDIDATE_WEBDAV_BASE_URL:?CARDRAG_CANDIDATE_WEBDAV_BASE_URL is required}
+      CARDRAG_MCP_PUBLIC_BASE_URL: ${CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL:?CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL is required}
+    ports: !override
+      - "${CARDRAG_CANDIDATE_MCP_BIND_ADDRESS:-127.0.0.1}:${CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18009}:8000"
+
+volumes:
+  mcp-state:
+    name: cardrag-mcp-v109-candidate-state
