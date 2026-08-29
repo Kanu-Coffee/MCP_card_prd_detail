@@ -12,8 +12,11 @@ import httpx
 import pytest
 from cardrag_core import (
     ArtifactRef,
+    DocumentAggregationBootstrap,
+    DocumentAggregationProfile,
     GenerationManifest,
     GenerationReady,
+    MaxChildAggregationDefinition,
     canonical_sha256,
     channel_pointer_path,
     generation_database_path,
@@ -25,6 +28,7 @@ from cardrag_core import (
 from helpers import pdf_bytes
 
 import cardrag_worker.pipeline as pipeline_module
+from cardrag_worker.aggregation_profile_v5 import VerifiedAggregationProfileV5
 from cardrag_worker.contracts import (
     DownloadRequest,
     IssuerSpec,
@@ -692,6 +696,48 @@ def _test_source(product_code: str) -> SourceRecord:
     )
 
 
+def _verified_aggregation_profile(
+    *,
+    embedding_profile_id: str,
+    exact_row_corpus_sha256: str,
+    generation_id: str,
+    generation_manifest_sha256: str,
+) -> VerifiedAggregationProfileV5:
+    profile = DocumentAggregationProfile(
+        schema_version="cardrag.document-aggregation-profile.v1",
+        profile_id="cardrag.document-aggregation.max-child.v1",
+        aggregation_policy="max_child",
+        aggregation_definition=MaxChildAggregationDefinition(
+            child_view_types=(
+                "CONTEXTUAL_ITEM",
+                "DETAIL",
+                "MAJOR_SECTION",
+                "RAW_ITEM",
+                "TITLE",
+            ),
+            formula="max(non-CONTRACT row score)",
+        ),
+        bootstrap=DocumentAggregationBootstrap(
+            ci=0.95,
+            method="paired-query-percentile-pcg64",
+            samples=2_000,
+            seed=1010,
+        ),
+        embedding_profile_id=embedding_profile_id,
+        exact_row_corpus_sha256=exact_row_corpus_sha256,
+        generation_id=generation_id,
+        generation_manifest_sha256=generation_manifest_sha256,
+        gold_sha256="a" * 64,
+        score_artifact_sha256="b" * 64,
+        selection_objective="ndcg_at_10",
+    )
+    return VerifiedAggregationProfileV5(
+        profile=profile,
+        profile_sha256=profile.profile_sha256,
+        artifact_sha256="c" * 64,
+    )
+
+
 @pytest.mark.asyncio
 async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
     tmp_path: Path,
@@ -971,3 +1017,140 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert sum(row[1] is not None for row in revisions) == 1
 
     assert pdf_requests == [source.source_url, source.source_url]
+
+
+@pytest.mark.asyncio
+async def test_v5_pipeline_promotes_verified_m0_profile_into_sealed_m1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [pdf_bytes()]
+    pdf_requests: list[str] = []
+    _install_pdf_http(monkeypatch, payload, pdf_requests)
+    embedding_requests: list[dict[str, Any]] = []
+    embeddings = _test_qwen_embeddings(embedding_requests)
+    source = _test_source("test-m1")
+    ocr = _OCR()
+    webdav = _FakeCandidateWebDAV()
+    webdav.fail_pointer_once = False
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        m0_pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(source)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        m0_contract_sha256 = m0_pipeline.contract_sha256
+        m0 = await m0_pipeline.run()
+        assert m0.status == "succeeded"
+        assert m0.generation_id is not None
+        m0_manifest = GenerationManifest.model_validate_json(
+            webdav.objects[generation_manifest_path(m0.generation_id).as_posix()]
+        )
+        assert m0_manifest.document_aggregation_profile is None
+        assert m0_manifest.document_aggregation_policy is None
+        assert m0_manifest.sealed_profile_sha256 is None
+        assert m0_manifest.exact_row_corpus_sha256 is None
+        m0_run = state.connection.execute(
+            "SELECT run_id FROM publish WHERE generation_id=?",
+            (m0.generation_id,),
+        ).fetchone()
+        assert m0_run is not None
+        m0_database = tmp_path / "runs" / str(m0_run[0]) / "sealed" / "index.sqlite3"
+        with sqlite3.connect(m0_database) as connection:
+            m0_metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+        assert m0_metadata["document_aggregation_status"] == "candidate_default"
+        assert m0_metadata["document_aggregation_policy"] == "max_child"
+        assert "sealed_profile_sha256" not in m0_metadata
+        exact_row_corpus_sha256 = m0_metadata["exact_row_corpus_sha256"]
+
+        selected = _verified_aggregation_profile(
+            embedding_profile_id=embeddings.profile.profile_id,
+            exact_row_corpus_sha256=exact_row_corpus_sha256,
+            generation_id=m0_manifest.generation_id,
+            generation_manifest_sha256=m0_manifest.manifest_sha256,
+        )
+        profile = selected.profile
+        provider_calls_after_m0 = len(embedding_requests)
+        with pytest.raises(RuntimeError, match="valid remote M0/M1 head"):
+            await pipeline_module.validate_document_aggregation_head(webdav, selected)
+
+        current_m0 = RemoteGenerationIdentity(
+            generation_id=m0_manifest.generation_id,
+            corpus_sha256=m0_manifest.corpus_sha256,
+            contract_sha256=m0_manifest.contract_sha256,
+            generation_schema="cardrag.generation.v5",
+            serving_schema="cardrag.serving-db.v5",
+        )
+        webdav.current = current_m0
+        stale = _verified_aggregation_profile(
+            embedding_profile_id=embeddings.profile.profile_id,
+            exact_row_corpus_sha256=exact_row_corpus_sha256,
+            generation_id="g-stale-evaluation",
+            generation_manifest_sha256="d" * 64,
+        )
+        with pytest.raises(RuntimeError, match="evaluated M0"):
+            await pipeline_module.validate_document_aggregation_head(webdav, stale)
+        webdav.current = replace(current_m0, corpus_sha256="e" * 64)
+        with pytest.raises(RuntimeError, match="head identity is inconsistent"):
+            await pipeline_module.validate_document_aggregation_head(webdav, selected)
+        webdav.current = current_m0
+        assert len(embedding_requests) == provider_calls_after_m0
+
+        m1_pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(source)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+            document_aggregation=selected,
+        )
+        assert m1_pipeline.contract_sha256 != m0_contract_sha256
+
+        m1 = await m1_pipeline.run()
+
+        assert m1.status == "succeeded"
+        assert m1.generation_id is not None and m1.generation_id != m0.generation_id
+        assert len(embedding_requests) == provider_calls_after_m0
+        m1_manifest = GenerationManifest.model_validate_json(
+            webdav.objects[generation_manifest_path(m1.generation_id).as_posix()]
+        )
+        assert m1_manifest.previous_generation_id == m0.generation_id
+        assert m1_manifest.document_aggregation_profile == profile
+        assert m1_manifest.document_aggregation_policy == "max_child"
+        assert m1_manifest.sealed_profile_sha256 == profile.profile_sha256
+        assert m1_manifest.exact_row_corpus_sha256 == exact_row_corpus_sha256
+        assert m1_manifest.retrieval_policy_sha256 == canonical_sha256(m1_pipeline.v5_retrieval_policy)
+        m1_run = state.connection.execute(
+            "SELECT run_id FROM publish WHERE generation_id=?",
+            (m1.generation_id,),
+        ).fetchone()
+        assert m1_run is not None
+        m1_database = tmp_path / "runs" / str(m1_run[0]) / "sealed" / "index.sqlite3"
+        with sqlite3.connect(m1_database) as connection:
+            m1_metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+        assert m1_metadata["document_aggregation_status"] == "sealed"
+        assert m1_metadata["document_aggregation_policy"] == "max_child"
+        assert m1_metadata["sealed_profile_sha256"] == profile.profile_sha256
+        assert m1_metadata["exact_row_corpus_sha256"] == exact_row_corpus_sha256
+        assert m1_metadata["aggregation_profile_artifact_sha256"] == "c" * 64
+        webdav.current = RemoteGenerationIdentity(
+            generation_id=m1_manifest.generation_id,
+            corpus_sha256=m1_manifest.corpus_sha256,
+            contract_sha256=m1_manifest.contract_sha256,
+            generation_schema="cardrag.generation.v5",
+            serving_schema="cardrag.serving-db.v5",
+        )
+        assert await m1_pipeline._validated_document_aggregation_head() == m1_manifest  # noqa: SLF001
+
+    assert pdf_requests == [source.source_url]

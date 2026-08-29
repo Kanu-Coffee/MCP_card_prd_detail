@@ -53,6 +53,7 @@ from cardrag_core import (
     generation_manifest_path,
     generation_vectors_path,
     object_path,
+    sealed_v5_retrieval_policy,
     sha256_bytes,
     sha256_file,
 )
@@ -60,6 +61,7 @@ from cardrag_core import (
     IssuerParserProfile as ManifestIssuerParserProfile,
 )
 
+from .aggregation_profile_v5 import VerifiedAggregationProfileV5
 from .async_utils import to_thread_fenced
 from .cache_seed_v109 import load_v109_seed_pins
 from .contracts import (
@@ -151,6 +153,7 @@ CHUNK_CONTRACT = "cardrag.page-window.v1"
 GENERATION_SCHEMA_ID_V5 = "cardrag.generation.v5"
 SERVING_SCHEMA_ID_V5 = "cardrag.serving-db.v5"
 V5_VIEW_MAXIMUM_CHARACTERS = 131_072
+MAX_GENERATION_MANIFEST_BYTES = 32 * 1024 * 1024
 STRUCTURE_FALLBACK_LEDGER_SCHEMA = "cardrag.structure-fallback-ledger.v1"
 STRUCTURE_FAILED_LEDGER_SCHEMA = "cardrag.structure-failed-ledger.v1"
 V5_RETRIEVAL_POLICY = {
@@ -1583,6 +1586,80 @@ def _embedding_miss_batches(
     return tuple(batches)
 
 
+async def validate_document_aggregation_head(
+    webdav: WebDAVClient,
+    selected: VerifiedAggregationProfileV5,
+    *,
+    expected_m1_contract_sha256: str | None = None,
+) -> GenerationManifest:
+    """GET-only proof that the channel head is the evaluated M0 or its sealed M1.
+
+    The CLI calls this before creating Worker state or running the credentialed
+    Qwen preflight.  At that point the live endpoint metadata needed to rebuild
+    the complete M1 Worker contract is intentionally unavailable.  The pipeline
+    therefore calls it again with ``expected_m1_contract_sha256`` after provider
+    preflight, and once more immediately before fixing the publication
+    predecessor.  Those later calls close the startup/publication TOCTOU windows
+    and bind the complete profile-artifact contract.
+    """
+
+    current = await webdav.validated_current_generation()
+    if current is None:
+        raise RuntimeError("sealed document aggregation requires a valid remote M0/M1 head")
+    body = await webdav.get_bytes(
+        generation_manifest_path(current.generation_id),
+        max_bytes=MAX_GENERATION_MANIFEST_BYTES,
+    )
+    if body is None:
+        raise RuntimeError("sealed document aggregation remote head manifest is missing")
+    try:
+        manifest = GenerationManifest.model_validate_json(body)
+    except Exception:
+        raise RuntimeError("sealed document aggregation remote head manifest is invalid") from None
+    if body != manifest.canonical_bytes():
+        raise RuntimeError("sealed document aggregation remote head manifest is not canonical")
+    if (
+        manifest.generation_id != current.generation_id
+        or manifest.corpus_sha256 != current.corpus_sha256
+        or manifest.contract_sha256 != current.contract_sha256
+        or manifest.schema_version != current.generation_schema
+        or manifest.serving_schema != current.serving_schema
+        or sum(document.availability == "ocr_failed" for document in manifest.documents)
+        != current.ocr_failed_document_count
+        or manifest.schema_version != GENERATION_SCHEMA_ID_V5
+        or manifest.primary_embedding_profile_id != selected.profile.embedding_profile_id
+    ):
+        raise RuntimeError("sealed document aggregation remote head identity is inconsistent")
+
+    if manifest.document_aggregation_profile is None:
+        if (
+            manifest.generation_id != selected.profile.generation_id
+            or manifest.manifest_sha256 != selected.profile.generation_manifest_sha256
+            or manifest.retrieval_policy_sha256 != canonical_sha256(V5_RETRIEVAL_POLICY)
+        ):
+            raise RuntimeError("sealed document aggregation is not based on its evaluated M0")
+        return manifest
+
+    expected_retrieval_policy = sealed_v5_retrieval_policy(
+        selected.profile,
+        selected.profile_sha256,
+    )
+    if (
+        manifest.generation_id == selected.profile.generation_id
+        or (
+            expected_m1_contract_sha256 is not None
+            and manifest.contract_sha256 != expected_m1_contract_sha256
+        )
+        or manifest.document_aggregation_profile != selected.profile
+        or manifest.document_aggregation_policy != selected.profile.aggregation_policy
+        or manifest.sealed_profile_sha256 != selected.profile_sha256
+        or manifest.exact_row_corpus_sha256 != selected.profile.exact_row_corpus_sha256
+        or manifest.retrieval_policy_sha256 != canonical_sha256(expected_retrieval_policy)
+    ):
+        raise RuntimeError("sealed document aggregation remote M1 identity is inconsistent")
+    return manifest
+
+
 class WorkerPipeline:
     def __init__(
         self,
@@ -1602,6 +1679,7 @@ class WorkerPipeline:
         retained_generations: int = 2,
         garbage_grace_days: int = 30,
         retained_incomplete_runs: int = 2,
+        document_aggregation: VerifiedAggregationProfileV5 | None = None,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
@@ -1620,6 +1698,11 @@ class WorkerPipeline:
             )
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
             raise ValueError("stable v1.0.10 publication requires explicit approval")
+        if document_aggregation is not None:
+            if v5_profile is None:
+                raise ValueError("sealed document aggregation requires the Qwen v5 pipeline")
+            if document_aggregation.profile.embedding_profile_id != v5_profile.profile_id:
+                raise ValueError("sealed document aggregation uses another embedding profile")
         if collect_remote_garbage and (
             webdav.channel != "stable" or not stable_publication_approved or not remote_gc_approved
         ):
@@ -1639,6 +1722,7 @@ class WorkerPipeline:
         self.ocr = ocr
         self.embeddings = embeddings
         self.v5_profile = v5_profile
+        self.document_aggregation = document_aggregation
         self.webdav = webdav
         self.maximum_attempts = maximum_attempts
         self.retry_cap_seconds = retry_cap_seconds
@@ -1663,65 +1747,68 @@ class WorkerPipeline:
                 issuer_parser_profile(adapter.spec.code).payload
                 for adapter in sorted(self.adapters, key=lambda item: item.spec.code)
             ]
-            return canonical_sha256(
-                {
-                    "schema_version": "cardrag.worker-contract.v4",
-                    "serving_schema": SERVING_SCHEMA_ID_V5,
-                    "issuer_adapters": [
-                        {
-                            "code": adapter.spec.code,
-                            "display_name": adapter.spec.display_name,
-                            "sort_order": adapter.spec.sort_order,
-                            "parser_version": adapter.parser_version,
-                            "allowed_hosts": sorted(adapter.spec.allowed_hosts),
-                            "categories": list(adapter.spec.categories),
-                            "minimum_records": adapter.spec.minimum_records,
-                            "minimum_interval_seconds": adapter.spec.minimum_interval_seconds,
-                            "retry_base_seconds": adapter.spec.retry_base_seconds,
-                            "maximum_retries": adapter.spec.maximum_retries,
-                            "minimum_retention_ratio": adapter.spec.minimum_retention_ratio,
-                            "protected_source_allowances": sorted(
-                                (item.contract_payload for item in adapter.spec.protected_source_allowances),
-                                key=canonical_json_bytes,
-                            ),
-                        }
-                        for adapter in self.adapters
-                    ],
-                    "download_contract": "cardrag.secure-pdf-download.v2",
-                    "ocr_contract": self.ocr.contract,
-                    "adoption_policy_version": self.ocr.adoption_policy_version,
-                    "structure": {
-                        "schema_version": "cardrag.structure.v2",
-                        "parser_profiles": parser_profiles,
-                        "contextual_item_policy": contextual_item_policy_payload(),
-                        "unclassified_fallback_policy": unclassified_fallback_policy_payload(),
-                        "view_maximum_characters": V5_VIEW_MAXIMUM_CHARACTERS,
-                    },
-                    "revision_history": {
-                        "policy_version": REVISION_HISTORY_POLICY_VERSION,
-                        "unresolved_ledger_schema": UNRESOLVED_REVISION_LEDGER_SCHEMA,
-                    },
-                    "embedding": {
-                        "profile_id": self.v5_profile.profile_id,
-                        "cache_namespace": self.v5_profile.cache_namespace,
-                        "provider": self.v5_profile.provider,
-                        "provider_id": self.v5_profile.provider_id,
-                        "model": self.v5_profile.model,
-                        "dimension": self.v5_profile.dimension,
-                        "dtype": self.v5_profile.dtype,
-                        "normalization": self.v5_profile.normalization,
-                        "document_policy": self.v5_profile.document_policy,
-                        "query_policy": self.v5_profile.query_policy,
-                        "maximum_tokens": self.v5_profile.maximum_tokens,
-                        "endpoint_name": self.v5_profile.endpoint_name,
-                        "endpoint_metadata_sha256": self.v5_profile.endpoint_metadata_sha256,
-                        "tokenizer_revision": QWEN_TOKENIZER_REVISION,
-                        "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
-                        "truncation": self.v5_profile.truncation_policy,
-                    },
-                    "retrieval": V5_RETRIEVAL_POLICY,
-                }
-            )
+            contract_payload: dict[str, Any] = {
+                "schema_version": "cardrag.worker-contract.v4",
+                "serving_schema": SERVING_SCHEMA_ID_V5,
+                "issuer_adapters": [
+                    {
+                        "code": adapter.spec.code,
+                        "display_name": adapter.spec.display_name,
+                        "sort_order": adapter.spec.sort_order,
+                        "parser_version": adapter.parser_version,
+                        "allowed_hosts": sorted(adapter.spec.allowed_hosts),
+                        "categories": list(adapter.spec.categories),
+                        "minimum_records": adapter.spec.minimum_records,
+                        "minimum_interval_seconds": adapter.spec.minimum_interval_seconds,
+                        "retry_base_seconds": adapter.spec.retry_base_seconds,
+                        "maximum_retries": adapter.spec.maximum_retries,
+                        "minimum_retention_ratio": adapter.spec.minimum_retention_ratio,
+                        "protected_source_allowances": sorted(
+                            (item.contract_payload for item in adapter.spec.protected_source_allowances),
+                            key=canonical_json_bytes,
+                        ),
+                    }
+                    for adapter in self.adapters
+                ],
+                "download_contract": "cardrag.secure-pdf-download.v2",
+                "ocr_contract": self.ocr.contract,
+                "adoption_policy_version": self.ocr.adoption_policy_version,
+                "structure": {
+                    "schema_version": "cardrag.structure.v2",
+                    "parser_profiles": parser_profiles,
+                    "contextual_item_policy": contextual_item_policy_payload(),
+                    "unclassified_fallback_policy": unclassified_fallback_policy_payload(),
+                    "view_maximum_characters": V5_VIEW_MAXIMUM_CHARACTERS,
+                },
+                "revision_history": {
+                    "policy_version": REVISION_HISTORY_POLICY_VERSION,
+                    "unresolved_ledger_schema": UNRESOLVED_REVISION_LEDGER_SCHEMA,
+                },
+                "embedding": {
+                    "profile_id": self.v5_profile.profile_id,
+                    "cache_namespace": self.v5_profile.cache_namespace,
+                    "provider": self.v5_profile.provider,
+                    "provider_id": self.v5_profile.provider_id,
+                    "model": self.v5_profile.model,
+                    "dimension": self.v5_profile.dimension,
+                    "dtype": self.v5_profile.dtype,
+                    "normalization": self.v5_profile.normalization,
+                    "document_policy": self.v5_profile.document_policy,
+                    "query_policy": self.v5_profile.query_policy,
+                    "maximum_tokens": self.v5_profile.maximum_tokens,
+                    "endpoint_name": self.v5_profile.endpoint_name,
+                    "endpoint_metadata_sha256": self.v5_profile.endpoint_metadata_sha256,
+                    "tokenizer_revision": QWEN_TOKENIZER_REVISION,
+                    "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
+                    "truncation": self.v5_profile.truncation_policy,
+                },
+                "retrieval": self.v5_retrieval_policy,
+            }
+            if self.document_aggregation is not None:
+                contract_payload["document_aggregation_profile_artifact_sha256"] = (
+                    self.document_aggregation.artifact_sha256
+                )
+            return canonical_sha256(contract_payload)
         return canonical_sha256(
             {
                 "schema_version": "cardrag.worker-contract.v2",
@@ -1763,6 +1850,29 @@ class WorkerPipeline:
                     "query_prefix": QUERY_EMBEDDING_PREFIX,
                 },
             }
+        )
+
+    @property
+    def v5_retrieval_policy(self) -> Mapping[str, object]:
+        """Preserve M0 exactly, or return the core-sealed M1 retrieval contract."""
+
+        if self.document_aggregation is None:
+            return V5_RETRIEVAL_POLICY
+        return sealed_v5_retrieval_policy(
+            self.document_aggregation.profile,
+            self.document_aggregation.profile_sha256,
+        )
+
+    async def _validated_document_aggregation_head(self) -> GenerationManifest:
+        """Rebind the preflighted provider contract to the current M0/M1 head."""
+
+        selected = self.document_aggregation
+        if selected is None:
+            raise RuntimeError("document aggregation head validation was not configured")
+        return await validate_document_aggregation_head(
+            self.webdav,
+            selected,
+            expected_m1_contract_sha256=self.contract_sha256,
         )
 
     async def _finite_stage(
@@ -1833,6 +1943,10 @@ class WorkerPipeline:
 
     async def run(self, *, resume_run_id: str | None = None) -> PipelineResult:
         with worker_lock(self.state_dir / "worker.lock"):
+            if self.document_aggregation is not None:
+                # Rebind the complete live-provider Worker contract before a
+                # run row or retention cleanup can mutate candidate state.
+                await self._validated_document_aggregation_head()
             run_id = resume_run_id or self.state.start_run()
             self.state.mark_stale_running_runs_interrupted(exclude_run_id=run_id)
             if resume_run_id:
@@ -3898,7 +4012,7 @@ class WorkerPipeline:
                 "view_maximum_characters": V5_VIEW_MAXIMUM_CHARACTERS,
             }
         )
-        retrieval_policy_sha256 = canonical_sha256(V5_RETRIEVAL_POLICY)
+        retrieval_policy_sha256 = canonical_sha256(self.v5_retrieval_policy)
 
         issuer_rows = tuple(
             IssuerInput(
@@ -4105,6 +4219,19 @@ class WorkerPipeline:
             node_links=link_rows,
             embedding_profiles=(exported_profile,),
             embedding_views=view_rows,
+            document_aggregation_policy=(
+                self.document_aggregation.profile.aggregation_policy
+                if self.document_aggregation is not None
+                else None
+            ),
+            sealed_profile_sha256=(
+                self.document_aggregation.profile_sha256 if self.document_aggregation is not None else None
+            ),
+            expected_exact_row_corpus_sha256=(
+                self.document_aggregation.profile.exact_row_corpus_sha256
+                if self.document_aggregation is not None
+                else None
+            ),
             extra_metadata={
                 "embedding_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
                 "embedding_endpoint_name": profile.endpoint_name,
@@ -4131,12 +4258,22 @@ class WorkerPipeline:
                     f"parser_profile_sha256.{issuer}": parser_profiles_by_issuer[issuer].sha256
                     for issuer in sorted(parser_profiles_by_issuer)
                 },
+                **(
+                    {"aggregation_profile_artifact_sha256": (self.document_aggregation.artifact_sha256)}
+                    if self.document_aggregation is not None
+                    else {}
+                ),
             },
         )
-        current_remote = await self.webdav.validated_current_generation()
-        if current_remote is None and await self.webdav.get_bytes(self.webdav.pointer_path) is not None:
-            raise RuntimeError("remote stable generation is corrupt; refusing publication")
-        previous_id = current_remote.generation_id if current_remote is not None else None
+        previous_id: str | None
+        if self.document_aggregation is not None:
+            current_aggregation_head = await self._validated_document_aggregation_head()
+            previous_id = current_aggregation_head.generation_id
+        else:
+            current_remote = await self.webdav.validated_current_generation()
+            if current_remote is None and await self.webdav.get_bytes(self.webdav.pointer_path) is not None:
+                raise RuntimeError("remote stable generation is corrupt; refusing publication")
+            previous_id = current_remote.generation_id if current_remote is not None else None
         generation_documents = tuple(
             sorted(
                 tuple(
@@ -4297,6 +4434,20 @@ class WorkerPipeline:
             parser_policy_sha256=parser_policy_sha256,
             embedding_policy_sha256=embedding_policy_sha256,
             retrieval_policy_sha256=retrieval_policy_sha256,
+            document_aggregation_profile=(
+                self.document_aggregation.profile if self.document_aggregation is not None else None
+            ),
+            document_aggregation_policy=(
+                self.document_aggregation.profile.aggregation_policy
+                if self.document_aggregation is not None
+                else None
+            ),
+            sealed_profile_sha256=(
+                self.document_aggregation.profile_sha256 if self.document_aggregation is not None else None
+            ),
+            exact_row_corpus_sha256=(
+                export.exact_row_corpus_sha256 if self.document_aggregation is not None else None
+            ),
             previous_generation_id=previous_id,
         )
         parser_profile_document_counts = Counter(artifact.issuer_profile_id for artifact in artifacts)
@@ -4616,6 +4767,45 @@ class WorkerPipeline:
                             v5_metrics["structure_failed_documents_sha256"]
                         ),
                     }
+                    exact_row_metadata = metadata.get("exact_row_corpus_sha256")
+                    if (
+                        exact_row_metadata is None
+                        or re.fullmatch(r"[0-9a-f]{64}", exact_row_metadata) is None
+                    ):
+                        raise RuntimeError("sealed v5 database exact-row corpus identity is invalid")
+                    if manifest.document_aggregation_profile is None:
+                        expected_metadata.update(
+                            {
+                                "document_aggregation_status": "candidate_default",
+                                "document_aggregation_policy": "max_child",
+                            }
+                        )
+                        if any(
+                            key in metadata
+                            for key in (
+                                "sealed_profile_sha256",
+                                "aggregation_profile_artifact_sha256",
+                            )
+                        ):
+                            raise RuntimeError("unsealed M0 database contains a sealed profile identity")
+                    else:
+                        selected = self.document_aggregation
+                        if (
+                            selected is None
+                            or manifest.document_aggregation_profile != selected.profile
+                            or manifest.sealed_profile_sha256 != selected.profile_sha256
+                            or manifest.exact_row_corpus_sha256 != selected.profile.exact_row_corpus_sha256
+                        ):
+                            raise RuntimeError("sealed M1 manifest lacks its supplied profile identity")
+                        expected_metadata.update(
+                            {
+                                "document_aggregation_status": "sealed",
+                                "document_aggregation_policy": str(manifest.document_aggregation_policy),
+                                "sealed_profile_sha256": selected.profile_sha256,
+                                "exact_row_corpus_sha256": selected.profile.exact_row_corpus_sha256,
+                                "aggregation_profile_artifact_sha256": selected.artifact_sha256,
+                            }
+                        )
                     for parser_profile in structure_contract.parser_profiles:
                         expected_metadata[f"parser_profile_id.{parser_profile.issuer}"] = (
                             parser_profile.profile_id

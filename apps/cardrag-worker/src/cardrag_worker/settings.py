@@ -111,6 +111,8 @@ class WorkerSettings:
     embedding_timeout_seconds: float
     embedding_max_response_bytes: int
     embedding_metadata_max_response_bytes: int
+    document_aggregation_profile_path: Path | None
+    document_aggregation_profile_artifact_sha256: str | None
     ocr_provider: str
     ocr_model: str
     ocr_fallback_provider: str | None
@@ -159,6 +161,28 @@ class WorkerSettings:
             if tokenizer_path_raw
             else state_dir / "contracts" / f"qwen3-embedding-8b-tokenizer-{QWEN_TOKENIZER_SHA256}.json"
         )
+        aggregation_path_raw = os.environ.get("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE")
+        aggregation_sha256_raw = os.environ.get("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256")
+        if (aggregation_path_raw is None) != (aggregation_sha256_raw is None):
+            raise ValueError(
+                "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE and "
+                "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256 are all-or-nothing"
+            )
+        aggregation_path: Path | None = None
+        aggregation_sha256: str | None = None
+        if aggregation_path_raw is not None and aggregation_sha256_raw is not None:
+            if (
+                not aggregation_path_raw
+                or _CONTROL.search(aggregation_path_raw)
+                or not Path(aggregation_path_raw).is_absolute()
+            ):
+                raise ValueError("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE must be an absolute path")
+            aggregation_sha256 = aggregation_sha256_raw.strip()
+            if re.fullmatch(r"[0-9a-f]{64}", aggregation_sha256) is None:
+                raise ValueError(
+                    "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256 must be lowercase SHA-256"
+                )
+            aggregation_path = Path(os.path.abspath(aggregation_path_raw))
         webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL")
         if require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
@@ -216,6 +240,8 @@ class WorkerSettings:
                 minimum=1024,
                 maximum=16 * MIB,
             ),
+            document_aggregation_profile_path=aggregation_path,
+            document_aggregation_profile_artifact_sha256=aggregation_sha256,
             ocr_provider=ocr_provider,
             ocr_model=os.environ.get("CARDRAG_OCR_MODEL", "gpt-5.6-sol"),
             ocr_fallback_provider=fallback_provider.strip().casefold() if fallback_provider else None,

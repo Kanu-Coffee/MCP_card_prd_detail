@@ -106,6 +106,48 @@ uv run python -m cardrag_mcp.aggregation_profile \
   > release-evidence/v1.0.10/document-aggregation-profile.json
 ```
 
+## Build the sealed M1 candidate
+
+M0가 candidate channel의 현재 head인 동안, 통과 artifact를 Worker에 명시적으로 주입하여 M1을
+생성합니다. 두 환경 변수를 모두 생략하면 기존 M0 `candidate_default/max_child` 계약은 byte-level
+contract payload까지 그대로 유지됩니다. 둘 중 하나만 설정하거나 상대 경로, symlink/non-regular
+file, noncanonical JSON, 전체 file SHA-256 불일치, `release_gate.status != passed`, M0가 아닌 score
+runtime identity는 Worker 시작 전에 거부됩니다.
+
+Worker는 candidate state directory/DB 생성과 credentialed tokenizer·Qwen provider preflight보다 먼저
+profile의 평가 generation ID/manifest SHA-256이 현재 candidate M0와 정확히 일치하는지 GET-only로
+확인합니다. Provider contract가 준비된 뒤 run row 생성/cleanup 전에 전체 M1 contract를 재결속하고,
+publication predecessor를 정하기 직전에 다시 확인하여 TOCTOU를 닫습니다. M1 contract에는 전체
+profile artifact SHA-256을, serving DB에는 그
+artifact SHA-256과 selected policy/profile SHA-256/exact-row corpus를, core generation manifest에는
+profile object/profile SHA-256/policy/exact-row corpus와 sealed retrieval-policy SHA-256을 결속합니다.
+Exporter가 M0와 동일한 `exact_row_corpus_sha256`을 재계산하지 못하면 publication 전에 실패합니다.
+
+아래 override는 profile file 하나만 container에 read-only로 mount합니다. M0 Worker가 terminal이고
+candidate 전용 volume/channel을 사용 중인지 먼저 확인해야 하며, 이 명령을 stable project/channel에
+사용하면 안 됩니다.
+
+```bash
+PROFILE_FILE="$PWD/release-evidence/v1.0.10/document-aggregation-profile.json"
+test -f "$PROFILE_FILE" || exit 1
+test ! -L "$PROFILE_FILE" || exit 1
+export CARDRAG_DOCUMENT_AGGREGATION_PROFILE_HOST_FILE="$PROFILE_FILE"
+export CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256
+CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256=$(sha256sum "$PROFILE_FILE" | awk '{print $1}')
+
+docker compose \
+  -p cardrag-v110-candidate \
+  -f deploy/worker/compose.yaml \
+  -f deploy/worker/compose.candidate.yaml \
+  -f deploy/worker/compose.secrets.yaml \
+  -f deploy/worker/compose.aggregation-profile.yaml \
+  run --rm worker
+```
+
+이 runtime loader는 이미 별도 검증된 artifact를 안전하게 소비하는 경계입니다. 통계 결과를 다시
+계산하는 release authority는 아래 offline validation command이며, M1 생성 후 export한 canonical
+serving generation manifest를 함께 제공해야 합니다.
+
 Release와 동일한 offline 재검증은 다음과 같습니다.
 
 ```bash

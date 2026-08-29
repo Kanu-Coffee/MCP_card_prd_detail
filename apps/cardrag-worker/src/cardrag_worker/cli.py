@@ -24,6 +24,7 @@ from .adoption import (
     validate_inventory,
     write_reports,
 )
+from .aggregation_profile_v5 import load_verified_aggregation_profile_v5
 from .cache_seed import (
     CacheSeedError,
     apply_cache_seed,
@@ -52,6 +53,7 @@ from .pipeline import (
     PipelineResult,
     WorkerPipeline,
     WorkerUnexpectedFailureError,
+    validate_document_aggregation_head,
 )
 from .providers import OCRProvider, make_ocr_provider
 from .settings import WorkerSettings
@@ -269,9 +271,26 @@ async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
     _guard_v110_publication_channel(settings)
-    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    document_aggregation = None
+    if settings.document_aggregation_profile_path is not None:
+        expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
+        if expected_artifact_sha256 is None:  # WorkerSettings enforces all-or-nothing.
+            raise ValueError("document aggregation profile artifact SHA-256 is absent")
+        document_aggregation = load_verified_aggregation_profile_v5(
+            settings.document_aggregation_profile_path,
+            expected_artifact_sha256=expected_artifact_sha256,
+        )
+    if document_aggregation is None:
+        # Preserve the unsealed M0 startup order byte-for-byte and behaviorally:
+        # candidate state precedes construction of its WebDAV client.
+        settings.state_dir.mkdir(parents=True, exist_ok=True)
     webdav = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
     try:
+        if document_aggregation is not None:
+            # No provider/tokenizer call or candidate-state mutation is allowed
+            # until GET-only proof identifies the evaluated M0 or its sealed M1.
+            await validate_document_aggregation_head(webdav, document_aggregation)
+            settings.state_dir.mkdir(parents=True, exist_ok=True)
         with WorkerState(settings.state_database) as state:
             primary = OCRResolver(
                 provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
@@ -320,6 +339,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 retained_incomplete_runs=settings.retained_incomplete_runs,
                 garbage_grace_days=settings.garbage_grace_days,
                 pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
+                document_aggregation=document_aggregation,
             ).run(resume_run_id=resume)
             return _pipeline_result_payload(result)
     finally:

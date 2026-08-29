@@ -1,0 +1,12 @@
+services:
+  worker:
+    environment:
+      CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE: /run/secrets/document_aggregation_profile
+      CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256: ${CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256:?set the independently verified complete profile file SHA-256}
+    secrets:
+      - source: document_aggregation_profile
+        target: document_aggregation_profile
+
+secrets:
+  document_aggregation_profile:
+    file: ${CARDRAG_DOCUMENT_AGGREGATION_PROFILE_HOST_FILE:?set an absolute host profile artifact path}

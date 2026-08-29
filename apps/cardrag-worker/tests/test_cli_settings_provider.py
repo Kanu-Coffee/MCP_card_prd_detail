@@ -390,6 +390,133 @@ def test_pipeline_result_payload_exposes_pdf_cache_activity() -> None:
     assert payload["v5_metrics"] == v5_metrics
 
 
+def test_run_verifies_supplied_aggregation_profile_before_state_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_path = tmp_path / "document-aggregation-profile.json"
+    state_root = tmp_path / "state"
+    observed: dict[str, object] = {}
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        document_aggregation_profile_path = profile_path
+        document_aggregation_profile_artifact_sha256 = "a" * 64
+        state_dir = state_root
+
+    def reject_profile(path: Path, *, expected_artifact_sha256: str) -> None:
+        observed.update(path=path, expected_artifact_sha256=expected_artifact_sha256)
+        raise RuntimeError("injected_profile_rejection")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module, "load_verified_aggregation_profile_v5", reject_profile)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(RuntimeError, match="injected_profile_rejection"):
+        asyncio.run(cli_module._run(None))
+
+    assert observed == {
+        "path": profile_path,
+        "expected_artifact_sha256": "a" * 64,
+    }
+    assert not state_root.exists()
+
+
+@pytest.mark.parametrize(
+    "head_failure",
+    (
+        "remote_m0_missing",
+        "remote_m0_stale",
+        "remote_head_identity_mismatch",
+    ),
+)
+def test_run_rejects_aggregation_head_before_provider_or_state_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_failure: str,
+) -> None:
+    profile_path = tmp_path / "document-aggregation-profile.json"
+    state_root = tmp_path / "state"
+    selected = object()
+    events: list[str] = []
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        document_aggregation_profile_path = profile_path
+        document_aggregation_profile_artifact_sha256 = "a" * 64
+        state_dir = state_root
+
+    class Client:
+        async def close(self) -> None:
+            events.append("webdav_close")
+
+    def webdav_from_env(**_kwargs: object) -> Client:
+        events.append("webdav_constructed")
+        return Client()
+
+    async def reject_head(
+        _webdav: object,
+        supplied: object,
+        *,
+        expected_m1_contract_sha256: str | None = None,
+    ) -> None:
+        assert supplied is selected
+        assert expected_m1_contract_sha256 is None
+        events.append("head_get_only_validation")
+        raise RuntimeError(head_failure)
+
+    async def provider_must_not_run(_settings: object) -> None:
+        events.append("qwen_provider_preflight")
+
+    def state_must_not_open(_path: Path) -> None:
+        events.append("worker_state_opened")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(
+        cli_module,
+        "load_verified_aggregation_profile_v5",
+        lambda *_args, **_kwargs: selected,
+    )
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", webdav_from_env)
+    monkeypatch.setattr(cli_module, "validate_document_aggregation_head", reject_head)
+    monkeypatch.setattr(cli_module, "_qwen_embedding_provider", provider_must_not_run)
+    monkeypatch.setattr(cli_module, "WorkerState", state_must_not_open)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(RuntimeError, match=head_failure):
+        asyncio.run(cli_module._run(None))
+
+    assert events == ["webdav_constructed", "head_get_only_validation", "webdav_close"]
+    assert not state_root.exists()
+
+
+def test_run_without_aggregation_profile_preserves_m0_state_then_webdav_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+
+    class Settings:
+        channel = "candidate-v1.0.10"
+        stable_publication_approved = False
+        document_aggregation_profile_path = None
+        document_aggregation_profile_artifact_sha256 = None
+        state_dir = state_root
+
+    def stop_at_webdav(**_kwargs: object) -> None:
+        assert state_root.is_dir()
+        raise RuntimeError("m0_webdav_stop")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", stop_at_webdav)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    with pytest.raises(RuntimeError, match="m0_webdav_stop"):
+        asyncio.run(cli_module._run(None))
+
+
 def test_cli_ocr_failure_aggregate_is_safe_bounded_and_exits_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
