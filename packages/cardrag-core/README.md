@@ -8,7 +8,7 @@ query, or MCP protocol implementation.
 
 The WebDAV publication contract is immutable and `READY`-last:
 
-- `v1/channels/stable.json`
+- `v1/channels/<channel>.json` (`stable` in production; isolated candidate names in validation)
 - `v1/generations/<generation-id>/manifest.json`
 - `v1/generations/<generation-id>/READY.json`
 - `v1/generations/<generation-id>/index.sqlite3`

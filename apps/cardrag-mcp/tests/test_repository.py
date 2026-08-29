@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import FakeEmbedder, create_database, unit_vector
+from conftest import FakeEmbedder, canonical_json_bytes, create_database, unit_vector
 
 from cardrag_mcp.embeddings import EmbeddingUnavailable
-from cardrag_mcp.models import Product, SearchFilters, SearchRequest, UnsupportedProduct
+from cardrag_mcp.models import (
+    OCRFailedProduct,
+    Product,
+    SearchFilters,
+    SearchRequest,
+    UnsupportedProduct,
+)
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.schema import ServingDatabaseError
 from cardrag_mcp.store import GenerationStore, load_generation_handle
@@ -85,9 +92,10 @@ def test_promotion_rejects_incompatible_query_embedding_policy(tmp_path: Path) -
     (
         ("cardrag.serving-db.v2", "SCDSA004"),
         ("cardrag.serving-db.v3", "FASOO_DRMONE"),
+        ("cardrag.serving-db.v4", "FASOO_DRMONE"),
     ),
 )
-def test_loader_accepts_last_good_v2_and_current_v3(
+def test_loader_accepts_supported_v2_v3_and_v4(
     tmp_path: Path,
     schema_id: str,
     protected_magic: str,
@@ -110,7 +118,10 @@ def test_loader_accepts_last_good_v2_and_current_v3(
     assert handle.metadata.contract_sha256 == fixture.contract_sha256
 
 
-@pytest.mark.parametrize("schema_id", ("cardrag.serving-db.v2", "cardrag.serving-db.v3"))
+@pytest.mark.parametrize(
+    "schema_id",
+    ("cardrag.serving-db.v2", "cardrag.serving-db.v3", "cardrag.serving-db.v4"),
+)
 def test_loader_rejects_missing_contract_hash(tmp_path: Path, schema_id: str) -> None:
     directory = tmp_path / f"gen-missing-contract-{schema_id.rsplit('.', 1)[-1]}"
     database = directory / "index.sqlite3"
@@ -130,7 +141,7 @@ def test_loader_rejects_missing_contract_hash(tmp_path: Path, schema_id: str) ->
     ("schema_id", "protected_magic", "expected_error"),
     (
         ("cardrag.serving-db.v2", "FASOO_DRMONE", "invalid bounded value"),
-        ("cardrag.serving-db.v4", "SCDSA002", "schema version is incompatible"),
+        ("cardrag.serving-db.v5", "SCDSA002", "schema version is incompatible"),
     ),
 )
 def test_loader_rejects_cross_version_magic_and_unknown_schema(
@@ -336,3 +347,98 @@ async def test_evidence_adjacency_product_and_page_queries(active_runtime) -> No
         "P1",
     ]
     assert len(await repository.list_documents()) == 2
+
+
+@pytest.mark.asyncio
+async def test_v4_repository_exposes_ocr_failed_pdf_without_pages_or_evidence(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    generation_id = "gen-v4-ocr-failure"
+    directory = store.generations / generation_id
+    database = directory / "index.sqlite3"
+    create_database(database, generation_id, schema_id="cardrag.serving-db.v4")
+    failed_document_id = "doc_" + "f" * 64
+    failed_payload = {
+        "attempts": 4,
+        "document_id": failed_document_id,
+        "issuer": "woori",
+        "page_count": 2,
+        "pdf_sha256": "a" * 64,
+        "pdf_size_bytes": 1234,
+        "product_code": "P-OCR-FAILED",
+        "product_name": "OCR Failed Card",
+        "reason": "The OCR provider timed out.",
+        "reason_code": "provider_timeout",
+        "title": "OCR Failed Card",
+    }
+    failed_hash = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "documents": [failed_payload],
+                "schema_version": "cardrag.ocr-failed-products.v1",
+            }
+        )
+    ).hexdigest()
+    with sqlite3.connect(database) as connection:
+        # One failure requires nineteen successful Woori products at the exact
+        # per-issuer 95% promotion boundary.
+        for index in range(2, 20):
+            document_id = f"doc-extra-{index:02d}"
+            product_code = f"P-EXTRA-{index:02d}"
+            text = f"validated OCR page {index}"
+            connection.execute(
+                "INSERT INTO documents VALUES(?,?,?,?,?,?,?)",
+                (document_id, "woori", product_code, product_code, f"{index:064x}", 100, 1),
+            )
+            connection.execute(
+                "INSERT INTO products VALUES(?,?,?,?)",
+                ("woori", product_code, product_code, document_id),
+            )
+            connection.execute(
+                "INSERT INTO pages VALUES(?,?,?,?)",
+                (document_id, 1, text, hashlib.sha256(text.encode()).hexdigest()),
+            )
+        connection.execute(
+            "INSERT INTO ocr_failed_products VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "woori",
+                failed_payload["product_code"],
+                failed_payload["product_name"],
+                failed_document_id,
+                failed_payload["title"],
+                failed_payload["pdf_sha256"],
+                failed_payload["pdf_size_bytes"],
+                failed_payload["page_count"],
+                failed_payload["reason_code"],
+                failed_payload["reason"],
+                failed_payload["attempts"],
+            ),
+        )
+        connection.execute("UPDATE metadata SET value='1' WHERE key='ocr_failed_document_count'")
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='ocr_failed_documents_sha256'",
+            (failed_hash,),
+        )
+        connection.commit()
+    handle = load_generation_handle(
+        directory,
+        store.objects,
+        maximum_vector_bytes=store.maximum_vector_bytes,
+    )
+    store.activate(handle)
+    repository = ServingRepository(store, FakeEmbedder(), cursor_secret=b"x" * 32)
+
+    product = await repository.get_product("woori", "P-OCR-FAILED")
+    assert isinstance(product, OCRFailedProduct)
+    assert product.availability == "ocr_failed"
+    assert product.document.document_id == failed_document_id
+    assert product.document.pdf_sha256 == "a" * 64
+    assert product.reason_code == "provider_timeout"
+    assert product.attempts == 4
+    assert await repository.get_document(failed_document_id) == product.document
+    assert await repository.get_source_page(failed_document_id, 1) is None
+    search = await repository.search(SearchRequest(query="airport"))
+    assert all(item.document_id != failed_document_id for item in search.items)
+    listed = await repository.list_products("woori")
+    assert any(isinstance(item, OCRFailedProduct) for item in listed)

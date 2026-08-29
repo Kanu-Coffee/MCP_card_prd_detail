@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import uuid
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .canonical import canonical_json_bytes, sha256_bytes, sha256_file
 from .domain import ArtifactRef, VerifiedArtifact
-from .paths import STABLE_POINTER_PATH, object_path, validate_relative_path
+from .paths import channel_pointer_path, object_path, validate_relative_path
 from .webdav import WebDAVClient, WebDAVHTTPError
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
+LOGGER = logging.getLogger(__name__)
 
 
 class ImmutablePublisher:
@@ -73,8 +76,20 @@ class ImmutablePublisher:
                 if exc.status_code not in {409, 412} or not self._client.exists(destination):
                     raise
             self._verify_remote(destination, digest=digest, size_bytes=size_bytes)
-        finally:
-            self._client.delete(temporary, missing_ok=True)
+        except BaseException:
+            # Cleanup is best effort after a publication failure.  A second
+            # WebDAV error while deleting the temporary object must not erase
+            # the phase/status of the error that actually stopped publication.
+            with suppress(Exception):
+                self._client.delete(temporary, missing_ok=True)
+            raise
+        else:
+            try:
+                self._client.delete(temporary, missing_ok=True)
+            except Exception:
+                # MOVE plus immutable destination readback is the commit point.
+                # Temp cleanup failure is observable but cannot negate it.
+                LOGGER.warning("Immutable publication temporary cleanup failed after verified commit")
         return ArtifactRef(
             sha256=digest,
             size_bytes=size_bytes,
@@ -150,11 +165,16 @@ class CASPublisher:
 
 
 class StablePointerPublisher:
-    """Atomically replace only ``v1/channels/stable.json`` after readback."""
+    """Atomically replace one validated channel pointer after readback."""
 
-    def __init__(self, client: WebDAVClient) -> None:
+    def __init__(self, client: WebDAVClient, *, channel: str = "stable") -> None:
         self._client = client
         self._verifier = ImmutablePublisher(client)
+        self._destination = channel_pointer_path(channel)
+
+    @property
+    def destination(self) -> PurePosixPath:
+        return self._destination
 
     def atomic_replace_bytes(
         self,
@@ -164,7 +184,7 @@ class StablePointerPublisher:
     ) -> ArtifactRef:
         digest = sha256_bytes(payload)
         size_bytes = len(payload)
-        destination = STABLE_POINTER_PATH
+        destination = self._destination
         temporary = PurePosixPath("v1", ".incoming", "channels", f"{uuid.uuid4().hex}.tmp")
         self._client.ensure_collection(destination.parent)
         self._client.ensure_collection(temporary.parent)
@@ -178,8 +198,18 @@ class StablePointerPublisher:
             self._verifier._verify_remote(temporary, digest=digest, size_bytes=size_bytes)
             self._client.move(temporary, destination, overwrite=True)
             self._verifier._verify_remote(destination, digest=digest, size_bytes=size_bytes)
-        finally:
-            self._client.delete(temporary, missing_ok=True)
+        except BaseException:
+            with suppress(Exception):
+                self._client.delete(temporary, missing_ok=True)
+            raise
+        else:
+            try:
+                self._client.delete(temporary, missing_ok=True)
+            except Exception:
+                # MOVE plus destination readback is the atomic commit point.
+                # A failed best-effort temp cleanup may leave an orphan for GC,
+                # but must not report the already verified pointer as failed.
+                LOGGER.warning("Stable pointer temporary cleanup failed after verified replacement")
         return ArtifactRef(
             sha256=digest,
             size_bytes=size_bytes,

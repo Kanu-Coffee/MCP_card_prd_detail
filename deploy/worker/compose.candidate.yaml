@@ -1,0 +1,12 @@
+name: cardrag-worker-v109-candidate
+
+services:
+  worker:
+    environment:
+      CARDRAG_CHANNEL: candidate-v1.0.9
+      CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_CANDIDATE_WEBDAV_BASE_URL:?CARDRAG_CANDIDATE_WEBDAV_BASE_URL is required}
+      CARDRAG_COLLECT_REMOTE_GARBAGE: "false"
+
+volumes:
+  worker-state:
+    name: cardrag-worker-v109-candidate-state

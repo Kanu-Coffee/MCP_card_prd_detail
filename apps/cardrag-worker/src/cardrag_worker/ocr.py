@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 import pypdfium2 as pdfium  # type: ignore[import-untyped]
-from cardrag_core import OCRCacheKind
+from cardrag_core import (
+    OCRCacheKind,
+    WebDAVHTTPError,
+    WebDAVIntegrityError,
+    canonical_json_bytes,
+)
 from cardrag_core.canonical import canonical_sha256, sha256_bytes
 from cardrag_core.domain import ArtifactRef
 from cardrag_core.manifests import (
@@ -41,7 +48,7 @@ from .providers import (
     OCR_BLANK_PAGE_SENTINEL,
     OCR_SPARSE_PAGE_PREFIX,
     OCRProvider,
-    ProviderError,
+    ProviderDocumentError,
 )
 from .state import WorkerState
 from .webdav import WebDAVClient
@@ -51,10 +58,155 @@ OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS = 12
 OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
 OCR_SEGMENTATION_STRATEGY_ID = "cardrag.ocr.windowed-continuity.v1"
 OCR_OUTPUT_POLICY: Literal["target-pages-only"] = "target-pages-only"
+OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS = (0.25, 1.0)
+OCR_CACHE_PUBLICATION_DIAGNOSTIC = "native-cache-publication-diagnostic.json"
+OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES = 4096
+
+OCRCachePublicationPhase = Literal["cas", "manifest", "ready"]
+OCRCachePublicationErrorKind = Literal[
+    "network",
+    "timeout",
+    "http",
+    "integrity",
+    "contract",
+    "unexpected",
+]
+
+# 423 is WebDAV's resource-locked response.  At an immutable publication
+# boundary it can clear without any contract change, so treat it like the
+# other bounded-retry statuses rather than an integrity/authentication error.
+_OCR_CACHE_TRANSIENT_HTTP_STATUSES = frozenset({408, 423, 425, 429, *range(500, 600)})
+_OCR_CACHE_PUBLICATION_REASONS: dict[OCRCachePublicationErrorKind, str] = {
+    "network": "OCR cache publication network is temporarily unavailable",
+    "timeout": "OCR cache publication timed out",
+    "http": "OCR cache publication received an HTTP failure status",
+    "integrity": "OCR cache publication integrity verification failed",
+    "contract": "OCR cache publication contract validation failed",
+    "unexpected": "OCR cache publication failed unexpectedly",
+}
 
 
 class OCRValidationError(RuntimeError):
     pass
+
+
+class OCRCachePublicationError(RuntimeError):
+    """Secret-safe, phase-aware failure raised by native cache publication."""
+
+    def __init__(
+        self,
+        *,
+        phase: OCRCachePublicationPhase,
+        error_kind: OCRCachePublicationErrorKind,
+        status_code: int | None = None,
+        retryable: bool = False,
+        attempts: int = 1,
+    ) -> None:
+        if attempts < 1:
+            raise ValueError("attempts must be positive")
+        self.phase = phase
+        self.error_kind = error_kind
+        self.status_code = status_code
+        self.retryable = retryable
+        self.attempts = attempts
+        self.reason_code = f"ocr_cache_publication_{phase}_{error_kind}"
+        self.reason = _OCR_CACHE_PUBLICATION_REASONS[error_kind]
+        status = f", status_code={status_code}" if status_code is not None else ""
+        super().__init__(
+            f"{self.reason_code}: {self.reason} "
+            f"(phase={phase}, retryable={str(retryable).lower()}, attempts={attempts}{status})"
+        )
+
+
+def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(chain) < 8:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return tuple(chain)
+
+
+def _cache_publication_error(
+    phase: OCRCachePublicationPhase,
+    exc: Exception,
+    *,
+    attempts: int = 1,
+) -> OCRCachePublicationError:
+    if isinstance(exc, OCRCachePublicationError):
+        return OCRCachePublicationError(
+            phase=exc.phase,
+            error_kind=exc.error_kind,
+            status_code=exc.status_code,
+            retryable=exc.retryable,
+            attempts=attempts,
+        )
+    chain = _exception_chain(exc)
+    http_failure = next((item for item in chain if isinstance(item, WebDAVHTTPError)), None)
+    if isinstance(http_failure, WebDAVHTTPError):
+        status_code = http_failure.status_code
+        if status_code in {409, 412}:
+            return OCRCachePublicationError(
+                phase=phase,
+                error_kind="contract",
+                status_code=status_code,
+                attempts=attempts,
+            )
+        return OCRCachePublicationError(
+            phase=phase,
+            error_kind="http",
+            status_code=status_code,
+            retryable=status_code in _OCR_CACHE_TRANSIENT_HTTP_STATUSES,
+            attempts=attempts,
+        )
+    if any(isinstance(item, WebDAVIntegrityError) for item in chain):
+        return OCRCachePublicationError(
+            phase=phase,
+            error_kind="integrity",
+            attempts=attempts,
+        )
+    if any(isinstance(item, (httpx.TimeoutException, TimeoutError)) for item in chain):
+        return OCRCachePublicationError(
+            phase=phase,
+            error_kind="timeout",
+            retryable=True,
+            attempts=attempts,
+        )
+    if any(isinstance(item, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)) for item in chain):
+        # These describe the request/client configuration, not a remote outage.
+        # Retrying the same immutable publication cannot repair them.
+        return OCRCachePublicationError(
+            phase=phase,
+            error_kind="contract",
+            attempts=attempts,
+        )
+    if any(
+        isinstance(item, (httpx.NetworkError, httpx.ProxyError, ConnectionError))
+        or (isinstance(item, httpx.ProtocolError) and not isinstance(item, httpx.LocalProtocolError))
+        for item in chain
+    ):
+        # Remote protocol disconnects and proxy-connection failures are
+        # RequestError siblings of NetworkError in HTTPX, but are equally
+        # recoverable at this bounded publication boundary.
+        return OCRCachePublicationError(
+            phase=phase,
+            error_kind="network",
+            retryable=True,
+            attempts=attempts,
+        )
+    if any(isinstance(item, (ValueError, TypeError, OCRValidationError)) for item in chain):
+        return OCRCachePublicationError(
+            phase=phase,
+            error_kind="contract",
+            attempts=attempts,
+        )
+    return OCRCachePublicationError(
+        phase=phase,
+        error_kind="unexpected",
+        attempts=attempts,
+    )
 
 
 def atomic_write(path: Path, body: bytes) -> None:
@@ -183,10 +335,20 @@ class OCRResult:
     reuse_key: str
     cache_kind: OCRCacheKind | None = None
     cache_reuse_key: str | None = None
+    cache_publication_deferred: bool = False
+    cache_publication_reason_code: str | None = None
 
     def __post_init__(self) -> None:
         if (self.cache_kind is None) != (self.cache_reuse_key is None):
             raise ValueError("OCR cache kind and reuse key must be present together")
+        if self.cache_publication_deferred != (self.cache_publication_reason_code is not None):
+            raise ValueError("deferred OCR cache publication and reason code must be present together")
+        if self.cache_publication_reason_code is not None and not re.fullmatch(
+            r"ocr_cache_publication_(?:cas|manifest|ready)_"
+            r"(?:network|timeout|http|integrity|contract|unexpected)",
+            self.cache_publication_reason_code,
+        ):
+            raise ValueError("OCR cache publication reason code is not allowlisted")
         try:
             verified = verify_ocr_bytes(
                 self.ocr_bytes,
@@ -200,6 +362,30 @@ class OCRResult:
             raise OCRValidationError("OCR result text does not match its exact bytes")
         if tuple(_page_body(page) for page in verified.pages) != self.pages:
             raise OCRValidationError("OCR result pages do not match its exact bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class PriorLocalNativeSource:
+    """A generation-seal-bound local native OCR candidate from a prior run.
+
+    The pipeline constructs this only after validating the retained publication
+    seal.  The resolver still revalidates the filesystem boundary, native OCR
+    manifest, source/processor contract, reuse key, and exact generation OCR
+    identity before any bytes are materialized into the new run.
+    """
+
+    runs_root: Path
+    run_id: str
+    generation_id: str
+    corpus_sha256: str
+    contract_sha256: str
+    document_id: str
+    pdf_sha256: str
+    pdf_size_bytes: int
+    page_count: int
+    ocr_sha256: str
+    ocr_size_bytes: int
+    resolver_subdir: Literal["primary", "fallback"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +492,7 @@ class OCRResolver:
         reuse_key: str,
         source: OCRInput,
         source_document_id: str,
+        output_dir: Path,
         adoption_policy_version: str | None = None,
     ) -> OCRResult | None:
         if self.webdav is None:
@@ -314,6 +501,13 @@ class OCRResolver:
         manifest_body = await self.webdav.get_bytes(ocr_manifest_path(reuse_key, kind=kind))
         if ready_body is None and manifest_body is None:
             return None
+        if kind == "native" and ready_body is None and manifest_body is not None:
+            return await self._repair_native_ready(
+                manifest_body=manifest_body,
+                reuse_key=reuse_key,
+                source=source,
+                output_dir=output_dir,
+            )
         if ready_body is None or manifest_body is None:
             raise OCRValidationError(f"incomplete {kind} OCR cache entry")
         try:
@@ -394,6 +588,88 @@ class OCRResolver:
             cache_reuse_key=reuse_key,
         )
 
+    async def _repair_native_ready(
+        self,
+        *,
+        manifest_body: bytes,
+        reuse_key: str,
+        source: OCRInput,
+        output_dir: Path,
+    ) -> OCRResult:
+        """Repair the sole safe partial state: verified manifest+CAS, absent READY."""
+
+        assert self.webdav is not None
+        try:
+            manifest = OCRArtifactManifest.model_validate_json(manifest_body)
+        except Exception as exc:
+            raise OCRValidationError("partial native OCR manifest is invalid") from exc
+        if manifest.canonical_bytes() != manifest_body:
+            raise OCRValidationError("partial native OCR manifest is not canonical")
+        if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
+            raise OCRValidationError("partial native OCR manifest contract mismatch")
+        artifact = manifest.output
+        body = await self.webdav.get_bytes(artifact.path, max_bytes=artifact.size_bytes)
+        if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
+            raise OCRValidationError("partial native OCR artifact is missing or corrupt")
+        try:
+            verified = verify_ocr_bytes(
+                body,
+                expected_page_count=source.page_count,
+                expected_sha256=artifact.sha256,
+                expected_size_bytes=artifact.size_bytes,
+                expected_char_count=manifest.ocr_chars,
+                expected_page_sha256=manifest.page_output_sha256,
+            )
+        except Exception as exc:
+            raise OCRValidationError("partial native OCR bytes failed strict verification") from exc
+        result = OCRResult(
+            pages=tuple(_page_body(page) for page in verified.pages),
+            ocr_bytes=body,
+            ocr_text=verified.text,
+            ocr_sha256=verified.sha256,
+            size_bytes=verified.size_bytes,
+            provenance="native-partial",
+            provider=manifest.contract.provider,
+            model=manifest.contract.model,
+            reuse_key=reuse_key,
+        )
+        try:
+            await self._publish_native_ready(manifest=manifest)
+        except OCRCachePublicationError as exc:
+            if not exc.retryable:
+                raise
+            self._write_cache_publication_diagnostic(
+                output_dir=output_dir,
+                manifest=manifest,
+                error=exc,
+            )
+            warnings.warn(
+                "native OCR READY repair was deferred after bounded retries "
+                f"(reason_code={exc.reason_code}, phase={exc.phase}); "
+                "publishing generation-only OCR",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return replace(
+                result,
+                cache_publication_deferred=True,
+                cache_publication_reason_code=exc.reason_code,
+            )
+        self._cache_publication_diagnostic_path(output_dir).unlink(missing_ok=True)
+        return OCRResult(
+            pages=result.pages,
+            ocr_bytes=result.ocr_bytes,
+            ocr_text=result.ocr_text,
+            ocr_sha256=result.ocr_sha256,
+            size_bytes=result.size_bytes,
+            provenance="native-repaired",
+            provider=result.provider,
+            model=result.model,
+            reuse_key=result.reuse_key,
+            cache_kind="native",
+            cache_reuse_key=result.reuse_key,
+        )
+
     def _load_local_native(
         self,
         *,
@@ -413,9 +689,12 @@ class OCRResolver:
         ):
             raise OCRValidationError("local native OCR seal is incomplete or unsafe")
         try:
-            manifest = OCRArtifactManifest.model_validate_json(manifest_path.read_bytes())
+            manifest_body = manifest_path.read_bytes()
+            manifest = OCRArtifactManifest.model_validate_json(manifest_body)
         except Exception as exc:
             raise OCRValidationError("local native OCR manifest is invalid") from exc
+        if manifest.canonical_bytes() != manifest_body:
+            raise OCRValidationError("local native OCR manifest is not canonical")
         if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
             # A sealed artifact from an older processing contract is a clean
             # cache miss. Its checkpoints are independently input-hash bound.
@@ -448,13 +727,194 @@ class OCRResolver:
             body,
         )
 
+    def _materialize_prior_local_native(
+        self,
+        *,
+        prior: PriorLocalNativeSource,
+        source: OCRInput,
+        reuse_key: str,
+        document_id: str,
+        output_dir: Path,
+    ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
+        """Strictly verify and atomically seed a new run from a retained run."""
+
+        if (
+            prior.document_id != document_id
+            or prior.pdf_sha256 != source.pdf_sha256
+            or prior.pdf_size_bytes != source.pdf_size_bytes
+            or prior.page_count != source.page_count
+            or not re.fullmatch(r"[0-9a-f]{64}", prior.corpus_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", prior.contract_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", prior.ocr_sha256)
+            or prior.ocr_size_bytes < 1
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", prior.run_id)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", prior.generation_id)
+            or prior.resolver_subdir not in {None, "primary", "fallback"}
+        ):
+            raise OCRValidationError("prior local native OCR identity is invalid")
+
+        run_root = prior.runs_root / prior.run_id
+        document_root = run_root / "documents" / document_id
+        outer_output_dir = document_root / "ocr"
+        prior_output_dir = (
+            outer_output_dir / prior.resolver_subdir
+            if prior.resolver_subdir is not None
+            else outer_output_dir
+        )
+        directory_chain = [
+            prior.runs_root,
+            run_root,
+            run_root / "documents",
+            document_root,
+            outer_output_dir,
+        ]
+        if prior.resolver_subdir is not None:
+            directory_chain.append(prior_output_dir)
+        try:
+            for directory in directory_chain:
+                mode = directory.lstat().st_mode
+                if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                    raise OCRValidationError("prior local native OCR directory is unsafe")
+            resolved_runs_root = prior.runs_root.resolve(strict=True)
+            resolved_run_root = run_root.resolve(strict=True)
+            resolved_documents_root = (run_root / "documents").resolve(strict=True)
+            resolved_document_root = document_root.resolve(strict=True)
+            resolved_outer_output_dir = outer_output_dir.resolve(strict=True)
+            resolved_output_dir = prior_output_dir.resolve(strict=True)
+        except OCRValidationError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise OCRValidationError("prior local native OCR directory is unavailable") from exc
+        if (
+            resolved_run_root.parent != resolved_runs_root
+            or resolved_documents_root.parent != resolved_run_root
+            or resolved_document_root.parent != resolved_documents_root
+            or resolved_outer_output_dir.parent != resolved_document_root
+            or (prior.resolver_subdir is None and resolved_output_dir != resolved_outer_output_dir)
+            or (prior.resolver_subdir is not None and resolved_output_dir.parent != resolved_outer_output_dir)
+        ):
+            raise OCRValidationError("prior local native OCR path escapes retained run storage")
+
+        prior_ocr_path = prior_output_dir / "ocr.md"
+        prior_manifest_path = prior_output_dir / "native-manifest.json"
+        try:
+            for path in (prior_ocr_path, prior_manifest_path):
+                mode = path.lstat().st_mode
+                if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                    raise OCRValidationError("prior local native OCR file is unsafe")
+                if path.resolve(strict=True).parent != resolved_output_dir:
+                    raise OCRValidationError("prior local native OCR file escapes its output directory")
+        except OCRValidationError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise OCRValidationError("prior local native OCR file is unavailable") from exc
+
+        local = self._load_local_native(
+            output_dir=prior_output_dir,
+            source=source,
+            reuse_key=reuse_key,
+        )
+        if local is None:
+            return None
+        local_result, local_manifest, local_body = local
+        if (
+            local_result.ocr_sha256 != prior.ocr_sha256
+            or local_result.size_bytes != prior.ocr_size_bytes
+            or local_manifest.output.sha256 != prior.ocr_sha256
+            or local_manifest.output.size_bytes != prior.ocr_size_bytes
+        ):
+            raise OCRValidationError("prior local native OCR differs from its generation seal")
+
+        if output_dir != prior_output_dir:
+            if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
+                raise OCRValidationError("current local OCR output directory is unsafe")
+            # Write the body first and the canonical manifest last so the
+            # manifest remains the local commit marker across process crashes.
+            atomic_write(output_dir / "ocr.md", local_body)
+            atomic_write(output_dir / "native-manifest.json", local_manifest.canonical_bytes())
+            materialized = self._load_local_native(
+                output_dir=output_dir,
+                source=source,
+                reuse_key=reuse_key,
+            )
+            if materialized is None:
+                raise OCRValidationError("materialized prior local native OCR lost its contract")
+            return materialized
+        return local
+
+    def matches_prior_local_native(
+        self,
+        *,
+        prior: PriorLocalNativeSource,
+        document_id: str,
+        pdf_sha256: str,
+        pdf_size_bytes: int,
+        page_count: int,
+    ) -> bool:
+        """Return a strict, read-only match for failover branch routing."""
+
+        try:
+            source = OCRInput(
+                pdf_sha256=pdf_sha256,
+                pdf_size_bytes=pdf_size_bytes,
+                page_count=page_count,
+            )
+            reuse_key = native_ocr_reuse_key(self.contract, source)
+            run_root = prior.runs_root / prior.run_id / "documents" / document_id / "ocr"
+            prior_output_dir = (
+                run_root / prior.resolver_subdir if prior.resolver_subdir is not None else run_root
+            )
+            return (
+                self._materialize_prior_local_native(
+                    prior=prior,
+                    source=source,
+                    reuse_key=reuse_key,
+                    document_id=document_id,
+                    output_dir=prior_output_dir,
+                )
+                is not None
+            )
+        except (OCRValidationError, ValueError):
+            return False
+
+    @staticmethod
+    def _cache_publication_diagnostic_path(output_dir: Path) -> Path:
+        return output_dir / OCR_CACHE_PUBLICATION_DIAGNOSTIC
+
+    def _write_cache_publication_diagnostic(
+        self,
+        *,
+        output_dir: Path,
+        manifest: OCRArtifactManifest,
+        error: OCRCachePublicationError,
+    ) -> None:
+        payload = canonical_json_bytes(
+            {
+                "artifact_sha256": manifest.output.sha256,
+                "attempts": error.attempts,
+                "created_at": datetime.now(UTC),
+                "error_kind": error.error_kind,
+                "outcome": "generation-only",
+                "phase": error.phase,
+                "reason": error.reason,
+                "reason_code": error.reason_code,
+                "retryable": error.retryable,
+                "reuse_key": manifest.reuse_key,
+                "schema_version": "cardrag.ocr-cache-publication-diagnostic.v1",
+                "status_code": error.status_code,
+            }
+        )
+        if len(payload) > OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES:
+            raise OCRValidationError("OCR cache publication diagnostic exceeds its size bound")
+        atomic_write(self._cache_publication_diagnostic_path(output_dir), payload)
+
     async def _commit_local_native(
         self,
         *,
         result: OCRResult,
         manifest: OCRArtifactManifest,
         body: bytes,
-        native_cache_invalid: bool,
+        output_dir: Path,
     ) -> OCRResult:
         if body != result.ocr_bytes:
             raise OCRValidationError("local native OCR body does not match its verified result")
@@ -462,20 +922,27 @@ class OCRResolver:
             return result
         try:
             await self._publish_native_cache(manifest=manifest, body=body)
-        except Exception as exc:
-            if native_cache_invalid:
-                # An immutable cache key cannot repair conflicting remote control
-                # bytes. Treat the corrupt entry as the cache miss it already was:
-                # keep the verified local seal and let the generation reference
-                # the OCR CAS object without claiming a cache control binding.
-                warnings.warn(
-                    "native OCR was produced and locally sealed, but its corrupt immutable "
-                    f"cache entry could not be replaced ({exc}); publishing generation-only OCR",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                return result
-            raise
+        except OCRCachePublicationError as exc:
+            if not exc.retryable:
+                raise
+            self._write_cache_publication_diagnostic(
+                output_dir=output_dir,
+                manifest=manifest,
+                error=exc,
+            )
+            warnings.warn(
+                "native OCR cache publication was deferred after bounded retries "
+                f"(reason_code={exc.reason_code}, phase={exc.phase}); "
+                "publishing generation-only OCR",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return replace(
+                result,
+                cache_publication_deferred=True,
+                cache_publication_reason_code=exc.reason_code,
+            )
+        self._cache_publication_diagnostic_path(output_dir).unlink(missing_ok=True)
         return OCRResult(
             pages=result.pages,
             ocr_bytes=result.ocr_bytes,
@@ -500,6 +967,7 @@ class OCRResolver:
         pdf_size_bytes: int,
         page_count: int,
         output_dir: Path,
+        prior_local_native: PriorLocalNativeSource | None = None,
     ) -> OCRResult:
         source = OCRInput(
             pdf_sha256=pdf_sha256,
@@ -507,7 +975,6 @@ class OCRResolver:
             page_count=page_count,
         )
         native_key = native_ocr_reuse_key(self.contract, source)
-        native_cache_invalid = False
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
             adopted_policies.append(LEGACY_ADOPTION_POLICY_V1)
@@ -534,13 +1001,12 @@ class OCRResolver:
                     reuse_key=lookup_key,
                     source=source,
                     source_document_id=document_id,
+                    output_dir=output_dir,
                     adoption_policy_version=candidate_policy,
                 )
-            except OCRValidationError as exc:
-                if kind == "native":
-                    native_cache_invalid = True
+            except OCRValidationError:
                 warnings.warn(
-                    f"ignoring invalid {kind} OCR cache entry {lookup_key}: {exc}",
+                    f"ignoring invalid {kind} OCR cache entry; strict validation failed",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -548,13 +1014,32 @@ class OCRResolver:
             if found is not None:
                 return found
         local = self._load_local_native(output_dir=output_dir, source=source, reuse_key=native_key)
+        if local is None and prior_local_native is not None:
+            try:
+                local = self._materialize_prior_local_native(
+                    prior=prior_local_native,
+                    source=source,
+                    reuse_key=native_key,
+                    document_id=document_id,
+                    output_dir=output_dir,
+                )
+            except OCRValidationError:
+                # A retained local artifact is only an optimization.  Any
+                # ambiguity or tampering is a strict miss: do not reuse its
+                # bytes, and let the ordinary provider path rebuild the OCR.
+                warnings.warn(
+                    "ignoring invalid prior local native OCR source; strict validation failed",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                local = None
         if local is not None:
             local_result, local_manifest, local_body = local
             committed = await self._commit_local_native(
                 result=local_result,
                 manifest=local_manifest,
                 body=local_body,
-                native_cache_invalid=native_cache_invalid,
+                output_dir=output_dir,
             )
             shutil.rmtree(output_dir / "rendered", ignore_errors=True)
             return committed
@@ -690,7 +1175,7 @@ class OCRResolver:
             result=result,
             manifest=manifest,
             body=body,
-            native_cache_invalid=native_cache_invalid,
+            output_dir=output_dir,
         )
         shutil.rmtree(output_dir / "rendered", ignore_errors=True)
         return result
@@ -701,23 +1186,78 @@ class OCRResolver:
         manifest: OCRArtifactManifest,
         body: bytes,
     ) -> None:
+        attempts = len(OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._publish_native_cache_once(manifest=manifest, body=body)
+            except OCRCachePublicationError as exc:
+                error = _cache_publication_error(exc.phase, exc, attempts=attempt)
+                if not error.retryable or attempt == attempts:
+                    raise error from None
+                await asyncio.sleep(OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS[attempt - 1])
+            else:
+                return
+        raise AssertionError("bounded OCR cache publication loop did not terminate")
+
+    async def _publish_native_ready(self, *, manifest: OCRArtifactManifest) -> None:
+        attempts = len(OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._publish_native_ready_once(manifest=manifest)
+            except OCRCachePublicationError as exc:
+                error = _cache_publication_error("ready", exc, attempts=attempt)
+                if not error.retryable or attempt == attempts:
+                    raise error from None
+                await asyncio.sleep(OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS[attempt - 1])
+            else:
+                return
+        raise AssertionError("bounded OCR READY publication loop did not terminate")
+
+    async def _publish_native_cache_once(
+        self,
+        *,
+        manifest: OCRArtifactManifest,
+        body: bytes,
+    ) -> None:
         assert self.webdav is not None
-        artifact_sha, _ = await self.webdav.put_cas(body, media_type="text/markdown; charset=utf-8")
-        if artifact_sha != manifest.output.sha256:
-            raise OCRValidationError("native OCR changed between local seal and CAS publication")
+        try:
+            artifact_sha, artifact_path = await self.webdav.put_cas(
+                body,
+                media_type="text/markdown; charset=utf-8",
+            )
+        except Exception as exc:
+            raise _cache_publication_error("cas", exc) from None
+        if artifact_sha != manifest.output.sha256 or artifact_path != manifest.output.path:
+            raise OCRCachePublicationError(phase="cas", error_kind="contract") from None
         payload: Mapping[str, Any] = manifest.model_dump(mode="json")
-        manifest_body = await self.webdav.put_json(
-            ocr_manifest_path(manifest.reuse_key, kind="native"), payload, immutable=True
+        try:
+            manifest_body = await self.webdav.put_json(
+                ocr_manifest_path(manifest.reuse_key, kind="native"), payload, immutable=True
+            )
+        except Exception as exc:
+            raise _cache_publication_error("manifest", exc) from None
+        if manifest_body != manifest.canonical_bytes():
+            raise OCRCachePublicationError(phase="manifest", error_kind="contract") from None
+        await self._publish_native_ready_once(manifest=manifest)
+
+    async def _publish_native_ready_once(self, *, manifest: OCRArtifactManifest) -> None:
+        assert self.webdav is not None
+        manifest_body = manifest.canonical_bytes()
+        ready = OCRReady(
+            reuse_key=manifest.reuse_key,
+            manifest_sha256=hashlib.sha256(manifest_body).hexdigest(),
+            ocr_sha256=manifest.output.sha256,
         )
-        await self.webdav.put_json(
-            ocr_ready_path(manifest.reuse_key, kind="native"),
-            OCRReady(
-                reuse_key=manifest.reuse_key,
-                manifest_sha256=hashlib.sha256(manifest_body).hexdigest(),
-                ocr_sha256=artifact_sha,
-            ).model_dump(mode="json"),
-            immutable=True,
-        )
+        try:
+            ready_body = await self.webdav.put_json(
+                ocr_ready_path(manifest.reuse_key, kind="native"),
+                ready.model_dump(mode="json"),
+                immutable=True,
+            )
+        except Exception as exc:
+            raise _cache_publication_error("ready", exc) from None
+        if ready_body != ready.canonical_bytes():
+            raise OCRCachePublicationError(phase="ready", error_kind="contract") from None
 
 
 def page_records(document_id: str, result: OCRResult) -> tuple[PageRecord, ...]:
@@ -744,10 +1284,66 @@ class FailoverOCRResolver:
 
     async def resolve(self, **kwargs: Any) -> OCRResult:
         output_dir = Path(kwargs.pop("output_dir"))
+        raw_prior = kwargs.pop("prior_local_native", None)
+        primary_prior: PriorLocalNativeSource | None = None
+        fallback_prior: PriorLocalNativeSource | None = None
+        if isinstance(raw_prior, PriorLocalNativeSource):
+            primary_prior = replace(raw_prior, resolver_subdir="primary")
+            fallback_prior = replace(raw_prior, resolver_subdir="fallback")
+            document_id = str(kwargs["document_id"])
+            pdf_sha256 = str(kwargs["pdf_sha256"])
+            pdf_size_bytes = int(kwargs["pdf_size_bytes"])
+            page_count = int(kwargs["page_count"])
+            primary_matches = self.primary.matches_prior_local_native(
+                prior=primary_prior,
+                document_id=document_id,
+                pdf_sha256=pdf_sha256,
+                pdf_size_bytes=pdf_size_bytes,
+                page_count=page_count,
+            )
+            fallback_matches = self.fallback.matches_prior_local_native(
+                prior=fallback_prior,
+                document_id=document_id,
+                pdf_sha256=pdf_sha256,
+                pdf_size_bytes=pdf_size_bytes,
+                page_count=page_count,
+            )
+            if primary_matches != fallback_matches:
+                if primary_matches:
+                    return await self.primary.resolve(
+                        **kwargs,
+                        output_dir=output_dir / "primary",
+                        prior_local_native=primary_prior,
+                    )
+                result = await self.fallback.resolve(
+                    **kwargs,
+                    output_dir=output_dir / "fallback",
+                    prior_local_native=fallback_prior,
+                )
+                shutil.rmtree(output_dir / "primary" / "rendered", ignore_errors=True)
+                return result
+            # Zero matches is unavailable/invalid; two matches cannot prove
+            # which resolver produced the sealed generation OCR.  Both are a
+            # strict miss, so neither sibling may consume retained bytes.
+            primary_prior = None
+            fallback_prior = None
         try:
-            return await self.primary.resolve(**kwargs, output_dir=output_dir / "primary")
-        except (ProviderError, OCRValidationError, httpx.HTTPError, TimeoutError):
+            return await self.primary.resolve(
+                **kwargs,
+                output_dir=output_dir / "primary",
+                prior_local_native=primary_prior,
+            )
+        except (
+            ProviderDocumentError,
+            OCRValidationError,
+            httpx.TimeoutException,
+            TimeoutError,
+        ):
             pass
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code not in {408, 413, 422, 425, 429} and not 500 <= status_code <= 599:
+                raise
         # Warning emission and fallback execution stay outside the primary
         # exception handler so cancellation cannot retain provider stderr as
         # implicit exception context.
@@ -756,6 +1352,10 @@ class FailoverOCRResolver:
             RuntimeWarning,
             stacklevel=2,
         )
-        result = await self.fallback.resolve(**kwargs, output_dir=output_dir / "fallback")
+        result = await self.fallback.resolve(
+            **kwargs,
+            output_dir=output_dir / "fallback",
+            prior_local_native=fallback_prior,
+        )
         shutil.rmtree(output_dir / "primary" / "rendered", ignore_errors=True)
         return result

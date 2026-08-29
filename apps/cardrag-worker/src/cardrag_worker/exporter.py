@@ -25,6 +25,7 @@ from .contracts import (
     DocumentRecord,
     EvidenceRecord,
     IssuerSpec,
+    OCRFailedProductRecord,
     PageRecord,
     UnsupportedProductRecord,
     canonical_json_bytes,
@@ -89,6 +90,22 @@ CREATE TABLE unsupported_products (
   FOREIGN KEY (issuer) REFERENCES issuers(code)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE ocr_failed_products (
+  issuer TEXT NOT NULL,
+  product_code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  document_id TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  pdf_sha256 TEXT NOT NULL CHECK(length(pdf_sha256)=64),
+  pdf_size_bytes INTEGER NOT NULL CHECK(pdf_size_bytes > 0),
+  page_count INTEGER NOT NULL CHECK(page_count > 0),
+  reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 64),
+  reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 256),
+  attempts INTEGER NOT NULL CHECK(attempts > 0),
+  PRIMARY KEY (issuer, product_code),
+  FOREIGN KEY (issuer) REFERENCES issuers(code)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE pages (
   document_id TEXT NOT NULL REFERENCES documents(document_id),
   page INTEGER NOT NULL CHECK(page > 0),
@@ -130,6 +147,7 @@ class ServingExport:
     issuer_count: int
     document_count: int
     unsupported_product_count: int
+    ocr_failed_product_count: int
     page_count: int
     evidence_count: int
 
@@ -160,6 +178,7 @@ def _validate_inputs(
     documents: Sequence[DocumentRecord],
     evidence: Sequence[EvidenceRecord],
     unsupported_products: Sequence[UnsupportedProductRecord],
+    ocr_failed_products: Sequence[OCRFailedProductRecord],
 ) -> None:
     if len(unsupported_products) > 100:
         raise ServingDatabaseError("unsupported product count exceeds the promotion limit")
@@ -178,10 +197,37 @@ def _validate_inputs(
     overlap = set(products).intersection(unsupported_identities)
     if overlap:
         raise ServingDatabaseError("a current product cannot be both served and unsupported")
-    for row in unsupported_products:
-        if row.source.issuer not in issuer_codes:
+    failed_identities = [(row.issuer, row.product_code) for row in ocr_failed_products]
+    if len(set(failed_identities)) != len(failed_identities):
+        raise ServingDatabaseError("latest corpus contains duplicate OCR-failed products")
+    failed_document_ids = [row.document_id for row in ocr_failed_products]
+    if len(set(failed_document_ids)) != len(failed_document_ids):
+        raise ServingDatabaseError("latest corpus contains duplicate OCR-failed document IDs")
+    if set(products).intersection(failed_identities) or set(unsupported_identities).intersection(
+        failed_identities
+    ):
+        raise ServingDatabaseError("a current product has multiple availability dispositions")
+    for failed_row in ocr_failed_products:
+        if (
+            failed_row.issuer not in issuer_codes
+            or re.fullmatch(r"doc_[0-9a-f]{64}", failed_row.document_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", failed_row.pdf_sha256) is None
+            or failed_row.pdf_size_bytes < 1
+            or failed_row.page_count < 1
+            or re.fullmatch(r"[a-z0-9_]{1,64}", failed_row.reason_code) is None
+            or not failed_row.reason
+            or len(failed_row.reason) > 256
+            or "\n" in failed_row.reason
+            or "\r" in failed_row.reason
+            or failed_row.attempts < 1
+        ):
+            raise ServingDatabaseError("OCR-failed product contains an invalid bounded value")
+    for unsupported_row in unsupported_products:
+        if unsupported_row.source.issuer not in issuer_codes:
             raise ServingDatabaseError("unsupported product references an unknown issuer")
-        if row.source_payload_json != canonical_json_bytes(row.source.discovery_payload).decode("utf-8"):
+        if unsupported_row.source_payload_json != canonical_json_bytes(
+            unsupported_row.source.discovery_payload
+        ).decode("utf-8"):
             raise ServingDatabaseError("unsupported product source payload is not canonical")
     evidence_ids = [row.evidence_id for row in evidence]
     if len(set(evidence_ids)) != len(evidence_ids):
@@ -223,6 +269,7 @@ def _verify_database(
     issuer_count: int,
     document_count: int,
     unsupported_product_count: int,
+    ocr_failed_product_count: int,
     page_count: int,
     evidence_count: int,
 ) -> None:
@@ -240,6 +287,11 @@ def _verify_database(
             "unsupported_products",
             "SELECT count(*) FROM unsupported_products",
             unsupported_product_count,
+        ),
+        (
+            "ocr_failed_products",
+            "SELECT count(*) FROM ocr_failed_products",
+            ocr_failed_product_count,
         ),
         ("pages", "SELECT count(*) FROM pages", page_count),
         ("evidence", "SELECT count(*) FROM evidence", evidence_count),
@@ -316,9 +368,16 @@ class ServingDatabaseExporter:
         documents: Sequence[DocumentRecord],
         evidence: Sequence[EvidenceRecord],
         unsupported_products: Sequence[UnsupportedProductRecord] = (),
+        ocr_failed_products: Sequence[OCRFailedProductRecord] = (),
         extra_metadata: Mapping[str, str] | None = None,
     ) -> ServingExport:
-        _validate_inputs(issuers, documents, evidence, unsupported_products)
+        _validate_inputs(
+            issuers,
+            documents,
+            evidence,
+            unsupported_products,
+            ocr_failed_products,
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         token = uuid.uuid4().hex
         working = target.parent / f".{target.name}.{token}.build"
@@ -333,6 +392,12 @@ class ServingDatabaseExporter:
             sorted(
                 unsupported_products,
                 key=lambda row: (row.source.issuer, row.source.product_code),
+            )
+        )
+        ordered_ocr_failed = tuple(
+            sorted(
+                ocr_failed_products,
+                key=lambda row: (row.issuer, row.product_code),
             )
         )
         unsupported_payload = sorted(
@@ -359,6 +424,13 @@ class ServingDatabaseExporter:
                     "documents": unsupported_payload,
                 }
             ),
+            "ocr_failed_document_count": str(len(ordered_ocr_failed)),
+            "ocr_failed_documents_sha256": canonical_sha256(
+                {
+                    "schema_version": "cardrag.ocr-failed-products.v1",
+                    "documents": [row.payload for row in ordered_ocr_failed],
+                }
+            ),
         }
         if extra_metadata:
             overlap = set(metadata).intersection(extra_metadata)
@@ -376,6 +448,28 @@ class ServingDatabaseExporter:
             connection.executemany(
                 "INSERT INTO issuers(code,display_name,sort_order) VALUES(?,?,?)",
                 ((row.code, row.display_name, row.sort_order) for row in ordered_issuers),
+            )
+            connection.executemany(
+                """INSERT INTO ocr_failed_products
+                   (issuer,product_code,name,document_id,title,pdf_sha256,pdf_size_bytes,
+                    page_count,reason_code,reason,attempts)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    (
+                        row.issuer,
+                        row.product_code,
+                        row.product_name,
+                        row.document_id,
+                        row.title,
+                        row.pdf_sha256,
+                        row.pdf_size_bytes,
+                        row.page_count,
+                        row.reason_code,
+                        row.reason,
+                        row.attempts,
+                    )
+                    for row in ordered_ocr_failed
+                ),
             )
             connection.executemany(
                 """INSERT INTO documents
@@ -459,6 +553,7 @@ class ServingDatabaseExporter:
                 issuer_count=len(ordered_issuers),
                 document_count=len(ordered_documents),
                 unsupported_product_count=len(ordered_unsupported),
+                ocr_failed_product_count=len(ordered_ocr_failed),
                 page_count=page_count,
                 evidence_count=len(ordered_evidence),
             )
@@ -472,6 +567,7 @@ class ServingDatabaseExporter:
                 issuer_count=len(ordered_issuers),
                 document_count=len(ordered_documents),
                 unsupported_product_count=len(ordered_unsupported),
+                ocr_failed_product_count=len(ordered_ocr_failed),
                 page_count=page_count,
                 evidence_count=len(ordered_evidence),
             )
@@ -494,6 +590,7 @@ class ServingDatabaseExporter:
             issuer_count=len(ordered_issuers),
             document_count=len(ordered_documents),
             unsupported_product_count=len(ordered_unsupported),
+            ocr_failed_product_count=len(ordered_ocr_failed),
             page_count=page_count,
             evidence_count=len(ordered_evidence),
         )

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -43,6 +44,10 @@ class RemoteDocument:
     page_count: int
     pdf: RemoteArtifact
     ocr_sha256: str | None = None
+    availability: str = "available"
+    failure_reason_code: str | None = None
+    failure_reason: str | None = None
+    failure_attempts: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +67,7 @@ class RemoteGeneration:
     embedding_model: str
     embedding_dimension: int
     embedding_count: int
+    issuer_ocr_counts: tuple[tuple[str, int, int, int], ...] = ()
 
 
 class ArtifactReader(Protocol):
@@ -250,6 +256,51 @@ class WebDAVUpdater:
         document_issuers = {document.issuer for document in generation.documents}
         if not document_issuers.issubset(generation.issuer_codes):
             raise RuntimeError("generation document references an undeclared issuer")
+        if generation.serving_schema == "cardrag.serving-db.v4":
+            if tuple(row[0] for row in generation.issuer_ocr_counts) != generation.issuer_codes:
+                raise RuntimeError("v4 generation issuer OCR counts are incomplete")
+            for issuer, acquired, succeeded, failed in generation.issuer_ocr_counts:
+                matching = [item for item in generation.documents if item.issuer == issuer]
+                if (
+                    acquired != len(matching)
+                    or succeeded != sum(item.availability == "available" for item in matching)
+                    or failed != sum(item.availability == "ocr_failed" for item in matching)
+                    or succeeded < 1
+                    or succeeded * 100 < acquired * 95
+                ):
+                    raise RuntimeError("v4 generation issuer OCR counts are invalid")
+            for document in generation.documents:
+                failure_values = (
+                    document.failure_reason_code,
+                    document.failure_reason,
+                    document.failure_attempts,
+                )
+                if document.availability == "available":
+                    if document.ocr_sha256 is None or any(
+                        value is not None for value in failure_values
+                    ):
+                        raise RuntimeError("available v4 document has an invalid OCR disposition")
+                elif document.availability == "ocr_failed":
+                    if (
+                        document.ocr_sha256 is not None
+                        or any(value is None for value in failure_values)
+                        or re.fullmatch(r"[a-z0-9_]{1,64}", document.failure_reason_code or "")
+                        is None
+                        or not document.failure_reason
+                        or len(document.failure_reason) > 256
+                        or "\n" in document.failure_reason
+                        or "\r" in document.failure_reason
+                        or isinstance(document.failure_attempts, bool)
+                        or not isinstance(document.failure_attempts, int)
+                        or document.failure_attempts < 1
+                    ):
+                        raise RuntimeError("OCR-failed v4 document has an invalid disposition")
+                else:
+                    raise RuntimeError("v4 document availability is invalid")
+        elif generation.issuer_ocr_counts or any(
+            document.availability != "available" for document in generation.documents
+        ):
+            raise RuntimeError("legacy generation contains v4 OCR dispositions")
 
     def _validated_handle(
         self,
@@ -298,7 +349,17 @@ class WebDAVUpdater:
             raise RuntimeError("generation manifest contains duplicate document IDs")
         if set(declared) != {item[0] for item in documents}:
             raise RuntimeError("manifest and database document sets differ")
-        for document_id, issuer, page_count, pdf_sha256, pdf_size_bytes in documents:
+        for (
+            document_id,
+            issuer,
+            page_count,
+            pdf_sha256,
+            pdf_size_bytes,
+            availability,
+            reason_code,
+            reason,
+            attempts,
+        ) in documents:
             manifest_document = declared[document_id]
             artifact = manifest_document.pdf
             if (
@@ -307,13 +368,20 @@ class WebDAVUpdater:
                 or artifact.sha256 != pdf_sha256
                 or artifact.size_bytes != pdf_size_bytes
                 or artifact.media_type != "application/pdf"
+                or manifest_document.availability != availability
+                or manifest_document.failure_reason_code != reason_code
+                or manifest_document.failure_reason != reason
+                or manifest_document.failure_attempts != attempts
             ):
                 raise RuntimeError("manifest and database PDF references differ")
+        available_documents = [
+            document for document in generation.documents if document.availability == "available"
+        ]
         expected_counts = (
             len(generation.issuer_codes),
             generation.document_count,
-            generation.document_count,
-            sum(document.page_count for document in generation.documents),
+            len(available_documents),
+            sum(document.page_count for document in available_documents),
             generation.chunk_count,
             generation.pdf_object_count,
         )
@@ -324,32 +392,81 @@ class WebDAVUpdater:
     def _database_contract(
         handle: GenerationHandle,
     ) -> tuple[
-        list[tuple[str, str, int, str, int]],
+        list[tuple[str, str, int, str, int, str, str | None, str | None, int | None]],
         tuple[int, int, int, int, int, int],
         tuple[str, ...],
     ]:
         with handle.connect() as connection:
-            documents = [
-                (str(row[0]), str(row[1]), int(row[2]), str(row[3]), int(row[4]))
+            documents: list[
+                tuple[str, str, int, str, int, str, str | None, str | None, int | None]
+            ] = [
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    int(row[2]),
+                    str(row[3]),
+                    int(row[4]),
+                    "available",
+                    None,
+                    None,
+                    None,
+                )
                 for row in connection.execute(
                     "SELECT document_id,issuer,page_count,pdf_sha256,pdf_size_bytes "
                     "FROM documents ORDER BY document_id"
                 )
             ]
+            if handle.metadata.schema_id == "cardrag.serving-db.v4":
+                documents.extend(
+                    (
+                        str(row[0]),
+                        str(row[1]),
+                        int(row[2]),
+                        str(row[3]),
+                        int(row[4]),
+                        "ocr_failed",
+                        str(row[5]),
+                        str(row[6]),
+                        int(row[7]),
+                    )
+                    for row in connection.execute(
+                        """SELECT document_id,issuer,page_count,pdf_sha256,pdf_size_bytes,
+                                  reason_code,reason,attempts
+                             FROM ocr_failed_products ORDER BY document_id"""
+                    )
+                )
+                documents.sort(key=lambda row: row[0])
             issuer_codes = tuple(
                 str(row[0]) for row in connection.execute("SELECT code FROM issuers ORDER BY code")
             )
-            raw_counts = connection.execute(
-                """
-                SELECT
-                  (SELECT count(*) FROM issuers),
-                  (SELECT count(*) FROM products),
-                  (SELECT count(*) FROM documents),
-                  (SELECT count(*) FROM pages),
-                  (SELECT count(*) FROM evidence),
-                  (SELECT count(DISTINCT pdf_sha256) FROM documents)
-                """
-            ).fetchone()
+            if handle.metadata.schema_id == "cardrag.serving-db.v4":
+                raw_counts = connection.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM issuers),
+                      (SELECT count(*) FROM products) +
+                        (SELECT count(*) FROM ocr_failed_products),
+                      (SELECT count(*) FROM documents),
+                      (SELECT count(*) FROM pages),
+                      (SELECT count(*) FROM evidence),
+                      (SELECT count(*) FROM (
+                         SELECT pdf_sha256 FROM documents
+                         UNION SELECT pdf_sha256 FROM ocr_failed_products
+                       ))
+                    """
+                ).fetchone()
+            else:
+                raw_counts = connection.execute(
+                    """
+                    SELECT
+                      (SELECT count(*) FROM issuers),
+                      (SELECT count(*) FROM products),
+                      (SELECT count(*) FROM documents),
+                      (SELECT count(*) FROM pages),
+                      (SELECT count(*) FROM evidence),
+                      (SELECT count(DISTINCT pdf_sha256) FROM documents)
+                    """
+                ).fetchone()
             if raw_counts is None:
                 raise RuntimeError("serving database corpus counts are unavailable")
             counts = (

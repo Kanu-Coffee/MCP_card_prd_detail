@@ -38,9 +38,17 @@ def test_default_activation_is_fixed_and_does_not_expand_with_registry() -> None
         **REGISTERED_ISSUERS,
         "lotte": Registration(LotteAdapter.spec, LotteAdapter),
     }
-    assert DEFAULT_ENABLED_ISSUERS == ("woori", "kb", "shinhan")
+    assert DEFAULT_ENABLED_ISSUERS == ("woori", "kb", "shinhan", "samsung")
     assert enabled_issuer_codes(None, registry=registry) == DEFAULT_ENABLED_ISSUERS
     assert [adapter.spec.code for adapter in enabled_adapters("lotte", registry=registry)] == ["lotte"]
+
+
+def test_samsung_is_registered_and_default_enabled_after_shinhan() -> None:
+    registration = REGISTERED_ISSUERS["samsung"]
+
+    assert registration.spec.display_name == "삼성카드"
+    assert registration.factory().spec is registration.spec
+    assert enabled_issuer_codes("samsung,woori") == ("woori", "samsung")
 
 
 def test_production_registry_has_a_nontrivial_first_run_discovery_floor() -> None:

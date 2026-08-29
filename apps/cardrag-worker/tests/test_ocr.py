@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import httpx
 import pytest
 from cardrag_core import (
     AdoptedOCRArtifactManifest,
@@ -18,6 +20,9 @@ from cardrag_core import (
     OCRArtifactManifest,
     OCRInput,
     OCRReady,
+    WebDAVError,
+    WebDAVHTTPError,
+    WebDAVIntegrityError,
     adopted_ocr_reuse_key,
     canonical_json_bytes,
     canonical_sha256,
@@ -29,11 +34,14 @@ from cardrag_core import (
 from helpers import pdf_bytes
 
 from cardrag_worker.ocr import (
+    OCR_CACHE_PUBLICATION_DIAGNOSTIC,
     OCR_OUTPUT_POLICY,
     FailoverOCRResolver,
+    OCRCachePublicationError,
     OCRResolver,
     OCRResult,
     OCRValidationError,
+    PriorLocalNativeSource,
     render_pdf,
 )
 from cardrag_worker.pipeline import _canonical_ocr_body
@@ -41,7 +49,9 @@ from cardrag_worker.providers import (
     DEFAULT_OCR_PROMPT,
     OCR_BLANK_PAGE_SENTINEL,
     OCR_SPARSE_PAGE_PREFIX,
+    ProviderDocumentError,
     ProviderError,
+    ProviderSystemicError,
 )
 from cardrag_worker.state import WorkerState
 
@@ -52,6 +62,12 @@ OCR_BODY_SINGLE_MARKER_NEWLINE = (
     "## Page 1\n이 페이지에는 카드 혜택 조건과 제외 사항이 자세하게 적혀 있습니다.\n\n"
     "## Page 2\n두 번째 페이지는 이전 페이지의 상품 설명을 연속해서 충분히 설명합니다.\n"
 ).encode()
+
+
+def wrapped_remote_protocol_error() -> WebDAVError:
+    error = WebDAVError("SECRET_WEBDAV_WRAPPER_PATH")
+    error.__cause__ = httpx.RemoteProtocolError("SECRET_REMOTE_PROTOCOL_BODY")
+    return error
 
 
 class FakeProvider:
@@ -104,6 +120,19 @@ class FakeWebDAV:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.fail_control = False
+        self.publish_failures: dict[str, list[Exception]] = {
+            "cas": [],
+            "manifest": [],
+            "ready": [],
+        }
+        self.publish_calls: dict[str, int] = {"cas": 0, "manifest": 0, "ready": 0}
+        self.cas_digest_override: str | None = None
+
+    def _publish_phase(self, phase: str) -> None:
+        self.publish_calls[phase] += 1
+        failures = self.publish_failures[phase]
+        if failures:
+            raise failures.pop(0)
 
     async def get_bytes(self, path: str | PurePosixPath, *, max_bytes: int | None = None) -> bytes | None:
         body = self.objects.get(str(path))
@@ -112,10 +141,11 @@ class FakeWebDAV:
         return body
 
     async def put_cas(self, body: bytes, *, media_type: str) -> tuple[str, str]:
+        self._publish_phase("cas")
         digest = sha256_bytes(body)
         path = object_path(digest).as_posix()
         self.objects[path] = body
-        return digest, path
+        return self.cas_digest_override or digest, path
 
     async def put_json(
         self,
@@ -124,6 +154,8 @@ class FakeWebDAV:
         *,
         immutable: bool,
     ) -> bytes:
+        phase = "ready" if str(path).endswith("/READY.json") else "manifest"
+        self._publish_phase(phase)
         if self.fail_control:
             raise RuntimeError("immutable conflict")
         body = canonical_json_bytes(payload)
@@ -772,7 +804,7 @@ async def test_v2_adopted_cache_is_preferred_over_v1_fallback(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_corrupt_native_control_is_cache_miss_and_local_seal_avoids_repeat_provider(
+async def test_corrupt_native_control_warning_is_redacted_and_publication_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
@@ -784,7 +816,8 @@ async def test_corrupt_native_control_is_cache_miss_and_local_seal_avoids_repeat
         source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
         key = native_ocr_reuse_key(resolver.contract, source)
         webdav.objects[f"v1/ocr-cache/native/{key[:2]}/{key}/READY.json"] = b"{}"
-        webdav.fail_control = True
+        raw_sentinel = "SECRET_URL_CREDENTIAL_AND_REMOTE_BODY"
+        webdav.publish_failures["manifest"] = [RuntimeError(raw_sentinel), RuntimeError(raw_sentinel)]
         pdf = tmp_path / "pdf-pages.txt"
         pdf.write_text("1", encoding="utf-8")
         arguments = dict(
@@ -796,22 +829,564 @@ async def test_corrupt_native_control_is_cache_miss_and_local_seal_avoids_repeat
             page_count=1,
             output_dir=tmp_path / "ocr",
         )
-        with pytest.warns(RuntimeWarning) as first_warnings:
-            first = await resolver.resolve(**arguments)
+        with (
+            pytest.warns(RuntimeWarning) as first_warnings,
+            pytest.raises(OCRCachePublicationError) as first_error,
+        ):
+            await resolver.resolve(**arguments)
         assert any("invalid native OCR cache entry" in str(item.message) for item in first_warnings)
-        assert any("publishing generation-only OCR" in str(item.message) for item in first_warnings)
+        assert raw_sentinel not in "".join(str(item.message) for item in first_warnings)
+        assert raw_sentinel not in str(first_error.value)
+        assert first_error.value.phase == "manifest"
+        assert first_error.value.error_kind == "unexpected"
+        assert first_error.value.retryable is False
+        assert provider.calls == [1]
+        assert (tmp_path / "ocr" / "native-manifest.json").is_file()
+        with (
+            pytest.warns(RuntimeWarning) as resumed_warnings,
+            pytest.raises(OCRCachePublicationError) as resumed_error,
+        ):
+            await resolver.resolve(**arguments)
+        assert any("invalid native OCR cache entry" in str(item.message) for item in resumed_warnings)
+        assert raw_sentinel not in "".join(str(item.message) for item in resumed_warnings)
+        assert raw_sentinel not in str(resumed_error.value)
+        assert provider.calls == [1]
+        assert not (tmp_path / "ocr" / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_ready_exhaustion_is_repaired_next_run_from_fresh_output_without_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    monkeypatch.setattr("cardrag_worker.ocr.OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    raw_sentinel = "SECRET_WEBDAV_URL_CREDENTIAL_AND_RAW_BODY"
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    webdav.publish_failures["ready"] = [
+        WebDAVHTTPError("PUT", PurePosixPath(raw_sentinel), 503) for _ in range(3)
+    ]
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        output_dir = tmp_path / "run-1-ocr"
+        arguments = dict(
+            run_id="run",
+            document_id="doc_ready_resume",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=output_dir,
+        )
+
+        with pytest.warns(RuntimeWarning, match="publishing generation-only OCR") as warnings_seen:
+            first = await resolver.resolve(**arguments)
+
+        rendered_warnings = "".join(str(item.message) for item in warnings_seen)
+        assert raw_sentinel not in rendered_warnings
         assert provider.calls == [1]
         assert (first.cache_kind, first.cache_reuse_key) == (None, None)
-        assert (tmp_path / "ocr" / "native-manifest.json").is_file()
-        with pytest.warns(RuntimeWarning) as resumed_warnings:
-            resumed = await resolver.resolve(**arguments)
-        assert any("invalid native OCR cache entry" in str(item.message) for item in resumed_warnings)
-        assert any("publishing generation-only OCR" in str(item.message) for item in resumed_warnings)
+        assert first.cache_publication_deferred is True
+        assert first.cache_publication_reason_code == "ocr_cache_publication_ready_http"
+        assert first.ocr_bytes == (output_dir / "ocr.md").read_bytes()
+        diagnostic_path = output_dir / OCR_CACHE_PUBLICATION_DIAGNOSTIC
+        diagnostic_body = diagnostic_path.read_bytes()
+        assert len(diagnostic_body) <= 4096
+        assert raw_sentinel.encode() not in diagnostic_body
+        diagnostic = json.loads(diagnostic_body)
+        assert diagnostic == {
+            "artifact_sha256": first.ocr_sha256,
+            "attempts": 3,
+            "created_at": diagnostic["created_at"],
+            "error_kind": "http",
+            "outcome": "generation-only",
+            "phase": "ready",
+            "reason": "OCR cache publication received an HTTP failure status",
+            "reason_code": "ocr_cache_publication_ready_http",
+            "retryable": True,
+            "reuse_key": first.reuse_key,
+            "schema_version": "cardrag.ocr-cache-publication-diagnostic.v1",
+            "status_code": 503,
+        }
+        root = f"v1/ocr-cache/native/{first.reuse_key[:2]}/{first.reuse_key}"
+        local_manifest = (output_dir / "native-manifest.json").read_bytes()
+        assert webdav.objects[root + "/manifest.json"] == local_manifest
+        assert root + "/READY.json" not in webdav.objects
+        assert webdav.objects[object_path(first.ocr_sha256).as_posix()] == first.ocr_bytes
+
+        next_provider = FakeProvider()
+        next_resolver = OCRResolver(
+            provider=next_provider,
+            state=state,
+            webdav=webdav,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        state.start_run(run_id="run-2")
+        next_output_dir = tmp_path / "run-2-ocr"
+        resumed = await next_resolver.resolve(
+            run_id="run-2",
+            document_id="doc_ready_resume",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=next_output_dir,
+        )
+
         assert provider.calls == [1]
-        assert (resumed.cache_kind, resumed.cache_reuse_key) == (None, None)
+        assert next_provider.calls == []
+        assert (resumed.cache_kind, resumed.cache_reuse_key) == ("native", first.reuse_key)
+        assert resumed.provenance == "native-repaired"
+        assert resumed.cache_publication_deferred is False
+        assert resumed.cache_publication_reason_code is None
         assert resumed.ocr_bytes == first.ocr_bytes
-        assert resumed.ocr_text == first.ocr_text
-        assert _canonical_ocr_body(resumed) == (tmp_path / "ocr" / "ocr.md").read_bytes()
+        assert webdav.objects[root + "/manifest.json"] == local_manifest
+        assert root + "/READY.json" in webdav.objects
+        assert diagnostic_path.exists()
+        assert not (next_output_dir / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
+        assert not (next_output_dir / "ocr.md").exists()
+        assert webdav.publish_calls == {"cas": 3, "manifest": 3, "ready": 4}
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_prior_local_native_symlink_is_strict_miss_and_calls_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    runs_root = tmp_path / "runs"
+    prior_output = runs_root / "run-1" / "documents" / "doc_prior_local" / "ocr"
+    pdf = tmp_path / "pdf-pages.txt"
+    pdf.write_text("1", encoding="utf-8")
+    state = WorkerState(tmp_path / "state.sqlite3")
+    first_provider = FakeProvider()
+    try:
+        state.start_run(run_id="run-1")
+        first_resolver = OCRResolver(
+            provider=first_provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        first = await first_resolver.resolve(
+            run_id="run-1",
+            document_id="doc_prior_local",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=prior_output,
+        )
+
+        outside = tmp_path / "outside-native-manifest.json"
+        outside.write_text("SECRET_UNTRUSTED_NATIVE_MANIFEST", encoding="utf-8")
+        prior_manifest = prior_output / "native-manifest.json"
+        prior_manifest.unlink()
+        prior_manifest.symlink_to(outside)
+
+        second_provider = FakeProvider()
+        second_resolver = OCRResolver(
+            provider=second_provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        state.start_run(run_id="run-2")
+        second_output = runs_root / "run-2" / "documents" / "doc_prior_local" / "ocr"
+        prior = PriorLocalNativeSource(
+            runs_root=runs_root,
+            run_id="run-1",
+            generation_id="g-prior-local",
+            corpus_sha256="b" * 64,
+            contract_sha256="c" * 64,
+            document_id="doc_prior_local",
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            ocr_sha256=first.ocr_sha256,
+            ocr_size_bytes=first.size_bytes,
+        )
+        with pytest.warns(RuntimeWarning, match="strict validation failed") as warnings_seen:
+            second = await second_resolver.resolve(
+                run_id="run-2",
+                document_id="doc_prior_local",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=second_output,
+                prior_local_native=prior,
+            )
+
+        assert first_provider.calls == [1]
+        assert second_provider.calls == [1]
+        assert second.ocr_bytes == (second_output / "ocr.md").read_bytes()
+        assert second.ocr_bytes != outside.read_bytes()
+        assert "SECRET_UNTRUSTED_NATIVE_MANIFEST" not in str(warnings_seen[0].message)
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_failover_ambiguous_prior_native_branches_are_strict_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    state = WorkerState(tmp_path / "state.sqlite3")
+    primary_provider = FakeProvider()
+    fallback_provider = FakeProvider()
+    try:
+        primary = OCRResolver(
+            provider=primary_provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        fallback = OCRResolver(
+            provider=fallback_provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        assert primary.contract == fallback.contract
+        source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+        reuse_key = native_ocr_reuse_key(primary.contract, source)
+        verified = verify_ocr_bytes(OCR_BODY, expected_page_count=1)
+        manifest = OCRArtifactManifest(
+            reuse_key=reuse_key,
+            source=source,
+            contract=primary.contract,
+            output=ArtifactRef.for_cas(
+                sha256=verified.sha256,
+                size_bytes=verified.size_bytes,
+                media_type="text/markdown; charset=utf-8",
+            ),
+            ocr_chars=verified.char_count,
+            page_output_sha256=verified.page_sha256,
+            created_at=NOW,
+        )
+        runs_root = tmp_path / "runs"
+        prior_outer = runs_root / "run-1" / "documents" / "doc_ambiguous_prior" / "ocr"
+        prior_outer.mkdir(parents=True)
+        (prior_outer / "ocr.md").write_bytes(OCR_BODY)
+        for branch in ("primary", "fallback"):
+            branch_root = prior_outer / branch
+            branch_root.mkdir()
+            (branch_root / "ocr.md").write_bytes(OCR_BODY)
+            (branch_root / "native-manifest.json").write_bytes(manifest.canonical_bytes())
+
+        prior = PriorLocalNativeSource(
+            runs_root=runs_root,
+            run_id="run-1",
+            generation_id="g-ambiguous-prior",
+            corpus_sha256="b" * 64,
+            contract_sha256="c" * 64,
+            document_id="doc_ambiguous_prior",
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            ocr_sha256=verified.sha256,
+            ocr_size_bytes=verified.size_bytes,
+        )
+        state.start_run(run_id="run-2")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        result = await FailoverOCRResolver(primary, fallback).resolve(
+            run_id="run-2",
+            document_id="doc_ambiguous_prior",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=runs_root / "run-2" / "documents" / "doc_ambiguous_prior" / "ocr",
+            prior_local_native=prior,
+        )
+
+        assert primary_provider.calls == [1]
+        assert fallback_provider.calls == []
+        assert result.provenance == "native"
+    finally:
+        state.close()
+
+
+def test_prior_native_failover_subdir_symlink_and_traversal_are_strict_misses(
+    tmp_path: Path,
+) -> None:
+    state = WorkerState(tmp_path / "state.sqlite3")
+    try:
+        resolver = OCRResolver(
+            provider=FakeProvider(),
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+        verified = verify_ocr_bytes(OCR_BODY, expected_page_count=1)
+        manifest = OCRArtifactManifest(
+            reuse_key=native_ocr_reuse_key(resolver.contract, source),
+            source=source,
+            contract=resolver.contract,
+            output=ArtifactRef.for_cas(
+                sha256=verified.sha256,
+                size_bytes=verified.size_bytes,
+                media_type="text/markdown; charset=utf-8",
+            ),
+            ocr_chars=verified.char_count,
+            page_output_sha256=verified.page_sha256,
+            created_at=NOW,
+        )
+        runs_root = tmp_path / "runs"
+        prior_outer = runs_root / "run-1" / "documents" / "doc_branch_boundary" / "ocr"
+        prior_outer.mkdir(parents=True)
+        outside = tmp_path / "outside-primary"
+        outside.mkdir()
+        (outside / "ocr.md").write_bytes(OCR_BODY)
+        (outside / "native-manifest.json").write_bytes(manifest.canonical_bytes())
+        (prior_outer / "primary").symlink_to(outside, target_is_directory=True)
+        common = {
+            "runs_root": runs_root,
+            "run_id": "run-1",
+            "generation_id": "g-branch-boundary",
+            "corpus_sha256": "b" * 64,
+            "contract_sha256": "c" * 64,
+            "document_id": "doc_branch_boundary",
+            "pdf_sha256": PDF_SHA,
+            "pdf_size_bytes": 3,
+            "page_count": 1,
+            "ocr_sha256": verified.sha256,
+            "ocr_size_bytes": verified.size_bytes,
+        }
+        symlink_prior = PriorLocalNativeSource(**common, resolver_subdir="primary")
+        traversal_prior = PriorLocalNativeSource(
+            **common,
+            resolver_subdir="../outside",  # type: ignore[arg-type]
+        )
+        arguments = {
+            "document_id": "doc_branch_boundary",
+            "pdf_sha256": PDF_SHA,
+            "pdf_size_bytes": 3,
+            "page_count": 1,
+        }
+
+        assert not resolver.matches_prior_local_native(prior=symlink_prior, **arguments)
+        assert not resolver.matches_prior_local_native(prior=traversal_prior, **arguments)
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize("status_code", [408, 423, 425, 429, 500, 599])
+@pytest.mark.asyncio
+async def test_transient_cache_http_statuses_exhaust_to_generation_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    monkeypatch.setattr("cardrag_worker.ocr.OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    webdav.publish_failures["cas"] = [
+        WebDAVHTTPError("PUT", PurePosixPath("SECRET_REMOTE_PATH"), status_code) for _ in range(3)
+    ]
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.warns(RuntimeWarning, match="publishing generation-only OCR"):
+            result = await resolver.resolve(
+                run_id="run",
+                document_id=f"doc_http_{status_code}",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+        assert result.cache_kind is None
+        diagnostic = json.loads((tmp_path / "ocr" / OCR_CACHE_PUBLICATION_DIAGNOSTIC).read_bytes())
+        assert diagnostic["phase"] == "cas"
+        assert diagnostic["status_code"] == status_code
+        assert diagnostic["retryable"] is True
+        assert diagnostic["attempts"] == 3
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize(
+    ("failure_factory", "expected_kind"),
+    [
+        (lambda: httpx.ConnectTimeout("SECRET_TIMEOUT_URL_AND_BODY"), "timeout"),
+        (lambda: httpx.ConnectError("SECRET_NETWORK_URL_AND_BODY"), "network"),
+        (lambda: httpx.RemoteProtocolError("SECRET_REMOTE_PROTOCOL_BODY"), "network"),
+        (lambda: httpx.ProtocolError("SECRET_PROTOCOL_BODY"), "network"),
+        (lambda: httpx.ProxyError("SECRET_PROXY_URL_AND_BODY"), "network"),
+        (wrapped_remote_protocol_error, "network"),
+    ],
+    ids=["timeout", "network", "remote-protocol", "protocol", "proxy", "wrapped-protocol"],
+)
+@pytest.mark.asyncio
+async def test_transient_cache_transport_exhaustion_is_redacted_and_generation_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_factory: Any,
+    expected_kind: str,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    monkeypatch.setattr("cardrag_worker.ocr.OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    webdav.publish_failures["cas"] = [failure_factory() for _ in range(3)]
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.warns(RuntimeWarning) as warnings_seen:
+            result = await resolver.resolve(
+                run_id="run",
+                document_id=f"doc_{expected_kind}",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+        assert result.cache_kind is None
+        diagnostic_body = (tmp_path / "ocr" / OCR_CACHE_PUBLICATION_DIAGNOSTIC).read_bytes()
+        assert b"SECRET_" not in diagnostic_body
+        diagnostic = json.loads(diagnostic_body)
+        assert diagnostic["error_kind"] == expected_kind
+        assert diagnostic["attempts"] == 3
+        assert "SECRET_" not in "".join(str(item.message) for item in warnings_seen)
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize("phase", ["cas", "manifest", "ready"])
+@pytest.mark.parametrize("status_code", [401, 403, 407])
+@pytest.mark.asyncio
+async def test_permanent_auth_cache_failure_is_typed_phase_aware_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    status_code: int,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    raw_sentinel = "SECRET_AUTH_URL_CREDENTIAL_AND_RAW_BODY"
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    webdav.publish_failures[phase] = [WebDAVHTTPError("PUT", PurePosixPath(raw_sentinel), status_code)]
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(OCRCachePublicationError) as captured:
+            await resolver.resolve(
+                run_id="run",
+                document_id=f"doc_{phase}_{status_code}",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+        error = captured.value
+        assert error.phase == phase
+        assert error.reason_code == f"ocr_cache_publication_{phase}_http"
+        assert error.reason == "OCR cache publication received an HTTP failure status"
+        assert error.error_kind == "http"
+        assert error.status_code == status_code
+        assert error.retryable is False
+        assert error.attempts == 1
+        assert raw_sentinel not in str(error)
+        assert not (tmp_path / "ocr" / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
+        assert webdav.publish_calls[phase] == 1
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_kind"),
+    [
+        (WebDAVIntegrityError("SECRET_INTEGRITY_REMOTE_BODY"), "integrity"),
+        (WebDAVHTTPError("PUT", PurePosixPath("SECRET_CONFLICT_REMOTE_PATH"), 412), "contract"),
+        (httpx.LocalProtocolError("SECRET_LOCAL_PROTOCOL_CONFIGURATION"), "contract"),
+        (httpx.UnsupportedProtocol("SECRET_UNSUPPORTED_PROTOCOL_CONFIGURATION"), "contract"),
+    ],
+    ids=["integrity", "immutable-conflict", "local-protocol", "unsupported-protocol"],
+)
+@pytest.mark.asyncio
+async def test_permanent_integrity_and_contract_cache_failures_fail_closed_without_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected_kind: str,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    webdav.publish_failures["cas"] = [failure]
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(OCRCachePublicationError) as captured:
+            await resolver.resolve(
+                run_id="run",
+                document_id=f"doc_{expected_kind}",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+        assert captured.value.phase == "cas"
+        assert captured.value.error_kind == expected_kind
+        assert captured.value.retryable is False
+        assert "SECRET_" not in str(captured.value)
+        assert not (tmp_path / "ocr" / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_cas_digest_contract_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    webdav.cas_digest_override = "f" * 64
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(OCRCachePublicationError) as captured:
+            await resolver.resolve(
+                run_id="run",
+                document_id="doc_contract_digest",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+        assert captured.value.phase == "cas"
+        assert captured.value.error_kind == "contract"
+        assert captured.value.reason_code == "ocr_cache_publication_cas_contract"
+        assert captured.value.retryable is False
     finally:
         state.close()
 
@@ -1140,7 +1715,15 @@ async def test_failover_preserves_fallback_verified_bytes(
 ) -> None:
     monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
     raw_sentinel = "RAW_PROVIDER_STDERR_SECRET_SENTINEL"
-    primary_provider = FakeProvider(fail_calls={1}, failure_message=raw_sentinel)
+
+    class DocumentFailingProvider(FakeProvider):
+        async def recognize(self, *args: Any, **kwargs: Any) -> str:
+            try:
+                return await super().recognize(*args, **kwargs)
+            except ProviderError:
+                raise ProviderDocumentError() from None
+
+    primary_provider = DocumentFailingProvider(fail_calls={1}, failure_message=raw_sentinel)
     fallback_provider = FakeProvider()
     state = WorkerState(tmp_path / "state.sqlite3")
     primary = OCRResolver(provider=primary_provider, state=state, webdav=None, chunk_pages=1)  # type: ignore[arg-type]
@@ -1172,6 +1755,36 @@ async def test_failover_preserves_fallback_verified_bytes(
 
 
 @pytest.mark.asyncio
+async def test_failover_does_not_swallow_provider_systemic_failure(tmp_path: Path) -> None:
+    class SystemicPrimary:
+        adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+        contract = {"schema_version": "test-primary.v1"}
+
+        async def resolve(self, **_kwargs: Any) -> OCRResult:
+            raise ProviderSystemicError("provider_process_exit", exit_code=17)
+
+    class RecordingFallback:
+        adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+        contract = {"schema_version": "test-fallback.v1"}
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def resolve(self, **_kwargs: Any) -> OCRResult:
+            self.calls += 1
+            raise AssertionError("systemic primary failure must bypass fallback")
+
+    fallback = RecordingFallback()
+    resolver = FailoverOCRResolver(SystemicPrimary(), fallback)  # type: ignore[arg-type]
+
+    with pytest.raises(ProviderSystemicError) as captured:
+        await resolver.resolve(output_dir=tmp_path / "ocr")
+
+    assert captured.value.reason_code == "provider_process_exit"
+    assert fallback.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_failover_cancellation_has_no_primary_provider_exception_context(tmp_path: Path) -> None:
     raw_sentinel = "RAW_PRIMARY_PROVIDER_STDERR_SENTINEL"
     fallback_started = asyncio.Event()
@@ -1181,7 +1794,9 @@ async def test_failover_cancellation_has_no_primary_provider_exception_context(t
         contract = {"schema_version": "test-primary.v1"}
 
         async def resolve(self, **_kwargs: Any) -> OCRResult:
-            raise ProviderError(raw_sentinel)
+            failure = ProviderDocumentError()
+            failure.__cause__ = ProviderError(raw_sentinel)
+            raise failure
 
     class BlockingFallback:
         adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"

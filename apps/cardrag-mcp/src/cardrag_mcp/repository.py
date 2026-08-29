@@ -21,6 +21,7 @@ from cardrag_mcp.models import (
     Evidence,
     EvidencePage,
     Issuer,
+    OCRFailedProduct,
     Product,
     SearchFilters,
     SearchPage,
@@ -394,7 +395,7 @@ class ServingRepository:
 
     async def get_product(
         self, issuer: str, product_code: str
-    ) -> Product | UnsupportedProduct | None:
+    ) -> Product | UnsupportedProduct | OCRFailedProduct | None:
         with self.store.pin() as handle:
             return await asyncio.to_thread(self._get_product, handle, issuer, product_code)
 
@@ -403,7 +404,7 @@ class ServingRepository:
         handle: GenerationHandle,
         issuer: str,
         product_code: str,
-    ) -> Product | UnsupportedProduct | None:
+    ) -> Product | UnsupportedProduct | OCRFailedProduct | None:
         with handle.connect() as connection:
             row = connection.execute(
                 """
@@ -426,21 +427,51 @@ class ServingRepository:
                     """,
                     (issuer, product_code),
                 ).fetchone()
+                if unsupported is None and handle.metadata.schema_id == "cardrag.serving-db.v4":
+                    ocr_failed = connection.execute(
+                        """SELECT issuer,product_code,name,document_id,title,pdf_sha256,
+                                  pdf_size_bytes,page_count,reason_code,reason,attempts
+                             FROM ocr_failed_products
+                            WHERE issuer=? AND product_code=?""",
+                        (issuer, product_code),
+                    ).fetchone()
+                else:
+                    ocr_failed = None
             else:
                 unsupported = None
+                ocr_failed = None
         if row is None:
-            if unsupported is None:
+            if unsupported is not None:
+                return UnsupportedProduct(
+                    issuer=unsupported["issuer"],
+                    product_code=unsupported["product_code"],
+                    name=unsupported["name"],
+                    source_id=unsupported["source_id"],
+                    source_version=unsupported["source_version"],
+                    source_url=unsupported["source_url"],
+                    protected_magic=unsupported["protected_magic"],
+                    protected_source_sha256=unsupported["protected_sha256"],
+                    protected_source_size_bytes=unsupported["protected_size_bytes"],
+                )
+            if ocr_failed is None:
                 return None
-            return UnsupportedProduct(
-                issuer=unsupported["issuer"],
-                product_code=unsupported["product_code"],
-                name=unsupported["name"],
-                source_id=unsupported["source_id"],
-                source_version=unsupported["source_version"],
-                source_url=unsupported["source_url"],
-                protected_magic=unsupported["protected_magic"],
-                protected_source_sha256=unsupported["protected_sha256"],
-                protected_source_size_bytes=unsupported["protected_size_bytes"],
+            failed_document = Document(
+                document_id=ocr_failed["document_id"],
+                issuer=ocr_failed["issuer"],
+                product_code=ocr_failed["product_code"],
+                title=ocr_failed["title"],
+                pdf_sha256=ocr_failed["pdf_sha256"],
+                pdf_size_bytes=ocr_failed["pdf_size_bytes"],
+                page_count=ocr_failed["page_count"],
+            )
+            return OCRFailedProduct(
+                issuer=ocr_failed["issuer"],
+                product_code=ocr_failed["product_code"],
+                name=ocr_failed["name"],
+                document=failed_document,
+                reason_code=ocr_failed["reason_code"],
+                reason=ocr_failed["reason"],
+                attempts=ocr_failed["attempts"],
             )
         document = Document(
             document_id=row["document_id"],
@@ -468,6 +499,13 @@ class ServingRepository:
             row = connection.execute(
                 "SELECT * FROM documents WHERE document_id=?", (document_id,)
             ).fetchone()
+            if row is None and handle.metadata.schema_id == "cardrag.serving-db.v4":
+                row = connection.execute(
+                    """SELECT document_id,issuer,product_code,title,pdf_sha256,
+                              pdf_size_bytes,page_count
+                         FROM ocr_failed_products WHERE document_id=?""",
+                    (document_id,),
+                ).fetchone()
         return Document(**dict(row)) if row is not None else None
 
     async def get_source_page(self, document_id: str, page: int) -> SourcePage | None:
@@ -501,35 +539,44 @@ class ServingRepository:
 
     async def list_products(
         self, issuer: str | None = None
-    ) -> tuple[Product | UnsupportedProduct, ...]:
+    ) -> tuple[Product | UnsupportedProduct | OCRFailedProduct, ...]:
         with self.store.pin() as handle:
             with handle.connect() as connection:
                 if issuer is None:
-                    rows = connection.execute(
-                        """
-                        SELECT issuer,product_code FROM products
-                        UNION ALL
-                        SELECT issuer,product_code FROM unsupported_products
-                        ORDER BY issuer,product_code
-                        """
-                    ).fetchall()
+                    sql = """
+                    SELECT issuer,product_code FROM products
+                    UNION ALL
+                    SELECT issuer,product_code FROM unsupported_products
+                    """
+                    if handle.metadata.schema_id == "cardrag.serving-db.v4":
+                        sql += " UNION ALL SELECT issuer,product_code FROM ocr_failed_products"
+                    rows = connection.execute(sql + " ORDER BY issuer,product_code").fetchall()
                 else:
-                    rows = connection.execute(
-                        """
-                        SELECT issuer,product_code FROM products WHERE issuer=?
-                        UNION ALL
-                        SELECT issuer,product_code FROM unsupported_products WHERE issuer=?
-                        ORDER BY product_code
-                        """,
-                        (issuer, issuer),
-                    ).fetchall()
+                    sql = """
+                    SELECT issuer,product_code FROM products WHERE issuer=?
+                    UNION ALL
+                    SELECT issuer,product_code FROM unsupported_products WHERE issuer=?
+                    """
+                    values: tuple[str, ...] = (issuer, issuer)
+                    if handle.metadata.schema_id == "cardrag.serving-db.v4":
+                        sql += (
+                            " UNION ALL SELECT issuer,product_code "
+                            "FROM ocr_failed_products WHERE issuer=?"
+                        )
+                        values += (issuer,)
+                    rows = connection.execute(sql + " ORDER BY product_code", values).fetchall()
             products = [self._get_product(handle, str(row[0]), str(row[1])) for row in rows]
         return tuple(product for product in products if product is not None)
 
     async def list_documents(self) -> tuple[Document, ...]:
         with self.store.pin() as handle:
             with handle.connect() as connection:
-                rows = connection.execute("SELECT * FROM documents ORDER BY document_id").fetchall()
+                sql = "SELECT * FROM documents"
+                if handle.metadata.schema_id == "cardrag.serving-db.v4":
+                    sql += """ UNION ALL
+                        SELECT document_id,issuer,product_code,title,pdf_sha256,
+                               pdf_size_bytes,page_count FROM ocr_failed_products"""
+                rows = connection.execute(sql + " ORDER BY document_id").fetchall()
         return tuple(Document(**dict(row)) for row in rows)
 
     async def list_pages(self, document_id: str) -> tuple[SourcePage, ...]:

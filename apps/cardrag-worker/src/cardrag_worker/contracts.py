@@ -14,8 +14,8 @@ from typing import Any, Literal, Protocol
 import httpx
 from cardrag_core import issuer_code
 
-SERVING_SCHEMA_ID: Literal["cardrag.serving-db.v3"] = "cardrag.serving-db.v3"
-GENERATION_SCHEMA_ID: Literal["cardrag.generation.v3"] = "cardrag.generation.v3"
+SERVING_SCHEMA_ID: Literal["cardrag.serving-db.v4"] = "cardrag.serving-db.v4"
+GENERATION_SCHEMA_ID: Literal["cardrag.generation.v4"] = "cardrag.generation.v4"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
 
@@ -266,6 +266,39 @@ class DocumentRecord:
     pdf_size_bytes: int
     page_count: int
     pages: tuple[PageRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OCRFailedProductRecord:
+    """A validated PDF excluded from OCR-derived serving artifacts."""
+
+    document_id: str
+    issuer: str
+    product_code: str
+    product_name: str
+    title: str
+    pdf_sha256: str
+    pdf_size_bytes: int
+    page_count: int
+    reason_code: str
+    reason: str
+    attempts: int
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return {
+            "attempts": self.attempts,
+            "document_id": self.document_id,
+            "issuer": self.issuer,
+            "page_count": self.page_count,
+            "pdf_sha256": self.pdf_sha256,
+            "pdf_size_bytes": self.pdf_size_bytes,
+            "product_code": self.product_code,
+            "product_name": self.product_name,
+            "reason": self.reason,
+            "reason_code": self.reason_code,
+            "title": self.title,
+        }
 
 
 @dataclass(frozen=True, slots=True)

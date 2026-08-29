@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from cardrag_core import EMBEDDING_DIMENSION, resolve_env_secret
+from cardrag_core import EMBEDDING_DIMENSION, channel_pointer_path, resolve_env_secret
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -40,9 +41,16 @@ def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 def _positive_float(name: str, default: float) -> float:
     value = float(os.environ.get(name, str(default)))
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be positive")
     return value
+
+
+def _boolean(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "true" if default else "false").strip().casefold()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
 
 
 def _provider_base_url(name: str, default: str) -> str:
@@ -69,6 +77,7 @@ def _provider_base_url(name: str, default: str) -> str:
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     state_dir: Path
+    channel: str
     webdav_base_url: str | None
     webdav_username: str | None
     webdav_password: str | None
@@ -96,6 +105,11 @@ class WorkerSettings:
     ocr_render_scale_milli: int
     stage_max_attempts: int
     retry_cap_seconds: float
+    pdf_cache_refresh_hours: float
+    retain_generations: int
+    retained_incomplete_runs: int
+    garbage_grace_days: int
+    collect_remote_garbage: bool
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
@@ -114,8 +128,11 @@ class WorkerSettings:
             raise ValueError("OpenRouter API key is required for embeddings")
         auth_root = os.environ.get("CARDRAG_CODEX_AUTH_ROOT")
         ca_file = os.environ.get("CARDRAG_WEBDAV_CA_FILE")
+        channel = os.environ.get("CARDRAG_CHANNEL", "stable")
+        channel_pointer_path(channel)
         return cls(
             state_dir=Path(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")).resolve(),
+            channel=channel,
             webdav_base_url=webdav_base.rstrip("/") if webdav_base else None,
             webdav_username=_read_secret("CARDRAG_WEBDAV_USERNAME", required=require_webdav),
             webdav_password=_read_secret("CARDRAG_WEBDAV_PASSWORD", required=require_webdav),
@@ -151,6 +168,11 @@ class WorkerSettings:
             ),
             stage_max_attempts=_positive_int("CARDRAG_STAGE_MAX_ATTEMPTS", 4),
             retry_cap_seconds=_positive_float("CARDRAG_RETRY_CAP_SECONDS", 30),
+            pdf_cache_refresh_hours=_positive_float("CARDRAG_PDF_CACHE_REFRESH_HOURS", 168),
+            retain_generations=_bounded_int("CARDRAG_RETAIN_GENERATIONS", 2, minimum=2, maximum=20),
+            retained_incomplete_runs=_bounded_int("CARDRAG_RETAIN_INCOMPLETE_RUNS", 2, minimum=1, maximum=20),
+            garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 30, minimum=1, maximum=365),
+            collect_remote_garbage=_boolean("CARDRAG_COLLECT_REMOTE_GARBAGE", True),
         )
 
     @property

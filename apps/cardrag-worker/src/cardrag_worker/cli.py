@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import signal
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -21,16 +24,53 @@ from .adoption import (
     validate_inventory,
     write_reports,
 )
-from .gc import collect_garbage
+from .cache_seed import (
+    CacheSeedError,
+    apply_cache_seed,
+    build_cache_seed_plan,
+    paths_overlap,
+)
+from .gc import GCPartialFailure, collect_garbage
 from .issuers import enabled_adapters
 from .ocr import FailoverOCRResolver, OCRResolver
-from .pipeline import OCRDocumentFailuresError, WorkerPipeline
+from .pdf_cache import PDFCache
+from .pipeline import (
+    OCRDocumentFailuresError,
+    OCRSystemicFailureError,
+    PipelineResult,
+    WorkerPipeline,
+    WorkerUnexpectedFailureError,
+)
 from .providers import OCRProvider, OpenRouterEmbeddingProvider, make_ocr_provider
 from .settings import WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
 from .webdav import WebDAVClient
 
 app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/embedding worker")
+
+_WORKER_SHUTDOWN_SIGNALS: tuple[int, int] = (int(signal.SIGTERM), int(signal.SIGINT))
+
+
+class WorkerSignalShutdown(RuntimeError):
+    """A process signal whose cancellation has been fully drained."""
+
+    def __init__(self, signal_number: int) -> None:
+        if type(signal_number) is not int or signal_number not in _WORKER_SHUTDOWN_SIGNALS:
+            raise ValueError("unsupported worker shutdown signal")
+        self.signal_number = signal_number
+        super().__init__("Worker signal shutdown completed")
+
+
+def _configure_worker_logging() -> None:
+    """Emit bounded Worker progress without enabling noisy dependency logs."""
+
+    logger = logging.getLogger("cardrag_worker")
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 
 def _echo(payload: Any) -> None:
@@ -61,6 +101,55 @@ def _echo_ocr_failures(exc: OCRDocumentFailuresError) -> None:
     )
 
 
+def _echo_ocr_systemic_failure(exc: OCRSystemicFailureError) -> None:
+    failure = exc.failure
+    payload: dict[str, Any] = {
+        "document_id": failure.document_id,
+        "error_class_category": failure.error_class_category,
+        "issuer": failure.issuer,
+        "product_code": failure.product_code,
+        "reason": failure.reason,
+        "reason_code": failure.reason_code,
+        "report": exc.report,
+        "run_id": exc.run_id,
+        "status": "failed",
+    }
+    if failure.phase is not None:
+        payload["phase"] = failure.phase
+    if failure.status_code is not None:
+        payload["status_code"] = failure.status_code
+    if failure.error_kind is not None:
+        payload["error_kind"] = failure.error_kind
+    if failure.retryable is not None:
+        payload["retryable"] = failure.retryable
+    if failure.publication_attempts is not None:
+        payload["publication_attempts"] = failure.publication_attempts
+    if failure.exit_code is not None:
+        payload["exit_code"] = failure.exit_code
+    _echo(payload)
+
+
+def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = None) -> None:
+    payload: dict[str, Any] = {
+        "reason": "Worker pipeline failed unexpectedly.",
+        "reason_code": "worker_unexpected_failure",
+        "status": "failed",
+    }
+    if exc is not None:
+        payload.update(
+            {
+                "error_class_category": exc.failure.error_class_category,
+                "report": exc.report,
+                "run_id": exc.run_id,
+            }
+        )
+        if exc.failure.status_code is not None:
+            payload["status_code"] = exc.failure.status_code
+        if exc.failure.errno is not None:
+            payload["errno"] = exc.failure.errno
+    _echo(payload)
+
+
 def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
     return make_ocr_provider(
         name,
@@ -74,7 +163,37 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
     )
 
 
+def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "generation_id": result.generation_id,
+        "corpus_sha256": result.corpus_sha256,
+        "contract_sha256": result.contract_sha256,
+        "documents": result.document_count,
+        "unsupported_documents": result.unsupported_document_count,
+        "evidence": result.evidence_count,
+        "gc_status": result.gc_status,
+        "gc_deleted": result.gc_deleted,
+        "gc_error": result.gc_error[:1000] if result.gc_error else None,
+        "pdf_cache_hits": result.pdf_cache_hits,
+        "pdf_cache_misses": result.pdf_cache_misses,
+        "pdf_cache_not_modified": result.pdf_cache_not_modified,
+        "pdf_cache_prune_error": (
+            result.pdf_cache_prune_error[:1000] if result.pdf_cache_prune_error else None
+        ),
+        "pdf_cache_prune_status": result.pdf_cache_prune_status,
+        "pdf_cache_pruned_bytes": result.pdf_cache_pruned_bytes,
+        "pdf_cache_pruned_objects": result.pdf_cache_pruned_objects,
+        "pdf_cache_revalidations": result.pdf_cache_revalidations,
+        "pdf_downloads": result.pdf_downloads,
+        "pdf_revisions": result.pdf_revisions,
+        "ocr_cache_publication_deferred": result.ocr_cache_publication_deferred,
+    }
+
+
 async def _run(resume: str | None) -> dict[str, Any]:
+    _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     webdav = WebDAVClient.from_env()
@@ -124,22 +243,113 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 webdav=webdav,
                 maximum_attempts=settings.stage_max_attempts,
                 retry_cap_seconds=settings.retry_cap_seconds,
+                collect_remote_garbage=(settings.collect_remote_garbage and settings.channel == "stable"),
+                retained_generations=settings.retain_generations,
+                retained_incomplete_runs=settings.retained_incomplete_runs,
+                garbage_grace_days=settings.garbage_grace_days,
+                pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
             ).run(resume_run_id=resume)
-            return {
-                "run_id": result.run_id,
-                "status": result.status,
-                "generation_id": result.generation_id,
-                "corpus_sha256": result.corpus_sha256,
-                "contract_sha256": result.contract_sha256,
-                "documents": result.document_count,
-                "unsupported_documents": result.unsupported_document_count,
-                "evidence": result.evidence_count,
-                "gc_status": result.gc_status,
-                "gc_deleted": result.gc_deleted,
-                "gc_error": result.gc_error[:1000] if result.gc_error else None,
-            }
+            return _pipeline_result_payload(result)
     finally:
         await webdav.close()
+
+
+async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
+    """Translate SIGTERM/SIGINT into one drained pipeline cancellation.
+
+    A second signal is deliberately coalesced with the first one. Repeated
+    ``Task.cancel()`` calls can otherwise interrupt publication
+    reconciliation or a cancellation-fenced blocking operation and release
+    the worker lock before its mutation has stopped.
+    """
+
+    loop = asyncio.get_running_loop()
+    task: asyncio.Task[dict[str, Any]] | None = None
+    requested_signal: int | None = None
+    installed: list[tuple[int, Any]] = []
+
+    def request_shutdown(signal_number: int) -> None:
+        nonlocal requested_signal
+        if requested_signal is not None:
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Additional worker shutdown signal ignored while cancellation drains"
+            )
+            return
+        requested_signal = signal_number
+        logging.getLogger("cardrag_worker.cli").warning(
+            "Worker shutdown requested; cancellation drain started (signal=%s)",
+            signal.Signals(signal_number).name,
+        )
+        if task is not None:
+            task.cancel()
+
+    try:
+        for signal_number in _WORKER_SHUTDOWN_SIGNALS:
+            previous = signal.getsignal(signal_number)
+            loop.add_signal_handler(signal_number, request_shutdown, signal_number)
+            installed.append((signal_number, previous))
+    except (NotImplementedError, RuntimeError):
+        for signal_number, previous in reversed(installed):
+            loop.remove_signal_handler(signal_number)
+            signal.signal(signal_number, previous)
+        raise RuntimeError("worker signal handlers are unavailable") from None
+
+    task = asyncio.create_task(_run(resume), name="cardrag-worker-pipeline")
+    # A signal may be delivered after its loop handler is installed but before
+    # the task reference becomes visible to that handler. Close that narrow
+    # startup race instead of silently running after a stop was requested.
+    if requested_signal is not None:
+        task.cancel()
+    cancelled_by_signal = False
+    result: dict[str, Any] | None = None
+    try:
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            if requested_signal is None:
+                raise
+            cancelled_by_signal = True
+    finally:
+        for signal_number, previous in reversed(installed):
+            loop.remove_signal_handler(signal_number)
+            signal.signal(signal_number, previous)
+
+    if cancelled_by_signal:
+        assert requested_signal is not None
+        raise WorkerSignalShutdown(requested_signal) from None
+    if result is None:
+        raise RuntimeError("worker pipeline returned no terminal result")
+    return result
+
+
+def _echo_signal_shutdown(exc: WorkerSignalShutdown) -> int:
+    signal_number: object = exc.signal_number
+    if type(signal_number) is not int or signal_number not in _WORKER_SHUTDOWN_SIGNALS:
+        signal_number = signal.SIGTERM
+    exit_code = 128 + signal_number
+    _echo(
+        {
+            "exit_code": exit_code,
+            "reason": "Worker stopped after cancellation drain and terminal-state reconciliation.",
+            "reason_code": "worker_signal_shutdown",
+            "signal": signal.Signals(signal_number).name,
+            # Process-level status only. Publication reconciliation may have
+            # durably proven the run succeeded immediately before shutdown;
+            # the state DB remains the authority for that run status.
+            "status": "shutdown_complete",
+        }
+    )
+    return exit_code
+
+
+def _echo_worker_busy() -> None:
+    _echo(
+        {
+            "reason": "Worker did not start because the worker lock is held.",
+            "reason_code": "worker_busy",
+            "status": "already_running",
+        }
+    )
 
 
 @app.command("run")
@@ -147,23 +357,45 @@ def run_command(
     resume: str | None = typer.Option(None, "--resume", help="Resume one failed finite run ID."),
 ) -> None:
     try:
-        _echo(asyncio.run(_run(resume)))
+        _echo(asyncio.run(_run_with_signal_shutdown(resume)))
+    except WorkerSignalShutdown as exc:
+        raise typer.Exit(code=_echo_signal_shutdown(exc)) from None
     except OCRDocumentFailuresError as exc:
         _echo_ocr_failures(exc)
         raise typer.Exit(code=1) from None
-    except AlreadyRunning as exc:
-        _echo({"status": "already_running", "error": str(exc)})
+    except OCRSystemicFailureError as exc:
+        _echo_ocr_systemic_failure(exc)
+        raise typer.Exit(code=1) from None
+    except AlreadyRunning:
+        _echo_worker_busy()
+    except WorkerUnexpectedFailureError as exc:
+        _echo_worker_unexpected_failure(exc)
+        raise typer.Exit(code=1) from None
+    except Exception:
+        _echo_worker_unexpected_failure()
+        raise typer.Exit(code=1) from None
 
 
 @app.command("resume")
 def resume_command(run_id: str = typer.Argument(..., help="Failed finite run ID.")) -> None:
     try:
-        _echo(asyncio.run(_run(run_id)))
+        _echo(asyncio.run(_run_with_signal_shutdown(run_id)))
+    except WorkerSignalShutdown as exc:
+        raise typer.Exit(code=_echo_signal_shutdown(exc)) from None
     except OCRDocumentFailuresError as exc:
         _echo_ocr_failures(exc)
         raise typer.Exit(code=1) from None
-    except AlreadyRunning as exc:
-        _echo({"status": "already_running", "error": str(exc)})
+    except OCRSystemicFailureError as exc:
+        _echo_ocr_systemic_failure(exc)
+        raise typer.Exit(code=1) from None
+    except AlreadyRunning:
+        _echo_worker_busy()
+    except WorkerUnexpectedFailureError as exc:
+        _echo_worker_unexpected_failure(exc)
+        raise typer.Exit(code=1) from None
+    except Exception:
+        _echo_worker_unexpected_failure()
+        raise typer.Exit(code=1) from None
 
 
 @app.command("webdav-check")
@@ -182,6 +414,55 @@ def webdav_check() -> None:
             await client.close()
 
     _echo(asyncio.run(check()))
+
+
+def _seed_legacy_pdf_cache(legacy_root: Path, *, apply: bool) -> dict[str, Any]:
+    plan = build_cache_seed_plan(legacy_root)
+    if not apply:
+        return plan.report(applied=False)
+
+    settings = WorkerSettings.from_env()
+    if settings.channel == "stable":
+        raise CacheSeedError("stable_destination_forbidden")
+    if settings.channel != "candidate-v1.0.9":
+        raise CacheSeedError("candidate_destination_required")
+    if paths_overlap(plan.legacy_root, settings.state_dir):
+        raise CacheSeedError("destination_overlaps_legacy_root")
+    settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
+            return apply_cache_seed(plan, PDFCache(settings.state_dir, state))
+    except AlreadyRunning as exc:
+        raise CacheSeedError("destination_busy") from exc
+
+
+@app.command("cache-seed")
+def cache_seed_command(
+    legacy_root: Path = typer.Argument(..., help="Absolute read-only v1.0.8 Worker state root."),
+    apply: bool = typer.Option(False, "--apply", help="Seed the candidate cache; default is dry-run."),
+) -> None:
+    """Validate legacy run PDFs and optionally seed only the candidate PDF cache."""
+
+    try:
+        _echo(_seed_legacy_pdf_cache(legacy_root, apply=apply))
+    except CacheSeedError as exc:
+        _echo(
+            {
+                "applied_candidates": 0,
+                "created_pdf_objects": 0,
+                "created_revisions": 0,
+                "dry_run": not apply,
+                "ledger_path": None,
+                "ledger_sha256": None,
+                "ledger_size_bytes": 0,
+                "reason_code": exc.code,
+                "reused_candidates": 0,
+                "schema_version": "cardrag.cache-seed-report.v1",
+                "skipped_stale_runs": 0,
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=1) from None
 
 
 async def _publish_if_requested(result: Any, publish: bool) -> int:
@@ -326,40 +607,96 @@ def adopt_legacy(
     _single_adoption(inventory, receipts, conflicts, publish, "legacy")
 
 
+async def _run_gc(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any]:
+    settings = WorkerSettings.from_env(require_webdav=True)
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    client = WebDAVClient.from_env()
+    try:
+        with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
+            result = await collect_garbage(
+                webdav=client,
+                state=state,
+                apply=apply,
+                retain_generations=retain,
+                grace_days=grace_days,
+                pointer_path=client.pointer_path,
+            )
+            payload = {
+                "dry_run": result.dry_run,
+                "retained_generations": result.retained_generations,
+                "marked_objects": result.marked_objects,
+                "candidates": result.candidates,
+                "eligible": result.eligible,
+                "deleted": result.deleted,
+            }
+    except BaseException:
+        # A secondary close failure must not replace GCPartialFailure and lose
+        # its already-completed DELETE count.
+        with suppress(Exception):
+            await client.close()
+        raise
+    await client.close()
+    return payload
+
+
+def _echo_gc_failure(*, deleted_count: int | None = None, busy: bool = False) -> None:
+    if deleted_count is not None:
+        _echo(
+            {
+                "deleted_count": deleted_count,
+                "reason": "Remote garbage collection stopped after partial deletion.",
+                "reason_code": "remote_gc_partial_failure",
+                "status": "failed",
+            }
+        )
+        return
+    if busy:
+        _echo(
+            {
+                "reason": "Remote garbage collection did not start because the worker lock is held.",
+                "reason_code": "remote_gc_busy",
+                "status": "failed",
+            }
+        )
+        return
+    _echo(
+        {
+            "reason": "Remote garbage collection failed.",
+            "reason_code": "remote_gc_failed",
+            "status": "failed",
+        }
+    )
+
+
+def _validated_gc_deleted_count(exc: GCPartialFailure) -> int | None:
+    try:
+        value: object = exc.deleted_count
+    except Exception:
+        return None
+    if type(value) is not int or value < 1:
+        return None
+    return value
+
+
 @app.command("gc")
 def gc_command(
     apply: bool = typer.Option(False, "--apply", help="Delete grace-eligible objects; default is dry-run."),
-    retain: int = typer.Option(3, "--retain", min=1),
+    retain: int = typer.Option(2, "--retain", min=1),
     grace_days: int = typer.Option(30, "--grace-days", min=1),
 ) -> None:
-    async def run_gc() -> dict[str, Any]:
-        settings = WorkerSettings.from_env(require_webdav=True)
-        settings.state_dir.mkdir(parents=True, exist_ok=True)
-        client = WebDAVClient.from_env()
-        try:
-            with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
-                result = await collect_garbage(
-                    webdav=client,
-                    state=state,
-                    apply=apply,
-                    retain_generations=retain,
-                    grace_days=grace_days,
-                )
-                return {
-                    "dry_run": result.dry_run,
-                    "retained_generations": result.retained_generations,
-                    "marked_objects": result.marked_objects,
-                    "candidates": result.candidates,
-                    "eligible": result.eligible,
-                    "deleted": result.deleted,
-                }
-        finally:
-            await client.close()
 
     try:
-        _echo(asyncio.run(run_gc()))
-    except AlreadyRunning as exc:
-        _echo({"status": "already_running", "error": str(exc)})
+        _echo(asyncio.run(_run_gc(apply=apply, retain=retain, grace_days=grace_days)))
+    except GCPartialFailure as exc:
+        deleted_count = _validated_gc_deleted_count(exc)
+        _echo_gc_failure(deleted_count=deleted_count)
+        raise typer.Exit(code=1) from None
+    except AlreadyRunning:
+        _echo_gc_failure(busy=True)
+        raise typer.Exit(code=1) from None
+    except Exception:
+        _echo_gc_failure()
+        raise typer.Exit(code=1) from None
 
 
 def main() -> None:

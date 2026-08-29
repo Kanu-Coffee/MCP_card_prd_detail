@@ -1,4 +1,9 @@
-# CardRAG v1.0.8 운영 문서
+# CardRAG 운영 문서
+
+현재 운영은 v1.0.8이며, v1.0.9은 운영과 격리된 후보로 검증한 뒤 반영합니다.
+[v1.0.9 후보 검증·전환 절차](V1_0_9_MIGRATION.md)를 먼저 확인하십시오.
+[2026-08-28 v1.0.8 OCR Worker 종료 조사](V1_0_8_OCR_INCIDENT_2026_08_28.md)는
+확인된 READY publication 경계와 v1.0.9 재발 방지 기준을 기록합니다.
 
 CardRAG v1.0.8의 지원 운영 구조는 다음과 같습니다.
 
@@ -18,6 +23,8 @@ WebDAV의 불변 객체와 세대 포인터만 공유합니다.
 3. [실운영 가이드](SIMPLE_RUNTIME.md)를 위에서 아래로 실행합니다.
 4. 검증된 과거 OCR을 이관할 때만
    [Legacy data-kit OCR adoption v2](LEGACY_DATA_KIT_ADOPTION_V2.md)를 따릅니다.
+5. v1.0.9 후보 검증과 PDF cache seed, 운영 전환, 구버전 정리는
+   [v1.0.9 전환 절차](V1_0_9_MIGRATION.md)를 따릅니다.
 
 ## 운영 완료 기준
 

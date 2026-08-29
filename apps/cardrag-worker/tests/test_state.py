@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -105,3 +106,63 @@ def test_incomplete_run_retention_is_bounded(tmp_path: Path) -> None:
             state.finish_run(run_id, "failed")
         prunable = state.prunable_incomplete_run_ids(keep=10)
         assert set(prunable) == {"failed-00", "failed-01"}
+
+
+def test_stale_running_runs_are_atomically_interrupted_with_exclusion(tmp_path: Path) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        stale = state.start_run(run_id="stale")
+        current = state.start_run(run_id="current")
+        assert state.mark_stale_running_runs_interrupted(exclude_run_id=current) == (stale,)
+        assert state.mark_stale_running_runs_interrupted(exclude_run_id=current) == ()
+
+        stale_row = state.connection.execute("SELECT * FROM run WHERE run_id=?", (stale,)).fetchone()
+        current_row = state.connection.execute("SELECT * FROM run WHERE run_id=?", (current,)).fetchone()
+        assert stale_row["status"] == "interrupted"
+        assert stale_row["finished_at"] is not None
+        assert 0 < len(stale_row["error"]) <= 4000
+        assert current_row["status"] == "running"
+        assert current_row["finished_at"] is None
+        assert state.prunable_incomplete_run_ids(keep=1) == (stale,)
+
+        state.assert_resumable(stale)
+        assert (
+            state.connection.execute("SELECT status FROM run WHERE run_id=?", (stale,)).fetchone()[0]
+            == "running"
+        )
+
+
+def test_existing_v108_run_status_constraint_is_migrated_without_losing_foreign_keys(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE run (
+          run_id TEXT PRIMARY KEY,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','no_change')),
+          corpus_sha256 TEXT,
+          contract_sha256 TEXT,
+          error TEXT
+        ) STRICT;
+        CREATE TABLE legacy_child (
+          child_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES run(run_id)
+        ) STRICT;
+        INSERT INTO run(run_id,started_at,status) VALUES('old-running','2026-01-01T00:00:00+00:00','running');
+        INSERT INTO legacy_child(child_id,run_id) VALUES('child','old-running');
+        """
+    )
+    connection.close()
+
+    with WorkerState(database) as state:
+        assert state.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert state.mark_stale_running_runs_interrupted() == ("old-running",)
+        assert (
+            state.connection.execute("SELECT status FROM run WHERE run_id='old-running'").fetchone()[0]
+            == "interrupted"
+        )
+        assert state.connection.execute("SELECT run_id FROM legacy_child").fetchone()[0] == "old-running"

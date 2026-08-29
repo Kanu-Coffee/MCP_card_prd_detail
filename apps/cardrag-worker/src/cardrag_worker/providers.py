@@ -8,7 +8,7 @@ import math
 import os
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import httpx
 from cardrag_core import (
@@ -19,6 +19,79 @@ from cardrag_core import (
 
 class ProviderError(RuntimeError):
     pass
+
+
+ProviderSystemicReasonCode = Literal[
+    "provider_contract_invalid",
+    "provider_process_exit",
+    "provider_process_spawn_failed",
+    "provider_systemic_failure",
+]
+ProviderFailureKind = Literal["contract", "process_exit", "process_spawn", "systemic"]
+
+_PROVIDER_SYSTEMIC_REASONS: dict[
+    ProviderSystemicReasonCode,
+    tuple[str, ProviderFailureKind],
+] = {
+    "provider_contract_invalid": (
+        "The provider returned an invalid response.",
+        "contract",
+    ),
+    "provider_process_exit": (
+        "The OCR provider process exited unsuccessfully.",
+        "process_exit",
+    ),
+    "provider_process_spawn_failed": (
+        "The OCR provider process could not be started.",
+        "process_spawn",
+    ),
+    "provider_systemic_failure": (
+        "The OCR provider failed outside a document boundary.",
+        "systemic",
+    ),
+}
+
+
+class ProviderDocumentError(ProviderError):
+    """A typed, safe failure known to be isolated to the current document."""
+
+    scope: Literal["document"] = "document"
+    reason_code = "provider_document_rejected"
+    reason = "The OCR provider could not process this document."
+    error_kind = "document"
+    retryable = True
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.reason_code}: {self.reason}")
+
+
+class ProviderSystemicError(ProviderError):
+    """A typed provider failure that must not be repeated across documents."""
+
+    scope: Literal["systemic"] = "systemic"
+    retryable = False
+
+    def __init__(
+        self,
+        reason_code: ProviderSystemicReasonCode = "provider_systemic_failure",
+        *,
+        exit_code: int | None = None,
+    ) -> None:
+        if reason_code == "provider_process_exit":
+            if (
+                exit_code is None
+                or isinstance(exit_code, bool)
+                or not -255 <= exit_code <= 255
+                or exit_code == 0
+            ):
+                raise ValueError("provider process exit_code must be a bounded nonzero integer")
+        elif exit_code is not None:
+            raise ValueError("provider exit_code is allowed only for provider_process_exit")
+        self.reason_code = reason_code
+        self.reason, self.error_kind = _PROVIDER_SYSTEMIC_REASONS[reason_code]
+        self.exit_code = exit_code
+        suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
+        super().__init__(f"{self.reason_code}: {self.reason}{suffix}")
 
 
 class EmbeddingProvider(Protocol):
@@ -91,8 +164,8 @@ class OpenRouterEmbeddingProvider:
         try:
             rows = sorted(response.json()["data"], key=lambda row: int(row["index"]))
             vectors = [row["embedding"] for row in rows]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ProviderError("embedding provider returned an invalid response") from exc
+        except (KeyError, TypeError, ValueError):
+            raise ProviderSystemicError("provider_contract_invalid") from None
         return validate_vectors(vectors, count=len(inputs))
 
 
@@ -215,8 +288,8 @@ class OpenRouterOCRProvider:
         response.raise_for_status()
         try:
             text = str(response.json()["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError("OCR provider returned an invalid response") from exc
+        except (KeyError, IndexError, TypeError):
+            raise ProviderSystemicError("provider_contract_invalid") from None
         return text
 
 
@@ -266,30 +339,33 @@ class CodexOCRProvider:
         }
         if self.auth_root is not None:
             environment["CODEX_HOME"] = str(self.auth_root)
-        process = await asyncio.create_subprocess_exec(
-            self.executable,
-            "exec",
-            "--model",
-            self.model,
-            "--config",
-            f'model_reasoning_effort="{self.reasoning_effort}"',
-            "--cd",
-            str(images[0].parent.resolve()),
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "--ignore-user-config",
-            *arguments,
-            "-",
-            cwd=images[0].parent,
-            env=environment,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            stdout, stderr = await asyncio.wait_for(
+            process = await asyncio.create_subprocess_exec(
+                self.executable,
+                "exec",
+                "--model",
+                self.model,
+                "--config",
+                f'model_reasoning_effort="{self.reasoning_effort}"',
+                "--cd",
+                str(images[0].parent.resolve()),
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-user-config",
+                *arguments,
+                "-",
+                cwd=images[0].parent,
+                env=environment,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            raise ProviderSystemicError("provider_process_spawn_failed") from None
+        try:
+            stdout, _stderr = await asyncio.wait_for(
                 process.communicate((prompt + "\n\n" + instructions).encode()),
                 timeout=self.timeout_seconds,
             )
@@ -298,8 +374,9 @@ class CodexOCRProvider:
             await process.wait()
             raise
         if process.returncode:
-            raise ProviderError(
-                f"Codex OCR exited {process.returncode}: {stderr[-400:].decode(errors='replace')}"
+            raise ProviderSystemicError(
+                "provider_process_exit",
+                exit_code=process.returncode,
             )
         return stdout.decode("utf-8")
 

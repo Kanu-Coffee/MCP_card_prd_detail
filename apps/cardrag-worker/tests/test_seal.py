@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -11,16 +13,19 @@ from cardrag_core import (
     GenerationCounts,
     GenerationDocument,
     GenerationManifest,
+    GenerationOCRFailure,
+    IssuerOCRCounts,
     canonical_json_bytes,
     generation_database_path,
+    generation_manifest_path,
     sha256_file,
 )
 
 from cardrag_worker.contracts import DocumentRecord, EvidenceRecord, IssuerSpec, PageRecord
 from cardrag_worker.exporter import ServingDatabaseExporter
-from cardrag_worker.pipeline import WorkerPipeline
+from cardrag_worker.pipeline import WorkerPipeline, WorkerUnexpectedFailureError
 from cardrag_worker.state import WorkerState
-from cardrag_worker.webdav import RemoteGenerationIdentity
+from cardrag_worker.webdav import PublishedBundle, RemoteGenerationIdentity
 
 
 class DummyOCR:
@@ -57,6 +62,8 @@ class NoWriteWebDAV:
     def __init__(self, current: RemoteGenerationIdentity | None = None) -> None:
         self.current = current
         self.put_calls = 0
+        self.pointer_path = "v1/stable.json"
+        self.channel = "stable"
 
     async def validated_current_generation(self) -> RemoteGenerationIdentity | None:
         return self.current
@@ -67,6 +74,18 @@ class NoWriteWebDAV:
     async def put_cas_file(self, path: Path, *, media_type: str) -> tuple[str, str]:
         self.put_calls += 1
         raise AssertionError("invalid seal must not write")
+
+
+class CancelReconciliationWebDAV(NoWriteWebDAV):
+    def __init__(self) -> None:
+        super().__init__()
+        self.remote_manifest: bytes | None = None
+
+    async def get_bytes(self, path: object, *, max_bytes: int | None = None) -> bytes | None:
+        del max_bytes
+        if self.current is not None and path == generation_manifest_path(self.current.generation_id):
+            return self.remote_manifest
+        return b"stable" if self.current else None
 
 
 def build_seal(root: Path, run_id: str = "run-sealed") -> dict[str, Any]:
@@ -120,8 +139,10 @@ def build_seal(root: Path, run_id: str = "run-sealed") -> dict[str, Any]:
         evidence=[evidence],
     )
     manifest = GenerationManifest(
+        schema_version="cardrag.generation.v4",
         generation_id=generation_id,
         created_at=datetime(2026, 8, 25, tzinfo=UTC),
+        serving_schema="cardrag.serving-db.v4",
         serving_database=ArtifactRef(
             sha256=export.sha256,
             size_bytes=export.size_bytes,
@@ -144,8 +165,10 @@ def build_seal(root: Path, run_id: str = "run-sealed") -> dict[str, Any]:
                     media_type="text/markdown; charset=utf-8",
                 ),
                 page_count=1,
+                availability="available",
             ),
         ),
+        issuer_ocr_counts=(IssuerOCRCounts(issuer="kb", acquired=1, succeeded=1, failed=0),),
     )
     seal = {
         "schema_version": "cardrag.worker-seal.v1",
@@ -234,26 +257,262 @@ async def test_explicit_resume_refreshes_discovery_before_using_a_seal(tmp_path:
         )
         state.finish_run("run-sealed", "failed", error="publish interrupted")
         worker = pipeline(tmp_path, state, webdav)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(WorkerUnexpectedFailureError) as captured:
             await worker.run(resume_run_id="run-sealed")
+        assert captured.value.failure.error_class_category == "runtime"
+        assert captured.value.report_path.is_file()
     assert webdav.put_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_resume_after_stable_activation_recovers_publish_row_idempotently(tmp_path: Path) -> None:
+async def test_resume_after_stable_activation_recovers_publish_row_idempotently(
+    tmp_path: Path,
+) -> None:
+    seal = build_seal(tmp_path)
+    seal["ocr_cache_publication_deferred"] = 1
+    seal_path = tmp_path / "runs" / "run-sealed" / "sealed" / "publish.json"
+    seal_path.write_bytes(canonical_json_bytes(seal))
+    resumed_seal = json.loads(seal_path.read_bytes())
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = CancelReconciliationWebDAV()
+    webdav.current = RemoteGenerationIdentity(
+        generation_id=manifest.generation_id,
+        corpus_sha256=manifest.corpus_sha256,
+        contract_sha256=manifest.contract_sha256,
+    )
+    webdav.remote_manifest = manifest.canonical_bytes()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id="run-sealed")
+        worker = pipeline(tmp_path, state, webdav)
+        first = await worker._publish_sealed("run-sealed", resumed_seal)
+        second = await worker._publish_sealed("run-sealed", resumed_seal)
+        assert state.ready_publish(manifest.corpus_sha256, manifest.contract_sha256) is not None
+    assert first.status == second.status == "succeeded"
+    assert first.ocr_cache_publication_deferred == second.ocr_cache_publication_deferred == 1
+
+
+@pytest.mark.asyncio
+async def test_same_generation_resume_requires_exact_manifest_and_failure_count(
+    tmp_path: Path,
+) -> None:
     seal = build_seal(tmp_path)
     manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = CancelReconciliationWebDAV()
+    webdav.current = RemoteGenerationIdentity(
+        generation_id=manifest.generation_id,
+        corpus_sha256=manifest.corpus_sha256,
+        contract_sha256=manifest.contract_sha256,
+        ocr_failed_document_count=1,
+    )
+    webdav.remote_manifest = manifest.canonical_bytes()
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id="run-sealed")
+        worker = pipeline(tmp_path, state, webdav)
+        with pytest.raises(RuntimeError, match="does not match"):
+            await worker._publish_sealed("run-sealed", seal)
+
+        assert state.ready_publish(manifest.corpus_sha256, manifest.contract_sha256) is None
+
+
+@pytest.mark.parametrize(
+    ("remote_manifest_matches", "expected_status", "expect_publish"),
+    [(True, "succeeded", True), (False, "interrupted", False)],
+)
+@pytest.mark.asyncio
+async def test_run_cancellation_reconciles_only_an_exact_committed_manifest(
+    tmp_path: Path,
+    remote_manifest_matches: bool,
+    expected_status: str,
+    expect_publish: bool,
+) -> None:
+    seal = build_seal(tmp_path)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = CancelReconciliationWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id="run-sealed")
+        state.finish_run("run-sealed", "failed", error="prior publication attempt was interrupted")
+        worker = pipeline(tmp_path, state, webdav)
+
+        async def commit_then_cancel(run_id: str, *, refresh_sources: bool = False) -> Any:
+            assert (run_id, refresh_sources) == ("run-sealed", True)
+            webdav.current = RemoteGenerationIdentity(
+                generation_id=manifest.generation_id,
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+            )
+            webdav.remote_manifest = (
+                manifest.canonical_bytes() if remote_manifest_matches else b'{"different":true}\n'
+            )
+            raise asyncio.CancelledError
+
+        worker._run_locked = commit_then_cancel  # type: ignore[method-assign]
+        with pytest.raises(asyncio.CancelledError):
+            await worker.run(resume_run_id="run-sealed")
+
+        row = state.connection.execute(
+            "SELECT status,error,corpus_sha256,contract_sha256 FROM run WHERE run_id='run-sealed'"
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == expected_status
+        publish = state.ready_publish(manifest.corpus_sha256, manifest.contract_sha256)
+        assert (publish is not None) is expect_publish
+        if expect_publish:
+            assert tuple(row)[1:] == (None, manifest.corpus_sha256, manifest.contract_sha256)
+            assert publish is not None
+            assert publish["generation_id"] == manifest.generation_id
+        else:
+            assert row["error"] == "worker_cancelled: Pipeline execution was interrupted."
+
+
+@pytest.mark.asyncio
+async def test_publish_sealed_reconciles_exact_commit_after_pointer_readback_failure(
+    tmp_path: Path,
+) -> None:
+    raw_sentinel = "RAW_STABLE_POINTER_READBACK_SECRET"
+    seal = build_seal(tmp_path)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = CancelReconciliationWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id="run-sealed")
+        worker = pipeline(tmp_path, state, webdav)
+
+        async def commit_then_fail(_sealed: object) -> Any:
+            webdav.current = RemoteGenerationIdentity(
+                generation_id=manifest.generation_id,
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+            )
+            webdav.remote_manifest = manifest.canonical_bytes()
+            raise RuntimeError(raw_sentinel)
+
+        worker._publish_remote_only = commit_then_fail  # type: ignore[method-assign]
+        result = await worker._publish_sealed("run-sealed", seal)
+
+        row = state.connection.execute(
+            "SELECT status,error,corpus_sha256,contract_sha256 FROM run WHERE run_id='run-sealed'"
+        ).fetchone()
+        assert row is not None
+        assert tuple(row) == ("succeeded", None, manifest.corpus_sha256, manifest.contract_sha256)
+        publish = state.ready_publish(manifest.corpus_sha256, manifest.contract_sha256)
+        assert publish is not None
+        assert publish["generation_id"] == manifest.generation_id
+
+    assert result.status == "succeeded"
+    assert result.generation_id == manifest.generation_id
+    assert raw_sentinel not in json.dumps(dict(row))
+
+
+@pytest.mark.asyncio
+async def test_legacy_seal_without_deferred_count_defaults_to_zero(tmp_path: Path) -> None:
+    seal = build_seal(tmp_path)
+    webdav = NoWriteWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        worker = pipeline(tmp_path, state, webdav)
+        validated = await worker._validate_local_seal(seal)
+    assert validated.ocr_cache_publication_deferred == 0
+
+
+@pytest.mark.parametrize("invalid", [True, -1, 2, "1", 1.0])
+@pytest.mark.asyncio
+async def test_seal_rejects_invalid_deferred_count_before_remote_write(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    seal = build_seal(tmp_path)
+    seal["ocr_cache_publication_deferred"] = invalid
+    webdav = NoWriteWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        worker = pipeline(tmp_path, state, webdav)
+        with pytest.raises(RuntimeError, match="deferred count is invalid"):
+            await worker._publish_remote_only(seal)
+    assert webdav.put_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_seal_deferred_count_cannot_include_ocr_failed_documents(tmp_path: Path) -> None:
+    seal = build_seal(tmp_path)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    available = manifest.documents[0]
+    available_documents = tuple(
+        available.model_copy(update={"document_id": f"doc_kb_{index:02d}"}) for index in range(19)
+    )
+    failed = GenerationDocument(
+        document_id="doc_kb_19",
+        issuer="kb",
+        pdf=available.pdf,
+        page_count=available.page_count,
+        availability="ocr_failed",
+        ocr_failure=GenerationOCRFailure(
+            reason_code="provider_document_rejected",
+            reason="The OCR provider could not process this document.",
+            attempts=1,
+        ),
+    )
+    expanded = GenerationManifest.model_validate_json(
+        canonical_json_bytes(
+            manifest.model_copy(
+                update={
+                    "counts": manifest.counts.model_copy(update={"documents": 20}),
+                    "documents": tuple(
+                        sorted((*available_documents, failed), key=lambda row: row.document_id)
+                    ),
+                    "issuer_ocr_counts": (IssuerOCRCounts(issuer="kb", acquired=20, succeeded=19, failed=1),),
+                }
+            )
+        )
+    )
+    seal["manifest"] = expanded.model_dump(mode="json")
+    seal["ocr_cache_publication_deferred"] = 20
+    webdav = NoWriteWebDAV()
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        worker = pipeline(tmp_path, state, webdav)
+        with pytest.raises(RuntimeError, match="deferred count is invalid"):
+            await worker._publish_remote_only(seal)
+
+    assert webdav.put_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_current_generation_does_not_suppress_replacement_seal(tmp_path: Path) -> None:
+    seal = build_seal(tmp_path)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    manifest = manifest.model_copy(update={"previous_generation_id": "g-partial"})
+    seal["manifest"] = manifest.model_dump(mode="json")
     webdav = NoWriteWebDAV(
         RemoteGenerationIdentity(
-            generation_id=manifest.generation_id,
+            generation_id="g-partial",
             corpus_sha256=manifest.corpus_sha256,
             contract_sha256=manifest.contract_sha256,
+            generation_schema="cardrag.generation.v4",
+            serving_schema="cardrag.serving-db.v4",
+            ocr_failed_document_count=1,
         )
     )
     with WorkerState(tmp_path / "state.sqlite3") as state:
         state.start_run(run_id="run-sealed")
         worker = pipeline(tmp_path, state, webdav)
-        first = await worker._publish_sealed("run-sealed", seal)
-        second = await worker._publish_sealed("run-sealed", seal)
-        assert state.ready_publish(manifest.corpus_sha256, manifest.contract_sha256) is not None
-    assert first.status == second.status == "succeeded"
+        publish_calls = 0
+
+        async def publish_replacement(
+            current_seal: dict[str, Any],
+        ) -> tuple[PublishedBundle, Any]:
+            nonlocal publish_calls
+            publish_calls += 1
+            validated = await worker._validate_local_seal(current_seal)
+            return (
+                PublishedBundle(
+                    generation_id=validated.manifest.generation_id,
+                    index_sha256=validated.manifest.serving_database.sha256,
+                    manifest_sha256=validated.manifest.manifest_sha256,
+                ),
+                validated,
+            )
+
+        worker._publish_remote_only = publish_replacement  # type: ignore[method-assign]
+        result = await worker._publish_sealed("run-sealed", seal)
+
+    assert publish_calls == 1
+    assert result.status == "succeeded"
+    assert result.generation_id == manifest.generation_id

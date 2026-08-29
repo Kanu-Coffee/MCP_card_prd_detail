@@ -21,6 +21,7 @@ from cardrag_mcp.updater import (
 
 def remote_generation(fixture) -> RemoteGeneration:
     database_body = fixture.database.read_bytes()
+    is_v4 = fixture.serving_schema == "cardrag.serving-db.v4"
     return RemoteGeneration(
         generation_id=fixture.generation_id,
         serving_schema=fixture.serving_schema,
@@ -43,6 +44,7 @@ def remote_generation(fixture) -> RemoteGeneration:
                     size_bytes=size,
                     media_type="application/pdf",
                 ),
+                ocr_sha256="e" * 64 if is_v4 else None,
             )
             for (document_id, digest, size, _), (_, issuer, page_count) in zip(
                 fixture.documents,
@@ -53,12 +55,25 @@ def remote_generation(fixture) -> RemoteGeneration:
         issuer_codes=fixture.issuer_codes,
         document_count=len(fixture.documents),
         pdf_object_count=len({digest for _, digest, _, _ in fixture.documents}),
-        ocr_object_count=0,
+        ocr_object_count=1 if is_v4 else 0,
         chunk_count=3 if len(fixture.documents) == 2 else 2,
         embedding_provider="openrouter",
         embedding_model="openai/text-embedding-3-small",
         embedding_dimension=1536,
         embedding_count=3 if len(fixture.documents) == 2 else 2,
+        issuer_ocr_counts=(
+            tuple(
+                (
+                    issuer,
+                    sum(row[1] == issuer for row in fixture.document_contracts),
+                    sum(row[1] == issuer for row in fixture.document_contracts),
+                    0,
+                )
+                for issuer in fixture.issuer_codes
+            )
+            if is_v4
+            else ()
+        ),
     )
 
 
@@ -212,6 +227,29 @@ async def test_updater_can_activate_last_good_v2_during_mcp_first_upgrade(tmp_pa
     assert store.active_generation_id == "gen-v2"
     with store.pin() as handle:
         assert handle.metadata.schema_id == "cardrag.serving-db.v2"
+
+
+@pytest.mark.asyncio
+async def test_updater_activates_v4_generation(tmp_path: Path) -> None:
+    fixture = create_database(
+        tmp_path / "remote-v4.sqlite3",
+        "gen-v4",
+        schema_id="cardrag.serving-db.v4",
+    )
+    remote = remote_generation(fixture)
+    reader = FakeReader(
+        remote,
+        fixture.database,
+        {digest: body for _, digest, _, body in fixture.documents},
+    )
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+    updater = WebDAVUpdater(reader, store, Metrics.create(), poll_seconds=300)
+
+    assert await updater.poll_once() is True
+    assert store.active_generation_id == "gen-v4"
+    with store.pin() as handle:
+        assert handle.metadata.schema_id == "cardrag.serving-db.v4"
+        assert handle.metadata.ocr_failed_document_count == 0
 
 
 @pytest.mark.asyncio

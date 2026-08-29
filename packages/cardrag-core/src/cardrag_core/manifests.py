@@ -31,6 +31,15 @@ from .paths import (
 _DOCUMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 DocumentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")]
 OCRCacheKind = Literal["native", "adopted"]
+GenerationAvailability = Literal["available", "ocr_failed"]
+OCRFailureReasonCode = Annotated[
+    str,
+    StringConstraints(pattern=r"^[a-z0-9_]{1,64}$"),
+]
+OCRFailureReasonText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
 
 LEGACY_ADOPTION_POLICY_V1: Literal["cardrag.legacy-ocr-adoption.v1"] = "cardrag.legacy-ocr-adoption.v1"
 LEGACY_ADOPTION_POLICY_V2: Literal["cardrag.legacy-ocr-adoption.v2"] = "cardrag.legacy-ocr-adoption.v2"
@@ -60,6 +69,34 @@ class GenerationCounts(StrictFrozenModel):
     chunks: NonNegativeInt
 
 
+class GenerationOCRFailure(StrictFrozenModel):
+    """Bounded, provider-secret-free reason for one isolated OCR failure."""
+
+    reason_code: OCRFailureReasonCode
+    reason: OCRFailureReasonText
+    attempts: PositiveInt
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_one_line(cls, value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("OCR failure reason must be one line")
+        return value
+
+
+class IssuerOCRCounts(StrictFrozenModel):
+    issuer: IssuerCode
+    acquired: PositiveInt
+    succeeded: PositiveInt
+    failed: NonNegativeInt
+
+    @model_validator(mode="after")
+    def counts_are_consistent(self) -> Self:
+        if self.acquired != self.succeeded + self.failed:
+            raise ValueError("issuer OCR acquired count must equal succeeded plus failed")
+        return self
+
+
 class GenerationDocument(StrictFrozenModel):
     """One served document and, when usable, its exact remote OCR cache identity.
 
@@ -74,6 +111,17 @@ class GenerationDocument(StrictFrozenModel):
     ocr_cache_kind: OCRCacheKind | None = None
     ocr_reuse_key: Sha256Hex | None = None
     page_count: PositiveInt
+    # These fields are absent from v1-v3 canonical manifests. ``exclude_if``
+    # preserves their exact historical bytes while allowing an explicit v4
+    # disposition for every acquired PDF.
+    availability: GenerationAvailability | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    ocr_failure: GenerationOCRFailure | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def artifact_contracts_are_cas_bound(self) -> Self:
@@ -91,6 +139,14 @@ class GenerationDocument(StrictFrozenModel):
             raise ValueError("OCR cache kind and reuse key must be provided together")
         if self.ocr is None and cache_fields_present[0]:
             raise ValueError("OCR cache identity requires a generation OCR artifact")
+        if self.availability == "available":
+            if self.ocr is None or self.ocr_failure is not None:
+                raise ValueError("available generation document requires OCR and no failure")
+        elif self.availability == "ocr_failed":
+            if self.ocr is not None or self.ocr_failure is None:
+                raise ValueError("ocr_failed generation document requires only a failure summary")
+        elif self.ocr_failure is not None:
+            raise ValueError("legacy generation document cannot contain an OCR failure summary")
         return self
 
 
@@ -99,6 +155,7 @@ class GenerationManifest(StrictFrozenModel):
         "cardrag.generation.v1",
         "cardrag.generation.v2",
         "cardrag.generation.v3",
+        "cardrag.generation.v4",
     ] = "cardrag.generation.v3"
     generation_id: str
     created_at: AwareDatetime
@@ -106,6 +163,7 @@ class GenerationManifest(StrictFrozenModel):
         "cardrag.serving-db.v1",
         "cardrag.serving-db.v2",
         "cardrag.serving-db.v3",
+        "cardrag.serving-db.v4",
     ] = "cardrag.serving-db.v3"
     serving_database: ArtifactRef
     corpus_sha256: Sha256Hex
@@ -114,6 +172,10 @@ class GenerationManifest(StrictFrozenModel):
     issuer_codes: tuple[IssuerCode, ...] = Field(min_length=1)
     counts: GenerationCounts
     documents: tuple[GenerationDocument, ...] = ()
+    issuer_ocr_counts: tuple[IssuerOCRCounts, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     previous_generation_id: str | None = None
 
     @field_validator("generation_id")
@@ -149,12 +211,24 @@ class GenerationManifest(StrictFrozenModel):
             raise ValueError("generation documents must be sorted and unique by document_id")
         return value
 
+    @field_validator("issuer_ocr_counts")
+    @classmethod
+    def issuer_ocr_counts_are_sorted_unique(
+        cls,
+        value: tuple[IssuerOCRCounts, ...],
+    ) -> tuple[IssuerOCRCounts, ...]:
+        keys = [row.issuer for row in value]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("issuer OCR counts must be sorted and unique")
+        return value
+
     @model_validator(mode="after")
     def bundle_is_self_consistent(self) -> Self:
         expected_serving_schema = {
             "cardrag.generation.v1": "cardrag.serving-db.v1",
             "cardrag.generation.v2": "cardrag.serving-db.v2",
             "cardrag.generation.v3": "cardrag.serving-db.v3",
+            "cardrag.generation.v4": "cardrag.serving-db.v4",
         }[self.schema_version]
         if self.serving_schema != expected_serving_schema:
             raise ValueError("generation and serving database schema versions must match")
@@ -177,6 +251,37 @@ class GenerationManifest(StrictFrozenModel):
         document_issuers = {document.issuer for document in self.documents}
         if not document_issuers.issubset(self.issuer_codes):
             raise ValueError("generation documents reference an undeclared issuer")
+        if self.schema_version == "cardrag.generation.v4":
+            if any(document.availability is None for document in self.documents):
+                raise ValueError("v4 generation documents require explicit availability")
+            count_issuers = tuple(row.issuer for row in self.issuer_ocr_counts)
+            if count_issuers != self.issuer_codes:
+                raise ValueError("v4 issuer OCR counts must cover every declared issuer")
+            if sum(row.acquired for row in self.issuer_ocr_counts) != self.counts.documents:
+                raise ValueError("v4 issuer OCR counts differ from generation document count")
+            availability_counts = {
+                issuer: (
+                    sum(
+                        document.availability == "available"
+                        for document in self.documents
+                        if document.issuer == issuer
+                    ),
+                    sum(
+                        document.availability == "ocr_failed"
+                        for document in self.documents
+                        if document.issuer == issuer
+                    ),
+                )
+                for issuer in self.issuer_codes
+            }
+            for row in self.issuer_ocr_counts:
+                succeeded, failed = availability_counts[row.issuer]
+                if (row.succeeded, row.failed) != (succeeded, failed):
+                    raise ValueError("v4 issuer OCR counts differ from document availability")
+                if row.succeeded * 100 < row.acquired * 95:
+                    raise ValueError("v4 issuer OCR success rate is below 95 percent")
+        elif self.issuer_ocr_counts or any(document.availability is not None for document in self.documents):
+            raise ValueError("OCR publication dispositions require generation v4")
         return self
 
     def canonical_bytes(self) -> bytes:

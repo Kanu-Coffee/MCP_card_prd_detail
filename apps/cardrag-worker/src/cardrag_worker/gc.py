@@ -31,11 +31,28 @@ from .webdav import WebDAVClient
 
 
 class GCError(RuntimeError):
-    """Control-plane uncertainty: no remote deletion was attempted."""
+    """Fail-closed remote garbage-collection error."""
+
+
+class GCPartialFailure(GCError):
+    """A bounded terminal error after one or more remote DELETEs succeeded."""
+
+    reason_code = "remote_gc_partial_failure"
+    reason = "Remote garbage collection stopped after partial deletion."
+
+    def __init__(self, *, deleted_count: int) -> None:
+        if type(deleted_count) is not int or deleted_count < 1:
+            raise ValueError("partial GC deleted_count must be a positive integer")
+        self.deleted_count = deleted_count
+        super().__init__(f"{self.reason_code}: {self.reason} (deleted_count={deleted_count})")
 
 
 _HEX_PREFIX = re.compile(r"^[0-9a-f]{2}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INCOMING_TEMP_LEAF = re.compile(r"^[0-9a-f]{32}\.tmp$")
+_INCOMING_ROOT = PurePosixPath("v1", ".incoming")
+_INCOMING_NAMESPACES = ("channels", "publish")
+_KNOWN_UNCOLLECTED_INCOMING_NAMESPACES = ("objects",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,8 +76,9 @@ async def _generation_chain(
     webdav: WebDAVClient,
     *,
     retain: int,
+    pointer_path: PurePosixPath,
 ) -> tuple[bytes, tuple[GenerationManifest, ...]]:
-    pointer_body = await _required_bytes(webdav, STABLE_POINTER_PATH)
+    pointer_body = await _required_bytes(webdav, pointer_path)
     try:
         pointer = GenerationPointer.model_validate_json(pointer_body)
     except Exception as exc:
@@ -135,6 +153,82 @@ async def _list_cas_objects(webdav: WebDAVClient) -> tuple[PurePosixPath, ...]:
                 raise GCError("unexpected CAS object in PROPFIND")
             objects.append(path)
     return tuple(sorted(objects, key=lambda item: item.as_posix()))
+
+
+async def _optional_children(
+    webdav: WebDAVClient,
+    path: PurePosixPath,
+) -> tuple[PurePosixPath, ...]:
+    try:
+        return await webdav.list_children(path)
+    except WebDAVHTTPError as exc:
+        if exc.status_code == 404:
+            return ()
+        raise
+
+
+def _is_incoming_temp_leaf(path: PurePosixPath | str) -> bool:
+    candidate = PurePosixPath(path)
+    return bool(
+        len(candidate.parts) == 4
+        and candidate.parts[:2] == _INCOMING_ROOT.parts
+        and candidate.parts[2] in _INCOMING_NAMESPACES
+        and _INCOMING_TEMP_LEAF.fullmatch(candidate.name)
+    )
+
+
+async def _incoming_leaf_exists_and_is_safe(
+    webdav: WebDAVClient,
+    path: PurePosixPath,
+) -> bool:
+    """Revalidate one exact temp leaf immediately before DELETE.
+
+    A 404 means the publisher already moved or removed the temp object. Any
+    descendant returned for the path makes its resource shape ambiguous and
+    therefore blocks the sweep.
+    """
+
+    if not _is_incoming_temp_leaf(path):
+        raise GCError("unsafe incoming temporary deletion candidate")
+    try:
+        descendants = await webdav.list_children(path)
+    except WebDAVHTTPError as exc:
+        if exc.status_code == 404:
+            return False
+        raise
+    if descendants:
+        raise GCError("incoming temporary deletion candidate is not a leaf")
+    return True
+
+
+async def _list_incoming_temp_leaves(webdav: WebDAVClient) -> tuple[PurePosixPath, ...]:
+    """List only publisher-created UUID temp leaves under the closed namespace."""
+
+    namespace_children = await _optional_children(webdav, _INCOMING_ROOT)
+    if len(namespace_children) != len(set(namespace_children)):
+        raise GCError("duplicate incoming namespace path in PROPFIND")
+    collected_roots = {_INCOMING_ROOT / name for name in _INCOMING_NAMESPACES}
+    allowed_roots = collected_roots | {
+        _INCOMING_ROOT / name for name in _KNOWN_UNCOLLECTED_INCOMING_NAMESPACES
+    }
+    for path in namespace_children:
+        if path.parent != _INCOMING_ROOT or path not in allowed_roots:
+            raise GCError("unexpected incoming namespace path")
+
+    leaves: list[PurePosixPath] = []
+    for namespace_root in sorted(
+        collected_roots.intersection(namespace_children),
+        key=lambda item: item.as_posix(),
+    ):
+        children = await webdav.list_children(namespace_root)
+        if len(children) != len(set(children)):
+            raise GCError("duplicate incoming temporary path in PROPFIND")
+        for path in children:
+            if path.parent != namespace_root or not _is_incoming_temp_leaf(path):
+                raise GCError("unexpected incoming temporary path")
+            if await _incoming_leaf_exists_and_is_safe(webdav, path):
+                leaves.append(path)
+    return tuple(sorted(leaves, key=lambda item: item.as_posix()))
 
 
 async def _mark_ocr_caches(
@@ -243,18 +337,25 @@ async def collect_garbage(
     webdav: WebDAVClient,
     state: WorkerState,
     apply: bool = False,
-    retain_generations: int = 3,
+    retain_generations: int = 2,
     grace_days: int = 30,
     now: datetime | None = None,
+    pointer_path: PurePosixPath = STABLE_POINTER_PATH,
 ) -> GCResult:
     if retain_generations < 1 or grace_days < 1:
         raise ValueError("retention and grace must be positive")
+    if pointer_path != STABLE_POINTER_PATH:
+        raise GCError("remote garbage collection is restricted to the stable channel")
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
 
     # Complete every parse/list/hash decision before considering DELETE.
-    pointer_body, manifests = await _generation_chain(webdav, retain=retain_generations)
+    pointer_body, manifests = await _generation_chain(
+        webdav,
+        retain=retain_generations,
+        pointer_path=pointer_path,
+    )
     retained = tuple(manifest.generation_id for manifest in manifests)
-    marked: set[str] = {STABLE_POINTER_PATH.as_posix()}
+    marked: set[str] = {pointer_path.as_posix()}
     retained_cache_references: dict[tuple[str, str], tuple[str, int, str]] = {}
     for manifest in manifests:
         generation_id = manifest.generation_id
@@ -286,6 +387,7 @@ async def collect_garbage(
     marked.update(cache_marks)
     all_generations = await _list_generation_ids(webdav)
     all_objects = await _list_cas_objects(webdav)
+    incoming_temp_leaves = await _list_incoming_temp_leaves(webdav)
     candidates = {
         f"v1/generations/{generation_id}"
         for generation_id in all_generations
@@ -293,18 +395,21 @@ async def collect_garbage(
     }
     candidates.update(path.as_posix() for path in all_objects if path.as_posix() not in marked)
     candidates.update(inactive_caches)
+    candidates.update(path.as_posix() for path in incoming_temp_leaves)
 
     first_seen = {path: state.note_unreferenced(path, observed_at=observed_at) for path in sorted(candidates)}
     state.clear_unreferenced_except(candidates)
     threshold = observed_at - timedelta(days=grace_days)
 
     def deletion_order(path: str) -> tuple[int, str]:
-        if path.startswith("v1/generations/"):
+        if _is_incoming_temp_leaf(path):
             return (0, path)
-        if path.startswith("v1/ocr-cache/"):
+        if path.startswith("v1/generations/"):
             return (1, path)
-        if path.startswith("v1/objects/"):
+        if path.startswith("v1/ocr-cache/"):
             return (2, path)
+        if path.startswith("v1/objects/"):
+            return (3, path)
         raise GCError(f"unexpected deletion candidate {path}")
 
     eligible = tuple(
@@ -315,17 +420,36 @@ async def collect_garbage(
     )
     deleted: list[str] = []
     if apply and eligible:
-        if await _required_bytes(webdav, STABLE_POINTER_PATH) != pointer_body:
+        if await _required_bytes(webdav, pointer_path) != pointer_body:
             raise GCError("stable pointer changed during GC; deleted 0 objects")
+        deletion_failure: Exception | None = None
         for path in eligible:
-            # Re-fence before each deletion. A changed head aborts the remaining
-            # sweep; every earlier candidate was proven unreferenced by the head
-            # observed immediately before its DELETE.
-            if await _required_bytes(webdav, STABLE_POINTER_PATH) != pointer_body:
-                raise GCError(f"stable pointer changed during GC after {len(deleted)} deletions")
-            await webdav.delete(path, missing_ok=True)
-            state.clear_unreferenced(path)
-            deleted.append(path)
+            try:
+                # Re-fence before each deletion. A changed head aborts the
+                # remaining sweep; every earlier candidate was proven
+                # unreferenced by the head observed immediately before DELETE.
+                if await _required_bytes(webdav, pointer_path) != pointer_body:
+                    raise GCError("stable pointer changed during GC")
+                candidate = PurePosixPath(path)
+                if _is_incoming_temp_leaf(candidate) and not await _incoming_leaf_exists_and_is_safe(
+                    webdav, candidate
+                ):
+                    state.clear_unreferenced(path)
+                    continue
+                await webdav.delete(path, missing_ok=True)
+                deleted.append(path)
+                state.clear_unreferenced(path)
+            except Exception as exc:
+                deletion_failure = exc
+                break
+        if deletion_failure is not None:
+            if deleted:
+                # Raise outside the source exception handler so raw WebDAV URL,
+                # body, or credential text is not retained as implicit context.
+                deleted_count = len(deleted)
+                deletion_failure = None
+                raise GCPartialFailure(deleted_count=deleted_count) from None
+            raise deletion_failure
     return GCResult(
         retained_generations=retained,
         marked_objects=sum(path.startswith("v1/objects/") for path in marked),

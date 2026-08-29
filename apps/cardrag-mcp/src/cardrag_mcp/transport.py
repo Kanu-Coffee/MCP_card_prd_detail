@@ -36,6 +36,7 @@ class CoreArtifactReader:
     def __init__(self, reader: MCPArtifactReader, client: ReadOnlyWebDAVClient) -> None:
         self._reader = reader
         self._client = client
+        self._pointer_path = getattr(reader, "pointer_path", STABLE_POINTER_PATH)
         self._current: CurrentGeneration | None = None
         self._last_etag: str | None = None
         self._last_remote: RemoteGeneration | None = None
@@ -43,7 +44,7 @@ class CoreArtifactReader:
     async def read_stable_generation(self) -> RemoteGeneration:
         etag: str | None = None
         try:
-            stat = await asyncio.to_thread(self._client.head, STABLE_POINTER_PATH)
+            stat = await asyncio.to_thread(self._client.head, self._pointer_path)
             etag = stat.etag
         except WebDAVHTTPError as exc:
             if exc.status_code != 405:
@@ -67,6 +68,14 @@ class CoreArtifactReader:
                     page_count=item.page_count,
                     pdf=_artifact(item.pdf),
                     ocr_sha256=None if item.ocr is None else item.ocr.sha256,
+                    availability=item.availability or "available",
+                    failure_reason_code=(
+                        None if item.ocr_failure is None else item.ocr_failure.reason_code
+                    ),
+                    failure_reason=None if item.ocr_failure is None else item.ocr_failure.reason,
+                    failure_attempts=(
+                        None if item.ocr_failure is None else item.ocr_failure.attempts
+                    ),
                 )
                 for item in manifest.documents
             ),
@@ -79,6 +88,10 @@ class CoreArtifactReader:
             embedding_model=contract.model,
             embedding_dimension=contract.dimension,
             embedding_count=contract.count,
+            issuer_ocr_counts=tuple(
+                (row.issuer, row.acquired, row.succeeded, row.failed)
+                for row in manifest.issuer_ocr_counts
+            ),
         )
         self._last_etag = etag
         self._last_remote = remote
@@ -124,4 +137,4 @@ def build_core_reader(settings: Settings) -> CoreArtifactReader:
         ca_file=settings.webdav_ca_file,
     )
     client = WebDAVClient(webdav_settings).read_only()
-    return CoreArtifactReader(MCPArtifactReader(client), client)
+    return CoreArtifactReader(MCPArtifactReader(client, channel=settings.channel), client)

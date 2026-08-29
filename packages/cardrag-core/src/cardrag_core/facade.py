@@ -12,7 +12,7 @@ from .canonical import sha256_bytes
 from .domain import ArtifactRef, VerifiedArtifact
 from .manifests import GenerationManifest, GenerationPointer, GenerationReady
 from .paths import (
-    STABLE_POINTER_PATH,
+    channel_pointer_path,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -38,10 +38,15 @@ class ArtifactContractError(WebDAVIntegrityError):
 class MCPArtifactReader:
     """MCP-safe facade exposing only verified read and download operations."""
 
-    __slots__ = ("__reader",)
+    __slots__ = ("__pointer_path", "__reader")
 
-    def __init__(self, reader: ReadOnlyWebDAVClient) -> None:
+    def __init__(self, reader: ReadOnlyWebDAVClient, *, channel: str = "stable") -> None:
         self.__reader = reader
+        self.__pointer_path = channel_pointer_path(channel)
+
+    @property
+    def pointer_path(self) -> PurePosixPath:
+        return self.__pointer_path
 
     @staticmethod
     def _parse_canonical(payload: bytes, model_type: type[ModelT], *, label: str) -> ModelT:
@@ -54,7 +59,7 @@ class MCPArtifactReader:
         return model
 
     def read_stable_pointer(self) -> GenerationPointer:
-        payload = self.__reader.get(STABLE_POINTER_PATH, max_bytes=_CONTROL_FILE_LIMIT).content
+        payload = self.__reader.get(self.__pointer_path, max_bytes=_CONTROL_FILE_LIMIT).content
         return self._parse_canonical(payload, GenerationPointer, label="stable generation pointer")
 
     def read_generation_ready(self, generation_id: str) -> tuple[GenerationReady, bytes]:
