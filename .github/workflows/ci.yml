@@ -60,6 +60,10 @@ jobs:
       - name: Validate the two-service deployment
         env:
           CARDRAG_WEBDAV_BASE_URL: https://webdav.example/cardrag
+          # Compose evaluates nested fallbacks in included files eagerly on some
+          # runner versions, even when the stable URL above is already set.
+          CARDRAG_CANDIDATE_WEBDAV_BASE_URL: https://webdav.example/cardrag
+          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL: https://cardrag.example
           CARDRAG_WEBDAV_USERNAME_SECRET_FILE: /etc/hostname
           CARDRAG_WEBDAV_PASSWORD_SECRET_FILE: /etc/hostname
           CARDRAG_WEBDAV_CA_SECRET_FILE: /etc/ssl/certs/ca-certificates.crt
@@ -131,7 +135,6 @@ jobs:
             config --quiet
           CARDRAG_LEGACY_ADOPTION_EXPORT_DIR=/tmp/cardrag-adoption-v2-export \
           CARDRAG_LEGACY_SOURCE_ROOT=/tmp/cardrag-legacy-source \
-          CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag \
             docker compose \
               -f deploy/worker/compose.yaml \
               -f deploy/worker/compose.secrets.yaml \
