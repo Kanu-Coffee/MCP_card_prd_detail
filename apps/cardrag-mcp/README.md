@@ -77,6 +77,15 @@ search. Configure only candidate MCP env files with
 `CARDRAG_RERANKER_SHADOW_ENABLED=true`; model/provider/max-count and timeout have
 dedicated `CARDRAG_RERANKER_SHADOW_*` settings.
 
+`cardrag-gold-capture` is an offline/candidate-only CLI and is not imported by
+the server. It produces the five evaluation lane JSONLs from hash-bound raw
+provenance. Native v5 capture calls the real exact, lexical, and reranker APIs
+and resumes from immutable per-query shards. The v1.0.9 and Qwen page lanes
+require independently reproducible external observations with source DB/vector,
+query-vector, every-row score, and complete coverage bindings; a self-asserted
+lane JSONL is rejected. See `docs/V1_0_10_GOLD_EVALUATION.md` for the artifact
+schemas and release revalidation commands.
+
 The process listens on `127.0.0.1:8000` by default.  `/health/live` and the
 minimal `/health/ready` response are public; MCP, resources, metrics, and PDF
 downloads require the configured static bearer token.

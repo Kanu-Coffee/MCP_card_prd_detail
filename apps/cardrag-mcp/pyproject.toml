@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 cardrag-mcp = "cardrag_mcp.main:main"
 cardrag-aggregation-capture = "cardrag_mcp.aggregation_capture:main"
+cardrag-gold-capture = "cardrag_mcp.gold_capture:main"
 
 [project.optional-dependencies]
 dev = [

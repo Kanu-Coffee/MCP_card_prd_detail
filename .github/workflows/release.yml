@@ -20,6 +20,10 @@ on:
         description: "SHA-256 of the sealed v1.0.10 document aggregation profile artifact"
         required: true
         type: string
+      capture_set_receipt_sha256:
+        description: "Independently approved SHA-256 of the five-lane binding receipt after source replay"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -63,6 +67,7 @@ jobs:
           RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
           ACCEPTANCE_REPORT_SHA256: ${{ inputs.acceptance_report_sha256 }}
           AGGREGATION_PROFILE_SHA256: ${{ inputs.aggregation_profile_sha256 }}
+          CAPTURE_SET_RECEIPT_SHA256: ${{ inputs.capture_set_receipt_sha256 }}
         run: |
           set -euo pipefail
           version=$REQUESTED_VERSION
@@ -78,11 +83,15 @@ jobs:
             acceptance_report="$evidence_dir/gold-evaluation-report.json"
             aggregation_profile="$evidence_dir/document-aggregation-profile.json"
             aggregation_scores="$evidence_dir/document-aggregation-scores.jsonl"
+            capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"
             serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"
             legacy_historical="$evidence_dir/v109-kb-real-regression-baseline.json"
             legacy_reaudit="$evidence_dir/v109-kb-v4-structure-reaudit.json"
             [[ "$ACCEPTANCE_REPORT_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$AGGREGATION_PROFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$CAPTURE_SET_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            test "$(sha256sum "$capture_set_receipt" | awk '{print $1}')" = \
+              "$CAPTURE_SET_RECEIPT_SHA256"
             .venv/bin/python -m cardrag_worker.legacy_v4_audit \
               --validate-release-artifact "$legacy_reaudit" \
               --historical-artifact "$legacy_historical"
@@ -113,6 +122,44 @@ jobs:
               validator_args+=(--run "$lane=$evidence_dir/$lane.jsonl")
             done
             .venv/bin/python -m cardrag_mcp.evaluation "${validator_args[@]}"
+            gold_sha256=$(sha256sum "$evidence_dir/gold.jsonl" | awk '{print $1}')
+            capture_args=(
+              validate-set
+              --gold "$evidence_dir/gold.jsonl"
+              --expected-gold-sha256 "$gold_sha256"
+              --native-score-artifact "$aggregation_scores"
+              --output "$capture_set_receipt"
+            )
+            for lane in \
+              v109_baseline \
+              qwen_page \
+              qwen_structure_exact \
+              lexical_shadow \
+              reranker_shadow; do
+              lane_receipt="$evidence_dir/$lane.capture-receipt.json"
+              lane_receipt_sha256=$(sha256sum "$lane_receipt" | awk '{print $1}')
+              capture_args+=(
+                --run "$lane=$evidence_dir/$lane.jsonl"
+                --receipt "$lane=$lane_receipt"
+                --expected-receipt-sha256 "$lane=$lane_receipt_sha256"
+              )
+              if [[ "$lane" == "v109_baseline" || "$lane" == "qwen_page" ]]; then
+                capture_args+=(
+                  --attestation "$lane=$evidence_dir/$lane.capture-attestation.jsonl"
+                )
+              else
+                capture_args+=(
+                  --attestation "$lane=$evidence_dir/native-v5-attestation.jsonl"
+                )
+              fi
+            done
+            # validate-set replays canonical cross-bindings, not the large source
+            # DB/vector/provider capture. This independently approved digest is
+            # the trust root attesting that external and native source replay
+            # commands completed before the evidence was committed.
+            .venv/bin/python -m cardrag_mcp.gold_capture "${capture_args[@]}"
+            test "$(sha256sum "$capture_set_receipt" | awk '{print $1}')" = \
+              "$CAPTURE_SET_RECEIPT_SHA256"
           fi
           python - "$version" <<'PY'
           import sys
