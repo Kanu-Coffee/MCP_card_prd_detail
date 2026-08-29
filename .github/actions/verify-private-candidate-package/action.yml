@@ -1,0 +1,26 @@
+name: Verify private candidate package
+description: Fail closed unless the user-owned GHCR package is private and linked to this repository
+
+runs:
+  using: composite
+  steps:
+    - name: Verify private user-owned package metadata
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -n "${GH_TOKEN:-}"
+        test "$(gh api "/users/${GITHUB_REPOSITORY_OWNER}" --jq .type)" = "User"
+
+        packages_json=$(mktemp)
+        trap 'rm -f "$packages_json"' EXIT
+        gh api --method GET --paginate \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2026-03-10" \
+          "/users/${GITHUB_REPOSITORY_OWNER}/packages?package_type=container&visibility=private&per_page=100" \
+          > "$packages_json"
+
+        jq -s -e \
+          --arg owner "$GITHUB_REPOSITORY_OWNER" \
+          --arg repository "$GITHUB_REPOSITORY" \
+          -f "$GITHUB_ACTION_PATH/validate-package-list.jq" \
+          "$packages_json" >/dev/null

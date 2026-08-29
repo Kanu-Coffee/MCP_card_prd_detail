@@ -107,10 +107,15 @@ python -m cardrag_core.candidate_acceptance \
 
 수락 대상 image를 public Docker Hub에 먼저 올리지 않습니다. 허용된 source repository는
 `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate` 하나뿐입니다. 이 package는 사전에
-`private`로 만들고 이 GitHub repository에 연결해야 합니다. release workflow는 GitHub API로
-`package_type=container`, `visibility=private`, 연결 repository identity를 확인하며 하나라도
-다르면 image를 읽기 전에 실패합니다. package 생성·visibility 설정과 candidate push는 별도
-승인된 producer 단계이고 public release 승인이 아닙니다.
+`private`로 만들고 이 GitHub repository에 연결해야 합니다. 현재 repository owner는 GitHub
+API상 `User`이므로 workflow는 private package도 반환하는 authenticated, paginated user-package
+list endpoint와 owner type을 함께 검증합니다. public package 전용 단건 endpoint는 사용하지
+않습니다. 그 뒤 exact-name 결과가 하나뿐인지, `package_type=container`, `visibility=private`,
+owner와 연결 repository identity가 같은지 확인하며
+하나라도 다르면 image를 읽기 전에 실패합니다. package 생성·visibility 설정과 candidate push는 별도
+승인된 producer 단계이고 public release 승인이 아닙니다. package의 GitHub Actions access에도 이
+repository를 `Read`로 명시해야 하며 repository 연결만으로 read 권한을 추정하지 않습니다. release
+jobs의 `packages: read` GITHUB_TOKEN이 metadata 조회와 pull을 둘 다 통과해야 합니다.
 
 승인된 producer는 local checkout을 build context로 사용하지 않고 full 40-hex commit으로 고정한
 remote Git context를 사용합니다. 따라서 staged/unstaged/untracked byte를 같은 VCS label로
@@ -232,6 +237,22 @@ ignore-unfixed=false
 
 public `dockerhub-public` environment 승인 뒤에만 checksum-pinned `crane 0.22.0`이 private
 source index와 모든 child/attestation blob을 Docker Hub immutable alias로 재귀 복사합니다.
+이 environment는 required reviewer가 1명 이상이어야 하고 `prevent_self_review=true`,
+`can_admins_bypass=false`, custom deployment policy의 유일한 tag pattern이 `v*.*.*`여야 합니다.
+reviewer의 `{type,id}` 집합은 source-controlled `approved-reviewers.json`과 정확히 같아야 하며 추가,
+대체, 중복, malformed reviewer를 모두 거부합니다. 현재 allowlist는 비어 있으므로 독립 reviewer를
+정하고 새 candidate source에서 numeric ID를 봉인하기 전에는 의도적으로 통과할 수 없습니다.
+workflow는 repository `Actions: read` 권한으로 repository visibility와 이 상태를 Docker Hub 인증
+전과 실제 public copy 직전에 REST API로 다시 읽습니다. 조회 실패나 drift는 모두 public write
+전에 실패합니다.
+
+2026-08-30 read-only audit에서 repository는 private personal-User 소유이고 environment는 protection
+rule이 없으며 admin bypass가 허용됩니다. GitHub Free/Pro personal private repository에서는 이
+required-reviewer/no-bypass 보호가 scheduler에 적용된다고 증명할 수 없으므로 verifier도 repository
+visibility가 `public`이 아니면 명시적으로 실패합니다. repository 공개 전환은 승인 범위를 크게
+넓히는 외부 변경이므로 이 문서는 이를 승인하지 않습니다. private 상태를 유지하려면
+Enterprise-backed organization 이전과 package ownership/verifier 재감사 또는 별도 독립 서명 승인
+설계가 필요합니다. 그 전에는 release를 dispatch하거나 승인해서는 안 됩니다.
 승인이 지연되면 image와 filesystem Trivy `UpdatedAt<=36h`, `DownloadedAt<=2h`를 현재 UTC로
 다시 검사하고 오래된 run은 public write 전에 실패합니다. destination OCI index digest,
 linux/amd64 child, platform config, attestation subject/digest와 raw SPDX/provenance blob byte가 receipt/scan과 모두

@@ -426,17 +426,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Require the candidate package to remain private and repository-scoped
+        uses: ./.github/actions/verify-private-candidate-package
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api \
-            /orgs/Kanu-Coffee/packages/container/mcp-card-prd-detail-candidate \
-            | jq -e '
-                .package_type == "container"
-                and .visibility == "private"
-                and .repository.full_name == env.GITHUB_REPOSITORY
-              ' >/dev/null
 
       - name: Authenticate read-only to the private candidate registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -692,7 +684,14 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [validate, strict-filesystem-scan, strict-image-scan]
     environment: dockerhub-public
+    permissions:
+      actions: read
+      contents: read
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
       - name: Install checksum-pinned OCI digest reader
         run: |
           set -euo pipefail
@@ -707,6 +706,11 @@ jobs:
             -C "$registry_tools_dir/unpack" crane
           install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
           "$registry_tools_dir/crane" version
+
+      - name: Verify independent Docker Hub approval boundary
+        uses: ./.github/actions/verify-public-release-environment
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Authenticate for immutable-tag preflight
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -825,6 +829,7 @@ jobs:
       matrix:
         target: [worker, mcp]
     permissions:
+      actions: read
       contents: read
       id-token: write
       packages: read
@@ -853,17 +858,9 @@ jobs:
           "$registry_tools_dir/crane" version
 
       - name: Reconfirm the candidate package is still private and repository-scoped
+        uses: ./.github/actions/verify-private-candidate-package
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api \
-            /orgs/Kanu-Coffee/packages/container/mcp-card-prd-detail-candidate \
-            | jq -e '
-                .package_type == "container"
-                and .visibility == "private"
-                and .repository.full_name == env.GITHUB_REPOSITORY
-              ' >/dev/null
 
       - name: Authenticate read-only to the private candidate registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -871,6 +868,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+
+      - name: Verify independent Docker Hub approval boundary before authentication
+        uses: ./.github/actions/verify-public-release-environment
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -1115,6 +1117,7 @@ jobs:
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
             case "$status" in
               404)
+                bash .github/actions/verify-public-release-environment/verify.sh
                 "$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy \
                   "$source_reference" "$reference"
                 ;;

@@ -1,6 +1,81 @@
+import copy
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _public_environment_policy_is_valid(
+    tmp_path: Path,
+    repository: dict[str, object],
+    environment: dict[str, object],
+    policies: dict[str, object],
+    approved_reviewers: dict[str, object],
+) -> bool:
+    jq = shutil.which("jq")
+    assert jq is not None
+    repository_path = tmp_path / "repository.json"
+    environment_path = tmp_path / "environment.json"
+    policies_path = tmp_path / "policies.json"
+    approved_reviewers_path = tmp_path / "approved-reviewers.json"
+    repository_path.write_text(json.dumps(repository), encoding="utf-8")
+    environment_path.write_text(json.dumps(environment), encoding="utf-8")
+    policies_path.write_text(json.dumps(policies), encoding="utf-8")
+    approved_reviewers_path.write_text(json.dumps(approved_reviewers), encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - executable and filter are repository-controlled
+        (
+            jq,
+            "-e",
+            "--slurpfile",
+            "repository",
+            str(repository_path),
+            "--slurpfile",
+            "policies",
+            str(policies_path),
+            "--slurpfile",
+            "approved_reviewers",
+            str(approved_reviewers_path),
+            "-f",
+            str(ROOT / ".github/actions/verify-public-release-environment/validate-environment.jq"),
+            str(environment_path),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _private_package_list_is_valid(tmp_path: Path, pages: list[object]) -> bool:
+    jq = shutil.which("jq")
+    assert jq is not None
+    packages_path = tmp_path / "packages.json"
+    packages_path.write_text(
+        "".join(f"{json.dumps(page)}\n" for page in pages),
+        encoding="utf-8",
+    )
+    result = subprocess.run(  # noqa: S603 - executable and filter are repository-controlled
+        (
+            jq,
+            "-s",
+            "-e",
+            "--arg",
+            "owner",
+            "Kanu-Coffee",
+            "--arg",
+            "repository",
+            "Kanu-Coffee/MCP_card_prd_detail",
+            "-f",
+            str(ROOT / ".github/actions/verify-private-candidate-package/validate-package-list.jq"),
+            str(packages_path),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
 
 
 def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_commit() -> None:
@@ -52,6 +127,293 @@ def test_release_legacy_validator_binds_the_contemporaneous_execution_record() -
     assert '--historical-source-artifact "$legacy_historical_source"' in workflow
 
 
+def test_public_registry_jobs_revalidate_independent_environment_approval() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    action = (ROOT / ".github/actions/verify-public-release-environment/action.yml").read_text(
+        encoding="utf-8"
+    )
+    verifier = (ROOT / ".github/actions/verify-public-release-environment/verify.sh").read_text(
+        encoding="utf-8"
+    )
+    approved_reviewers = json.loads(
+        (ROOT / ".github/actions/verify-public-release-environment/approved-reviewers.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    preflight_job = workflow.split("  registry-preflight:\n", 1)[1].split("  publish:\n", 1)[0]
+    publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
+
+    assert "actions: read" in preflight_job
+    assert "actions: read" in publish_job
+    assert preflight_job.count("uses: ./.github/actions/verify-public-release-environment") == 1
+    assert publish_job.count("uses: ./.github/actions/verify-public-release-environment") == 1
+    assert preflight_job.index("verify-public-release-environment") < preflight_job.index(
+        "Authenticate for immutable-tag preflight"
+    )
+    assert publish_job.index(
+        "Verify independent Docker Hub approval boundary before authentication"
+    ) < publish_job.index("password: ${{ secrets.DOCKERHUB_TOKEN }}")
+    assert publish_job.index(
+        "bash .github/actions/verify-public-release-environment/verify.sh"
+    ) < publish_job.index('"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy')
+    assert (
+        "404)\n"
+        "                bash .github/actions/verify-public-release-environment/verify.sh\n"
+        '                "$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy'
+    ) in publish_job
+    assert 'bash "$GITHUB_ACTION_PATH/verify.sh"' in action
+    assert '"repos/${GITHUB_REPOSITORY}"' in verifier
+    assert "repos/${GITHUB_REPOSITORY}/environments/dockerhub-public" in verifier
+    assert "deployment-branch-policies?per_page=100" in verifier
+    assert "X-GitHub-Api-Version: 2026-03-10" in verifier
+    assert "--slurpfile approved_reviewers" in verifier
+    assert approved_reviewers == {
+        "schema": "cardrag.public-release-reviewers.v1",
+        "reviewers": [],
+    }
+
+
+def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path: Path) -> None:
+    repository: dict[str, object] = {
+        "private": False,
+        "visibility": "public",
+        "owner": {"type": "User"},
+    }
+    reviewer_rule: dict[str, object] = {
+        "id": 1,
+        "type": "required_reviewers",
+        "prevent_self_review": True,
+        "reviewers": [
+            {
+                "type": "User",
+                "reviewer": {"id": 1234, "login": "release-reviewer"},
+            }
+        ],
+    }
+    environment: dict[str, object] = {
+        "name": "dockerhub-public",
+        "can_admins_bypass": False,
+        "protection_rules": [reviewer_rule],
+        "deployment_branch_policy": {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        },
+    }
+    policies: dict[str, object] = {
+        "total_count": 1,
+        "branch_policies": [{"id": 2, "name": "v*.*.*", "type": "tag"}],
+    }
+    approved_reviewers: dict[str, object] = {
+        "schema": "cardrag.public-release-reviewers.v1",
+        "reviewers": [{"type": "User", "id": 1234}],
+    }
+
+    assert _public_environment_policy_is_valid(
+        tmp_path,
+        repository,
+        environment,
+        policies,
+        approved_reviewers,
+    )
+
+    mutations: list[tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]] = []
+    for key, value in (
+        ("name", "not-public"),
+        ("can_admins_bypass", True),
+        ("deployment_branch_policy", None),
+        ("protection_rules", []),
+    ):
+        changed_environment = copy.deepcopy(environment)
+        changed_environment[key] = value
+        mutations.append(
+            (
+                copy.deepcopy(repository),
+                changed_environment,
+                copy.deepcopy(policies),
+                copy.deepcopy(approved_reviewers),
+            )
+        )
+
+    self_review = copy.deepcopy(environment)
+    self_review["protection_rules"][0]["prevent_self_review"] = False  # type: ignore[index]
+    mutations.append(
+        (
+            copy.deepcopy(repository),
+            self_review,
+            copy.deepcopy(policies),
+            copy.deepcopy(approved_reviewers),
+        )
+    )
+
+    no_reviewers = copy.deepcopy(environment)
+    no_reviewers["protection_rules"][0]["reviewers"] = []  # type: ignore[index]
+    mutations.append(
+        (
+            copy.deepcopy(repository),
+            no_reviewers,
+            copy.deepcopy(policies),
+            copy.deepcopy(approved_reviewers),
+        )
+    )
+
+    duplicate_rule = copy.deepcopy(environment)
+    duplicate_rule["protection_rules"].append(copy.deepcopy(reviewer_rule))  # type: ignore[union-attr]
+    mutations.append(
+        (
+            copy.deepcopy(repository),
+            duplicate_rule,
+            copy.deepcopy(policies),
+            copy.deepcopy(approved_reviewers),
+        )
+    )
+
+    substituted_reviewer = copy.deepcopy(environment)
+    substituted_reviewer["protection_rules"][0]["reviewers"][0]["reviewer"]["id"] = 9999  # type: ignore[index]
+    mutations.append(
+        (
+            copy.deepcopy(repository),
+            substituted_reviewer,
+            copy.deepcopy(policies),
+            copy.deepcopy(approved_reviewers),
+        )
+    )
+
+    malformed_reviewer = copy.deepcopy(environment)
+    del malformed_reviewer["protection_rules"][0]["reviewers"][0]["reviewer"]["id"]  # type: ignore[index]
+    mutations.append(
+        (
+            copy.deepcopy(repository),
+            malformed_reviewer,
+            copy.deepcopy(policies),
+            copy.deepcopy(approved_reviewers),
+        )
+    )
+
+    extra_reviewer = copy.deepcopy(environment)
+    extra_reviewer["protection_rules"][0]["reviewers"].append(  # type: ignore[union-attr,index]
+        {"type": "Team", "reviewer": {"id": 5678, "name": "release-team"}}
+    )
+    mutations.append(
+        (
+            copy.deepcopy(repository),
+            extra_reviewer,
+            copy.deepcopy(policies),
+            copy.deepcopy(approved_reviewers),
+        )
+    )
+
+    for key, value in (
+        ("total_count", 0),
+        ("branch_policies", []),
+        ("branch_policies", [{"id": 3, "name": "main", "type": "branch"}]),
+        ("branch_policies", [{"id": 4, "name": "v*.*.*", "type": "branch"}]),
+        ("branch_policies", [{"id": 5, "name": "v*.*.*"}]),
+    ):
+        changed_policies = copy.deepcopy(policies)
+        changed_policies[key] = value
+        mutations.append(
+            (
+                copy.deepcopy(repository),
+                copy.deepcopy(environment),
+                changed_policies,
+                copy.deepcopy(approved_reviewers),
+            )
+        )
+
+    for key, value in (
+        ("private", True),
+        ("visibility", "private"),
+        ("owner", {"type": "Bot"}),
+    ):
+        changed_repository = copy.deepcopy(repository)
+        changed_repository[key] = value
+        mutations.append(
+            (
+                changed_repository,
+                copy.deepcopy(environment),
+                copy.deepcopy(policies),
+                copy.deepcopy(approved_reviewers),
+            )
+        )
+
+    for changed_approved_reviewers in (
+        {"schema": "cardrag.public-release-reviewers.v1", "reviewers": []},
+        {"schema": "wrong", "reviewers": [{"type": "User", "id": 1234}]},
+        {
+            "schema": "cardrag.public-release-reviewers.v1",
+            "reviewers": [{"type": "User", "id": 9999}],
+        },
+        {
+            "schema": "cardrag.public-release-reviewers.v1",
+            "reviewers": [
+                {"type": "User", "id": 1234},
+                {"type": "User", "id": 1234},
+            ],
+        },
+    ):
+        mutations.append(
+            (
+                copy.deepcopy(repository),
+                copy.deepcopy(environment),
+                copy.deepcopy(policies),
+                changed_approved_reviewers,
+            )
+        )
+
+    assert all(
+        not _public_environment_policy_is_valid(
+            tmp_path,
+            changed_repository,
+            changed_environment,
+            changed_policies,
+            changed_approved_reviewers,
+        )
+        for (
+            changed_repository,
+            changed_environment,
+            changed_policies,
+            changed_approved_reviewers,
+        ) in mutations
+    )
+
+
+def test_private_candidate_package_filter_rejects_public_or_unlinked_matches(
+    tmp_path: Path,
+) -> None:
+    candidate: dict[str, object] = {
+        "id": 1,
+        "name": "mcp-card-prd-detail-candidate",
+        "package_type": "container",
+        "visibility": "private",
+        "owner": {"login": "Kanu-Coffee", "type": "User"},
+        "repository": {"full_name": "Kanu-Coffee/MCP_card_prd_detail"},
+    }
+    unrelated = {
+        "id": 2,
+        "name": "unrelated",
+        "package_type": "container",
+        "visibility": "private",
+    }
+    assert _private_package_list_is_valid(tmp_path, [[unrelated], [candidate]])
+
+    mutations: list[list[object]] = [[], [[]], [candidate], [{"message": "not a page"}]]
+    for path, value in (
+        (("visibility",), "public"),
+        (("package_type",), "npm"),
+        (("owner", "login"), "another-user"),
+        (("repository", "full_name"), "Kanu-Coffee/another-repository"),
+    ):
+        changed = copy.deepcopy(candidate)
+        if len(path) == 1:
+            changed[path[0]] = value
+        else:
+            changed[path[0]][path[1]] = value  # type: ignore[index]
+        mutations.append([[changed]])
+    mutations.append([[candidate, copy.deepcopy(candidate)]])
+
+    assert all(not _private_package_list_is_valid(tmp_path, pages) for pages in mutations)
+
+
 def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     strict_job = workflow.split("  strict-image-scan:\n", 1)[1].split("  registry-preflight:\n", 1)[0]
@@ -64,8 +426,8 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert "matrix:\n        target: [worker, mcp]" in strict_job
     assert "CANDIDATE_IMAGE_REPOSITORY: ghcr.io/kanu-coffee/" in workflow
     assert "packages: read" in strict_job
-    assert '.visibility == "private"' in strict_job
-    assert ".repository.full_name == env.GITHUB_REPOSITORY" in strict_job
+    assert strict_job.count("uses: ./.github/actions/verify-private-candidate-package") == 1
+    assert "/orgs/Kanu-Coffee/packages/" not in strict_job
     assert 'image="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"' in strict_job
     assert 'test "$observed_digest" = "$digest"' in strict_job
     assert "validate-candidate-oci-index.jq" in strict_job
@@ -111,8 +473,8 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert "go-containerregistry_Linux_x86_64.tar.gz" in publish_job
     assert "edb74d53fad9a596860f59d1c5d04a43dfb5f441dc71f57060dd0bf39483c833" in publish_job
     assert 'source_reference="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"' in publish_job
-    assert '.visibility == "private"' in publish_job
-    assert ".repository.full_name == env.GITHUB_REPOSITORY" in publish_job
+    assert publish_job.count("uses: ./.github/actions/verify-private-candidate-package") == 1
+    assert "/orgs/Kanu-Coffee/packages/" not in publish_job
     assert '"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy' in publish_job
     assert 'test "$(resolve_digest "$reference")" = "$digest"' in publish_job
     assert '"${IMAGE_NAME}@${digest}" \\' in publish_job
@@ -154,7 +516,21 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert workflow.count("-f .github/scripts/validate-candidate-attestation-manifest.jq") == 2
     assert workflow.count("python3 .github/scripts/validate-strict-json.py") == 8
     assert workflow.count("-f .github/scripts/validate-candidate-platform-manifest.jq") == 3
-    assert workflow.count('.visibility == "private"') == 2
+    package_action = (ROOT / ".github/actions/verify-private-candidate-package/action.yml").read_text(
+        encoding="utf-8"
+    )
+    package_filter = (
+        ROOT / ".github/actions/verify-private-candidate-package/validate-package-list.jq"
+    ).read_text(encoding="utf-8")
+    assert 'test "$(gh api "/users/${GITHUB_REPOSITORY_OWNER}" --jq .type)" = "User"' in (package_action)
+    assert '"/users/${GITHUB_REPOSITORY_OWNER}/packages?' in package_action
+    assert "package_type=container&visibility=private&per_page=100" in package_action
+    assert "gh api --method GET --paginate" in package_action
+    assert 'select(.name == "mcp-card-prd-detail-candidate")' in package_filter
+    assert "($matches | length == 1)" in package_filter
+    assert '$matches[0].visibility == "private"' in package_filter
+    assert "$matches[0].repository.full_name == $repository" in package_filter
+    assert "/packages/container/mcp-card-prd-detail-candidate" not in package_action
 
 
 def test_release_strict_filesystem_scan_is_sealed_and_published_as_evidence() -> None:

@@ -1,0 +1,10 @@
+name: Verify public release environment
+description: Fail closed unless Docker Hub publication has an independent GitHub approval boundary
+
+runs:
+  using: composite
+  steps:
+    - name: Verify dockerhub-public protection and tag policy
+      shell: bash
+      run: |
+        bash "$GITHUB_ACTION_PATH/verify.sh"
