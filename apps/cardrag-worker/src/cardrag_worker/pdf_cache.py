@@ -631,6 +631,22 @@ class PDFCache:
             return None
         return self._hit(cached.path, binding)
 
+    def lookup_revision(self, revision: PDFSourceRevisionRow) -> PDFCacheHit | None:
+        """Revalidate one immutable historical revision without rebinding history."""
+
+        if revision.relative_path != self.relative_object_path(revision.pdf_sha256):
+            raise PDFCacheMetadataError("historical PDF object path is not content-addressed")
+        try:
+            cached = self._validated_cache_object(revision.pdf_sha256)
+        except _InvalidCacheLeaf:
+            return None
+        if (cached.size_bytes, cached.page_count) != (
+            revision.pdf_size_bytes,
+            revision.page_count,
+        ):
+            return None
+        return self._hit(cached.path, revision)
+
     @staticmethod
     def _hit(path: Path, binding: PDFSourceRevisionRow) -> PDFCacheHit:
         return PDFCacheHit(

@@ -32,7 +32,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.9"}
+    assert versions == {"1.0.10"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -50,7 +50,7 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
     assert "from runtime as admin" not in lowered
 
 
-def test_v109_candidate_deployment_isolated_from_stable_runtime() -> None:
+def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     worker_base = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     mcp_base = (ROOT / "deploy/mcp/compose.yaml").read_text(encoding="utf-8")
     worker = (ROOT / "deploy/worker/compose.candidate.yaml").read_text(encoding="utf-8")
@@ -58,22 +58,33 @@ def test_v109_candidate_deployment_isolated_from_stable_runtime() -> None:
     cache_seed = (ROOT / "deploy/worker/compose.cache-seed.yaml").read_text(encoding="utf-8")
 
     for manifest in (worker, mcp):
-        assert "candidate-v1.0.9" in manifest
+        assert "candidate-v1.0.10" in manifest
         assert "CARDRAG_CANDIDATE_WEBDAV_BASE_URL" in manifest
-        assert "v1.0.8" not in manifest
+        assert "candidate-v1.0.9" not in manifest
     assert 'CARDRAG_COLLECT_REMOTE_GARBAGE: "false"' in worker
-    assert "cardrag-worker-v109-candidate-state" in worker
-    assert "cardrag-mcp-v109-candidate-state" in mcp
-    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18009" in mcp
-    assert "target: /mnt/cardrag-v108-state" in cache_seed
+    assert 'CARDRAG_REMOTE_GC_APPROVED: "false"' in worker
+    assert "cardrag-worker-v110-state" in worker
+    assert "cardrag-mcp-v110-state" in mcp
+    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18010" in mcp
+    assert "target: /mnt/cardrag-v109-state" in cache_seed
     assert "read_only: true" in cache_seed
     assert "external: true" in cache_seed
     assert "CARDRAG_WORKER_STATE_VOLUME" in worker_base
+    assert "CARDRAG_COLLECT_REMOTE_GARBAGE:-false" in worker_base
+    assert "CARDRAG_REMOTE_GC_APPROVED:-false" in worker_base
     assert "CARDRAG_MCP_STATE_VOLUME" in mcp_base
+    assert "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES" in mcp_base
+    assert "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES" in mcp_base
+    assert "CARDRAG_RERANKER_SHADOW_ENABLED=${CARDRAG_RERANKER_SHADOW_ENABLED:-false}" in (mcp_base)
+    assert "CARDRAG_RERANKER_SHADOW_MODEL" in mcp_base
+    assert "CARDRAG_RERANKER_SHADOW_PROVIDER_ID" in mcp_base
+    assert "CARDRAG_RERANKER_SHADOW_MAX_CANDIDATES" in mcp_base
+    assert "CARDRAG_RERANKER_SHADOW_TIMEOUT_SECONDS" in mcp_base
+    assert "CARDRAG_RERANKER_SHADOW_ENABLED" in mcp
     assert "cardrag-worker_worker-state" not in worker_base
     assert "cardrag-mcp_mcp-state" not in mcp_base
-    assert "cardrag-worker-v109-state" in worker_base
-    assert "cardrag-mcp-v109-state" in mcp_base
+    assert "cardrag-worker-v110-state" in worker_base
+    assert "cardrag-mcp-v110-state" in mcp_base
 
 
 def test_worker_service_keeps_terminal_and_progress_output_in_journal() -> None:
@@ -115,7 +126,14 @@ def test_public_environment_contract_is_documented_exactly() -> None:
         "CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS",
         "CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS",
         "CARDRAG_MCP_BEARER_TOKEN_FILE",
+        "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES",
+        "CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES",
         "CARDRAG_ENABLED_ISSUERS",
+        "CARDRAG_RERANKER_SHADOW_ENABLED",
+        "CARDRAG_RERANKER_SHADOW_MODEL",
+        "CARDRAG_RERANKER_SHADOW_PROVIDER_ID",
+        "CARDRAG_RERANKER_SHADOW_MAX_CANDIDATES",
+        "CARDRAG_RERANKER_SHADOW_TIMEOUT_SECONDS",
     }
     assert all(f"{name}=" in sample for name in required)
     assert "CARDRAG_DATABASE_URL" not in sample

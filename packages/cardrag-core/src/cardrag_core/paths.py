@@ -85,6 +85,12 @@ def generation_database_path(generation_id: str) -> PurePosixPath:
     return generation_root_path(generation_id) / "index.sqlite3"
 
 
+def generation_vectors_path(generation_id: str) -> PurePosixPath:
+    """Return the immutable v5 FP32 vector sidecar path."""
+
+    return generation_root_path(generation_id) / "vectors.f32"
+
+
 def temporary_object_path(digest: str, token: str | None = None) -> PurePosixPath:
     value = validate_sha256(digest)
     suffix = token or uuid.uuid4().hex
@@ -101,6 +107,12 @@ class GenerationPaths:
     manifest: PurePosixPath
     ready: PurePosixPath
     serving_database: PurePosixPath
+
+    @property
+    def vectors(self) -> PurePosixPath:
+        """Expose the v5 sidecar without changing the legacy constructor."""
+
+        return self.root / "vectors.f32"
 
     @classmethod
     def for_generation(cls, generation_id: str) -> GenerationPaths:

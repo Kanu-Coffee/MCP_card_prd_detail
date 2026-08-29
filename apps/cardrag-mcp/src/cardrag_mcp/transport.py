@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 from cardrag_core import (
@@ -19,6 +20,29 @@ from pydantic import SecretStr
 
 from cardrag_mcp.config import Settings
 from cardrag_mcp.updater import RemoteArtifact, RemoteDocument, RemoteGeneration
+
+
+async def _cancellation_fenced_to_thread[**P, T](
+    function: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Do not release a storage reservation while its blocking write still runs."""
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if task.done() and not task.cancelled():
+            task.exception()
+        raise
 
 
 def _artifact(value: ArtifactRef) -> RemoteArtifact:
@@ -55,6 +79,7 @@ class CoreArtifactReader:
         self._current = current
         manifest = current.manifest
         contract = manifest.embedding_contract
+        vector_sidecar = manifest.vector_sidecar
         remote = RemoteGeneration(
             generation_id=manifest.generation_id,
             serving_schema=manifest.serving_schema,
@@ -92,6 +117,19 @@ class CoreArtifactReader:
                 (row.issuer, row.acquired, row.succeeded, row.failed)
                 for row in manifest.issuer_ocr_counts
             ),
+            vector_sidecar=(None if vector_sidecar is None else _artifact(vector_sidecar.artifact)),
+            structure_contract=manifest.structure_contract,
+            embedding_profiles=manifest.embedding_profiles,
+            primary_embedding_profile_id=manifest.primary_embedding_profile_id,
+            embedding_view_counts=manifest.embedding_view_counts,
+            vector_sidecar_contract=manifest.vector_sidecar,
+            parser_policy_sha256=manifest.parser_policy_sha256,
+            embedding_policy_sha256=manifest.embedding_policy_sha256,
+            retrieval_policy_sha256=manifest.retrieval_policy_sha256,
+            document_aggregation_profile=manifest.document_aggregation_profile,
+            document_aggregation_policy=manifest.document_aggregation_policy,
+            sealed_profile_sha256=manifest.sealed_profile_sha256,
+            exact_row_corpus_sha256=manifest.exact_row_corpus_sha256,
         )
         self._last_etag = etag
         self._last_remote = remote
@@ -101,8 +139,24 @@ class CoreArtifactReader:
         current = self._current
         if current is None or current.manifest.generation_id != generation.generation_id:
             raise RuntimeError("stable generation changed before database download")
-        await asyncio.to_thread(
+        await _cancellation_fenced_to_thread(
             self._reader.download_serving_database,
+            destination,
+            current=current,
+        )
+
+    async def download_vector_sidecar(
+        self,
+        generation: RemoteGeneration,
+        destination: Path,
+    ) -> None:
+        current = self._current
+        if current is None or current.manifest.generation_id != generation.generation_id:
+            raise RuntimeError("stable generation changed before vector sidecar download")
+        if generation.vector_sidecar is None:
+            raise RuntimeError("remote generation does not declare a vector sidecar")
+        await _cancellation_fenced_to_thread(
+            self._reader.download_vector_sidecar,
             destination,
             current=current,
         )
@@ -114,7 +168,11 @@ class CoreArtifactReader:
             size_bytes=artifact.size_bytes,
             media_type=artifact.media_type,
         )
-        await asyncio.to_thread(self._reader.download_object, reference, destination)
+        await _cancellation_fenced_to_thread(
+            self._reader.download_object,
+            reference,
+            destination,
+        )
 
     async def close(self) -> None:
         await asyncio.to_thread(self._client.close)

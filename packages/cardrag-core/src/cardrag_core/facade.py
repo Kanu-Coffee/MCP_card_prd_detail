@@ -16,6 +16,7 @@ from .paths import (
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
+    generation_vectors_path,
     object_path,
 )
 from .webdav import ReadOnlyWebDAVClient, WebDAVIntegrityError
@@ -106,6 +107,23 @@ class MCPArtifactReader:
             or ready.serving_database_size_bytes != database.size_bytes
         ):
             raise ArtifactContractError("generation READY does not bind the serving database")
+        vector_sidecar = manifest.vector_sidecar
+        if manifest.schema_version == "cardrag.generation.v5":
+            if vector_sidecar is None:
+                raise ArtifactContractError("v5 generation manifest does not declare a vector sidecar")
+            if PurePosixPath(vector_sidecar.artifact.path) != generation_vectors_path(manifest.generation_id):
+                raise ArtifactContractError("vector sidecar path does not match its generation")
+            if (
+                ready.vector_sidecar_sha256 != vector_sidecar.artifact.sha256
+                or ready.vector_sidecar_size_bytes != vector_sidecar.artifact.size_bytes
+            ):
+                raise ArtifactContractError("generation READY does not bind the vector sidecar")
+        elif (
+            vector_sidecar is not None
+            or ready.vector_sidecar_sha256 is not None
+            or ready.vector_sidecar_size_bytes is not None
+        ):
+            raise ArtifactContractError("legacy generation must not declare a vector sidecar")
         return CurrentGeneration(pointer=pointer, ready=ready, manifest=manifest)
 
     def read_object(self, reference: ArtifactRef, *, max_bytes: int | None = None) -> bytes:
@@ -143,4 +161,32 @@ class MCPArtifactReader:
             destination,
             expected_sha256=database.sha256,
             expected_size_bytes=database.size_bytes,
+        )
+
+    def download_vector_sidecar(
+        self,
+        destination: str | Path,
+        *,
+        current: CurrentGeneration | None = None,
+    ) -> VerifiedArtifact:
+        """Download one READY-bound v5 vector matrix and verify its full identity."""
+
+        selected = current or self.read_current_generation()
+        sidecar = selected.manifest.vector_sidecar
+        if selected.manifest.schema_version != "cardrag.generation.v5" or sidecar is None:
+            raise ArtifactContractError("selected generation has no v5 vector sidecar")
+        artifact = sidecar.artifact
+        expected_path = generation_vectors_path(selected.manifest.generation_id)
+        if PurePosixPath(artifact.path) != expected_path:
+            raise ArtifactContractError("vector sidecar path does not match its generation")
+        if (
+            selected.ready.vector_sidecar_sha256 != artifact.sha256
+            or selected.ready.vector_sidecar_size_bytes != artifact.size_bytes
+        ):
+            raise ArtifactContractError("generation READY does not bind the vector sidecar")
+        return self.__reader.download(
+            artifact.path,
+            destination,
+            expected_sha256=artifact.sha256,
+            expected_size_bytes=artifact.size_bytes,
         )

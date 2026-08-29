@@ -337,8 +337,12 @@ class OCRResult:
     cache_reuse_key: str | None = None
     cache_publication_deferred: bool = False
     cache_publication_reason_code: str | None = None
+    cache_reused: bool = False
+    provider_called: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.cache_reused) is not bool or type(self.provider_called) is not bool:
+            raise ValueError("OCR cache/provider metrics must be booleans")
         if (self.cache_kind is None) != (self.cache_reuse_key is None):
             raise ValueError("OCR cache kind and reuse key must be present together")
         if self.cache_publication_deferred != (self.cache_publication_reason_code is not None):
@@ -586,6 +590,7 @@ class OCRResolver:
             reuse_key=reuse_key,
             cache_kind=kind,
             cache_reuse_key=reuse_key,
+            cache_reused=True,
         )
 
     async def _repair_native_ready(
@@ -632,6 +637,7 @@ class OCRResolver:
             provider=manifest.contract.provider,
             model=manifest.contract.model,
             reuse_key=reuse_key,
+            cache_reused=True,
         )
         try:
             await self._publish_native_ready(manifest=manifest)
@@ -668,6 +674,8 @@ class OCRResolver:
             reuse_key=result.reuse_key,
             cache_kind="native",
             cache_reuse_key=result.reuse_key,
+            cache_reused=result.cache_reused,
+            provider_called=result.provider_called,
         )
 
     def _load_local_native(
@@ -722,6 +730,7 @@ class OCRResolver:
                 provider=self.provider.provider,
                 model=self.provider.model,
                 reuse_key=reuse_key,
+                cache_reused=True,
             ),
             manifest,
             body,
@@ -955,6 +964,8 @@ class OCRResolver:
             reuse_key=result.reuse_key,
             cache_kind="native",
             cache_reuse_key=result.reuse_key,
+            cache_reused=result.cache_reused,
+            provider_called=result.provider_called,
         )
 
     async def resolve(
@@ -1061,6 +1072,8 @@ class OCRResolver:
             page_number: file_sha256(images[page_number - 1]) for page_number in range(1, page_count + 1)
         }
         page_text: dict[int, str] = {}
+        cache_reused = False
+        provider_called = False
         for chunk_index, call in enumerate(calls):
             selected = tuple(images[page_number - 1] for page_number in call.input_page_numbers)
             input_sha = canonical_sha256(
@@ -1101,7 +1114,9 @@ class OCRResolver:
                     else:
                         for page_number, value in zip(call.target_page_numbers, pages, strict=True):
                             page_text[page_number] = value
+                        cache_reused = True
                         continue
+            provider_called = True
             raw = await self.provider.recognize(
                 selected,
                 page_numbers=call.input_page_numbers,
@@ -1156,6 +1171,8 @@ class OCRResolver:
             provider=self.provider.provider,
             model=self.provider.model,
             reuse_key=native_key,
+            cache_reused=cache_reused,
+            provider_called=provider_called,
         )
         manifest = OCRArtifactManifest(
             reuse_key=result.reuse_key,

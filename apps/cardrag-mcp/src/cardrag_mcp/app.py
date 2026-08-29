@@ -1,4 +1,4 @@
-"""FastAPI edge and the five public MCP tools."""
+"""FastAPI edge and the eight public MCP tools."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -20,7 +21,12 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from cardrag_mcp.config import Settings
-from cardrag_mcp.models import SearchFilters, SearchRequest, SourcePdfDescriptor
+from cardrag_mcp.models import (
+    ContractSearchRequest,
+    SearchFilters,
+    SearchRequest,
+    SourcePdfDescriptor,
+)
 from cardrag_mcp.observability import Metrics, log_event
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.store import GenerationStore
@@ -101,13 +107,69 @@ def build_mcp_server(
         "CardRAG",
         instructions=(
             "Read-only search over the currently active card-product snapshot. "
+            "A v5 generation exposes exact, structure-preserving contract search, "
+            "revision history, "
+            "and linked source bundles; v4 generations retain the legacy evidence tools. "
             "Products whose current official source is protected DRM are explicitly reported "
             "with availability=unsupported_drm and have no document or PDF. "
             "Products whose validated PDF failed isolated OCR are reported with "
             "availability=ocr_failed and have a PDF but no OCR pages or evidence. "
-            "There is no history, version, as-of, remote-PDF, or page-image interface."
+            "There is no remote-PDF fetch or page-image interface."
         ),
     )
+
+    @server.tool()
+    async def search_contracts(
+        query: str,
+        issuer: str | None = None,
+        product_lineage_id: str | None = None,
+        as_of: str | None = None,
+        include_history: bool = False,
+        mode: str = "exact",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Search v5 views exactly, or poll a durable bounded exhaustive audit."""
+
+        parsed_as_of = None if as_of is None else date.fromisoformat(as_of)
+        result = await repository.search_contracts(
+            ContractSearchRequest(
+                query=query,
+                issuer=issuer,
+                product_lineage_id=product_lineage_id,
+                as_of=parsed_as_of,
+                include_history=include_history,
+                mode=mode,  # type: ignore[arg-type]
+                limit=limit,
+            )
+        )
+        return result.model_dump(mode="json")
+
+    @server.tool()
+    async def get_contract_bundle(
+        contract_revision_id: str,
+        scope: str = "full",
+        include_links: bool = True,
+    ) -> dict[str, Any]:
+        """Return one v5 contract's original-order structure and linked notices."""
+
+        value = await repository.get_contract_bundle(
+            contract_revision_id,
+            scope=scope,
+            include_links=include_links,
+        )
+        if value is None:
+            raise ValueError("contract revision not found")
+        return value.model_dump(mode="json")
+
+    @server.tool()
+    async def list_product_revisions(
+        issuer: str,
+        product_lineage_id: str,
+    ) -> dict[str, Any]:
+        """Return current, superseded, and ambiguous revisions for one product lineage."""
+
+        value = await repository.list_product_revisions(issuer, product_lineage_id)
+        return value.model_dump(mode="json")
 
     @server.tool()
     async def search_evidence(
@@ -119,7 +181,7 @@ def build_mcp_server(
         cursor: str | None = None,
         allow_degraded: bool = False,
     ) -> dict[str, Any]:
-        """FTS5 plus exact-cosine RRF search over active evidence."""
+        """Search active evidence through the v5 exact adapter or legacy v4 RRF."""
 
         result = await repository.search(
             SearchRequest(
@@ -297,7 +359,11 @@ def build_app(
                         await task
                 if updater is not None:
                     await updater.close()
-                await repository.embedder.close()
+                try:
+                    if repository.reranker_shadow is not None:
+                        await repository.reranker_shadow.close()
+                finally:
+                    await repository.embedder.close()
 
     app = FastAPI(
         title="CardRAG MCP",

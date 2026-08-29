@@ -30,6 +30,18 @@ from .cache_seed import (
     build_cache_seed_plan,
     paths_overlap,
 )
+from .cache_seed_v109 import (
+    V109CacheSeedError,
+    apply_v109_cache_seed,
+    build_v109_cache_seed_plan,
+)
+from .cache_seed_v109 import (
+    paths_overlap as v109_paths_overlap,
+)
+from .embedding_v5 import (
+    OpenRouterQwenEmbeddingProviderV5,
+    preflight_openrouter_qwen_providers,
+)
 from .gc import GCPartialFailure, collect_garbage
 from .issuers import enabled_adapters
 from .ocr import FailoverOCRResolver, OCRResolver
@@ -41,9 +53,10 @@ from .pipeline import (
     WorkerPipeline,
     WorkerUnexpectedFailureError,
 )
-from .providers import OCRProvider, OpenRouterEmbeddingProvider, make_ocr_provider
+from .providers import OCRProvider, make_ocr_provider
 from .settings import WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
+from .tokenizer_v5 import ensure_qwen_tokenizer
 from .webdav import WebDAVClient
 
 app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/embedding worker")
@@ -189,14 +202,75 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "pdf_downloads": result.pdf_downloads,
         "pdf_revisions": result.pdf_revisions,
         "ocr_cache_publication_deferred": result.ocr_cache_publication_deferred,
+        "v5_metrics": result.v5_metrics,
     }
+
+
+async def _qwen_embedding_provider(
+    settings: WorkerSettings,
+) -> OpenRouterQwenEmbeddingProviderV5:
+    """Run the credentialed provider/tokenizer preflight before touching a corpus."""
+
+    api_key = settings.openrouter_api_key or ""
+    tokenizer = await ensure_qwen_tokenizer(
+        settings.embedding_tokenizer_path,
+        timeout_seconds=settings.embedding_timeout_seconds,
+    )
+    comparison = await preflight_openrouter_qwen_providers(
+        api_key=api_key,
+        token_counter=tokenizer,
+        base_url=settings.openrouter_base_url,
+        timeout_seconds=settings.embedding_timeout_seconds,
+        embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
+        metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
+    )
+    selected = next(
+        report
+        for report in comparison.providers
+        if report.profile.provider_id == settings.embedding_provider_id
+    )
+    profile = selected.profile
+    if profile.maximum_tokens != settings.embedding_maximum_tokens:
+        raise ValueError("CARDRAG_EMBEDDING_MAXIMUM_TOKENS differs from live pinned-provider metadata")
+    if profile.model != settings.embedding_model or profile.dimension != settings.embedding_dimension:
+        raise ValueError("configured embedding model/dimension differs from the verified Qwen profile")
+    logging.getLogger("cardrag_worker.cli").info(
+        "Qwen provider preflight passed provider=%s samples=%d minimum_repeat_cosine=%.6f "
+        "minimum_cross_provider_cosine=%.6f tokenizer_sha256=%s",
+        profile.provider_id,
+        selected.sample_count,
+        selected.minimum_repeat_cosine,
+        comparison.minimum_cross_provider_cosine,
+        tokenizer.asset_sha256,
+    )
+    return OpenRouterQwenEmbeddingProviderV5(
+        api_key=api_key,
+        profile=profile,
+        token_counter=tokenizer,
+        base_url=settings.openrouter_base_url,
+        timeout_seconds=settings.embedding_timeout_seconds,
+        maximum_response_bytes=settings.embedding_max_response_bytes,
+    )
+
+
+def _guard_v110_publication_channel(settings: WorkerSettings) -> None:
+    if settings.channel == "candidate-v1.0.10":
+        return
+    if settings.channel == "stable":
+        if settings.stable_publication_approved:
+            return
+        raise ValueError(
+            "stable v1.0.10 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
+        )
+    raise ValueError("v1.0.10 Worker publication channel must be candidate-v1.0.10 or stable")
 
 
 async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
+    _guard_v110_publication_channel(settings)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    webdav = WebDAVClient.from_env()
+    webdav = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
     try:
         with WorkerState(settings.state_database) as state:
             primary = OCRResolver(
@@ -229,11 +303,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     prompt_version=settings.ocr_prompt_version,
                 )
                 resolver = FailoverOCRResolver(primary, fallback)
-            embeddings = OpenRouterEmbeddingProvider(
-                api_key=settings.openrouter_api_key or "",
-                model=settings.embedding_model,
-                base_url=settings.openrouter_base_url,
-            )
+            embeddings = await _qwen_embedding_provider(settings)
             result = await WorkerPipeline(
                 state=state,
                 state_dir=settings.state_dir,
@@ -243,7 +313,9 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 webdav=webdav,
                 maximum_attempts=settings.stage_max_attempts,
                 retry_cap_seconds=settings.retry_cap_seconds,
-                collect_remote_garbage=(settings.collect_remote_garbage and settings.channel == "stable"),
+                collect_remote_garbage=settings.collect_remote_garbage,
+                stable_publication_approved=settings.stable_publication_approved,
+                remote_gc_approved=settings.remote_gc_approved,
                 retained_generations=settings.retain_generations,
                 retained_incomplete_runs=settings.retained_incomplete_runs,
                 garbage_grace_days=settings.garbage_grace_days,
@@ -465,6 +537,58 @@ def cache_seed_command(
         raise typer.Exit(code=1) from None
 
 
+def _seed_v109_pdf_cache(source_state_root: Path, *, apply: bool) -> dict[str, Any]:
+    plan = build_v109_cache_seed_plan(source_state_root)
+    if not apply:
+        return plan.report(applied=False)
+    settings = WorkerSettings.from_env()
+    if settings.channel != "candidate-v1.0.10":
+        raise V109CacheSeedError("candidate_v110_destination_required")
+    if v109_paths_overlap(plan.source_root, settings.state_dir):
+        raise V109CacheSeedError("source_destination_overlap")
+    settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
+            cache = PDFCache(settings.state_dir, state)
+            first = apply_v109_cache_seed(plan, cache)
+            second = apply_v109_cache_seed(plan, cache)
+    except AlreadyRunning as exc:
+        raise V109CacheSeedError("destination_busy") from exc
+    if second["imported_pdf_objects"] != 0 or second["imported_revisions"] != 0:
+        raise V109CacheSeedError("idempotence_verification_failed")
+    return {
+        **first,
+        "idempotence_imported_pdf_objects": second["imported_pdf_objects"],
+        "idempotence_imported_revisions": second["imported_revisions"],
+        "idempotence_verified": True,
+    }
+
+
+@app.command("seed-cache-v109")
+def seed_cache_v109_command(
+    source_state_root: Path = typer.Argument(
+        ...,
+        help="Absolute read-only v1.0.9 Worker state root.",
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Seed v1.0.10; default is dry-run."),
+) -> None:
+    """Audit and idempotently import only v1.0.9 PDF cache/history into v1.0.10."""
+
+    try:
+        _echo(_seed_v109_pdf_cache(source_state_root, apply=apply))
+    except V109CacheSeedError as exc:
+        _echo(
+            {
+                "applied": False,
+                "dry_run": not apply,
+                "reason_code": exc.code,
+                "schema_version": "cardrag.cache-seed-v109-report.v1",
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=1) from None
+
+
 async def _publish_if_requested(result: Any, publish: bool) -> int:
     if not publish:
         return 0
@@ -609,8 +733,9 @@ def adopt_legacy(
 
 async def _run_gc(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any]:
     settings = WorkerSettings.from_env(require_webdav=True)
+    _guard_remote_gc(settings, apply=apply)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    client = WebDAVClient.from_env()
+    client = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
     try:
         with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
             result = await collect_garbage(
@@ -637,6 +762,23 @@ async def _run_gc(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any
         raise
     await client.close()
     return payload
+
+
+def _guard_remote_gc(settings: WorkerSettings, *, apply: bool) -> None:
+    """Require a separate deletion capability before any local or remote mutation."""
+
+    if not apply:
+        return
+    if (
+        settings.channel != "stable"
+        or not settings.collect_remote_garbage
+        or not settings.stable_publication_approved
+        or not settings.remote_gc_approved
+    ):
+        raise ValueError(
+            "remote GC apply requires stable channel, collection enabled, "
+            "stable publication approval, and separate remote-GC approval"
+        )
 
 
 def _echo_gc_failure(*, deleted_count: int | None = None, busy: bool = False) -> None:

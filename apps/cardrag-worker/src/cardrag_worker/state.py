@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
+import math
 import re
 import sqlite3
+import struct
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +31,10 @@ class AlreadyRunning(RuntimeError):
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 @contextmanager
@@ -93,6 +100,18 @@ class PDFSourceRevisionRow:
     superseded_at: str | None
     superseded_by_source_id: str | None
     source_superseded_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingCacheV5Row:
+    cache_key: str
+    profile_id: str
+    input_sha256: str
+    dimension: int
+    dtype: str
+    normalization: str
+    embedding: bytes
+    created_at: str
 
 
 SCHEMA = """
@@ -166,6 +185,23 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
   embedding BLOB NOT NULL CHECK(length(embedding)=6144),
   created_at TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
+
+-- v5 embeddings are deliberately isolated from the legacy 1,536D cache.  A
+-- cache identity binds the complete provider-specific profile as well as the
+-- exact formatted input, and the dynamic length CHECK prevents a row from
+-- claiming one dimension while storing another.
+CREATE TABLE IF NOT EXISTS embedding_cache_v5 (
+  cache_key TEXT PRIMARY KEY CHECK(length(cache_key)=64),
+  profile_id TEXT NOT NULL CHECK(length(profile_id) BETWEEN 1 AND 512),
+  input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
+  dimension INTEGER NOT NULL CHECK(dimension > 0),
+  dtype TEXT NOT NULL CHECK(dtype='float32'),
+  normalization TEXT NOT NULL CHECK(normalization='l2'),
+  embedding BLOB NOT NULL CHECK(length(embedding)=dimension*4),
+  created_at TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS embedding_cache_v5_profile_input_idx
+  ON embedding_cache_v5(profile_id,input_sha256);
 
 CREATE TABLE IF NOT EXISTS gc_unreferenced (
   remote_path TEXT PRIMARY KEY,
@@ -242,6 +278,38 @@ def _utc_iso(value: datetime | None = None) -> str:
     if timestamp.tzinfo is None:
         raise ValueError("cache timestamps must be timezone-aware")
     return timestamp.astimezone(UTC).isoformat()
+
+
+def _encode_embedding_cache_v5(values: Sequence[float], *, dimension: int) -> bytes:
+    """Return a finite, L2-normalized little-endian float32 cache value."""
+
+    if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
+        raise ValueError("embedding dimension must be a positive integer")
+    if len(values) != dimension:
+        raise ValueError(f"embedding dimension {len(values)} does not equal {dimension}")
+    converted = tuple(float(value) for value in values)
+    if not all(math.isfinite(value) for value in converted):
+        raise ValueError("embedding contains a non-finite value")
+    norm = math.sqrt(sum(value * value for value in converted))
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("embedding must have a finite non-zero norm")
+    packed = struct.pack(f"<{dimension}f", *(value / norm for value in converted))
+    stored = struct.unpack(f"<{dimension}f", packed)
+    stored_norm_squared = sum(value * value for value in stored)
+    if not math.isclose(stored_norm_squared, 1.0, rel_tol=2e-5, abs_tol=2e-5):
+        raise ValueError("float32 embedding failed L2 normalization")
+    return packed
+
+
+def _validate_embedding_cache_v5_blob(blob: bytes, *, dimension: int) -> None:
+    if len(blob) != dimension * 4:
+        raise RuntimeError("v5 embedding cache blob length does not match its dimension")
+    values = struct.unpack(f"<{dimension}f", blob)
+    if not all(math.isfinite(value) for value in values):
+        raise RuntimeError("v5 embedding cache contains a non-finite value")
+    norm_squared = sum(value * value for value in values)
+    if not math.isclose(norm_squared, 1.0, rel_tol=2e-5, abs_tol=2e-5):
+        raise RuntimeError("v5 embedding cache contains a non-normalized vector")
 
 
 def _required_text(value: str, *, field: str, maximum: int = 4096) -> str:
@@ -514,6 +582,43 @@ class WorkerState:
         if not isinstance(payload, dict):
             raise RuntimeError("stored snapshot payload is not a JSON object")
         return payload, datetime.fromisoformat(str(row["observed_at"]))
+
+    def snapshot_history(self, issuer: str) -> tuple[tuple[dict[str, Any], datetime], ...]:
+        """Return every canonically bound discovery snapshot for one issuer."""
+
+        _required_text(issuer, field="issuer", maximum=64)
+        rows = self.connection.execute(
+            """SELECT snapshot_id,source_sha256,observed_at,payload_json FROM snapshot
+               WHERE issuer=? ORDER BY observed_at,run_id,snapshot_id""",
+            (issuer,),
+        ).fetchall()
+        history: list[tuple[dict[str, Any], datetime]] = []
+        for row in rows:
+            raw = str(row["payload_json"])
+            try:
+                payload = json.loads(
+                    raw,
+                    parse_constant=_reject_json_constant,
+                )
+            except (TypeError, ValueError):
+                raise RuntimeError("stored snapshot payload is invalid JSON") from None
+            if not isinstance(payload, dict):
+                raise RuntimeError("stored snapshot payload is not a JSON object")
+            canonical = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if raw != canonical or str(row["snapshot_id"]) != digest or str(row["source_sha256"]) != digest:
+                raise RuntimeError("stored snapshot payload is not canonically hash-bound")
+            observed_at = datetime.fromisoformat(str(row["observed_at"]))
+            if observed_at.tzinfo is None:
+                raise RuntimeError("stored snapshot observation is timezone-naive")
+            history.append((payload, observed_at))
+        return tuple(history)
 
     def ensure_stage(self, run_id: str, document_id: str, stage_name: str, *, max_attempts: int = 4) -> None:
         now = _now().isoformat()
@@ -1059,6 +1164,26 @@ class WorkerState:
         ).fetchall()
         return tuple(PDFSourceRevisionRow(**dict(row)) for row in rows)
 
+    def pdf_cache_lineage_history(
+        self,
+        *,
+        issuer: str,
+        product_code: str,
+        document_type: str,
+    ) -> tuple[PDFSourceRevisionRow, ...]:
+        """Return durable byte revisions for one exact product lineage."""
+
+        issuer = _required_text(issuer, field="issuer", maximum=64)
+        product_code = _required_text(product_code, field="product_code", maximum=512)
+        document_type = _required_text(document_type, field="document_type", maximum=128)
+        rows = self.connection.execute(
+            _PDF_REVISION_SELECT
+            + """ WHERE s.issuer=? AND s.product_code=? AND s.document_type=?
+                  ORDER BY s.first_observed_at,r.revision_id""",
+            (issuer, product_code, document_type),
+        ).fetchall()
+        return tuple(PDFSourceRevisionRow(**dict(row)) for row in rows)
+
     def mark_pdf_cache_verified(
         self,
         *,
@@ -1110,6 +1235,97 @@ class WorkerState:
                (cache_key,contract_sha256,text_sha256,embedding,created_at) VALUES(?,?,?,?,?)""",
             (cache_key, contract_sha256, text_sha256, embedding, _now().isoformat()),
         )
+
+    def get_embedding_v5(
+        self,
+        cache_key: str,
+        *,
+        profile_id: str,
+        input_sha256: str,
+        dimension: int,
+        dtype: str = "float32",
+        normalization: str = "l2",
+    ) -> EmbeddingCacheV5Row | None:
+        """Read only the profile-bound v5 cache; the legacy table is never consulted."""
+
+        if not _SHA256.fullmatch(cache_key) or not _SHA256.fullmatch(input_sha256):
+            raise ValueError("v5 embedding cache identities must be lowercase sha256 values")
+        _required_text(profile_id, field="profile_id", maximum=512)
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
+            raise ValueError("embedding dimension must be a positive integer")
+        if dtype != "float32" or normalization != "l2":
+            raise ValueError("v5 embedding cache supports only float32 L2 vectors")
+        row = self.connection.execute(
+            """SELECT cache_key,profile_id,input_sha256,dimension,dtype,normalization,
+                      embedding,created_at
+               FROM embedding_cache_v5 WHERE cache_key=?""",
+            (cache_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        cached = EmbeddingCacheV5Row(**dict(row))
+        expected = (profile_id, input_sha256, dimension, dtype, normalization)
+        actual = (
+            cached.profile_id,
+            cached.input_sha256,
+            cached.dimension,
+            cached.dtype,
+            cached.normalization,
+        )
+        if actual != expected:
+            raise RuntimeError("v5 embedding cache key is bound to a different profile or input")
+        _validate_embedding_cache_v5_blob(cached.embedding, dimension=cached.dimension)
+        return cached
+
+    def put_embedding_v5(
+        self,
+        *,
+        cache_key: str,
+        profile_id: str,
+        input_sha256: str,
+        dimension: int,
+        values: Sequence[float],
+        dtype: str = "float32",
+        normalization: str = "l2",
+    ) -> EmbeddingCacheV5Row:
+        """Normalize and store a profile-specific v5 vector without touching v4 state."""
+
+        if not _SHA256.fullmatch(cache_key) or not _SHA256.fullmatch(input_sha256):
+            raise ValueError("v5 embedding cache identities must be lowercase sha256 values")
+        _required_text(profile_id, field="profile_id", maximum=512)
+        if dtype != "float32" or normalization != "l2":
+            raise ValueError("v5 embedding cache supports only float32 L2 vectors")
+        embedding = _encode_embedding_cache_v5(values, dimension=dimension)
+        with self.transaction() as connection:
+            connection.execute(
+                """INSERT INTO embedding_cache_v5
+                   (cache_key,profile_id,input_sha256,dimension,dtype,normalization,
+                    embedding,created_at)
+                   VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(cache_key) DO NOTHING""",
+                (
+                    cache_key,
+                    profile_id,
+                    input_sha256,
+                    dimension,
+                    dtype,
+                    normalization,
+                    embedding,
+                    _now().isoformat(),
+                ),
+            )
+        cached = self.get_embedding_v5(
+            cache_key,
+            profile_id=profile_id,
+            input_sha256=input_sha256,
+            dimension=dimension,
+            dtype=dtype,
+            normalization=normalization,
+        )
+        if cached is None:  # pragma: no cover - SQLite acknowledged the row.
+            raise RuntimeError("v5 embedding cache write did not persist")
+        if cached.embedding != embedding:
+            raise RuntimeError("v5 embedding cache key collision contains different vector bytes")
+        return cached
 
     def note_unreferenced(self, remote_path: str, *, observed_at: datetime | None = None) -> datetime:
         now = (observed_at or _now()).astimezone(UTC)

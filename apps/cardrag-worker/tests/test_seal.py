@@ -71,7 +71,15 @@ class NoWriteWebDAV:
     async def get_bytes(self, path: object, *, max_bytes: int | None = None) -> bytes | None:
         return b"stable" if self.current else None
 
-    async def put_cas_file(self, path: Path, *, media_type: str) -> tuple[str, str]:
+    async def put_cas_file(
+        self,
+        path: Path,
+        *,
+        media_type: str,
+        expected_sha256: str | None = None,
+        expected_size_bytes: int | None = None,
+    ) -> tuple[str, str]:
+        del path, media_type, expected_sha256, expected_size_bytes
         self.put_calls += 1
         raise AssertionError("invalid seal must not write")
 

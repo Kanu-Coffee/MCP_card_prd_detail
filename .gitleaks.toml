@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+# These exact public fixture/evidence identities trigger the generic-api-key
+# heuristic because their JSON field names contain "key" or "tokenizer".
+# Keep the allowlist value-specific so a different value at the same field is
+# still scanned normally.
+[[allowlists]]
+description = "Public blind-rater fixture and pinned Qwen tokenizer identities"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  '''rater_key["']?\s*:\s*["']anonymous-rater-01["']''',
+  '''tokenizer_revision["']?\s*:\s*["']1d8ad4ca9b3dd8059ad90a75d4983776a23d44af["']''',
+  '''tokenizer_sha256["']?\s*:\s*["']83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d["']''',
+]

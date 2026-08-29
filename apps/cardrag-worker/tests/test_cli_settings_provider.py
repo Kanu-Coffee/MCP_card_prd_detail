@@ -330,6 +330,10 @@ def test_gc_runner_close_failure_does_not_replace_partial_count(
         state_dir = tmp_path
         state_database = tmp_path / "state.sqlite3"
         lock_file = tmp_path / "worker.lock"
+        channel = "stable"
+        collect_remote_garbage = True
+        stable_publication_approved = True
+        remote_gc_approved = True
 
     class Client:
         pointer_path = STABLE_POINTER_PATH
@@ -341,7 +345,7 @@ def test_gc_runner_close_failure_does_not_replace_partial_count(
         raise GCPartialFailure(deleted_count=3) from None
 
     monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
-    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda: Client())
+    monkeypatch.setattr(cli_module.WebDAVClient, "from_env", lambda **_kwargs: Client())
     monkeypatch.setattr(cli_module, "collect_garbage", partial)
 
     with pytest.raises(GCPartialFailure) as captured:
@@ -359,6 +363,7 @@ def test_gc_runner_close_failure_does_not_replace_partial_count(
 
 
 def test_pipeline_result_payload_exposes_pdf_cache_activity() -> None:
+    v5_metrics = {"schema_version": "cardrag.worker-v5-metrics.v2"}
     payload = cli_module._pipeline_result_payload(
         PipelineResult(
             run_id="run-cache-metrics",
@@ -373,6 +378,7 @@ def test_pipeline_result_payload_exposes_pdf_cache_activity() -> None:
             pdf_downloads=2,
             pdf_revisions=1,
             ocr_cache_publication_deferred=2,
+            v5_metrics=v5_metrics,
         )
     )
 
@@ -381,6 +387,7 @@ def test_pipeline_result_payload_exposes_pdf_cache_activity() -> None:
     assert payload["pdf_downloads"] == 2
     assert payload["pdf_revisions"] == 1
     assert payload["ocr_cache_publication_deferred"] == 2
+    assert payload["v5_metrics"] == v5_metrics
 
 
 def test_cli_ocr_failure_aggregate_is_safe_bounded_and_exits_one(
@@ -641,11 +648,35 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
         WorkerSettings.from_env()
 
 
+def test_embedding_response_caps_are_bounded_canonical_integers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES", raising=False)
+    monkeypatch.delenv("CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES", raising=False)
+    settings = WorkerSettings.from_env()
+    assert settings.embedding_max_response_bytes == 32 * 1024**2
+    assert settings.embedding_metadata_max_response_bytes == 2 * 1024**2
+
+    for name, value in (
+        ("CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES", "true"),
+        ("CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES", "-1"),
+        ("CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES", str(1 << 80)),
+        ("CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES", "0"),
+    ):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            WorkerSettings.from_env()
+        monkeypatch.delenv(name)
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_candidate_channel_and_two_generation_retention_are_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
         "CARDRAG_CHANNEL",
+        "CARDRAG_STABLE_PUBLICATION_APPROVED",
+        "CARDRAG_REMOTE_GC_APPROVED",
         "CARDRAG_RETAIN_GENERATIONS",
         "CARDRAG_RETAIN_INCOMPLETE_RUNS",
         "CARDRAG_COLLECT_REMOTE_GARBAGE",
@@ -653,9 +684,11 @@ def test_candidate_channel_and_two_generation_retention_are_validated(
         monkeypatch.delenv(name, raising=False)
     stable = WorkerSettings.from_env()
     assert stable.channel == "stable"
+    assert stable.stable_publication_approved is False
+    assert stable.remote_gc_approved is False
     assert stable.retain_generations == 2
     assert stable.retained_incomplete_runs == 2
-    assert stable.collect_remote_garbage is True
+    assert stable.collect_remote_garbage is False
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.9")
     monkeypatch.setenv("CARDRAG_COLLECT_REMOTE_GARBAGE", "false")
@@ -669,6 +702,70 @@ def test_candidate_channel_and_two_generation_retention_are_validated(
     monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
     monkeypatch.setenv("CARDRAG_RETAIN_GENERATIONS", "1")
     with pytest.raises(ValueError, match="CARDRAG_RETAIN_GENERATIONS"):
+        WorkerSettings.from_env()
+
+
+def test_remote_gc_requires_stable_channel_and_two_independent_approvals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
+    monkeypatch.setenv("CARDRAG_COLLECT_REMOTE_GARBAGE", "true")
+    monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
+    monkeypatch.delenv("CARDRAG_REMOTE_GC_APPROVED", raising=False)
+
+    with pytest.raises(ValueError, match="STABLE_PUBLICATION_APPROVED=true"):
+        WorkerSettings.from_env()
+
+    monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "true")
+    with pytest.raises(ValueError, match="REMOTE_GC_APPROVED=true"):
+        WorkerSettings.from_env()
+
+    monkeypatch.setenv("CARDRAG_REMOTE_GC_APPROVED", "true")
+    approved = WorkerSettings.from_env()
+    assert approved.collect_remote_garbage is True
+    assert approved.stable_publication_approved is True
+    assert approved.remote_gc_approved is True
+    cli_module._guard_remote_gc(approved, apply=True)
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    with pytest.raises(ValueError, match="requires stable channel"):
+        WorkerSettings.from_env()
+
+
+def test_remote_gc_apply_guard_precedes_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
+    monkeypatch.setenv("CARDRAG_COLLECT_REMOTE_GARBAGE", "false")
+    monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
+    monkeypatch.delenv("CARDRAG_REMOTE_GC_APPROVED", raising=False)
+    settings = WorkerSettings.from_env()
+
+    cli_module._guard_remote_gc(settings, apply=False)
+    with pytest.raises(ValueError, match="separate remote-GC approval"):
+        cli_module._guard_remote_gc(settings, apply=True)
+
+
+def test_v110_publication_channel_requires_explicit_stable_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
+    cli_module._guard_v110_publication_channel(WorkerSettings.from_env())
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
+    with pytest.raises(ValueError, match="explicit.*APPROVED=true"):
+        cli_module._guard_v110_publication_channel(WorkerSettings.from_env())
+
+    monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "true")
+    approved = WorkerSettings.from_env()
+    assert approved.stable_publication_approved is True
+    cli_module._guard_v110_publication_channel(approved)
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "development")
+    with pytest.raises(ValueError, match="candidate-v1.0.10 or stable"):
+        cli_module._guard_v110_publication_channel(WorkerSettings.from_env())
+
+    monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "yes")
+    with pytest.raises(ValueError, match="CARDRAG_STABLE_PUBLICATION_APPROVED"):
         WorkerSettings.from_env()
 
 

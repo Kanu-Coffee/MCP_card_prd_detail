@@ -2,13 +2,13 @@ services:
   worker:
     volumes:
       - type: volume
-        source: v108-worker-state
-        target: /mnt/cardrag-v108-state
+        source: v109-worker-state
+        target: /mnt/cardrag-v109-state
         read_only: true
         volume:
           nocopy: true
 
 volumes:
-  v108-worker-state:
+  v109-worker-state:
     external: true
-    name: ${CARDRAG_V108_WORKER_STATE_VOLUME:-cardrag-worker_worker-state}
+    name: ${CARDRAG_V109_WORKER_STATE_VOLUME:-cardrag-worker-v109-state}

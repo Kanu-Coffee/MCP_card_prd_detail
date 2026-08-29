@@ -106,11 +106,22 @@ class FakeEmbedder(OpenRouterEmbedder):
         self.vector = vector if vector is not None else unit_vector(0)
         self.fail = fail
         self.calls: list[tuple[str, str, str]] = []
+        self.profile_calls: list[tuple[int, str, str | None]] = []
 
-    async def embed(self, query: str, *, provider: str, model: str) -> np.ndarray:
+    async def embed(
+        self,
+        query: str,
+        *,
+        provider: str,
+        model: str,
+        dimension: int = 1536,
+        query_policy: str = "cardrag.embedding-input.v1",
+        provider_id: str | None = None,
+    ) -> np.ndarray:
         from cardrag_mcp.embeddings import EmbeddingUnavailable
 
         self.calls.append((query, provider, model))
+        self.profile_calls.append((dimension, query_policy, provider_id))
         if self.fail:
             raise EmbeddingUnavailable("injected failure")
         return self.vector.copy()
@@ -349,6 +360,8 @@ def install_generation(
         directory,
         store.objects,
         maximum_vector_bytes=store.maximum_vector_bytes,
+        maximum_vector_sidecar_bytes=store.maximum_vector_sidecar_bytes,
+        maximum_resident_vector_bytes=store.maximum_resident_vector_bytes,
         expected_generation_id=generation_id,
     )
     store.verify_handle_pdfs(handle)

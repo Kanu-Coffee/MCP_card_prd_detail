@@ -11,19 +11,30 @@ import pytest
 from pydantic import SecretStr
 
 from cardrag_core import (
+    EMBEDDING_VIEW_TYPES,
     STABLE_POINTER_PATH,
     ArtifactContractError,
     ArtifactRef,
     CASPublisher,
     EmbeddingContract,
+    EmbeddingProfile,
+    EmbeddingVectorSidecar,
+    EmbeddingViewCount,
     GenerationCounts,
     GenerationDocument,
     GenerationManifest,
     GenerationPointer,
     GenerationReady,
     ImmutablePublisher,
+    IssuerOCRCounts,
+    IssuerParserProfile,
     MCPArtifactReader,
     StablePointerPublisher,
+    StructureContract,
+    StructureMajorClassCounts,
+    StructureNodeCounts,
+    StructureRevisionCounts,
+    StructureSourceCoverage,
     WebDAVClient,
     WebDAVHTTPError,
     WebDAVIntegrityError,
@@ -31,6 +42,7 @@ from cardrag_core import (
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
+    generation_vectors_path,
     object_path,
     sha256_bytes,
 )
@@ -204,6 +216,81 @@ def test_cas_publisher_is_create_once_and_readback_verified(
         publisher.publish_bytes(b"immutable", media_type="text/plain")
 
 
+def test_file_publication_rejects_symlinks_before_remote_mutation(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    tmp_path: Path,
+) -> None:
+    backend, client = webdav
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"sealed")
+    source = tmp_path / "source.bin"
+    source.symlink_to(target.name)
+    request_count = len(backend.requests)
+
+    with pytest.raises(WebDAVIntegrityError, match="missing or unsafe"):
+        CASPublisher(client).publish_file(source)
+
+    assert len(backend.requests) == request_count
+    assert not backend.files
+
+
+def test_file_publication_expected_identity_fails_before_remote_mutation(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    tmp_path: Path,
+) -> None:
+    backend, client = webdav
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"actual")
+    request_count = len(backend.requests)
+
+    with pytest.raises(WebDAVIntegrityError, match="sealed identity"):
+        CASPublisher(client).publish_file(
+            source,
+            expected_sha256=sha256_bytes(b"different"),
+            expected_size_bytes=len(b"actual"),
+        )
+
+    assert len(backend.requests) == request_count
+    assert not backend.files
+
+
+def test_file_publication_detects_path_swap_before_remote_commit(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, client = webdav
+    original = b"sealed-A"
+    replacement = b"unsealed-B"
+    source = tmp_path / "source.bin"
+    source.write_bytes(original)
+    replacement_path = tmp_path / "replacement.bin"
+    replacement_path.write_bytes(replacement)
+    destination = object_path(sha256_bytes(original)).as_posix()
+    original_put = client.put
+    swapped = False
+
+    def swap_before_upload(*args: object, **kwargs: object) -> object:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            replacement_path.replace(source)
+        return original_put(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(client, "put", swap_before_upload)
+
+    with pytest.raises(WebDAVIntegrityError, match="identity changed"):
+        CASPublisher(client).publish_file(
+            source,
+            expected_sha256=sha256_bytes(original),
+            expected_size_bytes=len(original),
+        )
+
+    assert source.read_bytes() == replacement
+    assert destination not in backend.files
+    assert not any(".incoming" in path for path in backend.files)
+
+
 def test_immutable_publisher_accepts_verified_409_move_collision(
     webdav: tuple[_MemoryWebDAV, WebDAVClient],
 ) -> None:
@@ -370,6 +457,148 @@ def _publish_current_generation(
     return manifest, pdf
 
 
+def _publish_current_v5_generation(
+    client: WebDAVClient,
+) -> tuple[GenerationManifest, bytes]:
+    generation_id = "gen-20260829-v5"
+    pdf = CASPublisher(client).publish_bytes(b"%PDF-v5", media_type="application/pdf")
+    ocr = CASPublisher(client).publish_bytes(
+        b"one",
+        media_type="text/markdown; charset=utf-8",
+    )
+    database = ImmutablePublisher(client).publish_bytes(
+        generation_database_path(generation_id),
+        b"SQLite format 3\x00v5",
+        media_type="application/vnd.sqlite3",
+    )
+    vector_bytes = b"\x00" * (4096 * 4)
+    vector_artifact = ImmutablePublisher(client).publish_bytes(
+        generation_vectors_path(generation_id),
+        vector_bytes,
+        media_type="application/octet-stream",
+    )
+    profile = EmbeddingProfile.qwen3(provider_id="deepinfra", maximum_tokens=8192)
+    coverage_hash = sha256_bytes(b"one")
+    manifest = GenerationManifest(
+        schema_version="cardrag.generation.v5",
+        generation_id=generation_id,
+        created_at=datetime(2026, 8, 29, tzinfo=UTC),
+        serving_schema="cardrag.serving-db.v5",
+        serving_database=database,
+        corpus_sha256=sha256_bytes(b"v5-corpus"),
+        contract_sha256=sha256_bytes(b"v5-contract"),
+        embedding_contract=EmbeddingContract(
+            provider="openrouter",
+            model="qwen/qwen3-embedding-8b",
+            dimension=4096,
+            count=1,
+        ),
+        issuer_codes=("lotte",),
+        counts=GenerationCounts(documents=1, pdf_objects=1, ocr_objects=1, chunks=1),
+        documents=(
+            GenerationDocument(
+                document_id="doc_lotte_v5",
+                issuer="lotte",
+                pdf=pdf,
+                ocr=ocr,
+                page_count=1,
+                availability="available",
+            ),
+        ),
+        issuer_ocr_counts=(IssuerOCRCounts(issuer="lotte", acquired=1, succeeded=1, failed=0),),
+        structure_contract=StructureContract(
+            schema_version="cardrag.structure.v2",
+            parser_profiles=(
+                IssuerParserProfile(
+                    issuer="lotte",
+                    profile_id="cardrag.parser.lotte.v1",
+                    profile_sha256=sha256_bytes(b"lotte-parser"),
+                ),
+            ),
+            node_counts=StructureNodeCounts(
+                total=1,
+                root=1,
+                major_section=0,
+                item=0,
+                paragraph=0,
+                list_item=0,
+                table=0,
+                table_row=0,
+                footnote=0,
+                boilerplate=0,
+                unclassified=0,
+            ),
+            major_class_counts=StructureMajorClassCounts(
+                total=0,
+                benefit=0,
+                notice=0,
+                mixed=0,
+                unknown=0,
+            ),
+            source_coverage=StructureSourceCoverage(
+                source_non_whitespace_characters=3,
+                covered_non_whitespace_characters=3,
+                source_non_whitespace_sha256=coverage_hash,
+                covered_non_whitespace_sha256=coverage_hash,
+            ),
+            revision_counts=StructureRevisionCounts(
+                total=1,
+                current=1,
+                superseded=0,
+                ambiguous=0,
+            ),
+            cross_contract_parent_count=0,
+            cross_contract_link_count=0,
+            lineages_with_multiple_current_revisions=0,
+        ),
+        embedding_profiles=(profile,),
+        primary_embedding_profile_id=profile.profile_id,
+        embedding_view_counts=tuple(
+            EmbeddingViewCount(view_type=view_type, count=int(index == 0))
+            for index, view_type in enumerate(EMBEDDING_VIEW_TYPES)
+        ),
+        vector_sidecar=EmbeddingVectorSidecar(
+            artifact=vector_artifact,
+            profile_id=profile.profile_id,
+            row_count=1,
+            dimension=4096,
+            dtype="float32",
+            byte_order="little-endian",
+            layout="row-major",
+            normalization="l2",
+        ),
+        parser_policy_sha256=sha256_bytes(b"parser-policy"),
+        embedding_policy_sha256=sha256_bytes(b"embedding-policy"),
+        retrieval_policy_sha256=sha256_bytes(b"retrieval-policy"),
+    )
+    ImmutablePublisher(client).publish_bytes(
+        generation_manifest_path(generation_id),
+        manifest.canonical_bytes(),
+        media_type="application/json",
+    )
+    ready = GenerationReady(
+        generation_id=generation_id,
+        manifest_sha256=manifest.manifest_sha256,
+        serving_database_sha256=database.sha256,
+        serving_database_size_bytes=database.size_bytes,
+        vector_sidecar_sha256=vector_artifact.sha256,
+        vector_sidecar_size_bytes=vector_artifact.size_bytes,
+    )
+    ImmutablePublisher(client).publish_bytes(
+        generation_ready_path(generation_id),
+        ready.canonical_bytes(),
+        media_type="application/json",
+    )
+    pointer = GenerationPointer(
+        generation_id=generation_id,
+        manifest_sha256=manifest.manifest_sha256,
+        ready_sha256=sha256_bytes(ready.canonical_bytes()),
+    )
+    client.ensure_collection(STABLE_POINTER_PATH.parent)
+    client.put(STABLE_POINTER_PATH, pointer.canonical_bytes(), content_type="application/json")
+    return manifest, vector_bytes
+
+
 @pytest.mark.parametrize("schema_pair", SCHEMA_PAIRS)
 def test_mcp_facade_exposes_verified_supported_schema_reads_only(
     webdav: tuple[_MemoryWebDAV, WebDAVClient],
@@ -401,6 +630,50 @@ def test_mcp_facade_rejects_pointer_ready_tampering(
     forged = pointer.model_copy(update={"ready_sha256": "0" * 64})
     backend.files[STABLE_POINTER_PATH.as_posix()] = forged.canonical_bytes()
     with pytest.raises(ArtifactContractError, match="does not bind"):
+        MCPArtifactReader(client.read_only()).read_current_generation()
+
+
+def test_mcp_facade_downloads_only_ready_bound_v5_vector_sidecar(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    tmp_path: Path,
+) -> None:
+    backend, client = webdav
+    manifest, vector_bytes = _publish_current_v5_generation(client)
+    reader = MCPArtifactReader(client.read_only())
+    current = reader.read_current_generation()
+    destination = (tmp_path / "vectors.f32").resolve()
+
+    verified = reader.download_vector_sidecar(destination, current=current)
+
+    assert verified.sha256 == sha256_bytes(vector_bytes)
+    assert destination.read_bytes() == vector_bytes
+    assert manifest.vector_sidecar is not None
+    vector_path = manifest.vector_sidecar.artifact.path
+    backend.files[vector_path] = b"x" * len(vector_bytes)
+    last_good = (tmp_path / "last-good.f32").resolve()
+    last_good.write_bytes(b"last-good")
+    with pytest.raises(WebDAVIntegrityError, match="SHA-256"):
+        reader.download_vector_sidecar(last_good, current=current)
+    assert last_good.read_bytes() == b"last-good"
+
+
+def test_mcp_facade_rejects_v5_ready_sidecar_cross_pair(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+) -> None:
+    backend, client = webdav
+    manifest, _ = _publish_current_v5_generation(client)
+    ready_path = generation_ready_path(manifest.generation_id).as_posix()
+    ready = GenerationReady.model_validate_json(backend.files[ready_path])
+    forged = ready.model_copy(update={"vector_sidecar_sha256": "0" * 64})
+    backend.files[ready_path] = forged.canonical_bytes()
+    pointer = GenerationPointer(
+        generation_id=manifest.generation_id,
+        manifest_sha256=manifest.manifest_sha256,
+        ready_sha256=sha256_bytes(forged.canonical_bytes()),
+    )
+    backend.files[STABLE_POINTER_PATH.as_posix()] = pointer.canonical_bytes()
+
+    with pytest.raises(ArtifactContractError, match="does not bind the vector sidecar"):
         MCPArtifactReader(client.read_only()).read_current_generation()
 
 

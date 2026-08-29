@@ -18,6 +18,7 @@ from cardrag_mcp.models import (
 )
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.schema import ServingDatabaseError
+from cardrag_mcp.schema_v5 import ServingDatabaseV5Error
 from cardrag_mcp.store import GenerationStore, load_generation_handle
 
 
@@ -139,10 +140,7 @@ def test_loader_rejects_missing_contract_hash(tmp_path: Path, schema_id: str) ->
 
 @pytest.mark.parametrize(
     ("schema_id", "protected_magic", "expected_error"),
-    (
-        ("cardrag.serving-db.v2", "FASOO_DRMONE", "invalid bounded value"),
-        ("cardrag.serving-db.v5", "SCDSA002", "schema version is incompatible"),
-    ),
+    (("cardrag.serving-db.v2", "FASOO_DRMONE", "invalid bounded value"),),
 )
 def test_loader_rejects_cross_version_magic_and_unknown_schema(
     tmp_path: Path,
@@ -159,6 +157,22 @@ def test_loader_rejects_cross_version_magic_and_unknown_schema(
     )
 
     with pytest.raises(ServingDatabaseError, match=expected_error):
+        load_generation_handle(
+            directory,
+            tmp_path / "objects",
+            maximum_vector_bytes=1024 * 1024,
+        )
+
+
+def test_loader_dispatches_claimed_v5_to_the_strict_v5_validator(tmp_path: Path) -> None:
+    directory = tmp_path / "gen-false-v5"
+    create_database(
+        directory / "index.sqlite3",
+        directory.name,
+        schema_id="cardrag.serving-db.v5",
+    )
+
+    with pytest.raises(ServingDatabaseV5Error, match="unexpected product_lineages schema"):
         load_generation_handle(
             directory,
             tmp_path / "objects",

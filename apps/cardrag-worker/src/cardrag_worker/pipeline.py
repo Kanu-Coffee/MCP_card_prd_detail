@@ -18,22 +18,32 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar, cast
 
 import httpx
 from cardrag_core import (
     DOCUMENT_EMBEDDING_PREFIX,
     EMBEDDING_DIMENSION,
     EMBEDDING_POLICY_VERSION,
+    EMBEDDING_VIEW_TYPES,
     QUERY_EMBEDDING_PREFIX,
+    QWEN3_DOCUMENT_POLICY,
     ArtifactRef,
     EmbeddingContract,
+    EmbeddingProfile,
+    EmbeddingVectorSidecar,
+    EmbeddingViewCount,
     GenerationCounts,
     GenerationDocument,
     GenerationManifest,
     GenerationOCRFailure,
     IssuerOCRCounts,
     OCRCacheKind,
+    StructureContract,
+    StructureMajorClassCounts,
+    StructureNodeCounts,
+    StructureRevisionCounts,
+    StructureSourceCoverage,
     WebDAVError,
     WebDAVHTTPError,
     WebDAVIntegrityError,
@@ -41,12 +51,17 @@ from cardrag_core import (
     canonical_sha256,
     generation_database_path,
     generation_manifest_path,
+    generation_vectors_path,
     object_path,
     sha256_bytes,
     sha256_file,
 )
+from cardrag_core import (
+    IssuerParserProfile as ManifestIssuerParserProfile,
+)
 
 from .async_utils import to_thread_fenced
+from .cache_seed_v109 import load_v109_seed_pins
 from .contracts import (
     GENERATION_SCHEMA_ID,
     SERVING_SCHEMA_ID,
@@ -67,7 +82,28 @@ from .downloader import (
     ProtectedDocumentError,
     SecurePDFDownloader,
 )
+from .embedding_v5 import (
+    OpenRouterQwenEmbeddingProviderV5,
+    QwenEmbeddingProfileV5,
+    embedding_cache_key,
+    format_embedding_input,
+)
 from .exporter import ServingDatabaseExporter, encode_embedding
+from .exporter_v5 import (
+    ContractRevisionInput,
+    DocumentPageInput,
+    EmbeddingProfileInput,
+    EmbeddingViewInput,
+    IssuerInput,
+    NodeLinkInput,
+    NodeSpanInput,
+    OCRFailedProductInput,
+    ProductLineageInput,
+    ServingDatabaseExporterV5,
+    StructureNodeInput,
+    UnsupportedProductInput,
+    ViewSourceSpanInput,
+)
 from .ocr import (
     OCRCachePublicationError,
     OCRResolver,
@@ -84,11 +120,47 @@ from .providers import (
     ProviderSystemicError,
 )
 from .rate_limit import IssuerRateLimiter, RateLimitedClient
+from .revision_history_v5 import (
+    REVISION_HISTORY_POLICY_VERSION,
+    UNRESOLVED_REVISION_LEDGER_SCHEMA,
+    TemporalStatusV5,
+    UnresolvedRevisionIdentityV5,
+    UnresolvedRevisionLedgerEntryV5,
+    UnresolvedRevisionReasonV5,
+    canonical_unresolved_revision_ledger_v5,
+    plan_revision_history_v5,
+    unresolved_revision_ledger_sha256_v5,
+)
 from .state import WorkerState, retry_delay, worker_lock
+from .structure import (
+    DerivedView,
+    StructureArtifact,
+    build_derived_views,
+    build_unclassified_fallback_artifact,
+    contextual_item_policy_payload,
+    issuer_parser_profile,
+    parse_structure_artifact,
+    unclassified_fallback_policy_payload,
+    validate_structure_artifact,
+)
+from .tokenizer_v5 import QWEN_TOKENIZER_REVISION, QWEN_TOKENIZER_SHA256
 from .webdav import PublishedBundle, WebDAVBundlePublisher, WebDAVClient
 
 T = TypeVar("T")
 CHUNK_CONTRACT = "cardrag.page-window.v1"
+GENERATION_SCHEMA_ID_V5 = "cardrag.generation.v5"
+SERVING_SCHEMA_ID_V5 = "cardrag.serving-db.v5"
+V5_VIEW_MAXIMUM_CHARACTERS = 131_072
+STRUCTURE_FALLBACK_LEDGER_SCHEMA = "cardrag.structure-fallback-ledger.v1"
+STRUCTURE_FAILED_LEDGER_SCHEMA = "cardrag.structure-failed-ledger.v1"
+V5_RETRIEVAL_POLICY = {
+    "aggregation": "max-child.v1",
+    "candidate_prefilter": "none",
+    "dense_scan": "exact-all-active-rows.v1",
+    "lexical_fusion": "forbidden",
+    "schema_version": "cardrag.retrieval-policy.v1",
+    "temporal_scope": "current",
+}
 LOGGER = logging.getLogger(__name__)
 LOCAL_RUN_CLEANUP_ERROR = (
     "local_run_cleanup_failed: Local diagnostic run cleanup failed after bounded retention."
@@ -183,6 +255,132 @@ class OCRDocumentFailuresError(RuntimeError):
         if not self.failures:
             raise ValueError("OCR document failure aggregate cannot be empty")
         super().__init__(f"{len(self.failures)} OCR document(s) failed; report={self.report}")
+
+
+StructureFailureStage = Literal["parser", "derived_views"]
+StructureFallbackReasonCode = Literal["parser_failed", "derived_view_failed"]
+
+
+@dataclass(frozen=True, slots=True)
+class StructureFailureRecord:
+    """One canonical, secret-free disposition after even lossless fallback failed."""
+
+    issuer: str
+    product_code: str
+    document_id: str
+    source_id: str
+    pdf_sha256: str
+    ocr_sha256: str
+    source_pages_sha256: str
+    page_count: int
+    failure_stage: StructureFailureStage
+
+    def __post_init__(self) -> None:
+        for field_name, maximum in (("issuer", 64), ("product_code", 256)):
+            value = getattr(self, field_name)
+            if (
+                not value
+                or value != value.strip()
+                or len(value) > maximum
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
+                raise ValueError(f"structure failure {field_name} is invalid")
+        if not re.fullmatch(r"doc_[0-9a-f]{64}", self.document_id):
+            raise ValueError("structure failure document_id is invalid")
+        if not re.fullmatch(r"source_[0-9a-f]{64}", self.source_id):
+            raise ValueError("structure failure source_id is invalid")
+        for field_name in ("pdf_sha256", "ocr_sha256", "source_pages_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", getattr(self, field_name)):
+                raise ValueError(f"structure failure {field_name} is invalid")
+        if self.page_count < 1:
+            raise ValueError("structure failure page_count must be positive")
+        if self.failure_stage not in {"parser", "derived_views"}:
+            raise ValueError("structure failure stage is invalid")
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return {
+            "disposition": "structure_failed",
+            "document_id": self.document_id,
+            "failure_code": "structure_fallback_failed",
+            "failure_stage": self.failure_stage,
+            "issuer": self.issuer,
+            "ocr_sha256": self.ocr_sha256,
+            "page_count": self.page_count,
+            "pdf_sha256": self.pdf_sha256,
+            "product_code": self.product_code,
+            "source_id": self.source_id,
+            "source_pages_sha256": self.source_pages_sha256,
+        }
+
+
+def _canonical_structure_failure_ledger(
+    failures: Sequence[StructureFailureRecord],
+) -> dict[str, Any]:
+    ordered = sorted(
+        failures,
+        key=lambda item: (item.issuer, item.product_code, item.document_id),
+    )
+    return {
+        "documents": [failure.payload for failure in ordered],
+        "failure_code": "structure_failed",
+        "schema_version": STRUCTURE_FAILED_LEDGER_SCHEMA,
+    }
+
+
+def _structure_failure_ledger_sha256(failures: Sequence[StructureFailureRecord]) -> str:
+    return canonical_sha256(_canonical_structure_failure_ledger(failures))
+
+
+def _canonical_structure_fallback_ledger(
+    documents: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    ordered = sorted(
+        (dict(document) for document in documents),
+        key=lambda item: str(item.get("document_id", "")),
+    )
+    return {
+        "documents": ordered,
+        "policy_version": str(unclassified_fallback_policy_payload()["schema_version"]),
+        "schema_version": STRUCTURE_FALLBACK_LEDGER_SCHEMA,
+    }
+
+
+def _structure_fallback_ledger_sha256(documents: Sequence[Mapping[str, Any]]) -> str:
+    return canonical_sha256(_canonical_structure_fallback_ledger(documents))
+
+
+class StructureDocumentFailuresError(RuntimeError):
+    """A final publication gate for documents with no searchable fallback."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        report_path: Path,
+        failures: Sequence[StructureFailureRecord],
+    ) -> None:
+        self.run_id = run_id
+        self.report_path = report_path
+        self.report = f"runs/{run_id}/reports/structure-failures.json"
+        self.failures = tuple(failures)
+        if not self.failures:
+            raise ValueError("structure document failure aggregate cannot be empty")
+        self.ledger_sha256 = _structure_failure_ledger_sha256(self.failures)
+        self.stored_error = (
+            "structure_failed: "
+            f"count={len(self.failures)}; ledger_sha256={self.ledger_sha256}; "
+            f"report={self.report}"
+        )
+        super().__init__(self.stored_error)
+
+
+class _StructureFallbackFailed(RuntimeError):
+    """Internal bounded signal; the original parser/provider error is discarded."""
+
+    def __init__(self, failure_stage: StructureFailureStage) -> None:
+        self.failure_stage = failure_stage
+        super().__init__("structure_fallback_failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,10 +605,12 @@ class PipelineResult:
     pdf_cache_pruned_bytes: int = 0
     pdf_cache_prune_error: str | None = None
     ocr_cache_publication_deferred: int = 0
+    v5_metrics: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _ProcessedDocument:
+    source: SourceRecord
     record: DocumentRecord
     pdf_path: Path
     ocr_path: Path
@@ -419,26 +619,81 @@ class _ProcessedDocument:
     ocr_cache_kind: OCRCacheKind | None
     ocr_reuse_key: str | None
     chunks: tuple[dict[str, Any], ...]
+    temporal_status: TemporalStatusV5 = "current"
+    supersedes_document_id: str | None = None
+    is_historical: bool = False
+    structure_artifact: StructureArtifact | None = None
+    embedding_views: tuple[DerivedView, ...] = ()
+    structure_fallback_reason_code: StructureFallbackReasonCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _AcquiredDocument:
     source: SourceRecord
     pdf: DownloadedPDF
+    temporal_status: TemporalStatusV5 = "current"
+    supersedes_document_id: str | None = None
+    is_historical: bool = False
+
+
+def _v5_corpus_identity_payload(
+    *,
+    acquired: Sequence[_AcquiredDocument],
+    unsupported_documents: Sequence[Mapping[str, Any]],
+    unresolved_revisions: Sequence[UnresolvedRevisionLedgerEntryV5],
+    unresolved_revision_sha256: str,
+) -> dict[str, Any]:
+    """Bind every materialized and unresolved revision truth before no-change."""
+
+    if unresolved_revision_sha256 != unresolved_revision_ledger_sha256_v5(unresolved_revisions):
+        raise RuntimeError("v5 corpus unresolved revision ledger hash mismatch")
+    return {
+        "schema_version": "cardrag.current-corpus.v3",
+        "documents": [
+            {
+                "source": item.source.discovery_payload,
+                "pdf_sha256": item.pdf.sha256,
+                "pdf_size_bytes": item.pdf.size_bytes,
+                "page_count": item.pdf.page_count,
+            }
+            for item in acquired
+        ],
+        "unsupported_documents": list(unsupported_documents),
+        "revision_history": {
+            "policy_version": REVISION_HISTORY_POLICY_VERSION,
+            "materialized_revisions": [
+                {
+                    "document_id": item.source.document_id(item.pdf.sha256),
+                    "source_id": item.source.source_id,
+                    "pdf_sha256": item.pdf.sha256,
+                    "temporal_status": item.temporal_status,
+                    "supersedes_document_id": item.supersedes_document_id,
+                }
+                for item in acquired
+            ],
+            "unresolved_ledger_schema": UNRESOLVED_REVISION_LEDGER_SCHEMA,
+            "unresolved_revision_count": len(unresolved_revisions),
+            "unresolved_revision_sha256": unresolved_revision_sha256,
+            "unresolved_revisions": list(unresolved_revisions),
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
 class _OCRFailedDocument:
     record: OCRFailedProductRecord
     pdf_path: Path
+    is_historical: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class _ValidatedSeal:
     manifest: GenerationManifest
     database_path: Path
-    objects: tuple[tuple[Path, str, str], ...]
+    vector_path: Path | None
+    objects: tuple[tuple[Path, str, str, int], ...]
     ocr_cache_publication_deferred: int
+    v5_metrics: Mapping[str, Any] | None
 
 
 def _atomic_write(path: Path, body: bytes) -> None:
@@ -457,6 +712,267 @@ def _atomic_write(path: Path, body: bytes) -> None:
             os.close(descriptor)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _validated_v5_metrics(
+    raw: object,
+    *,
+    manifest: GenerationManifest,
+) -> dict[str, Any]:
+    """Validate additive Worker evidence against its immutable v5 manifest."""
+
+    if not isinstance(raw, Mapping):
+        raise RuntimeError("sealed v5 Worker metrics are not an object")
+    required_keys = {
+        "schema_version",
+        "parser_profile_document_counts",
+        "node_type_counts",
+        "major_class_counts",
+        "unknown_unclassified_count",
+        "unknown_unclassified_denominator",
+        "unknown_unclassified_ratio",
+        "source_non_whitespace_count",
+        "covered_non_whitespace_count",
+        "source_coverage_percent",
+        "cross_page_continuation_count",
+        "table_node_count",
+        "footnote_node_count",
+        "contract_revision_count",
+        "current_revision_count",
+        "superseded_revision_count",
+        "ambiguous_revision_count",
+        "revision_history_policy_version",
+        "historical_revision_unresolved_count",
+        "historical_revision_unresolved_identities",
+        "historical_revision_unresolved_sha256",
+        "historical_pdf_cache_hits",
+        "structure_fallback_policy_version",
+        "structure_fallback_document_count",
+        "structure_fallback_documents",
+        "structure_fallback_documents_sha256",
+        "structure_failed_document_count",
+        "structure_failed_documents_sha256",
+        "embedding_view_counts",
+        "embedding_provider_call_count",
+        "embedding_provider",
+        "embedding_model",
+        "embedding_dimension",
+        "embedding_profile_id",
+        "vector_sidecar_size_bytes",
+        "ocr_cache_reused_count",
+        "ocr_provider_called_count",
+    }
+    if set(raw) != required_keys or raw.get("schema_version") != "cardrag.worker-v5-metrics.v2":
+        raise RuntimeError("sealed v5 Worker metrics have an unknown contract")
+
+    def count(name: str) -> int:
+        value = raw.get(name)
+        if type(value) is not int or value < 0:
+            raise RuntimeError(f"sealed v5 Worker metric {name} is invalid")
+        return value
+
+    def count_map(name: str) -> dict[str, int]:
+        value = raw.get(name)
+        if not isinstance(value, Mapping) or not value:
+            raise RuntimeError(f"sealed v5 Worker metric {name} is invalid")
+        parsed: dict[str, int] = {}
+        for key, raw_count in value.items():
+            if not isinstance(key, str) or not key or type(raw_count) is not int or raw_count < 0:
+                raise RuntimeError(f"sealed v5 Worker metric {name} is invalid")
+            parsed[key] = raw_count
+        return parsed
+
+    def finite_number(name: str) -> float:
+        value = raw.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError(f"sealed v5 Worker metric {name} is invalid")
+        converted = float(value)
+        if not math.isfinite(converted):
+            raise RuntimeError(f"sealed v5 Worker metric {name} is invalid")
+        return converted
+
+    structure = manifest.structure_contract
+    vector = manifest.vector_sidecar
+    if structure is None or vector is None or manifest.primary_embedding_profile_id is None:
+        raise RuntimeError("sealed v5 Worker metrics lost their manifest contract")
+    parser_counts = count_map("parser_profile_document_counts")
+    node_counts = count_map("node_type_counts")
+    major_counts = count_map("major_class_counts")
+    expected_node_counts = {
+        "BOILERPLATE": structure.node_counts.boilerplate,
+        "FOOTNOTE": structure.node_counts.footnote,
+        "ITEM": structure.node_counts.item,
+        "LIST_ITEM": structure.node_counts.list_item,
+        "MAJOR_SECTION": structure.node_counts.major_section,
+        "PARAGRAPH": structure.node_counts.paragraph,
+        "ROOT": structure.node_counts.root,
+        "TABLE": structure.node_counts.table,
+        "TABLE_ROW": structure.node_counts.table_row,
+        "UNCLASSIFIED": structure.node_counts.unclassified,
+    }
+    expected_major_counts = {
+        "BENEFIT": structure.major_class_counts.benefit,
+        "MIXED": structure.major_class_counts.mixed,
+        "NOTICE": structure.major_class_counts.notice,
+        "UNKNOWN": structure.major_class_counts.unknown,
+    }
+    if (
+        node_counts != expected_node_counts
+        or major_counts != expected_major_counts
+        or sum(parser_counts.values()) != structure.revision_counts.total
+        or count("contract_revision_count") != structure.revision_counts.total
+        or count("current_revision_count") != structure.revision_counts.current
+        or count("superseded_revision_count") != structure.revision_counts.superseded
+        or count("ambiguous_revision_count") != structure.revision_counts.ambiguous
+        or count("source_non_whitespace_count") != structure.source_coverage.source_non_whitespace_characters
+        or count("covered_non_whitespace_count")
+        != structure.source_coverage.covered_non_whitespace_characters
+        or count("table_node_count") != structure.node_counts.table
+        or count("footnote_node_count") != structure.node_counts.footnote
+    ):
+        raise RuntimeError("sealed v5 Worker metrics differ from the manifest")
+    coverage = finite_number("source_coverage_percent")
+    ratio = finite_number("unknown_unclassified_ratio")
+    if not math.isclose(coverage, 100.0, abs_tol=1e-12) or not 0.0 <= ratio <= 1.0:
+        raise RuntimeError("sealed v5 Worker metric ratios are invalid")
+    unknown_count = count("unknown_unclassified_count")
+    unknown_denominator = count("unknown_unclassified_denominator")
+    expected_unknown = node_counts["UNCLASSIFIED"] + major_counts["UNKNOWN"]
+    expected_denominator = sum(node_counts.values()) + node_counts["MAJOR_SECTION"]
+    expected_ratio = 0.0 if expected_denominator == 0 else expected_unknown / expected_denominator
+    if (
+        unknown_count != expected_unknown
+        or unknown_denominator != expected_denominator
+        or not math.isclose(ratio, expected_ratio, abs_tol=1e-15)
+    ):
+        raise RuntimeError("sealed v5 unknown/unclassified metrics are inconsistent")
+    raw_view_counts = raw.get("embedding_view_counts")
+    if not isinstance(raw_view_counts, Mapping) or set(raw_view_counts) != set(EMBEDDING_VIEW_TYPES):
+        raise RuntimeError("sealed v5 embedding view metrics are invalid")
+    for view_type, row in raw_view_counts.items():
+        if not isinstance(row, Mapping) or set(row) != {"downloads", "hits", "misses"}:
+            raise RuntimeError("sealed v5 embedding view metrics are invalid")
+        downloads = row.get("downloads")
+        hits = row.get("hits")
+        misses = row.get("misses")
+        if any(type(value) is not int or value < 0 for value in (downloads, hits, misses)):
+            raise RuntimeError("sealed v5 embedding view metrics are invalid")
+        assert isinstance(downloads, int) and isinstance(hits, int) and isinstance(misses, int)
+        if downloads > misses:
+            raise RuntimeError("sealed v5 embedding downloads exceed misses")
+        if view_type not in EMBEDDING_VIEW_TYPES:
+            raise RuntimeError("sealed v5 embedding view metric type is invalid")
+    if (
+        raw.get("embedding_provider") != manifest.embedding_contract.provider
+        or raw.get("embedding_model") != manifest.embedding_contract.model
+        or count("embedding_dimension") != manifest.embedding_contract.dimension
+        or raw.get("embedding_profile_id") != manifest.primary_embedding_profile_id
+        or count("vector_sidecar_size_bytes") != vector.artifact.size_bytes
+    ):
+        raise RuntimeError("sealed v5 embedding metrics differ from the manifest")
+    if raw.get("revision_history_policy_version") != REVISION_HISTORY_POLICY_VERSION:
+        raise RuntimeError("sealed v5 revision history policy is invalid")
+    raw_unresolved = raw.get("historical_revision_unresolved_identities")
+    if not isinstance(raw_unresolved, list):
+        raise RuntimeError("sealed v5 unresolved revision ledger is invalid")
+    parsed_unresolved: list[UnresolvedRevisionIdentityV5] = []
+    try:
+        for entry in raw_unresolved:
+            if not isinstance(entry, Mapping) or set(entry) != {
+                "source_id",
+                "pdf_sha256",
+                "reason_codes",
+            }:
+                raise ValueError
+            reason_codes = entry.get("reason_codes")
+            if not isinstance(reason_codes, list) or not reason_codes:
+                raise ValueError
+            for reason_code in reason_codes:
+                if not isinstance(reason_code, str):
+                    raise ValueError
+                parsed_unresolved.append(
+                    UnresolvedRevisionIdentityV5(
+                        source_id=str(entry.get("source_id")),
+                        pdf_sha256=str(entry.get("pdf_sha256")),
+                        reason_code=cast(UnresolvedRevisionReasonV5, reason_code),
+                    )
+                )
+    except (TypeError, ValueError):
+        raise RuntimeError("sealed v5 unresolved revision ledger is invalid") from None
+    canonical_unresolved = canonical_unresolved_revision_ledger_v5(parsed_unresolved)
+    if (
+        raw_unresolved != list(canonical_unresolved)
+        or count("historical_revision_unresolved_count") != len(canonical_unresolved)
+        or raw.get("historical_revision_unresolved_sha256")
+        != unresolved_revision_ledger_sha256_v5(canonical_unresolved)
+    ):
+        raise RuntimeError("sealed v5 unresolved revision ledger is inconsistent")
+    fallback_policy_version = str(unclassified_fallback_policy_payload()["schema_version"])
+    if raw.get("structure_fallback_policy_version") != fallback_policy_version:
+        raise RuntimeError("sealed v5 structure fallback policy is invalid")
+    raw_fallback_documents = raw.get("structure_fallback_documents")
+    if not isinstance(raw_fallback_documents, list):
+        raise RuntimeError("sealed v5 structure fallback ledger is invalid")
+    parsed_fallback_documents: list[dict[str, Any]] = []
+    for raw_document in raw_fallback_documents:
+        if not isinstance(raw_document, Mapping) or set(raw_document) != {
+            "contract_revision_id",
+            "document_id",
+            "reason_code",
+            "structure_artifact_sha256",
+        }:
+            raise RuntimeError("sealed v5 structure fallback ledger is invalid")
+        document_id = raw_document.get("document_id")
+        revision_id = raw_document.get("contract_revision_id")
+        reason_code = raw_document.get("reason_code")
+        artifact_sha256 = raw_document.get("structure_artifact_sha256")
+        if (
+            not isinstance(document_id, str)
+            or re.fullmatch(r"doc_[0-9a-f]{64}", document_id) is None
+            or not isinstance(revision_id, str)
+            or re.fullmatch(r"revision_[0-9a-f]{64}", revision_id) is None
+            or reason_code not in {"parser_failed", "derived_view_failed"}
+            or not isinstance(artifact_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None
+        ):
+            raise RuntimeError("sealed v5 structure fallback ledger is invalid")
+        parsed_fallback_documents.append(
+            {
+                "contract_revision_id": revision_id,
+                "document_id": document_id,
+                "reason_code": reason_code,
+                "structure_artifact_sha256": artifact_sha256,
+            }
+        )
+    canonical_fallback = _canonical_structure_fallback_ledger(parsed_fallback_documents)
+    canonical_fallback_documents = canonical_fallback["documents"]
+    fallback_document_ids = [row["document_id"] for row in parsed_fallback_documents]
+    available_document_ids = {
+        document.document_id for document in manifest.documents if document.availability == "available"
+    }
+    if (
+        raw_fallback_documents != canonical_fallback_documents
+        or len(fallback_document_ids) != len(set(fallback_document_ids))
+        or not set(fallback_document_ids) <= available_document_ids
+        or count("structure_fallback_document_count") != len(parsed_fallback_documents)
+        or raw.get("structure_fallback_documents_sha256") != canonical_sha256(canonical_fallback)
+    ):
+        raise RuntimeError("sealed v5 structure fallback ledger is inconsistent")
+    if count("structure_failed_document_count") != 0 or raw.get(
+        "structure_failed_documents_sha256"
+    ) != _structure_failure_ledger_sha256(()):
+        raise RuntimeError("sealed v5 generation contains a structure_failed disposition")
+    for name in (
+        "cross_page_continuation_count",
+        "historical_pdf_cache_hits",
+        "embedding_provider_call_count",
+        "ocr_cache_reused_count",
+        "ocr_provider_called_count",
+    ):
+        count(name)
+    # Round-trip to plain canonical JSON types so callers cannot retain a
+    # mutable or custom Mapping implementation supplied to validation.
+    return cast(dict[str, Any], json.loads(canonical_json_bytes(raw)))
 
 
 def _canonical_ocr_body(result: OCRResult) -> bytes:
@@ -849,6 +1365,39 @@ def _write_ocr_failure_report(
         raise RuntimeError("OCR failure report write failed") from None
 
 
+def _structure_source_pages_sha256(pages: Sequence[PageRecord]) -> str:
+    return canonical_sha256(
+        {
+            "pages": [{"page": page.page, "text_sha256": page.text_sha256} for page in pages],
+            "schema_version": "cardrag.structure-failure-source.v1",
+        }
+    )
+
+
+def _write_structure_failure_report(
+    path: Path,
+    *,
+    run_id: str,
+    failures: Sequence[StructureFailureRecord],
+) -> None:
+    ledger = _canonical_structure_failure_ledger(failures)
+    try:
+        _atomic_write(
+            path,
+            canonical_json_bytes(
+                {
+                    "ledger": ledger,
+                    "ledger_sha256": canonical_sha256(ledger),
+                    "run_id": run_id,
+                    "schema_version": "cardrag.structure-failure-report.v1",
+                    "structure_failed_count": len(failures),
+                }
+            ),
+        )
+    except Exception:
+        raise RuntimeError("structure failure report write failed") from None
+
+
 def select_current(records: Sequence[SourceRecord]) -> tuple[SourceRecord, ...]:
     """Latest-only inputs must be unique; ambiguity fails closed."""
 
@@ -907,6 +1456,38 @@ def _restore_snapshot(
         started_at=observed_at,
         finished_at=observed_at,
     )
+
+
+def _known_snapshot_sources(
+    state: WorkerState,
+    adapters: Sequence[IssuerAdapter],
+    current_records: Sequence[SourceRecord],
+) -> dict[str, SourceRecord]:
+    """Restore only canonical source payloads retained in durable snapshots."""
+
+    known: dict[str, SourceRecord] = {}
+    for adapter in adapters:
+        for payload, observed_at in state.snapshot_history(adapter.spec.code):
+            parser_version = payload.get("parser_version")
+            if not isinstance(parser_version, str) or not parser_version:
+                raise RuntimeError("stored source history has no parser version")
+            snapshot = _restore_snapshot(
+                payload,
+                observed_at=observed_at,
+                expected_issuer=adapter.spec.code,
+                expected_parser_version=parser_version,
+            )
+            for source in snapshot.records:
+                existing = known.get(source.source_id)
+                if existing is not None and existing.discovery_payload != source.discovery_payload:
+                    raise RuntimeError("stored snapshots disagree on a source identity")
+                known[source.source_id] = source
+    for source in current_records:
+        existing = known.get(source.source_id)
+        if existing is not None and existing.discovery_payload != source.discovery_payload:
+            raise RuntimeError("current source conflicts with durable snapshot history")
+        known[source.source_id] = source
+    return known
 
 
 def _section_type(text: str) -> str:
@@ -971,6 +1552,37 @@ def chunk_pages(
     return tuple(chunks)
 
 
+def _embedding_miss_batches(
+    misses: Sequence[int],
+    formatted_token_counts: Sequence[int],
+    *,
+    maximum_tokens: int,
+    maximum_batch_size: int = 64,
+) -> tuple[tuple[int, ...], ...]:
+    """Greedily bind deterministic provider batches to count and token caps."""
+
+    if maximum_tokens < 1 or maximum_batch_size < 1:
+        raise ValueError("embedding batch limits must be positive")
+    batches: list[tuple[int, ...]] = []
+    pending: list[int] = []
+    pending_tokens = 0
+    for index in misses:
+        if index < 0 or index >= len(formatted_token_counts):
+            raise ValueError("embedding miss index is outside the token ledger")
+        token_count = formatted_token_counts[index]
+        if isinstance(token_count, bool) or token_count < 1 or token_count > maximum_tokens:
+            raise ValueError("embedding input exceeds its exact batch token cap")
+        if pending and (len(pending) >= maximum_batch_size or pending_tokens + token_count > maximum_tokens):
+            batches.append(tuple(pending))
+            pending = []
+            pending_tokens = 0
+        pending.append(index)
+        pending_tokens += token_count
+    if pending:
+        batches.append(tuple(pending))
+    return tuple(batches)
+
+
 class WorkerPipeline:
     def __init__(
         self,
@@ -979,20 +1591,39 @@ class WorkerPipeline:
         state_dir: Path,
         adapters: Sequence[IssuerAdapter],
         ocr: OCRResolver,
-        embeddings: EmbeddingProvider,
+        embeddings: EmbeddingProvider | OpenRouterQwenEmbeddingProviderV5,
         webdav: WebDAVClient,
         maximum_attempts: int = 4,
         retry_cap_seconds: float = 30,
         pdf_cache_refresh_hours: float = 168,
-        collect_remote_garbage: bool = True,
+        collect_remote_garbage: bool = False,
+        stable_publication_approved: bool = False,
+        remote_gc_approved: bool = False,
         retained_generations: int = 2,
         garbage_grace_days: int = 30,
         retained_incomplete_runs: int = 2,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
-        if embeddings.dimension != EMBEDDING_DIMENSION:
-            raise ValueError(f"embedding dimension must be {EMBEDDING_DIMENSION}")
+        if embeddings.dimension == EMBEDDING_DIMENSION:
+            v5_profile: QwenEmbeddingProfileV5 | None = None
+        elif isinstance(embeddings, OpenRouterQwenEmbeddingProviderV5):
+            v5_profile = embeddings.profile
+            if (
+                getattr(embeddings.token_counter, "asset_sha256", None) != QWEN_TOKENIZER_SHA256
+                or getattr(embeddings.token_counter, "revision", None) != QWEN_TOKENIZER_REVISION
+            ):
+                raise ValueError("Qwen v5 pipeline requires the pinned exact tokenizer contract")
+        else:
+            raise ValueError(
+                "embedding provider must be the legacy 1,536D rollback provider or a sealed Qwen v5 provider"
+            )
+        if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
+            raise ValueError("stable v1.0.10 publication requires explicit approval")
+        if collect_remote_garbage and (
+            webdav.channel != "stable" or not stable_publication_approved or not remote_gc_approved
+        ):
+            raise ValueError("remote GC requires stable channel plus publication and remote-GC approvals")
         if retained_generations < 1 or garbage_grace_days < 1 or retained_incomplete_runs < 1:
             raise ValueError("garbage retention and grace must be positive")
         if not math.isfinite(pdf_cache_refresh_hours) or pdf_cache_refresh_hours <= 0:
@@ -1007,15 +1638,19 @@ class WorkerPipeline:
         self.adapters = tuple(adapters)
         self.ocr = ocr
         self.embeddings = embeddings
+        self.v5_profile = v5_profile
         self.webdav = webdav
         self.maximum_attempts = maximum_attempts
         self.retry_cap_seconds = retry_cap_seconds
         self.pdf_cache_refresh_interval = pdf_cache_refresh_interval
         self.collect_remote_garbage = collect_remote_garbage
+        self.stable_publication_approved = stable_publication_approved
+        self.remote_gc_approved = remote_gc_approved
         self.retained_generations = retained_generations
         self.garbage_grace_days = garbage_grace_days
         self.retained_incomplete_runs = retained_incomplete_runs
         self.exporter = ServingDatabaseExporter()
+        self.exporter_v5 = ServingDatabaseExporterV5()
         self.limiters = {
             adapter.spec.code: IssuerRateLimiter(adapter.spec.minimum_interval_seconds)
             for adapter in self.adapters
@@ -1023,6 +1658,70 @@ class WorkerPipeline:
 
     @property
     def contract_sha256(self) -> str:
+        if self.v5_profile is not None:
+            parser_profiles = [
+                issuer_parser_profile(adapter.spec.code).payload
+                for adapter in sorted(self.adapters, key=lambda item: item.spec.code)
+            ]
+            return canonical_sha256(
+                {
+                    "schema_version": "cardrag.worker-contract.v4",
+                    "serving_schema": SERVING_SCHEMA_ID_V5,
+                    "issuer_adapters": [
+                        {
+                            "code": adapter.spec.code,
+                            "display_name": adapter.spec.display_name,
+                            "sort_order": adapter.spec.sort_order,
+                            "parser_version": adapter.parser_version,
+                            "allowed_hosts": sorted(adapter.spec.allowed_hosts),
+                            "categories": list(adapter.spec.categories),
+                            "minimum_records": adapter.spec.minimum_records,
+                            "minimum_interval_seconds": adapter.spec.minimum_interval_seconds,
+                            "retry_base_seconds": adapter.spec.retry_base_seconds,
+                            "maximum_retries": adapter.spec.maximum_retries,
+                            "minimum_retention_ratio": adapter.spec.minimum_retention_ratio,
+                            "protected_source_allowances": sorted(
+                                (item.contract_payload for item in adapter.spec.protected_source_allowances),
+                                key=canonical_json_bytes,
+                            ),
+                        }
+                        for adapter in self.adapters
+                    ],
+                    "download_contract": "cardrag.secure-pdf-download.v2",
+                    "ocr_contract": self.ocr.contract,
+                    "adoption_policy_version": self.ocr.adoption_policy_version,
+                    "structure": {
+                        "schema_version": "cardrag.structure.v2",
+                        "parser_profiles": parser_profiles,
+                        "contextual_item_policy": contextual_item_policy_payload(),
+                        "unclassified_fallback_policy": unclassified_fallback_policy_payload(),
+                        "view_maximum_characters": V5_VIEW_MAXIMUM_CHARACTERS,
+                    },
+                    "revision_history": {
+                        "policy_version": REVISION_HISTORY_POLICY_VERSION,
+                        "unresolved_ledger_schema": UNRESOLVED_REVISION_LEDGER_SCHEMA,
+                    },
+                    "embedding": {
+                        "profile_id": self.v5_profile.profile_id,
+                        "cache_namespace": self.v5_profile.cache_namespace,
+                        "provider": self.v5_profile.provider,
+                        "provider_id": self.v5_profile.provider_id,
+                        "model": self.v5_profile.model,
+                        "dimension": self.v5_profile.dimension,
+                        "dtype": self.v5_profile.dtype,
+                        "normalization": self.v5_profile.normalization,
+                        "document_policy": self.v5_profile.document_policy,
+                        "query_policy": self.v5_profile.query_policy,
+                        "maximum_tokens": self.v5_profile.maximum_tokens,
+                        "endpoint_name": self.v5_profile.endpoint_name,
+                        "endpoint_metadata_sha256": self.v5_profile.endpoint_metadata_sha256,
+                        "tokenizer_revision": QWEN_TOKENIZER_REVISION,
+                        "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
+                        "truncation": self.v5_profile.truncation_policy,
+                    },
+                    "retrieval": V5_RETRIEVAL_POLICY,
+                }
+            )
         return canonical_sha256(
             {
                 "schema_version": "cardrag.worker-contract.v2",
@@ -1176,6 +1875,7 @@ class WorkerPipeline:
                 OCRFailureBookkeepingError,
                 OCRSystemicFailureError,
                 ProtectedDocumentError,
+                StructureDocumentFailuresError,
             ) as exc:
                 self.state.finish_run_if_running(run_id, "failed", error=str(exc))
                 raise
@@ -1453,6 +2153,8 @@ class WorkerPipeline:
             prune_error: str | None = None
             try:
                 protected_sha256s = {item.pdf.sha256 for item in acquired}
+                if self.v5_profile is not None:
+                    protected_sha256s.update(load_v109_seed_pins(self.state_dir))
                 retained_run_ids = self.state.retained_publication_run_ids(limit=self.retained_generations)
                 runs_root = self.state_dir / "runs"
                 if retained_run_ids:
@@ -1725,12 +2427,127 @@ class WorkerPipeline:
                     continue
                 acquired.append(_AcquiredDocument(source, pdf))
                 log_pdf_progress(pdf_index)
+
+        unresolved_revision_entries: list[UnresolvedRevisionIdentityV5] = []
+        historical_pdf_cache_hits = 0
+        if self.v5_profile is not None:
+            current_acquired = tuple(acquired)
+            known_sources = _known_snapshot_sources(
+                self.state,
+                self.adapters,
+                tuple(item.source for item in current_acquired),
+            )
+            materialized_by_document: dict[str, _AcquiredDocument] = {}
+            for current_document in current_acquired:
+                history = self.state.pdf_cache_lineage_history(
+                    issuer=current_document.source.issuer,
+                    product_code=current_document.source.product_code,
+                    document_type=current_document.source.document_type,
+                )
+                history_plan = plan_revision_history_v5(
+                    current_source=current_document.source,
+                    current_pdf_sha256=current_document.pdf.sha256,
+                    rows=history,
+                    known_sources=known_sources,
+                )
+                unresolved_revision_entries.extend(history_plan.unresolved_revisions)
+                for candidate in history_plan.candidates:
+                    is_current = (
+                        candidate.source.source_id == current_document.source.source_id
+                        and candidate.revision.pdf_sha256 == current_document.pdf.sha256
+                    )
+                    if is_current:
+                        downloaded = current_document.pdf
+                    else:
+                        cached = self.pdf_cache.lookup_revision(candidate.revision)
+                        if cached is None:
+                            unresolved_revision_entries.append(
+                                UnresolvedRevisionIdentityV5(
+                                    source_id=candidate.source.source_id,
+                                    pdf_sha256=candidate.revision.pdf_sha256,
+                                    reason_code="pdf_cache_object_unavailable",
+                                )
+                            )
+                            continue
+                        downloaded = cached.as_downloaded_pdf()
+                        historical_pdf_cache_hits += 1
+                    planned = _AcquiredDocument(
+                        source=candidate.source,
+                        pdf=downloaded,
+                        temporal_status=candidate.temporal_status,
+                        supersedes_document_id=candidate.supersedes_document_id,
+                        is_historical=not is_current,
+                    )
+                    document_id = candidate.document_id
+                    existing_document = materialized_by_document.get(document_id)
+                    if existing_document is not None:
+                        # The legacy document_id omits metadata-only source
+                        # differences. Keep the proven current revision and
+                        # report the historical identity as unresolved rather
+                        # than mixing two contracts in one run directory.
+                        existing_identity = (
+                            existing_document.source.source_id,
+                            existing_document.pdf.sha256,
+                        )
+                        planned_identity = (planned.source.source_id, planned.pdf.sha256)
+                        if existing_identity == planned_identity:
+                            if (
+                                existing_document.temporal_status != planned.temporal_status
+                                or existing_document.supersedes_document_id != planned.supersedes_document_id
+                            ):
+                                raise RuntimeError(
+                                    "duplicate revision identity has conflicting temporal truth"
+                                )
+                            continue
+                        dropped = existing_document if planned.temporal_status == "current" else planned
+                        unresolved_revision_entries.append(
+                            UnresolvedRevisionIdentityV5(
+                                source_id=dropped.source.source_id,
+                                pdf_sha256=dropped.pdf.sha256,
+                                reason_code="document_identity_collision",
+                            )
+                        )
+                        if planned.temporal_status == "current":
+                            materialized_by_document[document_id] = planned
+                        continue
+                    materialized_by_document[document_id] = planned
+            materialized_ids = set(materialized_by_document)
+            acquired = [
+                replace(
+                    item,
+                    supersedes_document_id=(
+                        item.supersedes_document_id
+                        if item.supersedes_document_id in materialized_ids
+                        else None
+                    ),
+                )
+                for item in sorted(
+                    materialized_by_document.values(),
+                    key=lambda row: (
+                        row.source.issuer,
+                        row.source.product_code,
+                        row.source.effective_date,
+                        row.source.source_version,
+                        row.pdf.sha256,
+                    ),
+                )
+            ]
+        unresolved_revision_ledger = canonical_unresolved_revision_ledger_v5(unresolved_revision_entries)
+        unresolved_revision_sha256 = unresolved_revision_ledger_sha256_v5(unresolved_revision_ledger)
         unsupported_payload = sorted(
             (item.payload for item in unsupported),
             key=canonical_json_bytes,
         )
-        corpus_sha256 = canonical_sha256(
-            {
+        if self.v5_profile is not None:
+            corpus_payload = _v5_corpus_identity_payload(
+                acquired=acquired,
+                unsupported_documents=unsupported_payload,
+                unresolved_revisions=unresolved_revision_ledger,
+                unresolved_revision_sha256=unresolved_revision_sha256,
+            )
+        else:
+            # Preserve the v1-v4 canonical corpus bytes exactly.
+            corpus_payload = {
                 "schema_version": "cardrag.current-corpus.v2",
                 "documents": [
                     {
@@ -1743,7 +2560,7 @@ class WorkerPipeline:
                 ],
                 "unsupported_documents": unsupported_payload,
             }
-        )
+        corpus_sha256 = canonical_sha256(corpus_payload)
         current_remote = await self.webdav.validated_current_generation()
         stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
         cache_healing_generation_id: str | None = None
@@ -1899,6 +2716,7 @@ class WorkerPipeline:
                     len(acquired),
                     0,
                     ocr_cache_publication_deferred=(validated_prior_seal.ocr_cache_publication_deferred),
+                    v5_metrics=validated_prior_seal.v5_metrics,
                 )
             )
         # A different fully valid stable generation wins. Rebuild a new
@@ -1953,7 +2771,7 @@ class WorkerPipeline:
                 raise RuntimeError("retained OCR cache healing deferred document set is ambiguous")
             sealed_ocr_objects = {
                 (path, digest)
-                for path, media_type, digest in cache_healing_validated_seal.objects
+                for path, media_type, digest, _size in cache_healing_validated_seal.objects
                 if media_type == "text/markdown; charset=utf-8"
             }
             runs_root = self.state_dir / "runs"
@@ -1995,9 +2813,13 @@ class WorkerPipeline:
         processed: list[_ProcessedDocument] = []
         ocr_failures: list[OCRFailureRecord] = []
         failed_documents: list[_OCRFailedDocument] = []
+        structure_failures: list[StructureFailureRecord] = []
         ocr_cache_publication_deferred = 0
+        ocr_cache_reused_count = 0
+        ocr_provider_called_count = 0
         ocr_failure_report = run_dir / "reports" / "ocr-failures.json"
         ocr_systemic_failure_report = run_dir / "reports" / "ocr-systemic-failure.json"
+        structure_failure_report = run_dir / "reports" / "structure-failures.json"
         for ocr_index, acquired_document in enumerate(acquired, start=1):
             source = acquired_document.source
             pdf = acquired_document.pdf
@@ -2158,6 +2980,7 @@ class WorkerPipeline:
                             attempts=failure_attempts,
                         ),
                         pdf_path=pdf.path,
+                        is_historical=acquired_document.is_historical,
                     )
                 )
                 _write_ocr_failure_report(
@@ -2184,6 +3007,8 @@ class WorkerPipeline:
                 continue
             if ocr_result is None:
                 raise RuntimeError("OCR stage returned no result")
+            ocr_cache_reused_count += int(ocr_result.cache_reused)
+            ocr_provider_called_count += int(ocr_result.provider_called)
             if ocr_result.cache_publication_deferred:
                 ocr_cache_publication_deferred += 1
                 LOGGER.warning(
@@ -2200,79 +3025,280 @@ class WorkerPipeline:
             if not ocr_path.exists() or ocr_path.read_bytes() != ocr_body:
                 _atomic_write(ocr_path, ocr_body)
             pages = page_records(document_id, ocr_result)
-            structure_path = run_dir / "documents" / document_id / "structure" / "pages.json"
+            structure_artifact: StructureArtifact | None = None
+            embedding_views: tuple[DerivedView, ...] = ()
+            structure_fallback_reason_code: StructureFallbackReasonCode | None = None
+            if self.v5_profile is not None:
+                structure_path = run_dir / "documents" / document_id / "structure" / "structure.v2.json"
 
-            async def structure(
-                current_pages: tuple[PageRecord, ...] = pages,
-                current_ocr_sha256: str = verified_ocr_sha256,
-                destination: Path = structure_path,
-            ) -> tuple[PageRecord, ...]:
-                payload = {
-                    "schema_version": "cardrag.structure.v1",
-                    "input_ocr_sha256": current_ocr_sha256,
-                    "pages": [
+                def unclassified_fallback_v5(
+                    current_pages: tuple[PageRecord, ...] = pages,
+                    current_source: SourceRecord = source,
+                    current_pdf_sha256: str = pdf.sha256,
+                ) -> StructureArtifact:
+                    fallback = build_unclassified_fallback_artifact(
+                        current_pages,
+                        issuer=current_source.issuer,
+                        product_code=current_source.product_code,
+                        product_name=current_source.product_name,
+                        source_version=current_source.source_version,
+                        effective_date=current_source.effective_date.isoformat(),
+                        document_type=current_source.document_type,
+                        source_id=current_source.source_id,
+                        pdf_sha256=current_pdf_sha256,
+                    )
+                    validate_structure_artifact(fallback)
+                    return fallback
+
+                def write_structure_v5(
+                    artifact: StructureArtifact,
+                    destination: Path = structure_path,
+                ) -> None:
+                    body = artifact.canonical_bytes
+                    if destination.exists():
+                        if destination.is_symlink() or not destination.is_file():
+                            raise RuntimeError("v5 structure checkpoint is not a regular file")
+                        if destination.read_bytes() == body:
+                            return
+                    _atomic_write(destination, body)
+
+                async def structure_v5(
+                    current_pages: tuple[PageRecord, ...] = pages,
+                    current_source: SourceRecord = source,
+                    current_pdf_sha256: str = pdf.sha256,
+                    destination: Path = structure_path,
+                ) -> tuple[StructureArtifact, StructureFallbackReasonCode | None]:
+                    del destination
+                    try:
+                        artifact = parse_structure_artifact(
+                            current_pages,
+                            issuer=current_source.issuer,
+                            product_code=current_source.product_code,
+                            product_name=current_source.product_name,
+                            source_version=current_source.source_version,
+                            effective_date=current_source.effective_date.isoformat(),
+                            document_type=current_source.document_type,
+                            source_id=current_source.source_id,
+                            pdf_sha256=current_pdf_sha256,
+                        )
+                        validate_structure_artifact(artifact)
+                        fallback_reason: StructureFallbackReasonCode | None = None
+                    except Exception:
+                        try:
+                            artifact = unclassified_fallback_v5()
+                        except Exception:
+                            raise _StructureFallbackFailed("parser") from None
+                        fallback_reason = "parser_failed"
+                    write_structure_v5(artifact)
+                    return artifact, fallback_reason
+
+                try:
+                    structure_artifact, structure_fallback_reason_code = await self._finite_stage(
+                        run_id=run_id,
+                        document_id=document_id,
+                        name="structure",
+                        operation=structure_v5,
+                        non_retryable_predicate=lambda exc: isinstance(exc, _StructureFallbackFailed),
+                        non_retryable_error_formatter=lambda _exc: (
+                            "structure_fallback_failed: lossless structure fallback failed"
+                        ),
+                    )
+                except _StructureFallbackFailed as exc:
+                    failure = StructureFailureRecord(
+                        issuer=source.issuer,
+                        product_code=source.product_code,
+                        document_id=document_id,
+                        source_id=source.source_id,
+                        pdf_sha256=pdf.sha256,
+                        ocr_sha256=verified_ocr_sha256,
+                        source_pages_sha256=_structure_source_pages_sha256(pages),
+                        page_count=len(pages),
+                        failure_stage=exc.failure_stage,
+                    )
+                    structure_failures.append(failure)
+                    _write_structure_failure_report(
+                        structure_failure_report,
+                        run_id=run_id,
+                        failures=structure_failures,
+                    )
+                    LOGGER.warning(
+                        "Structure fallback failed document_id=%s stage=%s; continuing",
+                        document_id,
+                        exc.failure_stage,
+                    )
+                    continue
+                assert structure_artifact is not None
+                verified_structure_artifact: StructureArtifact = structure_artifact
+                views_path = run_dir / "documents" / document_id / "structure" / "views.v1.json"
+
+                async def make_views_v5(
+                    artifact: StructureArtifact = verified_structure_artifact,
+                    fallback_reason: StructureFallbackReasonCode | None = (structure_fallback_reason_code),
+                    destination: Path = views_path,
+                ) -> tuple[
+                    StructureArtifact,
+                    tuple[DerivedView, ...],
+                    StructureFallbackReasonCode | None,
+                ]:
+                    assert self.v5_profile is not None
+
+                    def build_rows(candidate: StructureArtifact) -> tuple[DerivedView, ...]:
+                        assert self.v5_profile is not None
+                        generated = build_derived_views(
+                            candidate,
+                            maximum_chars=V5_VIEW_MAXIMUM_CHARACTERS,
+                            maximum_tokens=self.v5_profile.maximum_tokens,
+                            token_counter=self.embeddings.token_counter,  # type: ignore[union-attr]
+                        )
+                        if not generated:
+                            raise ValueError("structure artifact produced no searchable derived view")
+                        return generated
+
+                    final_artifact = artifact
+                    final_fallback_reason = fallback_reason
+                    try:
+                        rows = build_rows(final_artifact)
+                    except Exception:
+                        if fallback_reason is not None:
+                            raise _StructureFallbackFailed("derived_views") from None
+                        try:
+                            final_artifact = unclassified_fallback_v5()
+                            rows = build_rows(final_artifact)
+                        except Exception:
+                            raise _StructureFallbackFailed("derived_views") from None
+                        final_fallback_reason = "derived_view_failed"
+                    write_structure_v5(final_artifact)
+                    body = canonical_json_bytes(
                         {
-                            "document_id": page.document_id,
-                            "page": page.page,
-                            "section_type": _section_type(page.text),
-                            "text": page.text,
-                            "text_sha256": page.text_sha256,
+                            "embedding_profile_id": self.v5_profile.profile_id,
+                            "input_structure_sha256": final_artifact.artifact_sha256,
+                            "schema_version": "cardrag.embedding-views.v1",
+                            "views": [row.payload for row in rows],
                         }
-                        for page in current_pages
-                    ],
-                }
-                body = canonical_json_bytes(payload)
-                if destination.exists():
-                    if destination.is_symlink() or not destination.is_file():
-                        raise RuntimeError("structure checkpoint is not a regular file")
-                    if destination.read_bytes() == body:
-                        return current_pages
-                _atomic_write(destination, body)
-                return current_pages
+                    )
+                    if destination.exists():
+                        if destination.is_symlink() or not destination.is_file():
+                            raise RuntimeError("v5 view checkpoint is not a regular file")
+                        if destination.read_bytes() == body:
+                            return final_artifact, rows, final_fallback_reason
+                    _atomic_write(destination, body)
+                    return final_artifact, rows, final_fallback_reason
 
-            structured_pages = await self._finite_stage(
-                run_id=run_id,
-                document_id=document_id,
-                name="structure",
-                operation=structure,
-            )
-            chunks_path = run_dir / "documents" / document_id / "chunks" / "chunks.json"
+                try:
+                    (
+                        structure_artifact,
+                        embedding_views,
+                        structure_fallback_reason_code,
+                    ) = await self._finite_stage(
+                        run_id=run_id,
+                        document_id=document_id,
+                        name="views",
+                        operation=make_views_v5,
+                        non_retryable_predicate=lambda exc: isinstance(exc, _StructureFallbackFailed),
+                        non_retryable_error_formatter=lambda _exc: (
+                            "structure_fallback_failed: lossless structure views failed"
+                        ),
+                    )
+                except _StructureFallbackFailed as exc:
+                    failure = StructureFailureRecord(
+                        issuer=source.issuer,
+                        product_code=source.product_code,
+                        document_id=document_id,
+                        source_id=source.source_id,
+                        pdf_sha256=pdf.sha256,
+                        ocr_sha256=verified_ocr_sha256,
+                        source_pages_sha256=_structure_source_pages_sha256(pages),
+                        page_count=len(pages),
+                        failure_stage=exc.failure_stage,
+                    )
+                    structure_failures.append(failure)
+                    _write_structure_failure_report(
+                        structure_failure_report,
+                        run_id=run_id,
+                        failures=structure_failures,
+                    )
+                    LOGGER.warning(
+                        "Structure fallback views failed document_id=%s; continuing",
+                        document_id,
+                    )
+                    continue
+                structured_pages = pages
+                chunks: tuple[dict[str, Any], ...] = ()
+            else:
+                structure_path = run_dir / "documents" / document_id / "structure" / "pages.json"
 
-            async def make_chunks(
-                current_pages: tuple[PageRecord, ...] = structured_pages,
-                current_ocr_sha256: str = verified_ocr_sha256,
-                destination: Path = chunks_path,
-                current_document_id: str = document_id,
-            ) -> tuple[dict[str, Any], ...]:
-                rows = chunk_pages(current_document_id, current_pages)
-                payload = {
-                    "schema_version": "cardrag.chunk-artifact.v1",
-                    "input_sha256": canonical_sha256(
-                        {
-                            "ocr_sha256": current_ocr_sha256,
-                            "chunk_contract": CHUNK_CONTRACT,
-                            "pages": [page.text_sha256 for page in current_pages],
-                        }
-                    ),
-                    "chunks": rows,
-                }
-                body = canonical_json_bytes(payload)
-                if destination.exists():
-                    if destination.is_symlink() or not destination.is_file():
-                        raise RuntimeError("chunk checkpoint is not a regular file")
-                    if destination.read_bytes() == body:
-                        return rows
-                _atomic_write(destination, body)
-                return rows
+                async def structure_v4(
+                    current_pages: tuple[PageRecord, ...] = pages,
+                    current_ocr_sha256: str = verified_ocr_sha256,
+                    destination: Path = structure_path,
+                ) -> tuple[PageRecord, ...]:
+                    payload = {
+                        "schema_version": "cardrag.structure.v1",
+                        "input_ocr_sha256": current_ocr_sha256,
+                        "pages": [
+                            {
+                                "document_id": page.document_id,
+                                "page": page.page,
+                                "section_type": _section_type(page.text),
+                                "text": page.text,
+                                "text_sha256": page.text_sha256,
+                            }
+                            for page in current_pages
+                        ],
+                    }
+                    body = canonical_json_bytes(payload)
+                    if destination.exists():
+                        if destination.is_symlink() or not destination.is_file():
+                            raise RuntimeError("structure checkpoint is not a regular file")
+                        if destination.read_bytes() == body:
+                            return current_pages
+                    _atomic_write(destination, body)
+                    return current_pages
 
-            chunks = await self._finite_stage(
-                run_id=run_id,
-                document_id=document_id,
-                name="chunk",
-                operation=make_chunks,
-            )
+                structured_pages = await self._finite_stage(
+                    run_id=run_id,
+                    document_id=document_id,
+                    name="structure",
+                    operation=structure_v4,
+                )
+                chunks_path = run_dir / "documents" / document_id / "chunks" / "chunks.json"
+
+                async def make_chunks(
+                    current_pages: tuple[PageRecord, ...] = structured_pages,
+                    current_ocr_sha256: str = verified_ocr_sha256,
+                    destination: Path = chunks_path,
+                    current_document_id: str = document_id,
+                ) -> tuple[dict[str, Any], ...]:
+                    rows = chunk_pages(current_document_id, current_pages)
+                    payload = {
+                        "schema_version": "cardrag.chunk-artifact.v1",
+                        "input_sha256": canonical_sha256(
+                            {
+                                "ocr_sha256": current_ocr_sha256,
+                                "chunk_contract": CHUNK_CONTRACT,
+                                "pages": [page.text_sha256 for page in current_pages],
+                            }
+                        ),
+                        "chunks": rows,
+                    }
+                    body = canonical_json_bytes(payload)
+                    if destination.exists():
+                        if destination.is_symlink() or not destination.is_file():
+                            raise RuntimeError("chunk checkpoint is not a regular file")
+                        if destination.read_bytes() == body:
+                            return rows
+                    _atomic_write(destination, body)
+                    return rows
+
+                chunks = await self._finite_stage(
+                    run_id=run_id,
+                    document_id=document_id,
+                    name="chunk",
+                    operation=make_chunks,
+                )
             processed.append(
                 _ProcessedDocument(
+                    source=source,
                     record=DocumentRecord(
                         document_id=document_id,
                         issuer=source.issuer,
@@ -2291,6 +3317,12 @@ class WorkerPipeline:
                     ocr_cache_kind=ocr_result.cache_kind,
                     ocr_reuse_key=ocr_result.cache_reuse_key,
                     chunks=chunks,
+                    temporal_status=acquired_document.temporal_status,
+                    supersedes_document_id=acquired_document.supersedes_document_id,
+                    is_historical=acquired_document.is_historical,
+                    structure_artifact=structure_artifact,
+                    embedding_views=embedding_views,
+                    structure_fallback_reason_code=structure_fallback_reason_code,
                 )
             )
 
@@ -2308,11 +3340,40 @@ class WorkerPipeline:
             (
                 adapter.spec.code,
                 sum(item.source.issuer == adapter.spec.code for item in acquired),
-                sum(item.record.issuer == adapter.spec.code for item in processed),
+                sum(item.record.issuer == adapter.spec.code for item in processed)
+                + sum(item.issuer == adapter.spec.code for item in structure_failures),
                 sum(item.record.issuer == adapter.spec.code for item in failed_documents),
             )
             for adapter in sorted(self.adapters, key=lambda item: item.spec.code)
         )
+        if structure_failures:
+            ordered_structure_failures = tuple(
+                sorted(
+                    structure_failures,
+                    key=lambda item: (item.issuer, item.product_code, item.document_id),
+                )
+            )
+            raise StructureDocumentFailuresError(
+                run_id=run_id,
+                report_path=structure_failure_report,
+                failures=ordered_structure_failures,
+            )
+        # Historical revisions are included only when their immutable PDF and
+        # source metadata are proven.  A failed historical OCR would otherwise
+        # silently create a hole in a supposedly complete revision chain; do
+        # not downgrade it to the bounded current-corpus disposition path.
+        if any(item.is_historical for item in failed_documents):
+            ordered_failures = tuple(
+                sorted(
+                    ocr_failures,
+                    key=lambda item: (item.issuer, item.product_code, item.document_id),
+                )
+            )
+            raise OCRDocumentFailuresError(
+                run_id=run_id,
+                report_path=ocr_failure_report,
+                failures=ordered_failures,
+            )
         publication_gate_failed = any(
             acquired_count < 1
             or succeeded_count < 1
@@ -2392,6 +3453,32 @@ class WorkerPipeline:
                     generation_id=cache_healing_generation_id,
                     document_count=len(acquired),
                     evidence_count=0,
+                    ocr_cache_publication_deferred=ocr_cache_publication_deferred,
+                    v5_metrics=cache_healing_validated_seal.v5_metrics,
+                )
+            )
+
+        if self.v5_profile is not None:
+            published_result = await self._build_v5_generation(
+                run_id=run_id,
+                run_dir=run_dir,
+                seal_path=seal_path,
+                corpus_sha256=corpus_sha256,
+                contract_sha256=contract_sha256,
+                processed=processed,
+                unsupported=unsupported,
+                failed_documents=failed_documents,
+                issuer_ocr_counts=issuer_ocr_counts,
+                ocr_cache_publication_deferred=ocr_cache_publication_deferred,
+                unresolved_revision_ledger=unresolved_revision_ledger,
+                unresolved_revision_sha256=unresolved_revision_sha256,
+                historical_pdf_cache_hits=historical_pdf_cache_hits,
+                ocr_cache_reused_count=ocr_cache_reused_count,
+                ocr_provider_called_count=ocr_provider_called_count,
+            )
+            return await finalize_pdf_activity(
+                replace(
+                    published_result,
                     ocr_cache_publication_deferred=ocr_cache_publication_deferred,
                 )
             )
@@ -2630,6 +3717,717 @@ class WorkerPipeline:
             )
         )
 
+    async def _build_v5_generation(
+        self,
+        *,
+        run_id: str,
+        run_dir: Path,
+        seal_path: Path,
+        corpus_sha256: str,
+        contract_sha256: str,
+        processed: Sequence[_ProcessedDocument],
+        unsupported: Sequence[UnsupportedProductRecord],
+        failed_documents: Sequence[_OCRFailedDocument],
+        issuer_ocr_counts: tuple[IssuerOCRCounts, ...],
+        ocr_cache_publication_deferred: int,
+        unresolved_revision_ledger: Sequence[UnresolvedRevisionLedgerEntryV5],
+        unresolved_revision_sha256: str,
+        historical_pdf_cache_hits: int,
+        ocr_cache_reused_count: int,
+        ocr_provider_called_count: int,
+    ) -> PipelineResult:
+        """Build and publish one structure-preserving v5 generation."""
+
+        profile = self.v5_profile
+        provider = self.embeddings
+        if profile is None or not isinstance(provider, OpenRouterQwenEmbeddingProviderV5):
+            raise RuntimeError("v5 generation lost its sealed embedding provider")
+        if not processed:
+            raise RuntimeError("v5 generation requires at least one structured document")
+        ordered_documents = tuple(
+            sorted(
+                processed,
+                key=lambda row: (
+                    row.source.issuer,
+                    row.source.product_code,
+                    row.record.document_id,
+                ),
+            )
+        )
+        artifacts: list[StructureArtifact] = []
+        ordered_view_pairs: list[tuple[_ProcessedDocument, DerivedView]] = []
+        for document in ordered_documents:
+            artifact = document.structure_artifact
+            if artifact is None:
+                raise RuntimeError("v5 document has no structure artifact")
+            validate_structure_artifact(artifact)
+            if document.structure_fallback_reason_code is not None and any(
+                node.node_type not in {"ROOT", "ITEM", "UNCLASSIFIED"}
+                or node.major_class != "UNKNOWN"
+                or node.raw_heading is not None
+                for node in artifact.nodes
+            ):
+                raise RuntimeError("v5 structure fallback artifact violates its neutral policy")
+            artifacts.append(artifact)
+            ordered_view_pairs.extend((document, view) for view in document.embedding_views)
+        if not ordered_view_pairs:
+            raise RuntimeError("v5 structure produced no embedding views")
+        raw_structure_fallback_documents = tuple(
+            {
+                "contract_revision_id": artifact.contract_revision_id,
+                "document_id": document.record.document_id,
+                "reason_code": document.structure_fallback_reason_code,
+                "structure_artifact_sha256": artifact.artifact_sha256,
+            }
+            for document, artifact in zip(ordered_documents, artifacts, strict=True)
+            if document.structure_fallback_reason_code is not None
+        )
+        structure_fallback_ledger = _canonical_structure_fallback_ledger(raw_structure_fallback_documents)
+        structure_fallback_documents = tuple(structure_fallback_ledger["documents"])
+        structure_fallback_ledger_sha256 = canonical_sha256(structure_fallback_ledger)
+        empty_structure_failure_ledger_sha256 = _structure_failure_ledger_sha256(())
+
+        embedding_cache_hit_counts: Counter[str] = Counter()
+        embedding_cache_miss_counts: Counter[str] = Counter()
+        embedding_download_counts: Counter[str] = Counter()
+        embedding_provider_call_count = 0
+
+        async def embed_views() -> list[bytes]:
+            nonlocal embedding_provider_call_count
+            vectors: list[bytes | None] = [None] * len(ordered_view_pairs)
+            misses: list[int] = []
+            cache_bindings: list[tuple[str, str]] = []
+            formatted_token_counts: list[int] = []
+            for index, (_document, view) in enumerate(ordered_view_pairs):
+                formatted = format_embedding_input("document", view.embedding_input)
+                token_count = provider.token_counter(formatted)
+                if (
+                    isinstance(token_count, bool)
+                    or not isinstance(token_count, int)
+                    or token_count < 1
+                    or token_count > profile.maximum_tokens
+                ):
+                    raise RuntimeError(
+                        "derived view exceeds the sealed exact-token limit; truncation is forbidden"
+                    )
+                cache_key, input_sha256 = embedding_cache_key(
+                    profile,
+                    kind="document",
+                    formatted_input=formatted,
+                )
+                if input_sha256 != view.input_sha256:
+                    raise RuntimeError("derived view hash differs from its exact document input")
+                cache_bindings.append((cache_key, input_sha256))
+                formatted_token_counts.append(token_count)
+                cached = self.state.get_embedding_v5(
+                    cache_key,
+                    profile_id=profile.profile_id,
+                    input_sha256=input_sha256,
+                    dimension=profile.dimension,
+                    dtype=profile.dtype,
+                    normalization=profile.normalization,
+                )
+                if cached is None:
+                    misses.append(index)
+                    embedding_cache_miss_counts[view.view_type] += 1
+                else:
+                    vectors[index] = cached.embedding
+                    embedding_cache_hit_counts[view.view_type] += 1
+            miss_batches = _embedding_miss_batches(
+                misses,
+                formatted_token_counts,
+                maximum_tokens=profile.maximum_tokens,
+            )
+            for batch_indices in miss_batches:
+                embedding_provider_call_count += 1
+                generated = await provider.embed_documents(
+                    [ordered_view_pairs[index][1].embedding_input for index in batch_indices]
+                )
+                if len(generated) != len(batch_indices):
+                    raise RuntimeError("Qwen provider returned the wrong view batch count")
+                for index, vector in zip(batch_indices, generated, strict=True):
+                    cache_key, input_sha256 = cache_bindings[index]
+                    cached = self.state.put_embedding_v5(
+                        cache_key=cache_key,
+                        profile_id=profile.profile_id,
+                        input_sha256=input_sha256,
+                        dimension=profile.dimension,
+                        dtype=profile.dtype,
+                        normalization=profile.normalization,
+                        values=vector,
+                    )
+                    vectors[index] = cached.embedding
+                    embedding_download_counts[ordered_view_pairs[index][1].view_type] += 1
+            complete = [vector for vector in vectors if vector is not None]
+            if len(complete) != len(ordered_view_pairs):
+                raise RuntimeError("v5 embedding cache/provider left incomplete views")
+            return complete
+
+        vectors = await self._finite_stage(
+            run_id=run_id,
+            document_id="corpus-v5",
+            name="embedding-v5",
+            operation=embed_views,
+        )
+        parser_profiles_by_issuer = {
+            adapter.spec.code: issuer_parser_profile(adapter.spec.code) for adapter in self.adapters
+        }
+        for artifact in artifacts:
+            expected_profile = parser_profiles_by_issuer.get(artifact.issuer)
+            if expected_profile is None or artifact.issuer_profile != expected_profile:
+                raise RuntimeError("v5 structure artifact differs from its sealed issuer parser profile")
+        parser_policy_sha256 = canonical_sha256(
+            {
+                "contextual_item_policy": contextual_item_policy_payload(),
+                "profiles": [
+                    parser_profiles_by_issuer[issuer].payload for issuer in sorted(parser_profiles_by_issuer)
+                ],
+                "schema_version": "cardrag.structure-parser-policy.v1",
+                "unclassified_fallback_policy": unclassified_fallback_policy_payload(),
+            }
+        )
+        embedding_policy_sha256 = canonical_sha256(
+            {
+                "document_policy": QWEN3_DOCUMENT_POLICY,
+                "endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                "maximum_tokens": profile.maximum_tokens,
+                "profile_id": profile.profile_id,
+                "schema_version": "cardrag.embedding-policy.v1",
+                "tokenizer_revision": QWEN_TOKENIZER_REVISION,
+                "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
+                "view_maximum_characters": V5_VIEW_MAXIMUM_CHARACTERS,
+            }
+        )
+        retrieval_policy_sha256 = canonical_sha256(V5_RETRIEVAL_POLICY)
+
+        issuer_rows = tuple(
+            IssuerInput(
+                code=adapter.spec.code,
+                display_name=adapter.spec.display_name,
+                sort_order=adapter.spec.sort_order,
+            )
+            for adapter in self.adapters
+        )
+        document_artifacts = tuple(zip(ordered_documents, artifacts, strict=True))
+        current_lineage_rows: dict[str, tuple[_ProcessedDocument, StructureArtifact]] = {}
+        for document, artifact in document_artifacts:
+            if document.temporal_status != "current":
+                continue
+            if artifact.product_lineage_id in current_lineage_rows:
+                raise RuntimeError("v5 lineage has multiple current processed documents")
+            current_lineage_rows[artifact.product_lineage_id] = (document, artifact)
+        artifact_lineage_ids = {artifact.product_lineage_id for artifact in artifacts}
+        if set(current_lineage_rows) != artifact_lineage_ids:
+            raise RuntimeError("v5 lineage does not have exactly one proven current revision")
+        lineage_rows = tuple(
+            ProductLineageInput(
+                product_lineage_id=artifact.product_lineage_id,
+                issuer=document.source.issuer,
+                product_code=document.source.product_code,
+                document_type=document.source.document_type,
+                name=document.source.product_name,
+            )
+            for document, artifact in sorted(
+                current_lineage_rows.values(), key=lambda row: row[1].product_lineage_id
+            )
+        )
+        revision_id_by_document_id = {
+            document.record.document_id: artifact.contract_revision_id
+            for document, artifact in document_artifacts
+        }
+        revision_rows = tuple(
+            ContractRevisionInput(
+                contract_revision_id=artifact.contract_revision_id,
+                product_lineage_id=artifact.product_lineage_id,
+                document_id=document.record.document_id,
+                source_id=document.source.source_id,
+                source_version=document.source.source_version,
+                source_url=document.source.source_url,
+                effective_date=document.source.effective_date.isoformat(),
+                pdf_sha256=document.record.pdf_sha256,
+                pdf_size_bytes=document.record.pdf_size_bytes,
+                page_count=document.record.page_count,
+                temporal_status=document.temporal_status,
+                supersedes_revision_id=(
+                    None
+                    if document.supersedes_document_id is None
+                    else revision_id_by_document_id.get(document.supersedes_document_id)
+                ),
+            )
+            for document, artifact in document_artifacts
+        )
+        if any(
+            document.supersedes_document_id is not None and revision.supersedes_revision_id is None
+            for (document, _artifact), revision in zip(document_artifacts, revision_rows, strict=True)
+        ):
+            raise RuntimeError("v5 revision predecessor is absent from the sealed generation")
+        page_rows = tuple(
+            DocumentPageInput(
+                contract_revision_id=artifact.contract_revision_id,
+                page=page.page,
+                text=page.text,
+                text_sha256=page.text_sha256,
+            )
+            for artifact in artifacts
+            for page in artifact.pages
+        )
+        node_rows = tuple(
+            StructureNodeInput(
+                node_id=node.node_id,
+                contract_revision_id=node.contract_revision_id,
+                parent_id=node.parent_id,
+                parent_contract_revision_id=(None if node.parent_id is None else node.contract_revision_id),
+                node_type=node.node_type,
+                major_class=node.major_class,
+                raw_heading=node.raw_heading,
+                ordinal=node.ordinal,
+                display_text=node.display_text,
+                table_headers=node.table_headers,
+                table_cells=node.table_cells,
+                table_role=node.table_role,
+            )
+            for artifact in artifacts
+            for node in artifact.nodes
+        )
+        span_rows = tuple(
+            NodeSpanInput(
+                node_id=node.node_id,
+                contract_revision_id=node.contract_revision_id,
+                page=span.page,
+                source_start=span.source_start,
+                source_end=span.source_end,
+                text_sha256=span.text_sha256,
+                span_ordinal=span.span_ordinal,
+                is_canonical=span.is_canonical,
+            )
+            for artifact in artifacts
+            for node in artifact.nodes
+            for span in node.spans
+        )
+        link_rows = tuple(
+            NodeLinkInput(
+                from_node_id=link.from_node_id,
+                from_contract_revision_id=artifact.contract_revision_id,
+                to_node_id=link.to_node_id,
+                to_contract_revision_id=artifact.contract_revision_id,
+                link_type=link.link_type,
+                ordinal=link.ordinal,
+            )
+            for artifact in artifacts
+            for link in artifact.links
+        )
+        exported_profile = EmbeddingProfileInput(
+            profile_id=profile.profile_id,
+            provider=profile.provider,
+            model=profile.model,
+            provider_id=profile.provider_id,
+            dimension=profile.dimension,
+            dtype=profile.dtype,
+            normalization=profile.normalization,
+            document_policy=profile.document_policy,
+            query_policy=profile.query_policy,
+            maximum_tokens=profile.maximum_tokens,
+        )
+        view_rows = tuple(
+            EmbeddingViewInput(
+                row_index=index,
+                node_id=view.node_id,
+                contract_revision_id=view.contract_revision_id,
+                view_type=view.view_type,
+                embedding_input=view.embedding_input,
+                input_sha256=view.input_sha256,
+                profile_id=profile.profile_id,
+                display_text=view.display_text,
+                source_spans=tuple(
+                    ViewSourceSpanInput(
+                        page=span.page,
+                        source_start=span.source_start,
+                        source_end=span.source_end,
+                        text_sha256=span.text_sha256,
+                    )
+                    for span in view.spans
+                ),
+                vector=vector,
+            )
+            for index, ((_document, view), vector) in enumerate(zip(ordered_view_pairs, vectors, strict=True))
+        )
+        unsupported_rows = tuple(
+            UnsupportedProductInput(
+                issuer=row.source.issuer,
+                product_code=row.source.product_code,
+                name=row.source.product_name,
+                disposition=row.disposition,
+                source_id=row.source.source_id,
+                source_version=row.source.source_version,
+                source_url=row.source.source_url,
+                protected_magic=row.protected_magic,
+                protected_sha256=row.protected_sha256,
+                protected_size_bytes=row.protected_size_bytes,
+                source_payload_json=row.source_payload_json,
+            )
+            for row in unsupported
+        )
+        failed_rows = tuple(
+            OCRFailedProductInput(
+                issuer=row.record.issuer,
+                product_code=row.record.product_code,
+                name=row.record.product_name,
+                document_id=row.record.document_id,
+                title=row.record.title,
+                pdf_sha256=row.record.pdf_sha256,
+                pdf_size_bytes=row.record.pdf_size_bytes,
+                page_count=row.record.page_count,
+                reason_code=row.record.reason_code,
+                reason=row.record.reason,
+                attempts=row.record.attempts,
+            )
+            for row in failed_documents
+        )
+
+        generation_id = f"g-{run_id[:24]}-{corpus_sha256[:12]}"
+        database_path = run_dir / "sealed" / "index.sqlite3"
+        vector_path = run_dir / "sealed" / "vectors.f32"
+        export = self.exporter_v5.export(
+            database_path,
+            vector_path,
+            generation_id=generation_id,
+            corpus_sha256=corpus_sha256,
+            contract_sha256=contract_sha256,
+            primary_embedding_profile_id=profile.profile_id,
+            issuers=issuer_rows,
+            product_lineages=lineage_rows,
+            unsupported_products=unsupported_rows,
+            ocr_failed_products=failed_rows,
+            contract_revisions=revision_rows,
+            document_pages=page_rows,
+            structure_nodes=node_rows,
+            node_spans=span_rows,
+            node_links=link_rows,
+            embedding_profiles=(exported_profile,),
+            embedding_views=view_rows,
+            extra_metadata={
+                "embedding_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                "embedding_endpoint_name": profile.endpoint_name,
+                "embedding_policy_sha256": embedding_policy_sha256,
+                "parser_policy_sha256": parser_policy_sha256,
+                "retrieval_policy_sha256": retrieval_policy_sha256,
+                "revision_history_policy_version": REVISION_HISTORY_POLICY_VERSION,
+                "historical_revision_unresolved_count": str(len(unresolved_revision_ledger)),
+                "historical_revision_unresolved_sha256": unresolved_revision_sha256,
+                "structure_fallback_document_count": str(len(structure_fallback_documents)),
+                "structure_fallback_documents_sha256": structure_fallback_ledger_sha256,
+                "structure_fallback_policy_version": str(
+                    unclassified_fallback_policy_payload()["schema_version"]
+                ),
+                "structure_failed_document_count": "0",
+                "structure_failed_documents_sha256": empty_structure_failure_ledger_sha256,
+                "tokenizer_revision": QWEN_TOKENIZER_REVISION,
+                "tokenizer_sha256": QWEN_TOKENIZER_SHA256,
+                **{
+                    f"parser_profile_id.{issuer}": parser_profiles_by_issuer[issuer].profile_id
+                    for issuer in sorted(parser_profiles_by_issuer)
+                },
+                **{
+                    f"parser_profile_sha256.{issuer}": parser_profiles_by_issuer[issuer].sha256
+                    for issuer in sorted(parser_profiles_by_issuer)
+                },
+            },
+        )
+        current_remote = await self.webdav.validated_current_generation()
+        if current_remote is None and await self.webdav.get_bytes(self.webdav.pointer_path) is not None:
+            raise RuntimeError("remote stable generation is corrupt; refusing publication")
+        previous_id = current_remote.generation_id if current_remote is not None else None
+        generation_documents = tuple(
+            sorted(
+                tuple(
+                    GenerationDocument(
+                        document_id=document.record.document_id,
+                        issuer=document.record.issuer,
+                        pdf=ArtifactRef.for_cas(
+                            sha256=document.record.pdf_sha256,
+                            size_bytes=document.record.pdf_size_bytes,
+                            media_type="application/pdf",
+                        ),
+                        ocr=ArtifactRef.for_cas(
+                            sha256=document.ocr_sha256,
+                            size_bytes=document.ocr_size_bytes,
+                            media_type="text/markdown; charset=utf-8",
+                        ),
+                        page_count=document.record.page_count,
+                        ocr_cache_kind=document.ocr_cache_kind,
+                        ocr_reuse_key=document.ocr_reuse_key,
+                        availability="available",
+                    )
+                    for document in ordered_documents
+                )
+                + tuple(
+                    GenerationDocument(
+                        document_id=document.record.document_id,
+                        issuer=document.record.issuer,
+                        pdf=ArtifactRef.for_cas(
+                            sha256=document.record.pdf_sha256,
+                            size_bytes=document.record.pdf_size_bytes,
+                            media_type="application/pdf",
+                        ),
+                        page_count=document.record.page_count,
+                        availability="ocr_failed",
+                        ocr_failure=GenerationOCRFailure(
+                            reason_code=document.record.reason_code,
+                            reason=document.record.reason,
+                            attempts=document.record.attempts,
+                        ),
+                    )
+                    for document in failed_documents
+                ),
+                key=lambda row: row.document_id,
+            )
+        )
+        node_counts: Counter[str] = Counter(
+            node.node_type for artifact in artifacts for node in artifact.nodes
+        )
+        major_counts: Counter[str] = Counter(
+            node.major_class
+            for artifact in artifacts
+            for node in artifact.nodes
+            if node.node_type == "MAJOR_SECTION"
+        )
+        view_counts = Counter(view.view_type for _document, view in ordered_view_pairs)
+        core_profile = EmbeddingProfile.qwen3(
+            provider_id=profile.provider_id,
+            maximum_tokens=profile.maximum_tokens,
+        )
+        manifest = GenerationManifest(
+            schema_version="cardrag.generation.v5",
+            generation_id=generation_id,
+            created_at=datetime.now(UTC),
+            serving_schema="cardrag.serving-db.v5",
+            serving_database=ArtifactRef(
+                sha256=export.database_sha256,
+                size_bytes=export.database_size_bytes,
+                media_type="application/vnd.sqlite3",
+                path=generation_database_path(generation_id).as_posix(),
+            ),
+            corpus_sha256=corpus_sha256,
+            contract_sha256=contract_sha256,
+            embedding_contract=EmbeddingContract(
+                provider=profile.provider,
+                model=profile.model,
+                dimension=4096,
+                count=len(view_rows),
+            ),
+            issuer_codes=tuple(sorted(adapter.spec.code for adapter in self.adapters)),
+            counts=GenerationCounts(
+                documents=len(ordered_documents) + len(failed_documents),
+                pdf_objects=len(
+                    {row.record.pdf_sha256 for row in ordered_documents}
+                    | {row.record.pdf_sha256 for row in failed_documents}
+                ),
+                ocr_objects=len({row.ocr_sha256 for row in ordered_documents}),
+                chunks=len(view_rows),
+            ),
+            documents=generation_documents,
+            issuer_ocr_counts=issuer_ocr_counts,
+            structure_contract=StructureContract(
+                schema_version="cardrag.structure.v2",
+                parser_profiles=tuple(
+                    ManifestIssuerParserProfile(
+                        issuer=issuer,
+                        profile_id=parser_profiles_by_issuer[issuer].profile_id,
+                        profile_sha256=parser_profiles_by_issuer[issuer].sha256,
+                    )
+                    for issuer in sorted(parser_profiles_by_issuer)
+                ),
+                node_counts=StructureNodeCounts(
+                    total=len(node_rows),
+                    root=node_counts["ROOT"],
+                    major_section=node_counts["MAJOR_SECTION"],
+                    item=node_counts["ITEM"],
+                    paragraph=node_counts["PARAGRAPH"],
+                    list_item=node_counts["LIST_ITEM"],
+                    table=node_counts["TABLE"],
+                    table_row=node_counts["TABLE_ROW"],
+                    footnote=node_counts["FOOTNOTE"],
+                    boilerplate=node_counts["BOILERPLATE"],
+                    unclassified=node_counts["UNCLASSIFIED"],
+                ),
+                major_class_counts=StructureMajorClassCounts(
+                    total=node_counts["MAJOR_SECTION"],
+                    benefit=major_counts["BENEFIT"],
+                    notice=major_counts["NOTICE"],
+                    mixed=major_counts["MIXED"],
+                    unknown=major_counts["UNKNOWN"],
+                ),
+                source_coverage=StructureSourceCoverage(
+                    source_non_whitespace_characters=export.source_non_whitespace_count,
+                    covered_non_whitespace_characters=export.covered_non_whitespace_count,
+                    source_non_whitespace_sha256=export.source_coverage_sha256,
+                    covered_non_whitespace_sha256=export.source_coverage_sha256,
+                ),
+                revision_counts=StructureRevisionCounts(
+                    total=export.contract_revision_count,
+                    current=export.current_revision_count,
+                    superseded=export.superseded_revision_count,
+                    ambiguous=export.ambiguous_revision_count,
+                ),
+                cross_contract_parent_count=0,
+                cross_contract_link_count=0,
+                lineages_with_multiple_current_revisions=0,
+            ),
+            embedding_profiles=(core_profile,),
+            primary_embedding_profile_id=core_profile.profile_id,
+            embedding_view_counts=tuple(
+                EmbeddingViewCount(view_type=view_type, count=view_counts[view_type])
+                for view_type in EMBEDDING_VIEW_TYPES
+            ),
+            vector_sidecar=EmbeddingVectorSidecar(
+                artifact=ArtifactRef(
+                    sha256=export.vector_sha256,
+                    size_bytes=export.vector_size_bytes,
+                    media_type="application/octet-stream",
+                    path=generation_vectors_path(generation_id).as_posix(),
+                ),
+                profile_id=core_profile.profile_id,
+                row_count=export.vector_row_count,
+                dimension=4096,
+                dtype="float32",
+                byte_order="little-endian",
+                layout="row-major",
+                normalization="l2",
+            ),
+            parser_policy_sha256=parser_policy_sha256,
+            embedding_policy_sha256=embedding_policy_sha256,
+            retrieval_policy_sha256=retrieval_policy_sha256,
+            previous_generation_id=previous_id,
+        )
+        parser_profile_document_counts = Counter(artifact.issuer_profile_id for artifact in artifacts)
+        unknown_unclassified_count = node_counts["UNCLASSIFIED"] + major_counts["UNKNOWN"]
+        unknown_unclassified_denominator = len(node_rows) + node_counts["MAJOR_SECTION"]
+        source_coverage_percent = (
+            100.0
+            if export.source_non_whitespace_count == 0
+            else 100.0 * export.covered_non_whitespace_count / export.source_non_whitespace_count
+        )
+        v5_metrics = {
+            "schema_version": "cardrag.worker-v5-metrics.v2",
+            "parser_profile_document_counts": {
+                profile_id: parser_profile_document_counts[profile_id]
+                for profile_id in sorted(parser_profile_document_counts)
+            },
+            "node_type_counts": {
+                node_type: node_counts[node_type]
+                for node_type in (
+                    "BOILERPLATE",
+                    "FOOTNOTE",
+                    "ITEM",
+                    "LIST_ITEM",
+                    "MAJOR_SECTION",
+                    "PARAGRAPH",
+                    "ROOT",
+                    "TABLE",
+                    "TABLE_ROW",
+                    "UNCLASSIFIED",
+                )
+            },
+            "major_class_counts": {
+                major_class: major_counts[major_class]
+                for major_class in ("BENEFIT", "MIXED", "NOTICE", "UNKNOWN")
+            },
+            "unknown_unclassified_count": unknown_unclassified_count,
+            "unknown_unclassified_denominator": unknown_unclassified_denominator,
+            "unknown_unclassified_ratio": (
+                0.0
+                if unknown_unclassified_denominator == 0
+                else unknown_unclassified_count / unknown_unclassified_denominator
+            ),
+            "source_non_whitespace_count": export.source_non_whitespace_count,
+            "covered_non_whitespace_count": export.covered_non_whitespace_count,
+            "source_coverage_percent": source_coverage_percent,
+            "cross_page_continuation_count": sum(
+                link.link_type == "CONTINUATION_OF" for artifact in artifacts for link in artifact.links
+            ),
+            "table_node_count": node_counts["TABLE"],
+            "footnote_node_count": node_counts["FOOTNOTE"],
+            "contract_revision_count": export.contract_revision_count,
+            "current_revision_count": export.current_revision_count,
+            "superseded_revision_count": export.superseded_revision_count,
+            "ambiguous_revision_count": export.ambiguous_revision_count,
+            "revision_history_policy_version": REVISION_HISTORY_POLICY_VERSION,
+            "historical_revision_unresolved_count": len(unresolved_revision_ledger),
+            "historical_revision_unresolved_identities": list(unresolved_revision_ledger),
+            "historical_revision_unresolved_sha256": unresolved_revision_sha256,
+            "historical_pdf_cache_hits": historical_pdf_cache_hits,
+            "structure_fallback_policy_version": str(
+                unclassified_fallback_policy_payload()["schema_version"]
+            ),
+            "structure_fallback_document_count": len(structure_fallback_documents),
+            "structure_fallback_documents": list(structure_fallback_documents),
+            "structure_fallback_documents_sha256": structure_fallback_ledger_sha256,
+            "structure_failed_document_count": 0,
+            "structure_failed_documents_sha256": empty_structure_failure_ledger_sha256,
+            "embedding_view_counts": {
+                view_type: {
+                    "downloads": embedding_download_counts[view_type],
+                    "hits": embedding_cache_hit_counts[view_type],
+                    "misses": embedding_cache_miss_counts[view_type],
+                }
+                for view_type in EMBEDDING_VIEW_TYPES
+            },
+            "embedding_provider_call_count": embedding_provider_call_count,
+            "embedding_provider": profile.provider,
+            "embedding_model": profile.model,
+            "embedding_dimension": profile.dimension,
+            "embedding_profile_id": profile.profile_id,
+            "vector_sidecar_size_bytes": export.vector_size_bytes,
+            "ocr_cache_reused_count": ocr_cache_reused_count,
+            "ocr_provider_called_count": ocr_provider_called_count,
+        }
+        _validated_v5_metrics(v5_metrics, manifest=manifest)
+        sealed = {
+            "schema_version": "cardrag.worker-seal.v1",
+            "run_id": run_id,
+            "generation_id": generation_id,
+            "corpus_sha256": corpus_sha256,
+            "contract_sha256": contract_sha256,
+            "database_path": str(database_path),
+            "database_sha256": export.database_sha256,
+            "database_size_bytes": export.database_size_bytes,
+            "vector_path": str(vector_path),
+            "vector_sha256": export.vector_sha256,
+            "vector_size_bytes": export.vector_size_bytes,
+            "ocr_cache_publication_deferred": ocr_cache_publication_deferred,
+            "v5_metrics": v5_metrics,
+            "manifest": manifest.model_dump(mode="json"),
+            "objects": [
+                {
+                    "path": str(document.pdf_path),
+                    "sha256": document.record.pdf_sha256,
+                    "size_bytes": document.record.pdf_size_bytes,
+                    "media_type": "application/pdf",
+                }
+                for document in ordered_documents
+            ]
+            + [
+                {
+                    "path": str(document.pdf_path),
+                    "sha256": document.record.pdf_sha256,
+                    "size_bytes": document.record.pdf_size_bytes,
+                    "media_type": "application/pdf",
+                }
+                for document in failed_documents
+            ]
+            + [
+                {
+                    "path": str(document.ocr_path),
+                    "sha256": document.ocr_sha256,
+                    "size_bytes": document.ocr_size_bytes,
+                    "media_type": "text/markdown; charset=utf-8",
+                }
+                for document in ordered_documents
+            ],
+        }
+        _atomic_write(seal_path, canonical_json_bytes(sealed))
+        return await self._publish_sealed(run_id, sealed)
+
     async def _align_seal_to_current(
         self,
         sealed: Mapping[str, Any],
@@ -2694,10 +4492,14 @@ class WorkerPipeline:
             manifest.generation_id != generation_id
             or manifest.corpus_sha256 != corpus_sha256
             or manifest.contract_sha256 != contract_sha256
-            or manifest.schema_version != GENERATION_SCHEMA_ID
-            or manifest.serving_schema != SERVING_SCHEMA_ID
         ):
             raise RuntimeError("sealed generation manifest identity/contract mismatch")
+        expected_schema_pair = {
+            GENERATION_SCHEMA_ID: SERVING_SCHEMA_ID,
+            GENERATION_SCHEMA_ID_V5: SERVING_SCHEMA_ID_V5,
+        }
+        if expected_schema_pair.get(manifest.schema_version) != manifest.serving_schema:
+            raise RuntimeError("sealed generation manifest schema is not a worker v4/v5 bundle")
         if manifest.serving_database.path != generation_database_path(generation_id).as_posix():
             raise RuntimeError("sealed serving database has the wrong generation path")
         database_sha, database_size = await asyncio.to_thread(sha256_file, database_path)
@@ -2709,16 +4511,252 @@ class WorkerPipeline:
         ):
             raise RuntimeError("sealed serving database hash/size mismatch")
 
+        vector_path: Path | None = None
+        v5_metrics: Mapping[str, Any] | None = None
+        if manifest.schema_version == GENERATION_SCHEMA_ID_V5:
+            if manifest.vector_sidecar is None:
+                raise RuntimeError("sealed v5 generation has no vector sidecar")
+            vector_path = sealed_file(sealed.get("vector_path"), label="vector sidecar")
+            vector_sha, vector_size = await asyncio.to_thread(sha256_file, vector_path)
+            vector_artifact = manifest.vector_sidecar.artifact
+            if (
+                vector_sha != sealed.get("vector_sha256")
+                or vector_sha != vector_artifact.sha256
+                or vector_size != sealed.get("vector_size_bytes")
+                or vector_size != vector_artifact.size_bytes
+                or vector_artifact.path != generation_vectors_path(generation_id).as_posix()
+            ):
+                raise RuntimeError("sealed vector sidecar hash/size/path mismatch")
+            v5_metrics = _validated_v5_metrics(sealed.get("v5_metrics"), manifest=manifest)
+        elif any(
+            sealed.get(key) is not None for key in ("vector_path", "vector_sha256", "vector_size_bytes")
+        ):
+            raise RuntimeError("sealed legacy generation unexpectedly contains a vector sidecar")
+        elif sealed.get("v5_metrics") is not None:
+            raise RuntimeError("sealed legacy generation unexpectedly contains v5 Worker metrics")
+
         def verify_database_binding() -> None:
             connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro&immutable=1", uri=True)
             try:
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()
                 if integrity is None or integrity[0] != "ok":
                     raise RuntimeError("sealed serving database failed integrity_check")
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise RuntimeError("sealed serving database failed foreign_key_check")
                 metadata = {
                     str(key): str(value)
                     for key, value in connection.execute("SELECT key,value FROM metadata")
                 }
+                if manifest.schema_version == GENERATION_SCHEMA_ID_V5:
+                    structure_contract = manifest.structure_contract
+                    vector_contract = manifest.vector_sidecar
+                    if (
+                        structure_contract is None
+                        or vector_contract is None
+                        or vector_path is None
+                        or v5_metrics is None
+                    ):
+                        raise RuntimeError("sealed v5 manifest lost its structure/vector contract")
+                    expected_metadata = {
+                        "schema_id": SERVING_SCHEMA_ID_V5,
+                        "generation_id": generation_id,
+                        "corpus_sha256": corpus_sha256,
+                        "contract_sha256": contract_sha256,
+                        "embedding_provider": manifest.embedding_contract.provider,
+                        "embedding_model": manifest.embedding_contract.model,
+                        "embedding_dimension": str(manifest.embedding_contract.dimension),
+                        "embedding_count": str(manifest.embedding_contract.count),
+                        "embedding_input_policy_version": QWEN3_DOCUMENT_POLICY,
+                        "primary_embedding_profile_id": manifest.primary_embedding_profile_id,
+                        "vector_sidecar_sha256": vector_contract.artifact.sha256,
+                        "vector_sidecar_size_bytes": str(vector_contract.artifact.size_bytes),
+                        "vector_sidecar_row_count": str(vector_contract.row_count),
+                        "vector_sidecar_dimension": str(vector_contract.dimension),
+                        "vector_sidecar_dtype": vector_contract.dtype,
+                        "vector_sidecar_normalization": vector_contract.normalization,
+                        "vector_sidecar_byte_order": vector_contract.byte_order,
+                        "vector_sidecar_layout": vector_contract.layout,
+                        "vector_sidecar_profile_id": vector_contract.profile_id,
+                        "embedding_profile_count": str(len(manifest.embedding_profiles)),
+                        "parser_policy_sha256": str(manifest.parser_policy_sha256),
+                        "embedding_policy_sha256": str(manifest.embedding_policy_sha256),
+                        "retrieval_policy_sha256": str(manifest.retrieval_policy_sha256),
+                        "source_non_whitespace_count": str(
+                            structure_contract.source_coverage.source_non_whitespace_characters
+                        ),
+                        "covered_non_whitespace_count": str(
+                            structure_contract.source_coverage.covered_non_whitespace_characters
+                        ),
+                        "source_coverage_sha256": (
+                            structure_contract.source_coverage.source_non_whitespace_sha256
+                        ),
+                        "contract_revision_count": str(structure_contract.revision_counts.total),
+                        "current_revision_count": str(structure_contract.revision_counts.current),
+                        "superseded_revision_count": str(structure_contract.revision_counts.superseded),
+                        "ambiguous_revision_count": str(structure_contract.revision_counts.ambiguous),
+                        "structure_node_count": str(structure_contract.node_counts.total),
+                        "revision_history_policy_version": str(v5_metrics["revision_history_policy_version"]),
+                        "historical_revision_unresolved_count": str(
+                            v5_metrics["historical_revision_unresolved_count"]
+                        ),
+                        "historical_revision_unresolved_sha256": str(
+                            v5_metrics["historical_revision_unresolved_sha256"]
+                        ),
+                        "structure_fallback_document_count": str(
+                            v5_metrics["structure_fallback_document_count"]
+                        ),
+                        "structure_fallback_documents_sha256": str(
+                            v5_metrics["structure_fallback_documents_sha256"]
+                        ),
+                        "structure_fallback_policy_version": str(
+                            v5_metrics["structure_fallback_policy_version"]
+                        ),
+                        "structure_failed_document_count": str(v5_metrics["structure_failed_document_count"]),
+                        "structure_failed_documents_sha256": str(
+                            v5_metrics["structure_failed_documents_sha256"]
+                        ),
+                    }
+                    for parser_profile in structure_contract.parser_profiles:
+                        expected_metadata[f"parser_profile_id.{parser_profile.issuer}"] = (
+                            parser_profile.profile_id
+                        )
+                        expected_metadata[f"parser_profile_sha256.{parser_profile.issuer}"] = (
+                            parser_profile.profile_sha256
+                        )
+                    node_count_values = {
+                        "ROOT": structure_contract.node_counts.root,
+                        "MAJOR_SECTION": structure_contract.node_counts.major_section,
+                        "ITEM": structure_contract.node_counts.item,
+                        "PARAGRAPH": structure_contract.node_counts.paragraph,
+                        "LIST_ITEM": structure_contract.node_counts.list_item,
+                        "TABLE": structure_contract.node_counts.table,
+                        "TABLE_ROW": structure_contract.node_counts.table_row,
+                        "FOOTNOTE": structure_contract.node_counts.footnote,
+                        "BOILERPLATE": structure_contract.node_counts.boilerplate,
+                        "UNCLASSIFIED": structure_contract.node_counts.unclassified,
+                    }
+                    for node_type, count in node_count_values.items():
+                        expected_metadata[f"structure_node_count.{node_type}"] = str(count)
+                    major_count_values = {
+                        "BENEFIT": structure_contract.major_class_counts.benefit,
+                        "NOTICE": structure_contract.major_class_counts.notice,
+                        "MIXED": structure_contract.major_class_counts.mixed,
+                        "UNKNOWN": structure_contract.major_class_counts.unknown,
+                    }
+                    for major_class, count in major_count_values.items():
+                        expected_metadata[f"structure_major_class_count.{major_class}"] = str(count)
+                    for view_count in manifest.embedding_view_counts:
+                        expected_metadata[f"embedding_view_count.{view_count.view_type}"] = str(
+                            view_count.count
+                        )
+                    if any(metadata.get(key) != value for key, value in expected_metadata.items()):
+                        raise RuntimeError("sealed v5 database metadata does not bind its manifest")
+                    profile_rows = tuple(
+                        tuple(row)
+                        for row in connection.execute(
+                            """SELECT profile_id,provider,model,provider_id,dimension,dtype,
+                                      normalization,document_policy,query_policy,maximum_tokens
+                                 FROM embedding_profiles ORDER BY profile_id"""
+                        )
+                    )
+                    expected_profiles = tuple(
+                        (
+                            profile.profile_id,
+                            profile.provider,
+                            profile.model,
+                            profile.provider_id,
+                            profile.dimension,
+                            profile.dtype,
+                            profile.normalization,
+                            profile.document_policy,
+                            profile.query_policy,
+                            profile.maximum_tokens,
+                        )
+                        for profile in manifest.embedding_profiles
+                    )
+                    if profile_rows != expected_profiles:
+                        raise RuntimeError("sealed v5 database profiles do not bind its manifest")
+                    table_counts = {
+                        "SELECT count(*) FROM contract_revisions": (
+                            "contract_revisions",
+                            structure_contract.revision_counts.total,
+                        ),
+                        "SELECT count(*) FROM structure_nodes": (
+                            "structure_nodes",
+                            structure_contract.node_counts.total,
+                        ),
+                        "SELECT count(*) FROM embedding_profiles": (
+                            "embedding_profiles",
+                            len(manifest.embedding_profiles),
+                        ),
+                        "SELECT count(*) FROM embedding_views": (
+                            "embedding_views",
+                            manifest.counts.chunks,
+                        ),
+                        "SELECT count(*) FROM embedding_view_spans": (
+                            "embedding_view_spans",
+                            int(metadata["embedding_view_span_count"]),
+                        ),
+                        "SELECT count(*) FROM embedding_views_fts": (
+                            "embedding_views_fts",
+                            manifest.counts.chunks,
+                        ),
+                        "SELECT count(*) FROM ocr_failed_products": (
+                            "ocr_failed_products",
+                            sum(document.availability == "ocr_failed" for document in manifest.documents),
+                        ),
+                    }
+                    for query, (table, expected_count) in table_counts.items():
+                        actual_count = int(connection.execute(query).fetchone()[0])
+                        if actual_count != expected_count:
+                            raise RuntimeError(f"sealed v5 database {table} count differs from manifest")
+                    unsupported_count = int(
+                        connection.execute("SELECT count(*) FROM unsupported_products").fetchone()[0]
+                    )
+                    if unsupported_count != int(metadata.get("unsupported_document_count", "-1")):
+                        raise RuntimeError("sealed v5 unsupported disposition count is inconsistent")
+                    failed_count = table_counts["SELECT count(*) FROM ocr_failed_products"][1]
+                    if failed_count != int(metadata.get("ocr_failed_document_count", "-1")):
+                        raise RuntimeError("sealed v5 OCR-failed disposition count is inconsistent")
+                    continuation_count = int(
+                        connection.execute(
+                            "SELECT count(*) FROM node_links WHERE link_type='CONTINUATION_OF'"
+                        ).fetchone()[0]
+                    )
+                    if continuation_count != v5_metrics["cross_page_continuation_count"]:
+                        raise RuntimeError("sealed v5 continuation metrics differ from the database")
+                    row_stats = connection.execute(
+                        "SELECT count(*),min(row_index),max(row_index) FROM embedding_views"
+                    ).fetchone()
+                    if tuple(row_stats) != (
+                        manifest.counts.chunks,
+                        0,
+                        manifest.counts.chunks - 1,
+                    ):
+                        raise RuntimeError("sealed v5 embedding rows are not contiguous")
+                    columns = {
+                        str(row[1]) for row in connection.execute("PRAGMA table_info(embedding_views)")
+                    }
+                    if "embedding" in columns or "vector" in columns:
+                        raise RuntimeError("sealed v5 database contains inline vectors")
+                    row_struct = struct.Struct(f"<{vector_contract.dimension}f")
+                    with vector_path.open("rb") as sidecar:
+                        for row_index in range(vector_contract.row_count):
+                            raw = sidecar.read(row_struct.size)
+                            if len(raw) != row_struct.size:
+                                raise RuntimeError("sealed vector sidecar ended early")
+                            values = row_struct.unpack(raw)
+                            norm_squared = sum(value * value for value in values)
+                            if not all(math.isfinite(value) for value in values) or not math.isclose(
+                                norm_squared,
+                                1.0,
+                                rel_tol=2e-5,
+                                abs_tol=2e-5,
+                            ):
+                                raise RuntimeError(f"sealed vector sidecar row {row_index} is invalid")
+                        if sidecar.read(1):
+                            raise RuntimeError("sealed vector sidecar contains trailing bytes")
+                    return
                 expected_metadata = {
                     "schema_id": SERVING_SCHEMA_ID,
                     "generation_id": generation_id,
@@ -2756,7 +4794,7 @@ class WorkerPipeline:
             if reference is not None
         )
         actual_references: Counter[tuple[str, int, str, str]] = Counter()
-        validated_objects: list[tuple[Path, str, str]] = []
+        validated_objects: list[tuple[Path, str, str, int]] = []
         for raw_row in rows:
             if not isinstance(raw_row, Mapping):
                 raise RuntimeError("sealed CAS object row is invalid")
@@ -2773,15 +4811,17 @@ class WorkerPipeline:
                 raise RuntimeError(f"sealed CAS input changed or is unbound: {path}")
             remote_path = object_path(digest).as_posix()
             actual_references[(digest, size, media_type, remote_path)] += 1
-            validated_objects.append((path, media_type, digest))
+            validated_objects.append((path, media_type, digest, size))
         if actual_references != expected_references:
             raise RuntimeError("sealed CAS rows do not exactly match generation manifest references")
 
         return _ValidatedSeal(
             manifest,
             database_path,
+            vector_path,
             tuple(validated_objects),
             ocr_cache_publication_deferred,
+            v5_metrics,
         )
 
     async def _publish_remote_only(self, sealed: Mapping[str, Any]) -> tuple[PublishedBundle, _ValidatedSeal]:
@@ -2789,14 +4829,20 @@ class WorkerPipeline:
         generation_id = validated.manifest.generation_id
 
         # No remote mutation occurs until every seal/database/object check above succeeds.
-        for path, media_type, declared_sha in validated.objects:
-            published_digest, remote_path = await self.webdav.put_cas_file(path, media_type=media_type)
+        for path, media_type, declared_sha, declared_size in validated.objects:
+            published_digest, remote_path = await self.webdav.put_cas_file(
+                path,
+                media_type=media_type,
+                expected_sha256=declared_sha,
+                expected_size_bytes=declared_size,
+            )
             if published_digest != declared_sha or remote_path != object_path(published_digest).as_posix():
                 raise RuntimeError("CAS publisher returned a mismatched identity")
         published = await WebDAVBundlePublisher(self.webdav).publish(
             generation_id=generation_id,
             database=validated.database_path,
             manifest=sealed["manifest"],
+            vectors=validated.vector_path,
         )
         return published, validated
 
@@ -2844,6 +4890,7 @@ class WorkerPipeline:
                     document_count=sealed_manifest.counts.documents,
                     evidence_count=sealed_manifest.counts.chunks,
                     ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
+                    v5_metrics=validated.v5_metrics,
                 )
             if current.ocr_failed_document_count == 0:
                 self.state.finish_run(
@@ -2861,6 +4908,7 @@ class WorkerPipeline:
                     document_count=sealed_manifest.counts.documents,
                     evidence_count=0,
                     ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
+                    v5_metrics=validated.v5_metrics,
                 )
             # A different partial generation with the same corpus is not a
             # no-change proof. Fall through to the predecessor fence, which
@@ -2911,4 +4959,5 @@ class WorkerPipeline:
             document_count=manifest.counts.documents,
             evidence_count=manifest.counts.chunks,
             ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
+            v5_metrics=published_seal.v5_metrics,
         )

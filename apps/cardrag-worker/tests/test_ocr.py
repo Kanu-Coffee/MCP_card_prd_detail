@@ -246,6 +246,8 @@ async def test_blank_and_sparse_page_contract_seals_successfully(
         )
 
         assert provider.calls == [1]
+        assert result.provider_called is True
+        assert result.cache_reused is False
         assert result.pages == (
             OCR_BLANK_PAGE_SENTINEL,
             f"{OCR_SPARSE_PAGE_PREFIX}\nROVL Mileage",
@@ -516,6 +518,8 @@ async def test_native_cache_hit_skips_provider_and_records_exact_reference(tmp_p
             output_dir=tmp_path / "ocr",
         )
         assert provider.calls == []
+        assert result.provider_called is False
+        assert result.cache_reused is True
         assert (result.cache_kind, result.cache_reuse_key) == ("native", key)
         assert result.ocr_bytes == OCR_BODY
         assert result.ocr_text == OCR_BODY.decode("utf-8")
@@ -942,6 +946,8 @@ async def test_transient_ready_exhaustion_is_repaired_next_run_from_fresh_output
         assert next_provider.calls == []
         assert (resumed.cache_kind, resumed.cache_reuse_key) == ("native", first.reuse_key)
         assert resumed.provenance == "native-repaired"
+        assert resumed.provider_called is False
+        assert resumed.cache_reused is True
         assert resumed.cache_publication_deferred is False
         assert resumed.cache_publication_reason_code is None
         assert resumed.ocr_bytes == first.ocr_bytes

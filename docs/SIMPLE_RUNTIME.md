@@ -1,7 +1,8 @@
 # CardRAG v1.0.8 실운영 가이드
 
-> v1.0.8 운영이 끝나기 전에는 이 설치를 변경하지 마십시오. v1.0.9 후보는
-> [별도 검증·전환 절차](V1_0_9_MIGRATION.md)의 격리 overlay로 실행합니다.
+> 이 문서는 v1.0.8 배포의 역사적 운영 가이드입니다. 현재 보호 대상은 수동 실행 중인
+> v1.0.9 Worker이며 변경하지 않습니다. v1.0.10 candidate 검증과 향후 전환은
+> [v1.0.10 migration 절차](V1_0_10_MIGRATION.md)를 따르십시오.
 
 이 문서는 처음 운영 서버를 준비하는 사람을 위한 순서형 안내서입니다. 명령은
 별도 표시가 없으면 immutable staging인 `/opt/cardrag-v1.0.8`에서 실행합니다.
@@ -320,6 +321,8 @@ CARDRAG_MCP_PUBLISHED_PORT=8000
 CARDRAG_MCP_PUBLIC_BASE_URL=https://YOUR_MCP_HOST
 CARDRAG_MCP_UPDATE_INTERVAL_SECONDS=300
 CARDRAG_MCP_MAX_VECTOR_BYTES=1073741824
+CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES=17179869184
+CARDRAG_MCP_MAX_RESIDENT_VECTOR_BYTES=1073741824
 CARDRAG_MCP_RETAIN_GENERATIONS=3
 CARDRAG_MAXIMUM_CANDIDATE_COUNT=250
 CARDRAG_MAXIMUM_PDF_BYTES=104857600

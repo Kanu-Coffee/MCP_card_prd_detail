@@ -10,7 +10,19 @@ from typing import Any
 import pytest
 from cardrag_core import ArtifactRef, EmbeddingContract, GenerationCounts, GenerationManifest
 
-from cardrag_worker.webdav import WebDAVBundlePublisher
+from cardrag_worker.webdav import WebDAVBundlePublisher, WebDAVError, _guard_v5_stable_publication
+
+
+def test_v5_stable_publisher_primitive_requires_explicit_capability() -> None:
+    denied = type("Client", (), {"channel": "stable", "stable_publication_approved": False})()
+    with pytest.raises(ValueError, match="stable v1.0.10 publication requires explicit approval"):
+        _guard_v5_stable_publication(denied, schema_version="cardrag.generation.v5")
+
+    approved = type("Client", (), {"channel": "stable", "stable_publication_approved": True})()
+    candidate = type("Client", (), {"channel": "candidate-v1.0.10"})()
+    _guard_v5_stable_publication(approved, schema_version="cardrag.generation.v5")
+    _guard_v5_stable_publication(candidate, schema_version="cardrag.generation.v5")
+    _guard_v5_stable_publication(denied, schema_version="cardrag.generation.v4")
 
 
 async def _wait_until_set(event: threading.Event) -> None:
@@ -52,18 +64,50 @@ async def test_bundle_pointer_move_finishes_before_cancellation_propagates(tmp_p
     pointer_committed = threading.Event()
 
     class Immutable:
-        def publish_file(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
+        def publish_file(
+            self,
+            path: object,
+            source: Path,
+            *,
+            media_type: str,
+            expected_sha256: str,
+            expected_size_bytes: int,
+        ) -> ArtifactRef:
+            assert hashlib.sha256(source.read_bytes()).hexdigest() == expected_sha256
+            assert source.stat().st_size == expected_size_bytes
+            return ArtifactRef(
+                sha256=expected_sha256,
+                size_bytes=expected_size_bytes,
+                media_type=media_type,
+                path=str(path),
+            )
 
-        def publish_bytes(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
+        def publish_bytes(
+            self,
+            path: object,
+            body: bytes,
+            *,
+            media_type: str,
+        ) -> ArtifactRef:
+            return ArtifactRef(
+                sha256=hashlib.sha256(body).hexdigest(),
+                size_bytes=len(body),
+                media_type=media_type,
+                path=str(path),
+            )
 
     class Stable:
-        def atomic_replace_bytes(self, _body: bytes) -> None:
+        def atomic_replace_bytes(self, body: bytes) -> ArtifactRef:
             pointer_started.set()
             if not pointer_release.wait(timeout=5):
                 raise AssertionError("test did not release stable pointer MOVE")
             pointer_committed.set()
+            return ArtifactRef(
+                sha256=hashlib.sha256(body).hexdigest(),
+                size_bytes=len(body),
+                media_type="application/json",
+                path="v1/channels/stable.json",
+            )
 
     client = type("Client", (), {"immutable": Immutable(), "stable": Stable()})()
     task = asyncio.create_task(
@@ -86,3 +130,72 @@ async def test_bundle_pointer_move_finishes_before_cancellation_propagates(tmp_p
     assert pointer_committed.is_set()
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_bundle_rejects_mismatched_member_reference_before_control_objects(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "index.sqlite3"
+    database.write_bytes(b"sealed database")
+    database_body = database.read_bytes()
+    generation_id = "g-returned-identity-mismatch"
+    manifest = GenerationManifest(
+        generation_id=generation_id,
+        created_at=datetime(2026, 8, 29, tzinfo=UTC),
+        serving_database=ArtifactRef(
+            sha256=hashlib.sha256(database_body).hexdigest(),
+            size_bytes=len(database_body),
+            media_type="application/vnd.sqlite3",
+            path=f"v1/generations/{generation_id}/index.sqlite3",
+        ),
+        corpus_sha256="a" * 64,
+        contract_sha256="b" * 64,
+        embedding_contract=EmbeddingContract(
+            provider="test",
+            model="test",
+            dimension=1536,
+            count=0,
+        ),
+        issuer_codes=("kb",),
+        counts=GenerationCounts(documents=0, pdf_objects=0, ocr_objects=0, chunks=0),
+    )
+    control_calls: list[str] = []
+
+    class Immutable:
+        def publish_file(
+            self,
+            path: object,
+            _source: Path,
+            *,
+            media_type: str,
+            expected_sha256: str,
+            expected_size_bytes: int,
+        ) -> ArtifactRef:
+            assert expected_sha256 == manifest.serving_database.sha256
+            assert expected_size_bytes == manifest.serving_database.size_bytes
+            return ArtifactRef(
+                sha256="f" * 64,
+                size_bytes=expected_size_bytes,
+                media_type=media_type,
+                path=str(path),
+            )
+
+        def publish_bytes(self, *_args: Any, **_kwargs: Any) -> ArtifactRef:
+            control_calls.append("immutable control")
+            raise AssertionError("control object must not be published")
+
+    class Stable:
+        def atomic_replace_bytes(self, _body: bytes) -> ArtifactRef:
+            control_calls.append("pointer")
+            raise AssertionError("pointer must not be published")
+
+    client = type("Client", (), {"immutable": Immutable(), "stable": Stable()})()
+    with pytest.raises(WebDAVError, match="serving database publisher returned"):
+        await WebDAVBundlePublisher(client).publish(  # type: ignore[arg-type]
+            generation_id=generation_id,
+            database=database,
+            manifest=manifest.model_dump(mode="json"),
+        )
+
+    assert control_calls == []

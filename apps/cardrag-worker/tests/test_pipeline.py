@@ -1846,6 +1846,8 @@ async def test_post_publication_gc_failure_returns_fixed_safe_diagnostic(
             embeddings=FakeEmbeddings(),
             webdav=FakeWebDAV(None),  # type: ignore[arg-type]
             collect_remote_garbage=True,
+            stable_publication_approved=True,
+            remote_gc_approved=True,
         )
 
         async def publish_success(run_id: str, *, refresh_sources: bool = False) -> Any:
@@ -1876,6 +1878,24 @@ async def test_post_publication_gc_failure_returns_fixed_safe_diagnostic(
     assert raw_sentinel not in caplog.text
 
 
+def test_pipeline_remote_gc_requires_both_stable_approvals(tmp_path: Path) -> None:
+    with (
+        WorkerState(tmp_path / "state.sqlite3") as state,
+        pytest.raises(ValueError, match="publication and remote-GC approvals"),
+    ):
+        WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[Adapter((source(),))],
+            ocr=FakeOCR(),  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=True,
+            stable_publication_approved=True,
+            remote_gc_approved=False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_post_publication_gc_partial_failure_preserves_known_delete_count(
     tmp_path: Path,
@@ -1894,6 +1914,8 @@ async def test_post_publication_gc_partial_failure_preserves_known_delete_count(
             embeddings=FakeEmbeddings(),
             webdav=FakeWebDAV(None),  # type: ignore[arg-type]
             collect_remote_garbage=True,
+            stable_publication_approved=True,
+            remote_gc_approved=True,
         )
 
         async def publish_success(run_id: str, *, refresh_sources: bool = False) -> Any:

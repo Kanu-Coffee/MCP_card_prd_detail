@@ -7,11 +7,23 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
-from cardrag_core import EMBEDDING_DIMENSION, channel_pointer_path, resolve_env_secret
+from cardrag_core import (
+    QWEN3_EMBEDDING_DIMENSION,
+    QWEN3_EMBEDDING_MODEL,
+    QWEN3_EMBEDDING_PROVIDER_IDS,
+    Qwen3EmbeddingProviderId,
+    channel_pointer_path,
+    resolve_env_secret,
+)
+
+from .tokenizer_v5 import QWEN_TOKENIZER_SHA256
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+MIB = 1024 * 1024
+MAX_PROVIDER_RESPONSE_BYTES = 64 * MIB
 
 
 def _read_secret(name: str, *, required: bool = False) -> str | None:
@@ -33,7 +45,10 @@ def _nonnegative_int(name: str, default: int) -> int:
 
 
 def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    value = int(os.environ.get(name, str(default)))
+    raw = os.environ.get(name, str(default))
+    if re.fullmatch(r"[0-9]+", raw) is None:
+        raise ValueError(f"{name} must be a canonical non-negative decimal integer")
+    value = int(raw)
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
@@ -78,6 +93,8 @@ def _provider_base_url(name: str, default: str) -> str:
 class WorkerSettings:
     state_dir: Path
     channel: str
+    stable_publication_approved: bool
+    remote_gc_approved: bool
     webdav_base_url: str | None
     webdav_username: str | None
     webdav_password: str | None
@@ -88,6 +105,12 @@ class WorkerSettings:
     openrouter_api_key: str | None
     embedding_model: str
     embedding_dimension: int
+    embedding_provider_id: Qwen3EmbeddingProviderId
+    embedding_maximum_tokens: int
+    embedding_tokenizer_path: Path
+    embedding_timeout_seconds: float
+    embedding_max_response_bytes: int
+    embedding_metadata_max_response_bytes: int
     ocr_provider: str
     ocr_model: str
     ocr_fallback_provider: str | None
@@ -113,9 +136,29 @@ class WorkerSettings:
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
-        dimension = _positive_int("CARDRAG_EMBEDDING_DIMENSION", EMBEDDING_DIMENSION)
-        if dimension != EMBEDDING_DIMENSION:
-            raise ValueError(f"CARDRAG_EMBEDDING_DIMENSION must be {EMBEDDING_DIMENSION}")
+        dimension = _positive_int("CARDRAG_EMBEDDING_DIMENSION", QWEN3_EMBEDDING_DIMENSION)
+        if dimension != QWEN3_EMBEDDING_DIMENSION:
+            raise ValueError(f"CARDRAG_EMBEDDING_DIMENSION must be {QWEN3_EMBEDDING_DIMENSION}")
+        embedding_model = os.environ.get("CARDRAG_EMBEDDING_MODEL", QWEN3_EMBEDDING_MODEL).strip()
+        if embedding_model != QWEN3_EMBEDDING_MODEL:
+            raise ValueError(f"CARDRAG_EMBEDDING_MODEL must be {QWEN3_EMBEDDING_MODEL}")
+        raw_provider_id = os.environ.get("CARDRAG_EMBEDDING_PROVIDER_ID", "deepinfra").strip().casefold()
+        if raw_provider_id not in QWEN3_EMBEDDING_PROVIDER_IDS:
+            raise ValueError("CARDRAG_EMBEDDING_PROVIDER_ID must be deepinfra or nebius")
+        provider_id = cast(Qwen3EmbeddingProviderId, raw_provider_id)
+        maximum_tokens = _bounded_int(
+            "CARDRAG_EMBEDDING_MAXIMUM_TOKENS",
+            32_768 if provider_id == "deepinfra" else 32_000,
+            minimum=1,
+            maximum=32_768,
+        )
+        state_dir = Path(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")).resolve()
+        tokenizer_path_raw = os.environ.get("CARDRAG_QWEN_TOKENIZER_PATH")
+        tokenizer_path = (
+            Path(tokenizer_path_raw).resolve()
+            if tokenizer_path_raw
+            else state_dir / "contracts" / f"qwen3-embedding-8b-tokenizer-{QWEN_TOKENIZER_SHA256}.json"
+        )
         webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL")
         if require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
@@ -130,9 +173,21 @@ class WorkerSettings:
         ca_file = os.environ.get("CARDRAG_WEBDAV_CA_FILE")
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
+        stable_publication_approved = _boolean("CARDRAG_STABLE_PUBLICATION_APPROVED", False)
+        remote_gc_approved = _boolean("CARDRAG_REMOTE_GC_APPROVED", False)
+        collect_remote_garbage = _boolean("CARDRAG_COLLECT_REMOTE_GARBAGE", False)
+        if collect_remote_garbage and (
+            channel != "stable" or not stable_publication_approved or not remote_gc_approved
+        ):
+            raise ValueError(
+                "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires stable channel, "
+                "CARDRAG_STABLE_PUBLICATION_APPROVED=true, and CARDRAG_REMOTE_GC_APPROVED=true"
+            )
         return cls(
-            state_dir=Path(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")).resolve(),
+            state_dir=state_dir,
             channel=channel,
+            stable_publication_approved=stable_publication_approved,
+            remote_gc_approved=remote_gc_approved,
             webdav_base_url=webdav_base.rstrip("/") if webdav_base else None,
             webdav_username=_read_secret("CARDRAG_WEBDAV_USERNAME", required=require_webdav),
             webdav_password=_read_secret("CARDRAG_WEBDAV_PASSWORD", required=require_webdav),
@@ -143,8 +198,24 @@ class WorkerSettings:
                 "CARDRAG_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
             ),
             openrouter_api_key=api_key,
-            embedding_model=os.environ.get("CARDRAG_EMBEDDING_MODEL", "openai/text-embedding-3-small"),
+            embedding_model=embedding_model,
             embedding_dimension=dimension,
+            embedding_provider_id=provider_id,
+            embedding_maximum_tokens=maximum_tokens,
+            embedding_tokenizer_path=tokenizer_path,
+            embedding_timeout_seconds=_positive_float("CARDRAG_EMBEDDING_TIMEOUT_SECONDS", 120),
+            embedding_max_response_bytes=_bounded_int(
+                "CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES",
+                32 * MIB,
+                minimum=1024,
+                maximum=MAX_PROVIDER_RESPONSE_BYTES,
+            ),
+            embedding_metadata_max_response_bytes=_bounded_int(
+                "CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES",
+                2 * MIB,
+                minimum=1024,
+                maximum=16 * MIB,
+            ),
             ocr_provider=ocr_provider,
             ocr_model=os.environ.get("CARDRAG_OCR_MODEL", "gpt-5.6-sol"),
             ocr_fallback_provider=fallback_provider.strip().casefold() if fallback_provider else None,
@@ -172,7 +243,7 @@ class WorkerSettings:
             retain_generations=_bounded_int("CARDRAG_RETAIN_GENERATIONS", 2, minimum=2, maximum=20),
             retained_incomplete_runs=_bounded_int("CARDRAG_RETAIN_INCOMPLETE_RUNS", 2, minimum=1, maximum=20),
             garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 30, minimum=1, maximum=365),
-            collect_remote_garbage=_boolean("CARDRAG_COLLECT_REMOTE_GARBAGE", True),
+            collect_remote_garbage=collect_remote_garbage,
         )
 
     @property

@@ -21,6 +21,7 @@ from cardrag_core import (
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
+    generation_vectors_path,
     ocr_manifest_path,
     ocr_ready_path,
     validate_identifier,
@@ -111,6 +112,20 @@ async def _generation_chain(
             or manifest.serving_database.size_bytes != ready.serving_database_size_bytes
         ):
             raise GCError(f"generation {generation_id} control hashes disagree")
+        if manifest.schema_version == "cardrag.generation.v5":
+            sidecar = manifest.vector_sidecar
+            if sidecar is None or (
+                ready.vector_sidecar_sha256 != sidecar.artifact.sha256
+                or ready.vector_sidecar_size_bytes != sidecar.artifact.size_bytes
+                or sidecar.artifact.path != generation_vectors_path(generation_id).as_posix()
+            ):
+                raise GCError(f"generation {generation_id} vector control hashes disagree")
+        elif (
+            manifest.vector_sidecar is not None
+            or ready.vector_sidecar_sha256 is not None
+            or ready.vector_sidecar_size_bytes is not None
+        ):
+            raise GCError(f"legacy generation {generation_id} declares a vector sidecar")
         if index == 0 and (
             pointer.manifest_sha256 != ready.manifest_sha256
             or pointer.ready_sha256 != hashlib.sha256(ready_body).hexdigest()
@@ -134,7 +149,7 @@ async def _list_generation_ids(webdav: WebDAVClient) -> tuple[str, ...]:
         generation_children = await webdav.list_children(path)
         names = {child.name for child in generation_children if child.parent == path}
         if len(names) != len(generation_children) or not names.issubset(
-            {"index.sqlite3", "manifest.json", "READY.json"}
+            {"index.sqlite3", "vectors.f32", "manifest.json", "READY.json"}
         ):
             raise GCError(f"unexpected object in generation {path.name}")
         ids.append(path.name)
@@ -366,6 +381,8 @@ async def collect_garbage(
                 generation_ready_path(generation_id).as_posix(),
             }
         )
+        if manifest.vector_sidecar is not None:
+            marked.add(manifest.vector_sidecar.artifact.path)
         for document in manifest.documents:
             marked.add(document.pdf.path)
             if document.ocr is not None:

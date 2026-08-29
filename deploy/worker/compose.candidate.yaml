@@ -1,12 +1,19 @@
-name: cardrag-worker-v109-candidate
+name: cardrag-v110-candidate
 
 services:
   worker:
     environment:
-      CARDRAG_CHANNEL: candidate-v1.0.9
+      CARDRAG_CHANNEL: candidate-v1.0.10
+      CARDRAG_STABLE_PUBLICATION_APPROVED: "false"
+      CARDRAG_REMOTE_GC_APPROVED: "false"
       CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_CANDIDATE_WEBDAV_BASE_URL:?CARDRAG_CANDIDATE_WEBDAV_BASE_URL is required}
       CARDRAG_COLLECT_REMOTE_GARBAGE: "false"
+      CARDRAG_EMBEDDING_MODEL: qwen/qwen3-embedding-8b
+      CARDRAG_EMBEDDING_DIMENSION: "4096"
+      CARDRAG_EMBEDDING_PROVIDER_ID: ${CARDRAG_EMBEDDING_PROVIDER_ID:-deepinfra}
+      CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES: ${CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES:-33554432}
+      CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES: ${CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES:-2097152}
 
 volumes:
   worker-state:
-    name: cardrag-worker-v109-candidate-state
+    name: cardrag-worker-v110-state

@@ -19,11 +19,14 @@ def settings_for(state) -> Settings:
     )
 
 
-def test_exactly_five_approved_mcp_tools(active_runtime) -> None:
+def test_exactly_eight_approved_dual_read_mcp_tools(active_runtime) -> None:
     store, repository, _, _ = active_runtime
     app = build_app(repository, store, settings_for(store.root))
     tools = asyncio.run(app.state.mcp_server.list_tools())
     assert {tool.name for tool in tools} == {
+        "search_contracts",
+        "get_contract_bundle",
+        "list_product_revisions",
         "search_evidence",
         "get_evidence",
         "get_product",
@@ -36,6 +39,24 @@ def test_exactly_five_approved_mcp_tools(active_runtime) -> None:
         "evidence_id",
         "cursor",
         "limit",
+    }
+    assert set(by_name["search_contracts"].input_schema["properties"]) == {
+        "query",
+        "issuer",
+        "product_lineage_id",
+        "as_of",
+        "include_history",
+        "mode",
+        "limit",
+    }
+    assert set(by_name["get_contract_bundle"].input_schema["properties"]) == {
+        "contract_revision_id",
+        "scope",
+        "include_links",
+    }
+    assert set(by_name["list_product_revisions"].input_schema["properties"]) == {
+        "issuer",
+        "product_lineage_id",
     }
     assert "unsupported_drm" in (by_name["get_product"].description or "")
 

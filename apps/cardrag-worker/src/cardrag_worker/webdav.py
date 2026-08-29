@@ -13,6 +13,7 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
 from cardrag_core import (
+    ArtifactRef,
     CASPublisher,
     GenerationManifest,
     GenerationPointer,
@@ -27,7 +28,8 @@ from cardrag_core import (
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
-    sha256_file,
+    generation_vectors_path,
+    object_path,
     validate_relative_path,
 )
 from cardrag_core import (
@@ -62,12 +64,14 @@ class RemoteGenerationIdentity:
         "cardrag.generation.v2",
         "cardrag.generation.v3",
         "cardrag.generation.v4",
+        "cardrag.generation.v5",
     ] = "cardrag.generation.v3"
     serving_schema: Literal[
         "cardrag.serving-db.v1",
         "cardrag.serving-db.v2",
         "cardrag.serving-db.v3",
         "cardrag.serving-db.v4",
+        "cardrag.serving-db.v5",
     ] = "cardrag.serving-db.v3"
     ocr_failed_document_count: int = 0
 
@@ -79,6 +83,7 @@ class RemoteGenerationIdentity:
             "cardrag.generation.v2": "cardrag.serving-db.v2",
             "cardrag.generation.v3": "cardrag.serving-db.v3",
             "cardrag.generation.v4": "cardrag.serving-db.v4",
+            "cardrag.generation.v5": "cardrag.serving-db.v5",
         }[self.generation_schema]
         if self.serving_schema != expected:
             raise ValueError("remote generation and serving schema versions must match")
@@ -87,19 +92,29 @@ class RemoteGenerationIdentity:
 class WebDAVClient:
     """Coroutine-friendly facade; all byte publication remains in cardrag-core."""
 
-    def __init__(self, client: CoreWebDAVClient, *, channel: str = "stable") -> None:
+    def __init__(
+        self,
+        client: CoreWebDAVClient,
+        *,
+        channel: str = "stable",
+        stable_publication_approved: bool = False,
+    ) -> None:
+        if type(stable_publication_approved) is not bool:
+            raise ValueError("stable publication approval must be boolean")
         self.core = client
         self.channel = channel
+        self.stable_publication_approved = stable_publication_approved
         self.pointer_path = channel_pointer_path(channel)
         self.immutable = ImmutablePublisher(client)
         self.cas = CASPublisher(client)
         self.stable = StablePointerPublisher(client, channel=channel)
 
     @classmethod
-    def from_env(cls) -> WebDAVClient:
+    def from_env(cls, *, stable_publication_approved: bool = False) -> WebDAVClient:
         return cls(
             CoreWebDAVClient(WebDAVSettings.from_env()),
             channel=os.environ.get("CARDRAG_CHANNEL", "stable"),
+            stable_publication_approved=stable_publication_approved,
         )
 
     async def close(self) -> None:
@@ -206,9 +221,27 @@ class WebDAVClient:
         return artifact.sha256, artifact.path
 
     async def put_cas_file(
-        self, path: Path, *, media_type: str = "application/octet-stream"
+        self,
+        path: Path,
+        *,
+        media_type: str = "application/octet-stream",
+        expected_sha256: str | None = None,
+        expected_size_bytes: int | None = None,
     ) -> tuple[str, str]:
-        artifact = await to_thread_fenced(self.cas.publish_file, path, media_type=media_type)
+        artifact = await to_thread_fenced(
+            self.cas.publish_file,
+            path,
+            media_type=media_type,
+            expected_sha256=expected_sha256,
+            expected_size_bytes=expected_size_bytes,
+        )
+        if (
+            artifact.path != object_path(artifact.sha256).as_posix()
+            or artifact.media_type != media_type
+            or (expected_sha256 is not None and artifact.sha256 != expected_sha256)
+            or (expected_size_bytes is not None and artifact.size_bytes != expected_size_bytes)
+        ):
+            raise WebDAVError("CAS publisher returned a mismatched artifact identity")
         return artifact.sha256, artifact.path
 
     async def check(self) -> WebDAVCheck:
@@ -266,6 +299,8 @@ class WebDAVClient:
             with tempfile.TemporaryDirectory(prefix="cardrag-current-verify-") as directory:
                 root = Path(directory).resolve()
                 reader.download_serving_database(root / "index.sqlite3", current=current)
+                if current.manifest.schema_version == "cardrag.generation.v5":
+                    reader.download_vector_sidecar(root / "vectors.f32", current=current)
                 references = {
                     (document.pdf.sha256, document.pdf.path): document.pdf
                     for document in current.manifest.documents
@@ -318,8 +353,27 @@ class PublishedBundle:
     manifest_sha256: str
 
 
+def _guard_v5_stable_publication(client: object, *, schema_version: str) -> None:
+    if (
+        schema_version == "cardrag.generation.v5"
+        and getattr(client, "channel", "stable") == "stable"
+        and not getattr(client, "stable_publication_approved", False)
+    ):
+        raise ValueError("stable v1.0.10 publication requires explicit approval")
+
+
+def _require_exact_artifact(
+    actual: object,
+    expected: ArtifactRef,
+    *,
+    label: str,
+) -> None:
+    if not isinstance(actual, ArtifactRef) or actual != expected:
+        raise WebDAVError(f"{label} publisher returned a mismatched artifact identity")
+
+
 class WebDAVBundlePublisher:
-    """Seal immutable generation members, then atomically replace stable.json."""
+    """Seal immutable members, with an explicit capability for v5 stable publication."""
 
     def __init__(self, client: WebDAVClient) -> None:
         self.client = client
@@ -330,52 +384,113 @@ class WebDAVBundlePublisher:
         generation_id: str,
         database: Path,
         manifest: Mapping[str, Any],
+        vectors: Path | None = None,
     ) -> PublishedBundle:
         manifest_body = canonical_json_bytes(dict(manifest))
         validated_manifest = GenerationManifest.model_validate_json(manifest_body)
         if validated_manifest.generation_id != generation_id:
             raise ValueError("generation manifest ID does not match publication target")
+        _guard_v5_stable_publication(
+            self.client,
+            schema_version=validated_manifest.schema_version,
+        )
         manifest_sha = hashlib.sha256(manifest_body).hexdigest()
-        database_sha, database_size = await to_thread_fenced(sha256_file, database)
-        declared = manifest.get("serving_database")
+        database_artifact = validated_manifest.serving_database
         if (
-            not isinstance(declared, dict)
-            or declared.get("sha256") != database_sha
-            or declared.get("size_bytes") != database_size
-            or declared.get("path") != generation_database_path(generation_id).as_posix()
+            database_artifact.path != generation_database_path(generation_id).as_posix()
+            or database_artifact.media_type != "application/vnd.sqlite3"
         ):
             raise ValueError("manifest serving_database is not bound to index.sqlite3")
+        database_sha = database_artifact.sha256
+        database_size = database_artifact.size_bytes
+        vector_sha: str | None = None
+        vector_size: int | None = None
+        vector_artifact: ArtifactRef | None = None
+        if validated_manifest.schema_version == "cardrag.generation.v5":
+            if vectors is None or validated_manifest.vector_sidecar is None:
+                raise ValueError("v5 publication requires a vector sidecar")
+            vector_artifact = validated_manifest.vector_sidecar.artifact
+            if (
+                vector_artifact.path != generation_vectors_path(generation_id).as_posix()
+                or vector_artifact.media_type != "application/octet-stream"
+            ):
+                raise ValueError("manifest vector_sidecar is not bound to vectors.f32")
+            vector_sha = vector_artifact.sha256
+            vector_size = vector_artifact.size_bytes
+        elif vectors is not None or validated_manifest.vector_sidecar is not None:
+            raise ValueError("legacy generation publication cannot contain a vector sidecar")
         ready = GenerationReady(
             generation_id=generation_id,
             manifest_sha256=manifest_sha,
             serving_database_sha256=database_sha,
             serving_database_size_bytes=database_size,
+            vector_sidecar_sha256=vector_sha,
+            vector_sidecar_size_bytes=vector_size,
         )
         ready_body = ready.canonical_bytes()
 
         # A retry reuses these exact sealed bytes; core read-back verifies existing objects.
-        await to_thread_fenced(
+        published_database = await to_thread_fenced(
             self.client.immutable.publish_file,
             generation_database_path(generation_id),
             database,
             media_type="application/vnd.sqlite3",
+            expected_sha256=database_sha,
+            expected_size_bytes=database_size,
         )
-        await to_thread_fenced(
+        _require_exact_artifact(published_database, database_artifact, label="serving database")
+        if vectors is not None:
+            assert vector_artifact is not None
+            published_vectors = await to_thread_fenced(
+                self.client.immutable.publish_file,
+                generation_vectors_path(generation_id),
+                vectors,
+                media_type="application/octet-stream",
+                expected_sha256=vector_artifact.sha256,
+                expected_size_bytes=vector_artifact.size_bytes,
+            )
+            _require_exact_artifact(published_vectors, vector_artifact, label="vector sidecar")
+        expected_manifest = ArtifactRef(
+            sha256=manifest_sha,
+            size_bytes=len(manifest_body),
+            media_type="application/json",
+            path=generation_manifest_path(generation_id).as_posix(),
+        )
+        published_manifest = await to_thread_fenced(
             self.client.immutable.publish_bytes,
             generation_manifest_path(generation_id),
             manifest_body,
             media_type="application/json",
         )
-        await to_thread_fenced(
+        _require_exact_artifact(published_manifest, expected_manifest, label="generation manifest")
+        expected_ready = ArtifactRef(
+            sha256=hashlib.sha256(ready_body).hexdigest(),
+            size_bytes=len(ready_body),
+            media_type="application/json",
+            path=generation_ready_path(generation_id).as_posix(),
+        )
+        published_ready = await to_thread_fenced(
             self.client.immutable.publish_bytes,
             generation_ready_path(generation_id),
             ready_body,
             media_type="application/json",
         )
+        _require_exact_artifact(published_ready, expected_ready, label="generation READY")
         pointer = GenerationPointer(
             generation_id=generation_id,
             manifest_sha256=manifest_sha,
-            ready_sha256=hashlib.sha256(ready_body).hexdigest(),
+            ready_sha256=expected_ready.sha256,
         )
-        await to_thread_fenced(self.client.stable.atomic_replace_bytes, pointer.canonical_bytes())
+        pointer_body = pointer.canonical_bytes()
+        expected_pointer = ArtifactRef(
+            sha256=hashlib.sha256(pointer_body).hexdigest(),
+            size_bytes=len(pointer_body),
+            media_type="application/json",
+            path=channel_pointer_path(getattr(self.client, "channel", "stable")).as_posix(),
+        )
+        published_pointer = await to_thread_fenced(
+            self.client.stable.atomic_replace_bytes,
+            pointer_body,
+        )
+        _require_exact_artifact(published_pointer, expected_pointer, label="channel pointer")
         return PublishedBundle(generation_id, database_sha, manifest_sha)
