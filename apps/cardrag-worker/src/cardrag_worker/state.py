@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -463,6 +464,12 @@ class WorkerState:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        # OCR resolvers sharing this state object coordinate native reuse by
+        # current run and exact contract. Values are deliberately runtime-only;
+        # document-local sealed artifacts are the durable restart boundary.
+        self._ocr_native_run_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._ocr_run_local_manifest_indexes: dict[tuple[str, str], dict[str, tuple[Path, ...]]] = {}
+        self._ocr_run_local_manifest_index_locks: dict[tuple[str, str], asyncio.Lock] = {}
         descriptor, sealed_database = _open_nofollow_regular(path, create=True)
         os.close(descriptor)
         sidecar_paths = (

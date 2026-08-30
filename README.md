@@ -15,6 +15,9 @@ WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable c
 
 - 검증된 v1.0.9 PDF/OCR cache는 read-only seed와 기존 reuse key로 재사용합니다.
   1,536D Small cache와 별도 legacy Qwen vectors는 재사용하지 않습니다.
+- 한 Worker run 안에서 같은 PDF와 native OCR contract를 가리키는 여러 문서는 기존
+  document-local sealed OCR을 공유합니다. 추가 OCR body cache를 만들지 않으므로 state
+  capacity 예측을 우회하는 중복 저장이나 동일 입력의 provider 중복 호출이 없습니다.
 - OCR 원문을 contract revision별 ROOT/section/item/leaf/table/footnote 구조로 만들며,
   비공백 원문 coverage 100%와 cross-contract context 혼합 0건을 seal gate로
   검사합니다.

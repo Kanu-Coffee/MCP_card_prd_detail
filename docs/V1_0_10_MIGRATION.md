@@ -191,6 +191,35 @@ validation과 worker-contract hash에 함께 결속됩니다. `read-write`는 st
 별도 `CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true`가 모두 없으면 startup 전에
 거부됩니다. stable generation publication approval은 이 권한을 대신하지 않습니다.
 
+### 같은 run의 native OCR 중복 제거
+
+동일 run의 서로 다른 document가 같은 PDF SHA/size/page count와 완전히 같은
+`NativeOCRContract`를 가지면 native reuse key도 같습니다. Resolver는 provider 호출 전에
+현재 run의 `documents/*/ocr/{,primary,fallback}/native-manifest.json`을 contract별로 한 번
+색인하고, 요청된 key의 manifest와 `ocr.md`를 source, contract, canonical manifest,
+전체 SHA/size/char count, page SHA, credential-token 규칙까지 다시 검증합니다. 따라서 패치
+전에 성공한 document A가 실행 순서상 뒤에 있더라도 pending document B는 A의 완결 seal을
+먼저 재사용합니다. adopted cache는 document ID가 receipt에 결속되므로 이 색인에 들어가지
+않습니다.
+
+같은 process의 `(run_id, native reuse key)`는 하나의 lock으로 remote lookup부터 최종
+document-local seal까지 직렬화합니다. 여러 유효한 local seal의 OCR output이
+비결정적으로 다르면 가장 낮은 `(output SHA-256, size)`를 선택하고 그 process의 후속
+unbound duplicate를 같은 winner로 수렴시킵니다. 이미 게시된 generation의
+`prior_local_native`가 document별 SHA/size를 결속한 cache-healing에서는 현재 local과 prior의
+정확한 identity를 먼저 보존하고, sibling winner로 덮어쓰지 않습니다. 불완전 body-only 상태, 오래되거나 다른
+source/contract, symlink/hardlink, hash 불일치는 miss이며 삭제하거나 원문을 로그에
+노출하지 않습니다. credential 형태가 검출된 bytes는 miss로 낮추지 않고 systemic
+failure로 중단합니다.
+
+공유를 위한 두 번째 OCR body나 별도 persistent cache subtree는 만들지 않습니다. 완결
+`ocr.md`와 `native-manifest.json` 자체가 유일한 durable restart boundary이고, runtime
+색인/lock은 process memory에만 존재합니다. 따라서 추가 steady-state disk growth는 0이며
+수명과 정리는 기존 run retention과 같습니다. Candidate의 remote 우선순위
+`native -> adopted -> run-local native -> provider`와 `read-only` GET-only 계약도 그대로라
+local cross-document hit에서 native CAS/manifest/READY PUT 또는 READY repair는 0건이고,
+generation manifest의 `(ocr_cache_kind, ocr_reuse_key)`는 `(null, null)`로 유지됩니다.
+
 ## 4. candidate generation과 MCP
 
 candidate Worker는 v1.0.10 이미지를 사용하고 candidate channel에만 publish합니다.

@@ -7,10 +7,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import warnings
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +51,7 @@ from .providers import (
     OCR_SPARSE_PAGE_PREFIX,
     OCRProvider,
     ProviderDocumentError,
+    ProviderSystemicError,
     reject_credential_bearing_ocr,
 )
 from .state import WorkerState
@@ -62,6 +65,7 @@ OCR_OUTPUT_POLICY: Literal["target-pages-only"] = "target-pages-only"
 OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS = (0.25, 1.0)
 OCR_CACHE_PUBLICATION_DIAGNOSTIC = "native-cache-publication-diagnostic.json"
 OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES = 4096
+LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES = 1024 * 1024
 
 OCRCacheMode = Literal["read-only", "read-write"]
 OCRCachePublicationPhase = Literal["cas", "manifest", "ready"]
@@ -235,6 +239,147 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _read_nofollow_regular(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    expected_size_bytes: int | None = None,
+    state_root: Path | None = None,
+) -> bytes:
+    """Read one bounded regular file through a pinned no-follow parent."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor = -1
+    if state_root is None:
+        descriptor = os.open(path, flags)
+    else:
+        parent_descriptor = _open_beneath_directory(
+            path.parent,
+            state_root=state_root,
+            create=False,
+        )
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+        except BaseException:
+            os.close(parent_descriptor)
+            raise
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OCRValidationError("local OCR cache leaf is not a regular file")
+        if before.st_uid != os.geteuid() or before.st_nlink != 1:
+            raise OCRValidationError("local OCR cache leaf identity is unsafe")
+        if before.st_size < 1 or before.st_size > maximum_bytes:
+            raise OCRValidationError("local OCR cache leaf has an invalid size")
+        if expected_size_bytes is not None and before.st_size != expected_size_bytes:
+            raise OCRValidationError("local OCR cache leaf size differs from its manifest")
+        body = bytearray()
+        while len(body) <= maximum_bytes:
+            block = os.read(descriptor, min(1024 * 1024, maximum_bytes + 1 - len(body)))
+            if not block:
+                break
+            body.extend(block)
+        after = os.fstat(descriptor)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if identity_before != identity_after or len(body) != before.st_size:
+            raise OCRValidationError("local OCR cache leaf changed while it was read")
+        return bytes(body)
+    finally:
+        os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _open_beneath_directory(path: Path, *, state_root: Path, create: bool) -> int:
+    """Open a directory beneath state root via pinned O_NOFOLLOW dirfds."""
+
+    root = Path(os.path.abspath(os.fspath(state_root)))
+    candidate = Path(os.path.abspath(os.fspath(path)))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        raise OCRValidationError("local OCR cache path escapes worker state") from None
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(root, flags)
+    try:
+        root_stat = os.fstat(descriptor)
+        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.geteuid():
+            raise OCRValidationError("worker state root identity is unsafe")
+        for part in relative.parts:
+            try:
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                with suppress(FileExistsError):
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            current = os.fstat(next_descriptor)
+            if not stat.S_ISDIR(current.st_mode) or current.st_uid != os.geteuid():
+                os.close(next_descriptor)
+                raise OCRValidationError("local OCR cache directory identity is unsafe")
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _atomic_replace_at(parent_descriptor: int, name: str, body: bytes) -> None:
+    """Atomically replace one leaf relative to an already pinned directory."""
+
+    if Path(name).name != name:
+        raise OCRValidationError("local OCR artifact leaf name is invalid")
+    temporary_name = f".{name}.{secrets.token_hex(16)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    temporary_exists = False
+    try:
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_descriptor)
+        temporary_exists = True
+        view = memoryview(body)
+        while view:
+            written = os.write(descriptor, view)
+            if written < 1:
+                raise OSError("local OCR artifact write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temporary_name,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_exists = False
+        os.fsync(parent_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_exists:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            else:
+                os.fsync(parent_descriptor)
 
 
 def _page_body(page_with_marker: str) -> str:
@@ -482,6 +627,14 @@ class OCRResolver:
         self.render_scale_milli = render_scale_milli
         self.adoption_policy_version = adoption_policy_version
         self._cache_mode = cache_mode
+        self._state_root = Path(os.path.abspath(os.fspath(state.path.parent)))
+        self._native_run_locks: dict[tuple[str, str], asyncio.Lock] = state._ocr_native_run_locks
+        self._run_local_manifest_indexes: dict[tuple[str, str], dict[str, tuple[Path, ...]]] = (
+            state._ocr_run_local_manifest_indexes
+        )
+        self._run_local_manifest_index_locks: dict[tuple[str, str], asyncio.Lock] = (
+            state._ocr_run_local_manifest_index_locks
+        )
         self.contract = NativeOCRContract(
             processor_version=OCR_PROCESSOR_VERSION,
             cache_epoch=cache_epoch,
@@ -509,6 +662,213 @@ class OCRResolver:
     def _require_remote_cache_writable(self) -> None:
         if self.cache_mode != "read-write":
             raise OCRValidationError("remote OCR cache mutation is disabled in read-only mode")
+
+    def _load_native_seal(
+        self,
+        *,
+        output_dir: Path,
+        source: OCRInput,
+        reuse_key: str,
+        provenance: str,
+    ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
+        manifest_path = output_dir / "native-manifest.json"
+        try:
+            manifest_body = _read_nofollow_regular(
+                manifest_path,
+                maximum_bytes=LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES,
+                state_root=self._state_root,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            manifest = OCRArtifactManifest.model_validate_json(manifest_body)
+        except Exception as exc:
+            raise OCRValidationError("local native OCR manifest is invalid") from exc
+        if manifest.canonical_bytes() != manifest_body:
+            raise OCRValidationError("local native OCR manifest is not canonical")
+        if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
+            return None
+        ocr_path = output_dir / "ocr.md"
+        try:
+            body = _read_nofollow_regular(
+                ocr_path,
+                maximum_bytes=manifest.output.size_bytes,
+                expected_size_bytes=manifest.output.size_bytes,
+                state_root=self._state_root,
+            )
+            reject_credential_bearing_ocr(body)
+            verified = verify_ocr_bytes(
+                body,
+                expected_page_count=source.page_count,
+                expected_sha256=manifest.output.sha256,
+                expected_size_bytes=manifest.output.size_bytes,
+                expected_char_count=manifest.ocr_chars,
+                expected_page_sha256=manifest.page_output_sha256,
+            )
+        except ProviderSystemicError:
+            raise
+        except Exception as exc:
+            raise OCRValidationError("local native OCR bytes failed strict verification") from exc
+        return (
+            OCRResult(
+                pages=tuple(_page_body(page) for page in verified.pages),
+                ocr_bytes=body,
+                ocr_text=verified.text,
+                ocr_sha256=verified.sha256,
+                size_bytes=verified.size_bytes,
+                provenance=provenance,
+                provider=self.provider.provider,
+                model=self.provider.model,
+                reuse_key=reuse_key,
+                cache_reused=True,
+            ),
+            manifest,
+            body,
+        )
+
+    def _materialize_native_seal(
+        self,
+        *,
+        output_dir: Path,
+        manifest: OCRArtifactManifest,
+        body: bytes,
+    ) -> None:
+        # Preserve the existing document-local crash contract: verified body
+        # first, canonical manifest last. Both replacements stay beneath a
+        # pinned, no-follow state directory chain.
+        parent_descriptor = _open_beneath_directory(
+            output_dir,
+            state_root=self._state_root,
+            create=True,
+        )
+        try:
+            _atomic_replace_at(parent_descriptor, "ocr.md", body)
+            _atomic_replace_at(
+                parent_descriptor,
+                "native-manifest.json",
+                manifest.canonical_bytes(),
+            )
+        finally:
+            os.close(parent_descriptor)
+
+    def _build_run_local_manifest_index(self, run_id: str) -> dict[str, tuple[Path, ...]]:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+            return {}
+        documents_root = self._state_root / "runs" / run_id / "documents"
+        documents_descriptor = -1
+        try:
+            documents_descriptor = _open_beneath_directory(
+                documents_root,
+                state_root=self._state_root,
+                create=False,
+            )
+            with os.scandir(documents_descriptor) as entries:
+                document_names = tuple(
+                    entry.name
+                    for entry in entries
+                    if re.fullmatch(r"doc_[0-9a-f]{64}", entry.name) and entry.is_dir(follow_symlinks=False)
+                )
+        except (FileNotFoundError, OSError, OCRValidationError):
+            return {}
+        finally:
+            if documents_descriptor >= 0:
+                os.close(documents_descriptor)
+        indexed: dict[str, list[Path]] = {}
+        for document_name in document_names:
+            document_root = documents_root / document_name
+            for relative in (("ocr",), ("ocr", "primary"), ("ocr", "fallback")):
+                output_dir = document_root.joinpath(*relative)
+                try:
+                    manifest_body = _read_nofollow_regular(
+                        output_dir / "native-manifest.json",
+                        maximum_bytes=LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES,
+                        state_root=self._state_root,
+                    )
+                    manifest = OCRArtifactManifest.model_validate_json(manifest_body)
+                except (FileNotFoundError, OSError, OCRValidationError, ValueError):
+                    continue
+                if (
+                    manifest.canonical_bytes() != manifest_body
+                    or manifest.contract != self.contract
+                    or not re.fullmatch(r"[0-9a-f]{64}", manifest.reuse_key)
+                ):
+                    continue
+                indexed.setdefault(manifest.reuse_key, []).append(output_dir)
+        return {key: tuple(paths) for key, paths in indexed.items()}
+
+    async def _run_local_manifest_index(self, run_id: str) -> dict[str, tuple[Path, ...]]:
+        index_key = (run_id, self.contract.contract_sha256)
+        existing = self._run_local_manifest_indexes.get(index_key)
+        if existing is not None:
+            return existing
+        lock = self._run_local_manifest_index_locks.setdefault(index_key, asyncio.Lock())
+        async with lock:
+            existing = self._run_local_manifest_indexes.get(index_key)
+            if existing is None:
+                existing = self._build_run_local_manifest_index(run_id)
+                self._run_local_manifest_indexes[index_key] = existing
+            return existing
+
+    async def _register_run_local_native(
+        self,
+        *,
+        run_id: str,
+        reuse_key: str,
+        output_dir: Path,
+    ) -> None:
+        """Make a committed document-local native seal visible to this run."""
+
+        index = await self._run_local_manifest_index(run_id)
+        current = index.get(reuse_key, ())
+        if output_dir not in current:
+            index[reuse_key] = (*current, output_dir)
+
+    async def _lookup_indexed_run_local_native(
+        self,
+        *,
+        run_id: str,
+        source: OCRInput,
+        reuse_key: str,
+        output_dir: Path,
+        expected_ocr_identity: tuple[str, int] | None = None,
+    ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
+        index = await self._run_local_manifest_index(run_id)
+        candidates: dict[tuple[str, int], tuple[Path, OCRResult, OCRArtifactManifest, bytes]] = {}
+        for candidate_dir in index.get(reuse_key, ()):
+            try:
+                loaded = self._load_native_seal(
+                    output_dir=candidate_dir,
+                    source=source,
+                    reuse_key=reuse_key,
+                    provenance="native-local-indexed",
+                )
+            except (OSError, OCRValidationError):
+                continue
+            if loaded is not None:
+                identity = (loaded[0].ocr_sha256, loaded[0].size_bytes)
+                if expected_ocr_identity is not None and identity != expected_ocr_identity:
+                    continue
+                previous = candidates.get(identity)
+                if previous is None or candidate_dir.as_posix() < previous[0].as_posix():
+                    candidates[identity] = (candidate_dir, *loaded)
+        if not candidates:
+            return None
+        # OCR providers may be nondeterministic while every seal remains valid
+        # for the same exact contract. Choose the lowest output identity so a
+        # resumed run converges without another provider call.
+        _selected_path, selected_result, selected_manifest, selected_body = candidates[min(candidates)]
+        if _selected_path != output_dir:
+            self._materialize_native_seal(
+                output_dir=output_dir,
+                manifest=selected_manifest,
+                body=selected_body,
+            )
+        await self._register_run_local_native(
+            run_id=run_id,
+            reuse_key=reuse_key,
+            output_dir=output_dir,
+        )
+        return selected_result, selected_manifest, selected_body
 
     async def _lookup_cache(
         self,
@@ -609,8 +969,11 @@ class OCRResolver:
             # making ordinary cache hits restartable, this is the commit point
             # used when two isolated workers race to populate one immutable
             # reuse key with nondeterministic OCR output.
-            atomic_write(output_dir / "ocr.md", body)
-            atomic_write(output_dir / "native-manifest.json", manifest_body)
+            self._materialize_native_seal(
+                output_dir=output_dir,
+                manifest=manifest,
+                body=body,
+            )
         return OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -662,8 +1025,11 @@ class OCRResolver:
             )
         except Exception as exc:
             raise OCRValidationError("partial native OCR bytes failed strict verification") from exc
-        atomic_write(output_dir / "ocr.md", body)
-        atomic_write(output_dir / "native-manifest.json", manifest_body)
+        self._materialize_native_seal(
+            output_dir=output_dir,
+            manifest=manifest,
+            body=body,
+        )
         result = OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -722,55 +1088,11 @@ class OCRResolver:
         source: OCRInput,
         reuse_key: str,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
-        ocr_path = output_dir / "ocr.md"
-        manifest_path = output_dir / "native-manifest.json"
-        if not manifest_path.exists():
-            return None
-        if (
-            not ocr_path.is_file()
-            or ocr_path.is_symlink()
-            or not manifest_path.is_file()
-            or manifest_path.is_symlink()
-        ):
-            raise OCRValidationError("local native OCR seal is incomplete or unsafe")
-        try:
-            manifest_body = manifest_path.read_bytes()
-            manifest = OCRArtifactManifest.model_validate_json(manifest_body)
-        except Exception as exc:
-            raise OCRValidationError("local native OCR manifest is invalid") from exc
-        if manifest.canonical_bytes() != manifest_body:
-            raise OCRValidationError("local native OCR manifest is not canonical")
-        if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
-            # A sealed artifact from an older processing contract is a clean
-            # cache miss. Its checkpoints are independently input-hash bound.
-            return None
-        body = ocr_path.read_bytes()
-        try:
-            verified = verify_ocr_bytes(
-                body,
-                expected_page_count=source.page_count,
-                expected_sha256=manifest.output.sha256,
-                expected_size_bytes=manifest.output.size_bytes,
-                expected_char_count=manifest.ocr_chars,
-                expected_page_sha256=manifest.page_output_sha256,
-            )
-        except Exception as exc:
-            raise OCRValidationError("local native OCR bytes failed strict verification") from exc
-        return (
-            OCRResult(
-                pages=tuple(_page_body(page) for page in verified.pages),
-                ocr_bytes=body,
-                ocr_text=verified.text,
-                ocr_sha256=verified.sha256,
-                size_bytes=verified.size_bytes,
-                provenance="native-local",
-                provider=self.provider.provider,
-                model=self.provider.model,
-                reuse_key=reuse_key,
-                cache_reused=True,
-            ),
-            manifest,
-            body,
+        return self._load_native_seal(
+            output_dir=output_dir,
+            source=source,
+            reuse_key=reuse_key,
+            provenance="native-local",
         )
 
     def _materialize_prior_local_native(
@@ -874,10 +1196,11 @@ class OCRResolver:
         if output_dir != prior_output_dir:
             if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
                 raise OCRValidationError("current local OCR output directory is unsafe")
-            # Write the body first and the canonical manifest last so the
-            # manifest remains the local commit marker across process crashes.
-            atomic_write(output_dir / "ocr.md", local_body)
-            atomic_write(output_dir / "native-manifest.json", local_manifest.canonical_bytes())
+            self._materialize_native_seal(
+                output_dir=output_dir,
+                manifest=local_manifest,
+                body=local_body,
+            )
             materialized = self._load_local_native(
                 output_dir=output_dir,
                 source=source,
@@ -985,6 +1308,8 @@ class OCRResolver:
                         source_document_id=source_document_id,
                         output_dir=output_dir,
                     )
+                except ProviderSystemicError:
+                    raise
                 except Exception:
                     winner = None
             if winner is not None:
@@ -1044,6 +1369,37 @@ class OCRResolver:
             page_count=page_count,
         )
         native_key = native_ocr_reuse_key(self.contract, source)
+        lock = self._native_run_locks.setdefault((run_id, native_key), asyncio.Lock())
+        async with lock:
+            return await self._resolve_serialized(
+                run_id=run_id,
+                document_id=document_id,
+                pdf_path=pdf_path,
+                pdf_sha256=pdf_sha256,
+                pdf_size_bytes=pdf_size_bytes,
+                page_count=page_count,
+                output_dir=output_dir,
+                prior_local_native=prior_local_native,
+            )
+
+    async def _resolve_serialized(
+        self,
+        *,
+        run_id: str,
+        document_id: str,
+        pdf_path: Path,
+        pdf_sha256: str,
+        pdf_size_bytes: int,
+        page_count: int,
+        output_dir: Path,
+        prior_local_native: PriorLocalNativeSource | None = None,
+    ) -> OCRResult:
+        source = OCRInput(
+            pdf_sha256=pdf_sha256,
+            pdf_size_bytes=pdf_size_bytes,
+            page_count=page_count,
+        )
+        native_key = native_ocr_reuse_key(self.contract, source)
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
             adopted_policies.append(LEGACY_ADOPTION_POLICY_V1)
@@ -1081,8 +1437,37 @@ class OCRResolver:
                 )
                 found = None
             if found is not None:
+                if kind == "native":
+                    local_remote = self._load_local_native(
+                        output_dir=output_dir,
+                        source=source,
+                        reuse_key=native_key,
+                    )
+                    if local_remote is not None:
+                        await self._register_run_local_native(
+                            run_id=run_id,
+                            reuse_key=native_key,
+                            output_dir=output_dir,
+                        )
                 return found
-        local = self._load_local_native(output_dir=output_dir, source=source, reuse_key=native_key)
+        expected_ocr_identity = (
+            (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
+            if prior_local_native is not None
+            else None
+        )
+        local = self._load_local_native(
+            output_dir=output_dir,
+            source=source,
+            reuse_key=native_key,
+        )
+        if (
+            local is not None
+            and expected_ocr_identity is not None
+            and (local[0].ocr_sha256, local[0].size_bytes) != expected_ocr_identity
+        ):
+            # Generation cache healing is identity-bound per document. A valid
+            # nondeterministic sibling cannot displace that retained hash.
+            local = None
         if local is None and prior_local_native is not None:
             try:
                 local = self._materialize_prior_local_native(
@@ -1102,6 +1487,14 @@ class OCRResolver:
                     stacklevel=2,
                 )
                 local = None
+        if local is None:
+            local = await self._lookup_indexed_run_local_native(
+                run_id=run_id,
+                source=source,
+                reuse_key=native_key,
+                output_dir=output_dir,
+                expected_ocr_identity=expected_ocr_identity,
+            )
         if local is not None:
             local_result, local_manifest, local_body = local
             committed = await self._commit_local_native(
@@ -1110,6 +1503,18 @@ class OCRResolver:
                 body=local_body,
                 output_dir=output_dir,
                 source_document_id=document_id,
+            )
+            final_local = self._load_local_native(
+                output_dir=output_dir,
+                source=source,
+                reuse_key=native_key,
+            )
+            if final_local is None or final_local[0].ocr_sha256 != committed.ocr_sha256:
+                raise OCRValidationError("committed local native OCR identity is unavailable")
+            await self._register_run_local_native(
+                run_id=run_id,
+                reuse_key=native_key,
+                output_dir=output_dir,
             )
             shutil.rmtree(output_dir / "rendered", ignore_errors=True)
             return committed
@@ -1219,8 +1624,6 @@ class OCRResolver:
         combined = "\n\n".join(f"## Page {index}\n\n{value}" for index, value in enumerate(pages, 1)) + "\n"
         body = combined.encode()
         reject_credential_bearing_ocr(body)
-        ocr_path = output_dir / "ocr.md"
-        atomic_write(ocr_path, body)
         # Verify exactly the bytes that will be cached and referenced by generations.
         verified = verify_ocr_bytes(body, expected_page_count=page_count)
         result = OCRResult(
@@ -1249,13 +1652,31 @@ class OCRResolver:
             page_output_sha256=verified.page_sha256,
             created_at=datetime.now(UTC),
         )
-        atomic_write(output_dir / "native-manifest.json", manifest.canonical_bytes())
+        self._materialize_native_seal(
+            output_dir=output_dir,
+            manifest=manifest,
+            body=body,
+        )
         result = await self._commit_local_native(
             result=result,
             manifest=manifest,
             body=body,
             output_dir=output_dir,
             source_document_id=document_id,
+        )
+        final_local = self._load_local_native(
+            output_dir=output_dir,
+            source=source,
+            reuse_key=native_key,
+        )
+        if final_local is None or final_local[0].ocr_sha256 != result.ocr_sha256:
+            raise OCRValidationError("committed local native OCR identity is unavailable")
+        # In read-write mode a concurrent remote first-writer may have replaced
+        # the document-local loser. Index only that validated final winner.
+        await self._register_run_local_native(
+            run_id=run_id,
+            reuse_key=native_key,
+            output_dir=output_dir,
         )
         shutil.rmtree(output_dir / "rendered", ignore_errors=True)
         return result

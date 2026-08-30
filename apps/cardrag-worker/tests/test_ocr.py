@@ -624,6 +624,93 @@ def cache_native(
     return key
 
 
+def write_document_local_native(
+    resolver: OCRResolver,
+    output_dir: Path,
+    *,
+    body: bytes = OCR_BODY,
+    source: OCRInput | None = None,
+    reuse_key: str | None = None,
+    contract: NativeOCRContract | None = None,
+) -> tuple[str, OCRArtifactManifest]:
+    selected_source = source or OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+    selected_contract = contract or resolver.contract
+    selected_key = reuse_key or native_ocr_reuse_key(selected_contract, selected_source)
+    verified = verify_ocr_bytes(body, expected_page_count=selected_source.page_count)
+    manifest = OCRArtifactManifest(
+        reuse_key=selected_key,
+        source=selected_source,
+        contract=selected_contract,
+        output=ArtifactRef.for_cas(
+            sha256=verified.sha256,
+            size_bytes=verified.size_bytes,
+            media_type="text/markdown; charset=utf-8",
+        ),
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "ocr.md").write_bytes(body)
+    (output_dir / "native-manifest.json").write_bytes(manifest.canonical_bytes())
+    return selected_key, manifest
+
+
+def cache_v1_adopted(
+    resolver: OCRResolver,
+    webdav: FakeWebDAV,
+    *,
+    document_id: str,
+    body: bytes = OCR_BODY,
+) -> str:
+    source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+    verified = verify_ocr_bytes(body, expected_page_count=1)
+    key = adopted_ocr_reuse_key(
+        adoption_policy_version="cardrag.legacy-ocr-adoption.v1",
+        source_document_id=document_id,
+        pdf_sha256=PDF_SHA,
+    )
+    artifact = ArtifactRef.for_cas(
+        sha256=verified.sha256,
+        size_bytes=verified.size_bytes,
+        media_type="text/markdown; charset=utf-8",
+    )
+    receipt = LegacyAdoptionReceipt(
+        adoption_policy_version="cardrag.legacy-ocr-adoption.v1",
+        source_bundle_id="bundle-adopted-test",
+        source_bundle_sha256="b" * 64,
+        source_database_id="legacy-db",
+        source_document_id=document_id,
+        pdf_sha256=PDF_SHA,
+        ocr_sha256=verified.sha256,
+        validation=LegacyAdoptionValidation(
+            hash_verified=True,
+            page_coverage_verified=True,
+            utf8_verified=True,
+            ledger_bound=True,
+        ),
+    )
+    manifest = AdoptedOCRArtifactManifest(
+        reuse_key=key,
+        source=source,
+        receipt=receipt,
+        output=artifact,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+    )
+    ready = OCRReady(
+        reuse_key=key,
+        manifest_sha256=sha256_bytes(manifest.canonical_bytes()),
+        ocr_sha256=verified.sha256,
+    )
+    root = f"v1/ocr-cache/adopted/{key[:2]}/{key}"
+    webdav.objects[artifact.path] = body
+    webdav.objects[root + "/manifest.json"] = manifest.canonical_bytes()
+    webdav.objects[root + "/READY.json"] = ready.canonical_bytes()
+    return key
+
+
 @pytest.mark.asyncio
 async def test_native_cache_hit_skips_provider_and_records_exact_reference(tmp_path: Path) -> None:
     provider = FakeProvider()
@@ -694,6 +781,69 @@ async def test_native_cache_credential_token_fails_systemically_before_local_sea
 
 
 @pytest.mark.asyncio
+async def test_credential_bearing_concurrent_remote_winner_keeps_systemic_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav)
+    credential = "sk-or-v1-" + "a" * 64
+    remote_body = (
+        f"## Page 1\n\n동시 원격 winner의 카드 혜택 본문에 포함되면 안 되는 값 {credential}\n"
+    ).encode()
+    local_body = "## Page 1\n\n로컬 loser의 정상적인 카드 혜택 조건과 제외 사항 본문입니다.\n".encode()
+    try:
+        cache_native(resolver, webdav, body=remote_body)
+        source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+        key = native_ocr_reuse_key(resolver.contract, source)
+        verified = verify_ocr_bytes(local_body, expected_page_count=1)
+        result = OCRResult(
+            pages=("로컬 loser의 정상적인 카드 혜택 조건과 제외 사항 본문입니다.",),
+            ocr_bytes=local_body,
+            ocr_text=verified.text,
+            ocr_sha256=verified.sha256,
+            size_bytes=verified.size_bytes,
+            provenance="native",
+            provider=provider.provider,
+            model=provider.model,
+            reuse_key=key,
+            provider_called=True,
+        )
+        manifest = OCRArtifactManifest(
+            reuse_key=key,
+            source=source,
+            contract=resolver.contract,
+            output=ArtifactRef.for_cas(
+                sha256=verified.sha256,
+                size_bytes=verified.size_bytes,
+                media_type="text/markdown; charset=utf-8",
+            ),
+            ocr_chars=verified.char_count,
+            page_output_sha256=verified.page_sha256,
+            created_at=NOW,
+        )
+
+        async def publication_collision(**_kwargs: Any) -> None:
+            raise OCRCachePublicationError(phase="manifest", error_kind="integrity")
+
+        monkeypatch.setattr(resolver, "_publish_native_cache", publication_collision)
+        with pytest.raises(ProviderSystemicError) as captured:
+            await resolver._commit_local_native(  # noqa: SLF001
+                result=result,
+                manifest=manifest,
+                body=local_body,
+                output_dir=tmp_path / "runs" / "run" / "documents" / f"doc_{'a' * 64}" / "ocr",
+                source_document_id=f"doc_{'a' * 64}",
+            )
+
+        assert captured.value.reason_code == "provider_output_credential_detected"
+        assert credential not in str(captured.value)
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_read_only_native_cache_hit_is_reused_without_any_remote_mutation(
     tmp_path: Path,
 ) -> None:
@@ -757,6 +907,721 @@ async def test_read_only_native_cache_miss_stays_local_and_resumes_without_remot
         assert (second.cache_kind, second.cache_reuse_key) == (None, None)
         assert first.ocr_bytes == second.ocr_bytes
         assert webdav.objects == {}
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_same_run_different_documents_reuse_one_native_provider_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        first_output = documents_root / f"doc_{'a' * 64}" / "ocr"
+        second_output = documents_root / f"doc_{'b' * 64}" / "ocr"
+        common = {
+            "run_id": "run",
+            "pdf_path": pdf,
+            "pdf_sha256": PDF_SHA,
+            "pdf_size_bytes": 3,
+            "page_count": 1,
+        }
+
+        first = await resolver.resolve(
+            **common,
+            document_id=f"doc_{'a' * 64}",
+            output_dir=first_output,
+        )
+        second = await resolver.resolve(
+            **common,
+            document_id=f"doc_{'b' * 64}",
+            output_dir=second_output,
+        )
+
+        assert provider.calls == [1]
+        assert first.provider_called is True
+        assert second.provider_called is False
+        assert second.cache_reused is True
+        assert second.provenance == "native-local-indexed"
+        assert (second.cache_kind, second.cache_reuse_key) == (None, None)
+        assert first.ocr_bytes == second.ocr_bytes == (second_output / "ocr.md").read_bytes()
+        assert not (tmp_path / "runs" / "run" / "shared-ocr-cache").exists()
+        assert webdav.objects == {}
+        assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_same_run_concurrent_duplicate_native_provider_is_serialized_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class BlockingProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, total_pages, prompt
+            self.calls.append(target_page_numbers[0])
+            self.started.set()
+            await self.release.wait()
+            return "## Page 1\n\n동시 요청을 직렬화하는 충분히 긴 카드 혜택 본문입니다.\n"
+
+    provider = BlockingProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+
+        async def resolve(document_hex: str) -> OCRResult:
+            document_id = f"doc_{document_hex * 64}"
+            return await resolver.resolve(
+                run_id="run",
+                document_id=document_id,
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=documents_root / document_id / "ocr",
+            )
+
+        first_task = asyncio.create_task(resolve("a"))
+        await provider.started.wait()
+        second_task = asyncio.create_task(resolve("b"))
+        try:
+            await asyncio.sleep(0)
+            assert provider.calls == [1]
+            assert not second_task.done()
+        finally:
+            provider.release.set()
+        first, second = await asyncio.gather(first_task, second_task)
+
+        assert provider.calls == [1]
+        assert sum(result.provider_called for result in (first, second)) == 1
+        assert first.ocr_bytes == second.ocr_bytes
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_document_bootstraps_completed_native_seal_before_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending B is resolved first after restart while completed A is never invoked."""
+
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    pdf = tmp_path / "pdf-pages.txt"
+    pdf.write_text("1", encoding="utf-8")
+    documents_root = tmp_path / "runs" / "run" / "documents"
+    completed_id = f"doc_{'a' * 64}"
+    pending_id = f"doc_{'b' * 64}"
+    first_provider = FakeProvider()
+    first_state = WorkerState(tmp_path / "state.sqlite3")
+    try:
+        first_state.start_run(run_id="run")
+        first_resolver = OCRResolver(
+            provider=first_provider,
+            state=first_state,
+            webdav=None,
+            chunk_pages=1,
+            cache_mode="read-only",
+        )  # type: ignore[arg-type]
+        completed = await first_resolver.resolve(
+            run_id="run",
+            document_id=completed_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / completed_id / "ocr",
+        )
+    finally:
+        first_state.close()
+
+    resumed_provider = FakeProvider()
+    resumed_state = WorkerState(tmp_path / "state.sqlite3")
+    try:
+        resumed_resolver = OCRResolver(
+            provider=resumed_provider,
+            state=resumed_state,
+            webdav=None,
+            chunk_pages=1,
+            cache_mode="read-only",
+        )  # type: ignore[arg-type]
+        pending = await resumed_resolver.resolve(
+            run_id="run",
+            document_id=pending_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / pending_id / "ocr",
+        )
+
+        assert first_provider.calls == [1]
+        assert resumed_provider.calls == []
+        assert pending.provider_called is False
+        assert pending.provenance == "native-local-indexed"
+        assert pending.ocr_bytes == completed.ocr_bytes
+    finally:
+        resumed_state.close()
+
+
+@pytest.mark.asyncio
+async def test_conflicting_valid_document_seals_converge_without_provider_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        first_body = "## Page 1\n\n첫 번째로 유효한 카드 혜택 조건과 제외 사항 본문입니다.\n".encode()
+        second_body = "## Page 1\n\n두 번째로 유효한 카드 혜택 조건과 제외 사항 본문입니다.\n".encode()
+        write_document_local_native(
+            resolver,
+            documents_root / f"doc_{'a' * 64}" / "ocr",
+            body=first_body,
+        )
+        write_document_local_native(
+            resolver,
+            documents_root / f"doc_{'b' * 64}" / "ocr",
+            body=second_body,
+        )
+        expected = min((first_body, second_body), key=sha256_bytes)
+
+        results = []
+        for value in ("c", "d"):
+            document_id = f"doc_{value * 64}"
+            results.append(
+                await resolver.resolve(
+                    run_id="run",
+                    document_id=document_id,
+                    pdf_path=pdf,
+                    pdf_sha256=PDF_SHA,
+                    pdf_size_bytes=3,
+                    page_count=1,
+                    output_dir=documents_root / document_id / "ocr",
+                )
+            )
+
+        assert provider.calls == []
+        assert all(result.provider_called is False for result in results)
+        assert [result.ocr_bytes for result in results] == [expected, expected]
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_generation_bound_conflicting_document_seals_preserve_each_exact_hash(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    first_body = "## Page 1\n\n첫 generation 문서에 결속된 충분히 긴 카드 혜택 본문입니다.\n".encode()
+    second_body = "## Page 1\n\n둘째 generation 문서에 결속된 충분히 긴 카드 혜택 본문입니다.\n".encode()
+    try:
+        state.start_run(run_id="run")
+        runs_root = tmp_path / "runs"
+        documents_root = runs_root / "run" / "documents"
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        results = []
+        for value, body in (("a", first_body), ("b", second_body)):
+            document_id = f"doc_{value * 64}"
+            output_dir = documents_root / document_id / "ocr"
+            write_document_local_native(resolver, output_dir, body=body)
+            verified = verify_ocr_bytes(body, expected_page_count=1)
+            prior = PriorLocalNativeSource(
+                runs_root=runs_root,
+                run_id="run",
+                generation_id="g-bound",
+                corpus_sha256="b" * 64,
+                contract_sha256="c" * 64,
+                document_id=document_id,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                ocr_sha256=verified.sha256,
+                ocr_size_bytes=verified.size_bytes,
+            )
+            results.append(
+                await resolver.resolve(
+                    run_id="run",
+                    document_id=document_id,
+                    pdf_path=pdf,
+                    pdf_sha256=PDF_SHA,
+                    pdf_size_bytes=3,
+                    page_count=1,
+                    output_dir=output_dir,
+                    prior_local_native=prior,
+                )
+            )
+
+        assert provider.calls == []
+        assert [result.ocr_bytes for result in results] == [first_body, second_body]
+        assert [result.ocr_sha256 for result in results] == [
+            sha256_bytes(first_body),
+            sha256_bytes(second_body),
+        ]
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_credential_bearing_document_local_seal_fails_systemically_without_provider(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    credential = "sk-or-v1-" + "a" * 64
+    body = (f"## Page 1\n\n이 페이지에는 카드 혜택 조건과 제외 사항이 적혀 있습니다. {credential}\n").encode()
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        write_document_local_native(
+            resolver,
+            documents_root / f"doc_{'a' * 64}" / "ocr",
+            body=body,
+        )
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+
+        with pytest.raises(ProviderSystemicError) as captured:
+            await resolver.resolve(
+                run_id="run",
+                document_id=f"doc_{'b' * 64}",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=documents_root / f"doc_{'b' * 64}" / "ocr",
+            )
+
+        assert captured.value.reason_code == "provider_output_credential_detected"
+        assert provider.calls == []
+        assert credential not in str(captured.value)
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_document_local_native_reuse_is_scoped_to_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        for run_id, value in (("run-1", "a"), ("run-2", "b")):
+            state.start_run(run_id=run_id)
+            document_id = f"doc_{value * 64}"
+            await resolver.resolve(
+                run_id=run_id,
+                document_id=document_id,
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "runs" / run_id / "documents" / document_id / "ocr",
+            )
+
+        assert provider.calls == [1, 1]
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_run_local_manifest_indexes_are_isolated_by_primary_fallback_contract(
+    tmp_path: Path,
+) -> None:
+    state = WorkerState(tmp_path / "state.sqlite3")
+    primary_provider = FakeProvider()
+    fallback_provider = FakeProvider()
+    fallback_provider.model = "gpt-5.5-fallback"
+    primary = OCRResolver(
+        provider=primary_provider,
+        state=state,
+        webdav=None,
+        chunk_pages=1,
+        cache_mode="read-only",
+    )  # type: ignore[arg-type]
+    fallback = OCRResolver(
+        provider=fallback_provider,
+        state=state,
+        webdav=None,
+        chunk_pages=1,
+        cache_mode="read-only",
+    )  # type: ignore[arg-type]
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        primary_body = "## Page 1\n\n기본 모델 계약으로 검증된 충분히 긴 카드 혜택 본문입니다.\n".encode()
+        fallback_body = "## Page 1\n\n대체 모델 계약으로 검증된 충분히 긴 카드 혜택 본문입니다.\n".encode()
+        write_document_local_native(
+            primary,
+            documents_root / f"doc_{'a' * 64}" / "ocr" / "primary",
+            body=primary_body,
+        )
+        write_document_local_native(
+            fallback,
+            documents_root / f"doc_{'b' * 64}" / "ocr" / "fallback",
+            body=fallback_body,
+        )
+        # Build the primary memo first; it must not hide fallback seals from a
+        # resolver sharing the same WorkerState.
+        await primary._run_local_manifest_index("run")  # noqa: SLF001
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        pending_id = f"doc_{'c' * 64}"
+
+        result = await fallback.resolve(
+            run_id="run",
+            document_id=pending_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / pending_id / "ocr" / "fallback",
+        )
+
+        assert primary_provider.calls == []
+        assert fallback_provider.calls == []
+        assert result.ocr_bytes == fallback_body
+        assert result.provenance == "native-local-indexed"
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_indexed_native_materialization_rejects_intermediate_symlink_without_provider(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        write_document_local_native(
+            resolver,
+            documents_root / f"doc_{'a' * 64}" / "ocr",
+        )
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        pending_id = f"doc_{'b' * 64}"
+        pending_root = documents_root / pending_id
+        pending_root.mkdir(parents=True)
+        (pending_root / "ocr").symlink_to(outside, target_is_directory=True)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+
+        with pytest.raises((OSError, OCRValidationError)):
+            await resolver.resolve(
+                run_id="run",
+                document_id=pending_id,
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=pending_root / "ocr",
+            )
+
+        assert provider.calls == []
+        assert sentinel.read_bytes() == b"unchanged"
+        assert sorted(path.name for path in outside.iterdir()) == ["sentinel"]
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_hardlinked_document_local_body_is_a_strict_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        candidate = documents_root / f"doc_{'a' * 64}" / "ocr"
+        write_document_local_native(resolver, candidate)
+        outside_link = tmp_path / "outside-hardlink.md"
+        outside_link.hardlink_to(candidate / "ocr.md")
+        pending_id = f"doc_{'b' * 64}"
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+
+        result = await resolver.resolve(
+            run_id="run",
+            document_id=pending_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / pending_id / "ocr",
+        )
+
+        assert provider.calls == [1]
+        assert result.provider_called is True
+        assert outside_link.read_bytes() == OCR_BODY
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_document_local_seals_do_not_poison_later_same_run_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        partial = documents_root / f"doc_{'a' * 64}" / "ocr"
+        partial.mkdir(parents=True)
+        (partial / "ocr.md").write_bytes(
+            "## Page 1\n\n중단 전에 남은 서로 다른 미완결 OCR 본문입니다.\n".encode()
+        )
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        results = []
+        for value in ("b", "c"):
+            document_id = f"doc_{value * 64}"
+            results.append(
+                await resolver.resolve(
+                    run_id="run",
+                    document_id=document_id,
+                    pdf_path=pdf,
+                    pdf_sha256=PDF_SHA,
+                    pdf_size_bytes=3,
+                    page_count=1,
+                    output_dir=documents_root / document_id / "ocr",
+                )
+            )
+
+        assert provider.calls == [1]
+        assert results[0].provider_called is True
+        assert results[1].provider_called is False
+        assert results[0].ocr_bytes == results[1].ocr_bytes
+        assert not (partial / "native-manifest.json").exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_and_mismatched_seals_yield_to_one_valid_document_winner(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        partial = documents_root / f"doc_{'a' * 64}" / "ocr"
+        partial.mkdir(parents=True)
+        (partial / "ocr.md").write_bytes(OCR_BODY)
+        mismatched = documents_root / f"doc_{'b' * 64}" / "ocr"
+        write_document_local_native(resolver, mismatched)
+        (mismatched / "ocr.md").write_bytes(
+            "## Page 1\n\nmanifest 해시와 일치하지 않는 충분히 긴 다른 본문입니다.\n".encode()
+        )
+        valid_body = "## Page 1\n\n완결 seal에서 재사용할 충분히 긴 카드 혜택 본문입니다.\n".encode()
+        write_document_local_native(
+            resolver,
+            documents_root / f"doc_{'c' * 64}" / "ocr",
+            body=valid_body,
+        )
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        pending_id = f"doc_{'d' * 64}"
+
+        result = await resolver.resolve(
+            run_id="run",
+            document_id=pending_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / pending_id / "ocr",
+        )
+
+        assert provider.calls == []
+        assert result.ocr_bytes == valid_body
+        assert result.provenance == "native-local-indexed"
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_indexed_source_and_contract_mismatches_are_not_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        current_source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=3, page_count=1)
+        wrong_source = OCRInput(pdf_sha256="e" * 64, pdf_size_bytes=3, page_count=1)
+        write_document_local_native(
+            resolver,
+            documents_root / f"doc_{'a' * 64}" / "ocr",
+            source=wrong_source,
+        )
+        wrong_provider = FakeProvider()
+        wrong_provider.model = "different-model"
+        wrong_resolver = OCRResolver(
+            provider=wrong_provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+            cache_mode="read-only",
+        )  # type: ignore[arg-type]
+        write_document_local_native(
+            wrong_resolver,
+            documents_root / f"doc_{'b' * 64}" / "ocr",
+            source=current_source,
+        )
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        pending_id = f"doc_{'c' * 64}"
+
+        result = await resolver.resolve(
+            run_id="run",
+            document_id=pending_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / pending_id / "ocr",
+        )
+
+        assert provider.calls == [1]
+        assert wrong_provider.calls == []
+        assert result.provider_called is True
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize("leaf_name", ["ocr.md", "native-manifest.json"])
+@pytest.mark.asyncio
+async def test_symlinked_document_local_seal_leaf_is_ignored_without_outside_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leaf_name: str,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+        candidate = documents_root / f"doc_{'a' * 64}" / "ocr"
+        write_document_local_native(resolver, candidate)
+        outside = tmp_path / f"outside-{leaf_name}"
+        outside.write_bytes(b"SECRET_OUTSIDE_UNTRUSTED_BYTES")
+        (candidate / leaf_name).unlink()
+        (candidate / leaf_name).symlink_to(outside)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        pending_id = f"doc_{'b' * 64}"
+
+        result = await resolver.resolve(
+            run_id="run",
+            document_id=pending_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / pending_id / "ocr",
+        )
+
+        assert provider.calls == [1]
+        assert result.provider_called is True
+        assert outside.read_bytes() == b"SECRET_OUTSIDE_UNTRUSTED_BYTES"
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_adopted_remote_result_is_never_registered_for_cross_document_native_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    try:
+        state.start_run(run_id="run")
+        first_id = f"doc_{'a' * 64}"
+        second_id = f"doc_{'b' * 64}"
+        adopted_key = cache_v1_adopted(resolver, webdav, document_id=first_id)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        documents_root = tmp_path / "runs" / "run" / "documents"
+
+        adopted = await resolver.resolve(
+            run_id="run",
+            document_id=first_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / first_id / "ocr",
+        )
+        generated = await resolver.resolve(
+            run_id="run",
+            document_id=second_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / second_id / "ocr",
+        )
+
+        assert (adopted.cache_kind, adopted.cache_reuse_key) == ("adopted", adopted_key)
+        assert provider.calls == [1]
+        assert generated.provider_called is True
         assert webdav.publish_calls == {"cas": 0, "manifest": 0, "ready": 0}
     finally:
         state.close()
