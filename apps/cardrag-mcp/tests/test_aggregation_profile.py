@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+import numpy as np
 import pytest
+from pydantic import ValidationError
 
+import cardrag_mcp.aggregation_profile as aggregation_module
 from cardrag_mcp.aggregation_profile import (
     CONTRACT_PLUS_CHILD,
     MAX_CHILD,
+    MAX_PORTABLE_ARTIFACT_BYTES,
+    MAX_SCORE_COUNT,
     REQUIRED_AGGREGATION_SLICES,
     SCORE_ARTIFACT_SCHEMA_VERSION,
     TOP3_MEAN,
     AggregationProfileError,
+    ArtifactBinding,
+    ScoreArtifactManifest,
     build_aggregation_profile,
+    open_score_artifact,
     validate_aggregation_profile,
 )
 
@@ -23,6 +34,14 @@ SHA_A = "a" * 64
 SOURCE_COMMIT = "1" * 40
 EMBEDDING_PROFILE_ID = "cardrag.qwen3-embedding-8b.deepinfra.test"
 ROOT = Path(__file__).resolve().parents[3]
+
+
+@dataclass(frozen=True, slots=True)
+class ScorePaths:
+    scores: Path
+    inventory: Path
+    matrix: Path
+    vectors: Path
 
 
 def _canonical(value: object) -> bytes:
@@ -41,6 +60,162 @@ def _write_jsonl(path: Path, records: Sequence[dict[str, Any]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _binding(payload: bytes) -> dict[str, object]:
+    return {"sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload)}
+
+
+@pytest.mark.parametrize("reader_kind", ("whole", "jsonl", "mapped"))
+def test_profile_readers_reject_same_inode_growth_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_kind: str,
+) -> None:
+    target = tmp_path / "race.jsonl"
+    payload = _canonical({}) + b"\n"
+    target.write_bytes(payload)
+    original_inode = target.stat().st_ino
+    original_open = aggregation_module.os.open
+    read_calls = 0
+    fdopen_calls = 0
+    raced = False
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == target:
+            raced = True
+            with target.open("ab") as stream:
+                stream.write(payload)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def forbidden_read(descriptor: int, count: int) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        raise AssertionError("read must not run after the opened-size preflight fails")
+
+    def forbidden_fdopen(*args: object, **kwargs: object) -> object:
+        nonlocal fdopen_calls
+        fdopen_calls += 1
+        raise AssertionError("fdopen must not run after the opened identity check fails")
+
+    monkeypatch.setattr(aggregation_module.os, "open", racing_open)
+    if reader_kind == "whole":
+        monkeypatch.setattr(aggregation_module.os, "read", forbidden_read)
+        with pytest.raises(AggregationProfileError, match="fixture_size_invalid"):
+            aggregation_module._read_regular(
+                target,
+                maximum_bytes=len(payload),
+                error_prefix="fixture",
+            )
+    elif reader_kind == "jsonl":
+        monkeypatch.setattr(aggregation_module.os, "fdopen", forbidden_fdopen)
+        with pytest.raises(AggregationProfileError, match="fixture_changed_during_read"):
+            with aggregation_module._ScoreLineReader(target, code="fixture"):
+                pass
+    else:
+        binding = ArtifactBinding(
+            sha256=hashlib.sha256(payload).hexdigest(),
+            size_bytes=len(payload),
+        )
+        with pytest.raises(AggregationProfileError, match="fixture_changed_during_open"):
+            with aggregation_module._MappedArtifact(target, binding, code="fixture"):
+                pass
+
+    assert raced
+    assert target.stat().st_ino == original_inode
+    assert read_calls == 0
+    assert fdopen_calls == 0
+
+
+def test_score_line_reader_enforces_running_artifact_cap(tmp_path: Path) -> None:
+    target = tmp_path / "bounded.jsonl"
+    payload = _canonical({}) + b"\n"
+    target.write_bytes(payload)
+
+    original_limit = aggregation_module.MAX_SCORE_ARTIFACT_BYTES
+    aggregation_module.MAX_SCORE_ARTIFACT_BYTES = len(payload)
+    try:
+        with aggregation_module._ScoreLineReader(target, code="fixture") as reader:
+            assert reader.next_record() == {}
+            original_stream = reader._stream
+            injected = io.BytesIO(payload)
+            reader._stream = injected
+            with pytest.raises(AggregationProfileError, match="fixture_size_invalid"):
+                reader.next_record()
+            injected.close()
+            reader._stream = original_stream
+            assert reader.next_record() is None
+    finally:
+        aggregation_module.MAX_SCORE_ARTIFACT_BYTES = original_limit
+
+
+def test_profile_readers_accept_stable_two_link_snapshot(tmp_path: Path) -> None:
+    target = tmp_path / "artifact.jsonl"
+    linked = tmp_path / "artifact-hardlink.jsonl"
+    payload = _canonical({}) + b"\n"
+    target.write_bytes(payload)
+    os.link(target, linked)
+    assert target.stat().st_nlink == linked.stat().st_nlink == 2
+
+    assert (
+        aggregation_module._read_regular(
+            linked,
+            maximum_bytes=len(payload),
+            error_prefix="fixture",
+        )
+        == payload
+    )
+    with aggregation_module._ScoreLineReader(linked, code="fixture") as reader:
+        assert reader.next_record() == {}
+        assert reader.next_record() is None
+    binding = ArtifactBinding(
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+    with aggregation_module._MappedArtifact(linked, binding, code="fixture"):
+        pass
+
+
+@pytest.mark.parametrize("reader_kind", ("jsonl", "mapped"))
+def test_profile_context_readers_check_current_path_when_body_raises(
+    tmp_path: Path,
+    reader_kind: str,
+) -> None:
+    target = tmp_path / "artifact.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    payload = _canonical({}) + b"\n"
+    target.write_bytes(payload)
+    replacement.write_bytes(payload)
+    binding = ArtifactBinding(
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+
+    with pytest.raises(AggregationProfileError, match="fixture_changed_during_read"):
+        if reader_kind == "jsonl":
+            with aggregation_module._ScoreLineReader(target, code="fixture"):
+                replacement.replace(target)
+                raise RuntimeError("consumer failed after replacing the pathname")
+        else:
+            with aggregation_module._MappedArtifact(target, binding, code="fixture"):
+                replacement.replace(target)
+                raise RuntimeError("consumer failed after replacing the pathname")
+
+
+def _score_paths(root: Path) -> ScorePaths:
+    return ScorePaths(
+        scores=root / "scores.jsonl",
+        inventory=root / "inventory.jsonl",
+        matrix=root / "scores.f32",
+        vectors=root / "query-vectors.f32",
+    )
+
+
 def _gold_query(index: int, slices: Sequence[str], *, no_answer: bool = False) -> dict[str, Any]:
     query_id = f"query-{index:03d}"
     if no_answer:
@@ -57,7 +232,7 @@ def _gold_query(index: int, slices: Sequence[str], *, no_answer: bool = False) -
             "slices": sorted(set(slices).union({"no_answer"})),
             "spans": [],
         }
-    relevant = f"relevant-{index:03d}"
+    relevant = "relevant"
     first_span = {
         "contract_revision_id": relevant,
         "page": 1,
@@ -86,10 +261,7 @@ def _gold_query(index: int, slices: Sequence[str], *, no_answer: bool = False) -
         }
         spans.append(condition_span)
         condition_groups.append(
-            {
-                "at_k": 10,
-                "span_ids": [first_span["span_id"], condition_span["span_id"]],
-            }
+            {"at_k": 10, "span_ids": [first_span["span_id"], condition_span["span_id"]]}
         )
         expected_numeric_facts.append("월 10,000원")
         expected_revision_ids.append(relevant)
@@ -114,108 +286,152 @@ def _write_gold(path: Path, *, count: int, release: bool) -> str:
     for index in range(count):
         if release and index == 0:
             records.append(_gold_query(index, ["no_answer"], no_answer=True))
-            continue
-        slices = [required[(index - 1) % len(required)]] if release else ["benefit"]
-        records.append(_gold_query(index, slices))
+        else:
+            slices = [required[(index - 1) % len(required)]] if release else ["benefit"]
+            records.append(_gold_query(index, slices))
     return _write_jsonl(path, records)
 
 
-def _score_rows(query_id: str, index: int, *, first_ordinal: int = 0) -> list[dict[str, Any]]:
+def _inventory_rows() -> tuple[list[dict[str, Any]], np.ndarray[Any, Any]]:
     contracts = (
-        (f"relevant-{index:03d}", 1.0, (0.5, 0.5, 0.5)),
-        (f"distractor-a-{index:03d}", -1.0, (0.9, 0.9, 0.9)),
-        (f"distractor-b-{index:03d}", -0.9, (0.8, 0.8, 0.8)),
+        ("relevant", 1.0, (0.5, 0.5, 0.5)),
+        ("distractor-a", -1.0, (0.9, 0.9, 0.9)),
+        ("distractor-b", -0.9, (0.8, 0.8, 0.8)),
     )
-    records: list[dict[str, Any]] = []
-    ordinal = first_ordinal
-    row_index = 0
+    rows: list[dict[str, Any]] = []
+    scores: list[float] = []
     for contract_id, contract_score, children in contracts:
-        records.append(
+        rows.append(
             {
                 "contract_revision_id": contract_id,
                 "embedding_profile_id": EMBEDDING_PROFILE_ID,
                 "input_sha256": SHA_A,
                 "node_id": f"{contract_id}:contract",
-                "ordinal": ordinal,
-                "query_id": query_id,
-                "row_index": row_index,
-                "schema_version": "cardrag.document-aggregation-row-score.v1",
-                "score": contract_score,
+                "ordinal": len(rows),
+                "row_index": len(rows),
+                "schema_version": "cardrag.document-aggregation-corpus-row.v1",
                 "view_type": "CONTRACT",
             }
         )
-        ordinal += 1
-        row_index += 1
+        scores.append(contract_score)
         for child_index, child_score in enumerate(children):
-            records.append(
+            rows.append(
                 {
                     "contract_revision_id": contract_id,
                     "embedding_profile_id": EMBEDDING_PROFILE_ID,
                     "input_sha256": SHA_A,
                     "node_id": f"{contract_id}:child:{child_index}",
-                    "ordinal": ordinal,
-                    "query_id": query_id,
-                    "row_index": row_index,
-                    "schema_version": "cardrag.document-aggregation-row-score.v1",
-                    "score": child_score,
+                    "ordinal": len(rows),
+                    "row_index": len(rows),
+                    "schema_version": "cardrag.document-aggregation-corpus-row.v1",
                     "view_type": "RAW_ITEM",
                 }
             )
-            ordinal += 1
-            row_index += 1
-    return records
+            scores.append(child_score)
+    return rows, np.asarray(scores, dtype="<f4")
 
 
 def _write_scores(
-    path: Path,
+    paths: ScorePaths,
     gold_path: Path,
     *,
     count: int,
     generation_manifest_sha256: str,
+    validation_profile: Literal["release_grade", "fixture_only"] = "fixture_only",
 ) -> list[dict[str, Any]]:
-    gold_sha256 = hashlib.sha256(gold_path.read_bytes()).hexdigest()
+    inventory_rows, one_query_scores = _inventory_rows()
+    inventory_manifest = {
+        "corpus_row_count": len(inventory_rows),
+        "embedding_profile_id": EMBEDDING_PROFILE_ID,
+        "exact_row_corpus_sha256": "d" * 64,
+        "generation_id": "generation-v110-test",
+        "schema_version": "cardrag.document-aggregation-corpus-inventory.v1",
+        "serving_database_sha256": "b" * 64,
+        "vector_sidecar_sha256": "c" * 64,
+    }
+    inventory_payload = b"".join(
+        _canonical(record) + b"\n" for record in [inventory_manifest, *inventory_rows]
+    )
+    paths.inventory.write_bytes(inventory_payload)
+    score_payload = np.tile(one_query_scores, count).astype("<f4", copy=False).tobytes()
+    paths.matrix.write_bytes(score_payload)
+    vectors: list[bytes] = []
+    for index in range(count):
+        vector = np.zeros((4096,), dtype="<f4")
+        vector[index % 4096] = 1.0
+        vectors.append(vector.tobytes())
+    vector_payload = b"".join(vectors)
+    paths.vectors.write_bytes(vector_payload)
     records: list[dict[str, Any]] = [
         {
             "approximate": False,
+            "byte_order": "little-endian",
+            "corpus_inventory": _binding(inventory_payload),
+            "corpus_row_count": len(inventory_rows),
             "embedding_dimension": 4096,
             "embedding_model": "qwen/qwen3-embedding-8b",
             "embedding_profile_id": EMBEDDING_PROFILE_ID,
             "exact": True,
+            "exact_row_corpus_sha256": "d" * 64,
             "generation_id": "generation-v110-test",
             "generation_manifest_sha256": generation_manifest_sha256,
-            "gold_sha256": gold_sha256,
-            "serving_database_sha256": "b" * 64,
-            "vector_sidecar_sha256": "c" * 64,
-            "exact_row_corpus_sha256": "d" * 64,
+            "gold_sha256": hashlib.sha256(gold_path.read_bytes()).hexdigest(),
+            "matrix_order": "row-major",
             "query_count": count,
-            "row_count": count * 12,
+            "query_vector_matrix": _binding(vector_payload),
             "runtime_document_aggregation_policy": "max_child",
             "runtime_document_aggregation_status": "candidate_default",
+            "scalar_type": "float32",
             "schema_version": SCORE_ARTIFACT_SCHEMA_VERSION,
+            "score_count": count * len(inventory_rows),
+            "score_matrix": _binding(score_payload),
             "scoring_contract": "cardrag.v5-exact-row-score.v1",
+            "serving_database_sha256": "b" * 64,
             "source_commit": SOURCE_COMMIT,
             "temporal_scope_policy": "gold-query.v1",
+            "validation_profile": validation_profile,
+            "vector_sidecar_sha256": "c" * 64,
         }
     ]
     for index in range(count):
-        query_id = f"query-{index:03d}"
         question = (
             f"정답 없음 질문 {index}" if index == 0 and count >= 300 else f"카드 혜택 질문 {index}"
         )
+        segment_start = index * len(inventory_rows) * 4
+        segment_end = (index + 1) * len(inventory_rows) * 4
+        score_segment = score_payload[segment_start:segment_end]
         records.append(
             {
                 "active_contracts": 3,
-                "expected_rows": 12,
-                "query_id": query_id,
+                "expected_rows": len(inventory_rows),
+                "ordinal": index,
+                "query_id": f"query-{index:03d}",
                 "query_sha256": hashlib.sha256(question.encode()).hexdigest(),
-                "query_vector_sha256": hashlib.sha256(f"query-vector-{index}".encode()).hexdigest(),
-                "schema_version": "cardrag.document-aggregation-query-coverage.v1",
-                "scored_rows": 12,
+                "query_vector_count": 4096,
+                "query_vector_offset_bytes": index * 4096 * 4,
+                "query_vector_sha256": hashlib.sha256(vectors[index]).hexdigest(),
+                "query_vector_size_bytes": 4096 * 4,
+                "schema_version": "cardrag.document-aggregation-query-coverage.v2",
+                "score_count": len(inventory_rows),
+                "score_offset_bytes": index * len(inventory_rows) * 4,
+                "score_sha256": hashlib.sha256(score_segment).hexdigest(),
+                "score_size_bytes": len(inventory_rows) * 4,
+                "scored_rows": len(inventory_rows),
             }
         )
-        records.extend(_score_rows(query_id, index))
-    _write_jsonl(path, records)
+    _write_jsonl(paths.scores, records)
     return records
+
+
+def _profile(paths: ScorePaths, gold: Path, **kwargs: Any) -> Any:
+    return build_aggregation_profile(
+        gold,
+        paths.scores,
+        paths.inventory,
+        paths.matrix,
+        paths.vectors,
+        **kwargs,
+    )
 
 
 def _generation_manifest(directory: Path) -> str:
@@ -229,67 +445,50 @@ def _generation_manifest(directory: Path) -> str:
 def test_three_aggregation_policies_are_deterministic_and_fixture_is_not_release_ready(
     tmp_path: Path,
 ) -> None:
-    gold_path = tmp_path / "gold.jsonl"
-    scores_path = tmp_path / "scores.jsonl"
-    _write_gold(gold_path, count=3, release=False)
-    generation_sha256 = hashlib.sha256(b"generation").hexdigest()
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=3, release=False)
     _write_scores(
-        scores_path,
-        gold_path,
+        paths,
+        gold,
         count=3,
-        generation_manifest_sha256=generation_sha256,
+        generation_manifest_sha256=hashlib.sha256(b"generation").hexdigest(),
     )
 
-    first = build_aggregation_profile(
-        gold_path,
-        scores_path,
-        release_gate=False,
-        bootstrap_samples=100,
-        bootstrap_seed=7,
-    )
-    second = build_aggregation_profile(
-        gold_path,
-        scores_path,
-        release_gate=False,
-        bootstrap_samples=100,
-        bootstrap_seed=7,
-    )
+    first = _profile(paths, gold, release_gate=False, bootstrap_samples=100, bootstrap_seed=7)
+    second = _profile(paths, gold, release_gate=False, bootstrap_samples=100, bootstrap_seed=7)
 
     assert first.canonical_bytes == second.canonical_bytes
     assert set(first.payload["definitions"]) == {MAX_CHILD, TOP3_MEAN, CONTRACT_PLUS_CHILD}
     assert first.payload["selection"]["winner"] == CONTRACT_PLUS_CHILD
-    assert first.payload["release_gate"] == {
-        "evaluated": False,
-        "failure_reasons": [],
-        "status": "not_evaluated",
-    }
+    assert first.payload["release_gate"]["status"] == "not_evaluated"
     assert first.payload["sealed_profile"] is None
-    assert first.payload["sealed_profile_sha256"] is None
-    contract_ndcg = first.payload["policies"][CONTRACT_PLUS_CHILD]["overall"]["ndcg_at_10"]
-    max_child_ndcg = first.payload["policies"][MAX_CHILD]["overall"]["ndcg_at_10"]
-    assert contract_ndcg["value"] == 1.0
-    assert contract_ndcg["value"] > max_child_ndcg["value"]
+    assert (
+        first.payload["policies"][CONTRACT_PLUS_CHILD]["overall"]["ndcg_at_10"]["value"]
+        > first.payload["policies"][MAX_CHILD]["overall"]["ndcg_at_10"]["value"]
+    )
 
 
-def test_release_profile_is_hash_bound_recomputed_and_passes_only_with_full_gold(
+def test_release_profile_is_hash_bound_recomputed_and_passes_only_with_release_evidence(
     tmp_path: Path,
 ) -> None:
-    gold_path = tmp_path / "gold.jsonl"
-    scores_path = tmp_path / "scores.jsonl"
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
     profile_path = tmp_path / "profile.json"
     manifests = tmp_path / "generation-manifests"
     generation_sha256 = _generation_manifest(manifests)
-    gold_sha256 = _write_gold(gold_path, count=300, release=True)
+    gold_sha256 = _write_gold(gold, count=300, release=True)
     _write_scores(
-        scores_path,
-        gold_path,
+        paths,
+        gold,
         count=300,
         generation_manifest_sha256=generation_sha256,
+        validation_profile="release_grade",
     )
 
-    artifact = build_aggregation_profile(
-        gold_path,
-        scores_path,
+    artifact = _profile(
+        paths,
+        gold,
         expected_gold_sha256=gold_sha256,
         expected_source_commit=SOURCE_COMMIT,
         bootstrap_samples=2_000,
@@ -297,141 +496,238 @@ def test_release_profile_is_hash_bound_recomputed_and_passes_only_with_full_gold
     )
     profile_bytes = artifact.canonical_bytes + b"\n"
     profile_path.write_bytes(profile_bytes)
-    profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
-
-    assert artifact.payload["release_gate"]["status"] == "passed"
-    assert artifact.payload["selection"]["winner"] == CONTRACT_PLUS_CHILD
-    sealed = artifact.payload["sealed_profile"]
-    assert sealed["aggregation_policy"] == CONTRACT_PLUS_CHILD
-    assert (
-        artifact.payload["sealed_profile_sha256"] == hashlib.sha256(_canonical(sealed)).hexdigest()
-    )
     validated = validate_aggregation_profile(
         profile_path,
-        gold_path,
-        scores_path,
+        gold,
+        paths.scores,
+        paths.inventory,
+        paths.matrix,
+        paths.vectors,
         manifests,
-        expected_profile_sha256=profile_sha256,
+        expected_profile_sha256=hashlib.sha256(profile_bytes).hexdigest(),
         expected_source_commit=SOURCE_COMMIT,
         bootstrap_samples=2_000,
         bootstrap_seed=1010,
     )
+
+    assert artifact.payload["release_gate"]["status"] == "passed"
+    assert artifact.payload["selection"]["winner"] == CONTRACT_PLUS_CHILD
     assert validated.canonical_bytes == artifact.canonical_bytes
 
 
-def test_incomplete_coverage_and_non_float_scores_fail_closed(tmp_path: Path) -> None:
-    gold_path = tmp_path / "gold.jsonl"
-    scores_path = tmp_path / "scores.jsonl"
-    _write_gold(gold_path, count=1, release=False)
-    generation_sha256 = hashlib.sha256(b"generation").hexdigest()
-    records = _write_scores(
-        scores_path,
-        gold_path,
-        count=1,
-        generation_manifest_sha256=generation_sha256,
-    )
-
-    incomplete = [dict(record) for record in records]
-    incomplete[1]["expected_rows"] = 13
-    _write_jsonl(scores_path, incomplete)
-    with pytest.raises(AggregationProfileError, match="score_query_coverage_incomplete"):
-        build_aggregation_profile(
-            gold_path,
-            scores_path,
-            release_gate=False,
-            bootstrap_samples=100,
-        )
-
-    invalid_score = [dict(record) for record in records]
-    invalid_score[2]["score"] = True
-    _write_jsonl(scores_path, invalid_score)
-    with pytest.raises(AggregationProfileError, match="score_row_invalid"):
-        build_aggregation_profile(
-            gold_path,
-            scores_path,
-            release_gate=False,
-            bootstrap_samples=100,
-        )
-
-
-def test_score_artifact_is_canonical_profile_bound_and_symlink_safe(tmp_path: Path) -> None:
-    gold_path = tmp_path / "gold.jsonl"
-    scores_path = tmp_path / "scores.jsonl"
-    link_path = tmp_path / "scores-link.jsonl"
-    _write_gold(gold_path, count=1, release=False)
+def test_fixture_profile_can_never_be_a_release_trust_root(tmp_path: Path) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    gold_sha = _write_gold(gold, count=300, release=True)
     _write_scores(
-        scores_path,
-        gold_path,
-        count=1,
-        generation_manifest_sha256=hashlib.sha256(b"generation").hexdigest(),
+        paths,
+        gold,
+        count=300,
+        generation_manifest_sha256="e" * 64,
+        validation_profile="fixture_only",
     )
+    with pytest.raises(AggregationProfileError, match="score_validation_profile_not_release_grade"):
+        _profile(
+            paths,
+            gold,
+            expected_gold_sha256=gold_sha,
+            expected_source_commit=SOURCE_COMMIT,
+            bootstrap_samples=2_000,
+        )
 
+
+def test_legacy_v1_score_artifact_is_rejected_even_in_fixture_mode(tmp_path: Path) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=1, release=False)
+    records = _write_scores(paths, gold, count=1, generation_manifest_sha256="e" * 64)
+    records[0]["schema_version"] = "cardrag.document-aggregation-score-artifact.v1"
+    _write_jsonl(paths.scores, records)
+    with pytest.raises(AggregationProfileError, match="score_manifest_invalid"):
+        _profile(paths, gold, release_gate=False, bootstrap_samples=100)
+
+
+def test_reader_preserves_one_ulp_and_rejects_truncation_trailing_and_segment_swap(
+    tmp_path: Path,
+) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=2, release=False)
+    records = _write_scores(paths, gold, count=2, generation_manifest_sha256="e" * 64)
+    values = np.frombuffer(paths.matrix.read_bytes(), dtype="<f4").copy()
+    values[0] = np.nextafter(values[0], np.float32(0.0), dtype=np.float32)
+    payload = values.astype("<f4", copy=False).tobytes()
+    paths.matrix.write_bytes(payload)
+    records[0]["score_matrix"] = _binding(payload)
+    segment_size = int(records[1]["score_size_bytes"])
+    records[1]["score_sha256"] = hashlib.sha256(payload[:segment_size]).hexdigest()
+    _write_jsonl(paths.scores, records)
+    with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors) as opened:
+        actual = opened.scores_for(0)
+        assert actual[0].tobytes() == values[0].tobytes()
+        del actual
+
+    paths.matrix.write_bytes(payload[:-1])
+    with pytest.raises(AggregationProfileError, match="score_matrix_size_mismatch"):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
+    paths.matrix.write_bytes(payload + b"\0")
+    with pytest.raises(AggregationProfileError, match="score_matrix_size_mismatch"):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
+
+    swapped = payload[segment_size:] + payload[:segment_size]
+    paths.matrix.write_bytes(swapped)
+    records[0]["score_matrix"] = _binding(swapped)
+    _write_jsonl(paths.scores, records)
+    with pytest.raises(AggregationProfileError, match="score_matrix_segment_sha256_mismatch"):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
+
+
+def test_inventory_and_query_vector_tamper_fail_closed(tmp_path: Path) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=1, release=False)
+    records = _write_scores(paths, gold, count=1, generation_manifest_sha256="e" * 64)
+    inventory = paths.inventory.read_bytes().replace(b'"row_index":0', b'"row_index":9', 1)
+    paths.inventory.write_bytes(inventory)
+    with pytest.raises(AggregationProfileError, match="corpus_inventory_row_order_invalid"):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
+
+    _write_scores(paths, gold, count=1, generation_manifest_sha256="e" * 64)
+    bad_vector = np.zeros((4096,), dtype="<f4").tobytes()
+    paths.vectors.write_bytes(bad_vector)
+    records[0]["query_vector_matrix"] = _binding(bad_vector)
+    records[1]["query_vector_sha256"] = hashlib.sha256(bad_vector).hexdigest()
+    _write_jsonl(paths.scores, records)
+    with pytest.raises(AggregationProfileError, match="query_vector_norm_invalid"):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
+
+
+@pytest.mark.parametrize("invalid", [np.float32(np.nan), np.float32(1.0000001)])
+def test_score_matrix_rejects_non_finite_and_out_of_range_float32(
+    tmp_path: Path,
+    invalid: np.float32,
+) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=1, release=False)
+    records = _write_scores(paths, gold, count=1, generation_manifest_sha256="e" * 64)
+    scores = np.frombuffer(paths.matrix.read_bytes(), dtype="<f4").copy()
+    scores[0] = invalid
+    payload = scores.astype("<f4", copy=False).tobytes()
+    paths.matrix.write_bytes(payload)
+    records[0]["score_matrix"] = _binding(payload)
+    records[1]["score_sha256"] = hashlib.sha256(payload).hexdigest()
+    _write_jsonl(paths.scores, records)
+    with pytest.raises(AggregationProfileError, match="score_matrix_value_invalid"):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
+
+
+def test_schema_caps_reject_oversized_shape_without_allocating() -> None:
+    base: dict[str, Any] = {
+        "approximate": False,
+        "byte_order": "little-endian",
+        "corpus_inventory": {"sha256": "a" * 64, "size_bytes": 1},
+        "corpus_row_count": MAX_SCORE_COUNT + 1,
+        "embedding_dimension": 4096,
+        "embedding_model": "qwen/qwen3-embedding-8b",
+        "embedding_profile_id": EMBEDDING_PROFILE_ID,
+        "exact": True,
+        "exact_row_corpus_sha256": "d" * 64,
+        "generation_id": "generation-v110-test",
+        "generation_manifest_sha256": "e" * 64,
+        "gold_sha256": "f" * 64,
+        "matrix_order": "row-major",
+        "query_count": 1,
+        "query_vector_matrix": {"sha256": "1" * 64, "size_bytes": 4096 * 4},
+        "runtime_document_aggregation_policy": "max_child",
+        "runtime_document_aggregation_status": "candidate_default",
+        "scalar_type": "float32",
+        "schema_version": SCORE_ARTIFACT_SCHEMA_VERSION,
+        "score_count": MAX_SCORE_COUNT + 1,
+        "score_matrix": {
+            "sha256": "2" * 64,
+            "size_bytes": MAX_PORTABLE_ARTIFACT_BYTES,
+        },
+        "scoring_contract": "cardrag.v5-exact-row-score.v1",
+        "serving_database_sha256": "b" * 64,
+        "source_commit": SOURCE_COMMIT,
+        "temporal_scope_policy": "gold-query.v1",
+        "validation_profile": "fixture_only",
+        "vector_sidecar_sha256": "c" * 64,
+    }
+    with pytest.raises(ValidationError):
+        ScoreArtifactManifest.model_validate(base)
+    with pytest.raises(ValidationError):
+        ArtifactBinding(sha256="a" * 64, size_bytes=MAX_PORTABLE_ARTIFACT_BYTES + 1)
+
+
+def test_artifact_is_canonical_source_bound_and_symlink_safe(tmp_path: Path) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=1, release=False)
+    _write_scores(paths, gold, count=1, generation_manifest_sha256="e" * 64)
     with pytest.raises(AggregationProfileError, match="candidate_source_commit_mismatch"):
-        build_aggregation_profile(
-            gold_path,
-            scores_path,
+        _profile(
+            paths,
+            gold,
             release_gate=False,
             expected_source_commit="2" * 40,
             bootstrap_samples=100,
         )
-    with pytest.raises(AggregationProfileError, match="expected_source_commit_invalid"):
-        build_aggregation_profile(
-            gold_path,
-            scores_path,
-            release_gate=False,
-            expected_source_commit="not-a-commit",
-            bootstrap_samples=100,
-        )
-    link_path.symlink_to(scores_path)
-
+    link = tmp_path / "scores-link.jsonl"
+    link.symlink_to(paths.scores)
     with pytest.raises(AggregationProfileError, match="score_artifact_not_regular"):
-        build_aggregation_profile(
-            gold_path,
-            link_path,
-            release_gate=False,
-            bootstrap_samples=100,
-        )
-
-    rows = scores_path.read_bytes().splitlines(keepends=True)
-    rows[2] = rows[2].replace(b'"node_id":', b'"node_id" :')
-    scores_path.write_bytes(b"".join(rows))
+        with open_score_artifact(link, paths.inventory, paths.matrix, paths.vectors):
+            pass
+    lines = paths.scores.read_bytes().splitlines(keepends=True)
+    lines[1] = lines[1].replace(b'"query_id":', b'"query_id" :')
+    paths.scores.write_bytes(b"".join(lines))
     with pytest.raises(AggregationProfileError, match="score_not_canonical_bytes"):
-        build_aggregation_profile(
-            gold_path,
-            scores_path,
-            release_gate=False,
-            bootstrap_samples=100,
-        )
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            pass
 
 
-def test_release_workflow_recomputes_the_external_hash_bound_profile() -> None:
+@pytest.mark.parametrize(
+    ("target_name", "error"),
+    [
+        ("scores", "score_artifact_changed_during_read"),
+        ("inventory", "corpus_inventory_changed_during_read"),
+    ],
+)
+def test_json_evidence_path_replacement_is_detected_at_context_exit(
+    tmp_path: Path,
+    target_name: str,
+    error: str,
+) -> None:
+    gold = tmp_path / "gold.jsonl"
+    paths = _score_paths(tmp_path)
+    _write_gold(gold, count=1, release=False)
+    _write_scores(paths, gold, count=1, generation_manifest_sha256="e" * 64)
+    target = getattr(paths, target_name)
+    original = target.read_bytes()
+    displaced = tmp_path / f"{target.name}.displaced"
+    with pytest.raises(AggregationProfileError, match=error):
+        with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
+            target.replace(displaced)
+            target.write_bytes(original)
+
+
+def test_release_workflow_names_all_compact_profile_inputs() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     for contract in (
         "aggregation_profile_sha256:",
-        "AGGREGATION_PROFILE_SHA256: ${{ inputs.aggregation_profile_sha256 }}",
         'aggregation_profile="$evidence_dir/document-aggregation-profile.json"',
         'aggregation_scores="$evidence_dir/document-aggregation-scores.jsonl"',
-        'serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"',
         ".venv/bin/python -m cardrag_mcp.aggregation_profile",
         '--scores "$aggregation_scores"',
         '--validate-profile "$aggregation_profile"',
-        '--expected-profile-sha256 "$AGGREGATION_PROFILE_SHA256"',
-        '--generation-manifest-dir "$evidence_dir/generation-manifests"',
-        '--serving-generation-manifest "$serving_generation_manifest"',
         "--bootstrap-samples 2000",
         "--bootstrap-seed 1010",
     ):
         assert contract in workflow
-    for source_binding in (
-        "candidate_source_commit:",
-        "CANDIDATE_SOURCE_COMMIT: ${{ inputs.candidate_source_commit }}",
-        '[[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]',
-        'test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"',
-        'git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
-        'git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
-        "((${#candidate_evidence_paths[@]} > 0))",
-        "release-evidence/v1.0.10/*) ;;",
-    ):
-        assert source_binding in workflow
-    assert workflow.count('--expected-source-commit "$CANDIDATE_SOURCE_COMMIT"') >= 3
-    assert '--expected-source-commit "$GITHUB_SHA"' not in workflow

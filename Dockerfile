@@ -44,10 +44,13 @@ FROM ${PYTHON_DEV_IMAGE} AS runtime-layout
 USER 0
 RUN addgroup -S -g 10001 cardrag && \
     adduser -S -D -H -u 10001 -G cardrag -h /nonexistent -s /sbin/nologin cardrag && \
-    mkdir -p /usr/share/doc/cardrag /var/lib/cardrag-worker /var/lib/cardrag-mcp && \
-    chown 10001:10001 /var/lib/cardrag-worker /var/lib/cardrag-mcp && \
+    mkdir -p /usr/share/doc/cardrag /var/lib/cardrag-worker \
+      /var/lib/cardrag-codex-home/home /var/lib/cardrag-mcp && \
+    chown -R 10001:10001 /var/lib/cardrag-worker \
+      /var/lib/cardrag-codex-home /var/lib/cardrag-mcp && \
     chmod 0755 /usr/share/doc/cardrag && \
-    chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-mcp
+    chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-codex-home \
+      /var/lib/cardrag-codex-home/home /var/lib/cardrag-mcp
 USER 10001:10001
 
 
@@ -125,7 +128,9 @@ LABEL org.opencontainers.image.title="CardRAG Worker" \
 COPY --from=worker-build /opt/cardrag /opt/cardrag
 COPY --from=runtime-layout --chown=10001:10001 \
   /var/lib/cardrag-worker /var/lib/cardrag-worker
-VOLUME ["/var/lib/cardrag-worker"]
+COPY --from=runtime-layout --chown=10001:10001 \
+  /var/lib/cardrag-codex-home /var/lib/cardrag-codex-home
+VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home"]
 ENTRYPOINT ["cardrag-worker"]
 CMD ["run"]
 

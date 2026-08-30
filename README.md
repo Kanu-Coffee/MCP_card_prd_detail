@@ -45,6 +45,7 @@ WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable c
 | WebDAV channel | `candidate-v1.0.10` |
 | Compose project | `cardrag-v110-candidate` |
 | Worker volume | `cardrag-worker-v110-state` |
+| Codex auth volume | `cardrag-worker-v110-codex-home` |
 | MCP volume | `cardrag-mcp-v110-state` |
 | MCP bind | `127.0.0.1:18010` |
 

@@ -79,7 +79,9 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
 
     assert "addgroup -S -g 10001 cardrag" in layout
     assert "adduser -S -D -H -u 10001 -G cardrag" in layout
-    assert "chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-mcp" in layout
+    assert "/var/lib/cardrag-codex-home/home" in layout
+    assert "chown -R 10001:10001 /var/lib/cardrag-worker" in layout
+    assert "chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-codex-home" in layout
     assert "bubblewrap=0.11.2-r0" in worker_runtime
     assert "libcap=2.78-r0" in worker_runtime
     assert "apk upgrade" not in worker_runtime
@@ -94,6 +96,8 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     assert "codex --version" in worker_runtime
     assert "USER 10001:10001" in worker_runtime
     assert "/var/lib/cardrag-worker /var/lib/cardrag-worker" in worker
+    assert "/var/lib/cardrag-codex-home /var/lib/cardrag-codex-home" in worker
+    assert 'VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home"]' in worker
     assert 'org.opencontainers.image.title="CardRAG Worker"' in worker
     assert 'ENTRYPOINT ["cardrag-worker"]' in worker
     assert 'CMD ["run"]' in worker

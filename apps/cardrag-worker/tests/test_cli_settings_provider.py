@@ -931,6 +931,35 @@ def test_worker_settings_preserves_unresolved_state_path_for_symlink_gate(
     assert settings.state_dir != configured.resolve()
 
 
+@pytest.mark.parametrize("relative_auth_root", (".", "codex", "home/codex"))
+def test_worker_settings_rejects_codex_auth_inside_worker_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_auth_root: str,
+) -> None:
+    state = tmp_path / "worker-state"
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(state))
+    monkeypatch.setenv("CARDRAG_CODEX_AUTH_ROOT", str(state / relative_auth_root))
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        WorkerSettings.from_env()
+
+
+def test_worker_settings_accepts_separate_codex_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "worker-state"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(state))
+    monkeypatch.setenv("CARDRAG_CODEX_AUTH_ROOT", str(codex_home))
+
+    settings = WorkerSettings.from_env()
+
+    assert settings.state_dir == state
+    assert settings.codex_auth_root == codex_home
+
+
 def test_ocr_quality_defaults_and_configuration_are_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

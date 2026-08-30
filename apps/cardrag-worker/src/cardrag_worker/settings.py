@@ -212,6 +212,15 @@ class WorkerSettings:
         if require_providers and not api_key:
             raise ValueError("OpenRouter API key is required for embeddings")
         auth_root = os.environ.get("CARDRAG_CODEX_AUTH_ROOT")
+        resolved_auth_root = Path(auth_root).resolve() if auth_root else None
+        if resolved_auth_root is not None:
+            resolved_state_dir = state_dir.resolve()
+            if (
+                resolved_auth_root == resolved_state_dir
+                or resolved_state_dir in resolved_auth_root.parents
+                or resolved_auth_root in resolved_state_dir.parents
+            ):
+                raise ValueError("CARDRAG_CODEX_AUTH_ROOT must not overlap CARDRAG_WORKER_STATE_DIR")
         ca_file = os.environ.get("CARDRAG_WEBDAV_CA_FILE")
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
@@ -311,7 +320,7 @@ class WorkerSettings:
             ocr_cache_epoch=_nonnegative_int("CARDRAG_OCR_CACHE_EPOCH", 0),
             ocr_prompt_version=os.environ.get("CARDRAG_OCR_PROMPT_VERSION", "cardrag-ocr.ko.v2"),
             codex_executable=os.environ.get("CARDRAG_CODEX_EXECUTABLE", "codex"),
-            codex_auth_root=Path(auth_root).resolve() if auth_root else None,
+            codex_auth_root=resolved_auth_root,
             ocr_chunk_pages=_bounded_int("CARDRAG_OCR_CHUNK_PAGES", 2, minimum=1, maximum=100),
             ocr_whole_document_max_pages=_bounded_int(
                 "CARDRAG_OCR_WHOLE_DOCUMENT_MAX_PAGES", 4, minimum=1, maximum=100

@@ -81,6 +81,7 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
 
 
 def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
+    root_env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     worker_base = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     mcp_base = (ROOT / "deploy/mcp/compose.yaml").read_text(encoding="utf-8")
     worker = (ROOT / "deploy/worker/compose.candidate.yaml").read_text(encoding="utf-8")
@@ -96,12 +97,20 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert 'CARDRAG_REMOTE_GC_APPROVED: "false"' in worker
     assert 'CARDRAG_OCR_CACHE_MODE: "read-only"' in worker
     assert "cardrag-worker-v110-state" in worker
+    assert "cardrag-worker-v110-codex-home" in worker
     assert "cardrag-mcp-v110-state" in mcp
     assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18010" in mcp
     assert "target: /mnt/cardrag-v109-state" in cache_seed
     assert "read_only: true" in cache_seed
     assert "external: true" in cache_seed
     assert "CARDRAG_WORKER_STATE_VOLUME" in worker_base
+    assert "CARDRAG_WORKER_CODEX_HOME_VOLUME" in worker_base
+    assert "CARDRAG_CODEX_AUTH_ROOT=/var/lib/cardrag-codex-home" in worker_base
+    assert "CODEX_HOME=/var/lib/cardrag-codex-home" in worker_base
+    assert "HOME=/var/lib/cardrag-codex-home/home" in worker_base
+    assert "/var/lib/cardrag-worker/codex" not in worker_base
+    assert "CARDRAG_CODEX_AUTH_ROOT=/var/lib/cardrag-codex-home" in root_env_example
+    assert "/var/lib/cardrag-worker/codex" not in root_env_example
     assert "CARDRAG_COLLECT_REMOTE_GARBAGE:-false" in worker_base
     assert "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED:-false" in worker_base
     assert "CARDRAG_REMOTE_GC_APPROVED:-false" in worker_base
@@ -131,7 +140,65 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "cardrag-worker_worker-state" not in worker_base
     assert "cardrag-mcp_mcp-state" not in mcp_base
     assert "cardrag-worker-v110-state" in worker_base
+    assert "cardrag-worker-v110-codex-home" in worker_base
     assert "cardrag-mcp-v110-state" in mcp_base
+
+
+def test_codex_auth_migration_procedure_is_fail_closed_and_redacted() -> None:
+    migration = (ROOT / "docs/V1_0_10_MIGRATION.md").read_text(encoding="utf-8")
+    section = migration.split("## 3. Codex OAuth/home 분리", 1)[1].split("## 4. v1.0.9 PDF/OCR seed", 1)[0]
+
+    for contract in (
+        "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST",
+        "CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST",
+        "ghcr\\.io/kanu-coffee/mcp-card-prd-detail-candidate@sha256:",
+        'test "$(docker image inspect "$CARDRAG_CANDIDATE_WORKER_IMAGE"',
+        '--arg expected "$CARDRAG_CANDIDATE_WORKER_IMAGE"',
+        'if {entry.name for entry in os.scandir(destination_root)} != {"home"}',
+        "os.O_NOFOLLOW",
+        "before = os.fstat(source_fd)",
+        "identity(os.fstat(source_fd)) != identity(before)",
+        "source_block != destination_block",
+        'set(os.listdir(r))=={"auth.json","home"}',
+        "codex-auth-copy-verified",
+        "codex-auth-metadata-verified",
+        "codex-login-status-verified",
+        "실제 OCR provider argv smoke",
+    ):
+        assert contract in section
+    assert section.count("--pull never") == 3
+    assert "CARDRAG_CANDIDATE_WORKER_INDEX_DIGEST" not in section
+    assert section.count("set -euo pipefail") == 2
+    assert section.count(': "${CARDRAG_CANDIDATE_WORKER_IMAGE:?') == 2
+    assert section.count("codex_volume=cardrag-worker-v110-codex-home") == 2
+    assert section.count('--volume "$codex_volume:/var/lib/cardrag-codex-home:ro"') == 2
+    assert '--volume "$source_volume:/source:ro"' in section
+    assert "auth.json` 값, 일부 문자열, SHA-256은" in section
+    assert "old state의 exact `/codex` subtree" in section
+    assert "`/home`은" in section
+
+
+def test_candidate_migration_resumes_the_exact_preserved_run() -> None:
+    migration = (ROOT / "docs/V1_0_10_MIGRATION.md").read_text(encoding="utf-8")
+    deployment = (ROOT / "deploy/README.md").read_text(encoding="utf-8")
+    section = migration.split("## 5. candidate generation과 MCP", 1)[1]
+
+    for contract in (
+        '"${CARDRAG_PRESERVED_RUN_ID:?the audited interrupted run ID is required}"',
+        '[[ "$CARDRAG_PRESERVED_RUN_ID" =~ ^[0-9a-f]{32}$ ]]',
+        "docker run --rm -i --pull never --network none --read-only",
+        'for suffix in ("-wal", "-shm")',
+        'raise SystemExit("worker-state-not-checkpointed")',
+        "file:/state/worker-state.sqlite3?mode=ro&immutable=1",
+        'row[0] not in {"failed", "interrupted"}',
+        "\"SELECT COUNT(*) FROM run WHERE status='running'\"",
+        'print("preserved-run-resume-verified")',
+        'worker resume "$CARDRAG_PRESERVED_RUN_ID"',
+    ):
+        assert contract in section
+    assert 'run --name "$worker_container" worker run' not in section
+    assert 'worker resume "$CARDRAG_PRESERVED_RUN_ID"' in deployment
+    assert "candidate-worker-acceptance worker run" not in deployment
 
 
 def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> None:
@@ -146,6 +213,7 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
             "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST": "sha256:" + "a" * 64,
             "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST": "sha256:" + "b" * 64,
             "CARDRAG_WORKER_IMAGE": "attacker.invalid/worker:local",
+            "CARDRAG_WORKER_CODEX_HOME_VOLUME": "attacker-codex-home",
             "CARDRAG_MCP_IMAGE": "attacker.invalid/mcp:local",
             "CARDRAG_ENABLED_ISSUERS": "woori",
             "CARDRAG_STABLE_PUBLICATION_APPROVED": "true",
@@ -198,8 +266,10 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
         )
         return json.loads(result.stdout)
 
-    worker_service = render("worker")["services"]["worker"]
+    worker_config = render("worker")
+    worker_service = worker_config["services"]["worker"]
     worker_environment = worker_service["environment"]
+    worker_volumes = {volume["target"]: volume for volume in worker_service["volumes"]}
     assert worker_service["image"] == (
         "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@"
         + environment["CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST"]
@@ -222,6 +292,13 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert worker_environment["CARDRAG_OCR_CACHE_PUBLICATION_APPROVED"] == "false"
     assert worker_environment["CARDRAG_REMOTE_GC_APPROVED"] == "false"
     assert worker_environment["CARDRAG_COLLECT_REMOTE_GARBAGE"] == "false"
+    assert worker_environment["CARDRAG_CODEX_AUTH_ROOT"] == "/var/lib/cardrag-codex-home"
+    assert worker_environment["CODEX_HOME"] == "/var/lib/cardrag-codex-home"
+    assert worker_environment["HOME"] == "/var/lib/cardrag-codex-home/home"
+    assert worker_volumes["/var/lib/cardrag-worker"]["source"] == "worker-state"
+    assert worker_volumes["/var/lib/cardrag-codex-home"]["source"] == "codex-home"
+    assert worker_config["volumes"]["worker-state"]["name"] == "cardrag-worker-v110-state"
+    assert worker_config["volumes"]["codex-home"]["name"] == "cardrag-worker-v110-codex-home"
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_WORKER_"):
             assert worker_environment[name] == expected

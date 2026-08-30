@@ -28,6 +28,9 @@ dependencies = [
 cardrag-mcp = "cardrag_mcp.main:main"
 cardrag-aggregation-capture = "cardrag_mcp.aggregation_capture:main"
 cardrag-gold-capture = "cardrag_mcp.gold_capture:main"
+cardrag-gold-external-producer = "cardrag_mcp.external_gold_producer:main"
+cardrag-gold-answer-artifact = "cardrag_mcp.gold_answer_artifact:main"
+cardrag-gold-review = "cardrag_mcp.gold_review:main"
 
 [project.optional-dependencies]
 dev = [

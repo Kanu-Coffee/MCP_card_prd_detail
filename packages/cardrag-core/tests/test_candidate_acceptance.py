@@ -290,12 +290,17 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         generation_objects_by_path[path] for path in sorted(generation_objects_by_path)
     )
     config = EffectiveConfigEvidence(
-        schema_version="cardrag.candidate-effective-config.v1",
+        schema_version="cardrag.candidate-effective-config.v2",
         source_commit=SOURCE_COMMIT,
         release_version="1.0.10",
         compose_project="cardrag-v110-candidate",
         channel="candidate-v1.0.10",
         worker_volume="cardrag-worker-v110-state",
+        worker_state_mount_path="/var/lib/cardrag-worker",
+        worker_codex_home_volume="cardrag-worker-v110-codex-home",
+        worker_codex_home_mount_path="/var/lib/cardrag-codex-home",
+        worker_codex_auth_root="/var/lib/cardrag-codex-home",
+        worker_home="/var/lib/cardrag-codex-home/home",
         mcp_volume="cardrag-mcp-v110-state",
         mcp_host="127.0.0.1",
         mcp_port=18010,
@@ -408,7 +413,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     )
     generation_write_requests = 13
     worker = WorkerMetricsEvidence(
-        schema_version="cardrag.candidate-worker-metrics.v1",
+        schema_version="cardrag.candidate-worker-metrics.v2",
         source_commit=SOURCE_COMMIT,
         generation_id=manifest.generation_id,
         generation_manifest_sha256=manifest.manifest_sha256,
@@ -424,6 +429,17 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         systempaths_unconfined_verified=False,
         privileged_verified=False,
         cap_add_count_verified=0,
+        worker_state_mount_path="/var/lib/cardrag-worker",
+        codex_home_mount_path="/var/lib/cardrag-codex-home",
+        codex_auth_root="/var/lib/cardrag-codex-home",
+        codex_home="/var/lib/cardrag-codex-home",
+        home="/var/lib/cardrag-codex-home/home",
+        codex_home_separate_volume_verified=True,
+        worker_state_legacy_codex_auth_entries=0,
+        codex_auth_json_mode="0600",
+        codex_auth_json_uid_gid="10001:10001",
+        codex_login_status_verified=True,
+        codex_login_status_output_retained=False,
         codex_version_verified=True,
         bubblewrap_version_verified=True,
         bubblewrap_user_namespace_verified=True,
@@ -878,6 +894,28 @@ def test_effective_config_rejects_a_cross_role_platform_manifest(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("worker_codex_home_volume", "cardrag-worker-v110-state"),
+        ("worker_codex_home_mount_path", "/var/lib/cardrag-worker/codex"),
+        ("worker_codex_auth_root", "/var/lib/cardrag-worker/codex"),
+        ("worker_home", "/var/lib/cardrag-worker/home"),
+    ),
+)
+def test_effective_config_rejects_codex_home_state_overlap(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     "field",
     (
         "worker_max_state_bytes",
@@ -1028,6 +1066,12 @@ def test_acceptance_rejects_noncanonical_and_duplicate_json(tmp_path: Path) -> N
         ("worker_metrics", "systempaths_unconfined_verified", True),
         ("worker_metrics", "privileged_verified", True),
         ("worker_metrics", "cap_add_count_verified", 1),
+        ("worker_metrics", "codex_home_separate_volume_verified", False),
+        ("worker_metrics", "worker_state_legacy_codex_auth_entries", 1),
+        ("worker_metrics", "codex_auth_json_mode", "0644"),
+        ("worker_metrics", "codex_auth_json_uid_gid", "0:0"),
+        ("worker_metrics", "codex_login_status_verified", False),
+        ("worker_metrics", "codex_login_status_output_retained", True),
         (
             "worker_metrics",
             "codex_general_file_read_and_exec_tools_disabled_verified",

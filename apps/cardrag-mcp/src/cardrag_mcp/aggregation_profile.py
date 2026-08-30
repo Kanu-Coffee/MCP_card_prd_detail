@@ -1,7 +1,7 @@
 """Seal the statistically selected v1.0.10 document aggregation policy.
 
 The online exact-search implementation is deliberately not imported here.  This
-offline evaluator consumes every row score from a hash-bound JSONL artifact,
+offline evaluator consumes every row score from hash-bound compact v2 artifacts,
 reconstructs all three planned contract aggregation policies, and emits a
 canonical profile artifact.  Release mode refuses to seal a profile unless a
 unique policy wins the paired 95% bootstrap comparison and is non-regressive
@@ -14,14 +14,16 @@ import argparse
 import hashlib
 import json
 import math
+import mmap
 import os
 import re
 import stat
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, Self, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -46,16 +48,18 @@ from cardrag_mcp.evaluation import (
     load_gold_jsonl,
 )
 
-SCORE_ARTIFACT_SCHEMA_VERSION = "cardrag.document-aggregation-score-artifact.v1"
-QUERY_COVERAGE_SCHEMA_VERSION = "cardrag.document-aggregation-query-coverage.v1"
-ROW_SCORE_SCHEMA_VERSION = "cardrag.document-aggregation-row-score.v1"
+SCORE_ARTIFACT_SCHEMA_VERSION = "cardrag.document-aggregation-score-artifact.v2"
+QUERY_COVERAGE_SCHEMA_VERSION = "cardrag.document-aggregation-query-coverage.v2"
+CORPUS_INVENTORY_SCHEMA_VERSION = "cardrag.document-aggregation-corpus-inventory.v1"
+CORPUS_ROW_SCHEMA_VERSION = "cardrag.document-aggregation-corpus-row.v1"
 PROFILE_ARTIFACT_SCHEMA_VERSION = "cardrag.document-aggregation-profile-artifact.v1"
 SEALED_PROFILE_SCHEMA_VERSION = "cardrag.document-aggregation-profile.v1"
 VALIDATION_RECEIPT_SCHEMA_VERSION = "cardrag.document-aggregation-validation-receipt.v1"
 
-MAX_SCORE_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024
+MAX_PORTABLE_ARTIFACT_BYTES = 95_000_000
+MAX_SCORE_ARTIFACT_BYTES = MAX_PORTABLE_ARTIFACT_BYTES
 MAX_SCORE_LINE_BYTES = 64 * 1024
-MAX_SCORE_ROWS = 20_000_000
+MAX_SCORE_COUNT = 20_000_000
 MAX_PROFILE_BYTES = 32 * 1024 * 1024
 
 MAX_CHILD: Literal["max_child"] = "max_child"
@@ -115,14 +119,20 @@ def _validated_expected_source_commit(
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
+
+
+class ArtifactBinding(_StrictModel):
+    sha256: Sha256Hex
+    size_bytes: int = Field(strict=True, gt=0, le=MAX_PORTABLE_ARTIFACT_BYTES)
 
 
 class ScoreArtifactManifest(_StrictModel):
-    schema_version: Literal["cardrag.document-aggregation-score-artifact.v1"]
+    schema_version: Literal["cardrag.document-aggregation-score-artifact.v2"]
     gold_sha256: Sha256Hex
     query_count: int = Field(strict=True, ge=1, le=500)
-    row_count: int = Field(strict=True, ge=1, le=MAX_SCORE_ROWS)
+    corpus_row_count: int = Field(strict=True, ge=1, le=MAX_SCORE_COUNT)
+    score_count: int = Field(strict=True, ge=1, le=MAX_SCORE_COUNT)
     source_commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}([0-9a-f]{24})?$")]
     generation_id: Identifier
     generation_manifest_sha256: Sha256Hex
@@ -139,6 +149,13 @@ class ScoreArtifactManifest(_StrictModel):
     runtime_document_aggregation_status: Literal["candidate_default", "sealed"]
     runtime_document_aggregation_policy: AggregationPolicy
     runtime_sealed_profile_sha256: Sha256Hex | None = None
+    corpus_inventory: ArtifactBinding
+    score_matrix: ArtifactBinding
+    query_vector_matrix: ArtifactBinding
+    byte_order: Literal["little-endian"]
+    scalar_type: Literal["float32"]
+    matrix_order: Literal["row-major"]
+    validation_profile: Literal["release_grade", "fixture_only"]
 
     @model_validator(mode="after")
     def runtime_aggregation_identity_is_complete(self) -> ScoreArtifactManifest:
@@ -150,30 +167,63 @@ class ScoreArtifactManifest(_StrictModel):
             or self.runtime_sealed_profile_sha256 is not None
         ):
             raise ValueError("candidate-default runtime aggregation must be unsealed max_child")
+        if (
+            self.score_count != self.query_count * self.corpus_row_count
+            or self.score_matrix.size_bytes != self.score_count * 4
+            or self.query_vector_matrix.size_bytes != self.query_count * 4096 * 4
+        ):
+            raise ValueError("aggregation sidecar sizes do not match their declared shapes")
         return self
 
 
 class QueryScoreCoverage(_StrictModel):
-    schema_version: Literal["cardrag.document-aggregation-query-coverage.v1"]
+    schema_version: Literal["cardrag.document-aggregation-query-coverage.v2"]
+    ordinal: int = Field(strict=True, ge=0, le=499)
     query_id: Identifier
     query_sha256: Sha256Hex
-    query_vector_sha256: Sha256Hex
-    expected_rows: int = Field(strict=True, ge=1, le=MAX_SCORE_ROWS)
-    scored_rows: int = Field(strict=True, ge=1, le=MAX_SCORE_ROWS)
+    expected_rows: int = Field(strict=True, ge=1, le=MAX_SCORE_COUNT)
+    scored_rows: int = Field(strict=True, ge=1, le=MAX_SCORE_COUNT)
     active_contracts: int = Field(strict=True, ge=1, le=100_000)
+    score_offset_bytes: int = Field(strict=True, ge=0, le=MAX_PORTABLE_ARTIFACT_BYTES)
+    score_size_bytes: int = Field(strict=True, gt=0, le=MAX_PORTABLE_ARTIFACT_BYTES)
+    score_count: int = Field(strict=True, ge=1, le=MAX_SCORE_COUNT)
+    score_sha256: Sha256Hex
+    query_vector_offset_bytes: int = Field(strict=True, ge=0, le=MAX_PORTABLE_ARTIFACT_BYTES)
+    query_vector_size_bytes: int = Field(strict=True, gt=0, le=4096 * 4)
+    query_vector_count: Literal[4096]
+    query_vector_sha256: Sha256Hex
+
+    @model_validator(mode="after")
+    def segments_match_counts(self) -> Self:
+        if (
+            self.expected_rows != self.scored_rows
+            or self.scored_rows != self.score_count
+            or self.score_size_bytes != self.score_count * 4
+            or self.query_vector_size_bytes != self.query_vector_count * 4
+        ):
+            raise ValueError("aggregation query coverage is incomplete")
+        return self
 
 
-class RowScore(_StrictModel):
-    schema_version: Literal["cardrag.document-aggregation-row-score.v1"]
-    query_id: Identifier
-    ordinal: int = Field(strict=True, ge=0, le=MAX_SCORE_ROWS - 1)
+class CorpusInventoryManifest(_StrictModel):
+    schema_version: Literal["cardrag.document-aggregation-corpus-inventory.v1"]
+    generation_id: Identifier
+    serving_database_sha256: Sha256Hex
+    vector_sidecar_sha256: Sha256Hex
+    exact_row_corpus_sha256: Sha256Hex
+    embedding_profile_id: EmbeddingProfileId
+    corpus_row_count: int = Field(strict=True, ge=1, le=MAX_SCORE_COUNT)
+
+
+class CorpusInventoryRow(_StrictModel):
+    schema_version: Literal["cardrag.document-aggregation-corpus-row.v1"]
+    ordinal: int = Field(strict=True, ge=0, le=MAX_SCORE_COUNT - 1)
     row_index: int = Field(strict=True, ge=0)
     contract_revision_id: Identifier
     node_id: Identifier
     view_type: ViewType
     input_sha256: Sha256Hex
     embedding_profile_id: EmbeddingProfileId
-    score: float = Field(strict=True, ge=-1.0, le=1.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,13 +248,15 @@ class _ContractAccumulator:
     contract_score: float | None = None
     child_scores: list[float] = field(default_factory=list)
 
-    def add(self, row: RowScore) -> None:
+    def add(self, row: CorpusInventoryRow, score: float) -> None:
         if row.view_type == "CONTRACT":
             if self.contract_score is not None:
                 raise AggregationProfileError("duplicate_contract_view")
-            self.contract_score = row.score
+            self.contract_score = score
         else:
-            self.child_scores.append(row.score)
+            self.child_scores.append(score)
+            self.child_scores.sort(reverse=True)
+            del self.child_scores[3:]
 
     def scores(self) -> dict[AggregationPolicy, float]:
         if self.contract_score is None:
@@ -235,8 +287,18 @@ def _absolute_without_resolving(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+def _identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _read_regular(path: Path, *, maximum_bytes: int, error_prefix: str) -> bytes:
@@ -256,24 +318,36 @@ def _read_regular(path: Path, *, maximum_bytes: int, error_prefix: str) -> bytes
         raise AggregationProfileError(f"{error_prefix}_open_failed") from exc
     try:
         before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise AggregationProfileError(f"{error_prefix}_not_regular")
+        if before.st_size <= 0 or before.st_size > maximum_bytes:
+            raise AggregationProfileError(f"{error_prefix}_size_invalid")
+        if _identity(listed) != _identity(before):
+            raise AggregationProfileError(f"{error_prefix}_changed_during_read")
         chunks: list[bytes] = []
         remaining = before.st_size
+        size = 0
         while remaining:
             chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
                 raise AggregationProfileError(f"{error_prefix}_changed_during_read")
+            if len(chunk) > maximum_bytes - size:
+                raise AggregationProfileError(f"{error_prefix}_size_invalid")
             chunks.append(chunk)
+            size += len(chunk)
             remaining -= len(chunk)
         if os.read(descriptor, 1):
             raise AggregationProfileError(f"{error_prefix}_changed_during_read")
         after = os.fstat(descriptor)
+        try:
+            current = absolute.lstat()
+        except OSError:
+            raise AggregationProfileError(f"{error_prefix}_changed_during_read") from None
+        identity = _identity(before)
+        if size != before.st_size or identity != _identity(after) or identity != _identity(current):
+            raise AggregationProfileError(f"{error_prefix}_changed_during_read")
     finally:
         os.close(descriptor)
-    if _identity(before) != _identity(after) or (listed.st_dev, listed.st_ino) != (
-        before.st_dev,
-        before.st_ino,
-    ):
-        raise AggregationProfileError(f"{error_prefix}_changed_during_read")
     return b"".join(chunks)
 
 
@@ -313,8 +387,9 @@ def _decode_canonical_line(raw: bytes, line: int) -> dict[str, Any]:
 
 
 class _ScoreLineReader:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, code: str = "score_artifact") -> None:
         self._path = _absolute_without_resolving(path)
+        self._code = code
         self._descriptor: int | None = None
         self._stream: Any = None
         self._listed: os.stat_result | None = None
@@ -327,20 +402,32 @@ class _ScoreLineReader:
         try:
             listed = self._path.lstat()
         except FileNotFoundError:
-            raise AggregationProfileError("score_artifact_missing") from None
+            raise AggregationProfileError(f"{self._code}_missing") from None
         if stat.S_ISLNK(listed.st_mode) or not stat.S_ISREG(listed.st_mode):
-            raise AggregationProfileError("score_artifact_not_regular")
+            raise AggregationProfileError(f"{self._code}_not_regular")
         if listed.st_size <= 0 or listed.st_size > MAX_SCORE_ARTIFACT_BYTES:
-            raise AggregationProfileError("score_artifact_size_invalid")
+            raise AggregationProfileError(f"{self._code}_size_invalid")
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             descriptor = os.open(self._path, flags)
         except OSError as exc:
-            raise AggregationProfileError("score_artifact_open_failed") from exc
+            raise AggregationProfileError(f"{self._code}_open_failed") from exc
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise AggregationProfileError(f"{self._code}_not_regular")
+            if before.st_size <= 0 or before.st_size > MAX_SCORE_ARTIFACT_BYTES:
+                raise AggregationProfileError(f"{self._code}_size_invalid")
+            if _identity(listed) != _identity(before):
+                raise AggregationProfileError(f"{self._code}_changed_during_read")
+            stream = os.fdopen(descriptor, "rb", closefd=False)
+        except Exception:
+            os.close(descriptor)
+            raise
         self._descriptor = descriptor
         self._listed = listed
-        self._before = os.fstat(descriptor)
-        self._stream = os.fdopen(descriptor, "rb", closefd=False)
+        self._before = before
+        self._stream = stream
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -353,17 +440,19 @@ class _ScoreLineReader:
                 after = os.fstat(descriptor)
                 listed = self._listed
                 before = self._before
-                if (
-                    exc is None
-                    and listed is not None
-                    and before is not None
-                    and (
-                        _identity(before) != _identity(after)
-                        or (listed.st_dev, listed.st_ino) != (before.st_dev, before.st_ino)
-                        or self.size_bytes != before.st_size
-                    )
-                ):
-                    raise AggregationProfileError("score_artifact_changed_during_read")
+                if listed is not None and before is not None:
+                    try:
+                        current_path = self._path.lstat()
+                    except OSError:
+                        raise AggregationProfileError(f"{self._code}_changed_during_read") from None
+                    identity = _identity(before)
+                    if (
+                        identity != _identity(listed)
+                        or identity != _identity(after)
+                        or identity != _identity(current_path)
+                        or (exc is None and self.size_bytes != before.st_size)
+                    ):
+                        raise AggregationProfileError(f"{self._code}_changed_during_read")
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -376,6 +465,8 @@ class _ScoreLineReader:
         raw = cast(bytes, self._stream.readline(MAX_SCORE_LINE_BYTES + 1))
         if not raw:
             return None
+        if len(raw) > MAX_SCORE_ARTIFACT_BYTES - self.size_bytes:
+            raise AggregationProfileError(f"{self._code}_size_invalid", line=self.line + 1)
         self.line += 1
         self.size_bytes += len(raw)
         self._digest.update(raw)
@@ -384,6 +475,341 @@ class _ScoreLineReader:
     @property
     def sha256(self) -> str:
         return self._digest.hexdigest()
+
+
+class _MappedArtifact:
+    """Hash-pin one bounded regular file and expose read-only zero-copy segments."""
+
+    def __init__(self, path: Path, binding: ArtifactBinding, *, code: str) -> None:
+        self.path = _absolute_without_resolving(path)
+        self.binding = binding
+        self.code = code
+        self._descriptor: int | None = None
+        self._mapping: mmap.mmap | None = None
+        self._listed: os.stat_result | None = None
+        self._before: os.stat_result | None = None
+
+    def __enter__(self) -> _MappedArtifact:
+        try:
+            listed = self.path.lstat()
+        except FileNotFoundError:
+            raise AggregationProfileError(f"{self.code}_missing") from None
+        if stat.S_ISLNK(listed.st_mode) or not stat.S_ISREG(listed.st_mode):
+            raise AggregationProfileError(f"{self.code}_not_regular")
+        if listed.st_size != self.binding.size_bytes:
+            raise AggregationProfileError(f"{self.code}_size_mismatch")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.path, flags)
+        except OSError as exc:
+            raise AggregationProfileError(f"{self.code}_open_failed") from exc
+        self._descriptor = descriptor
+        self._listed = listed
+        before = os.fstat(descriptor)
+        self._before = before
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size != self.binding.size_bytes
+            or _identity(listed) != _identity(before)
+        ):
+            os.close(descriptor)
+            self._descriptor = None
+            raise AggregationProfileError(f"{self.code}_changed_during_open")
+        digest = hashlib.sha256()
+        position = 0
+        while position < before.st_size:
+            block = os.pread(descriptor, min(1024 * 1024, before.st_size - position), position)
+            if not block:
+                os.close(descriptor)
+                self._descriptor = None
+                raise AggregationProfileError(f"{self.code}_changed_during_read")
+            digest.update(block)
+            position += len(block)
+        after_hash = os.fstat(descriptor)
+        try:
+            current_path = self.path.lstat()
+        except OSError:
+            os.close(descriptor)
+            self._descriptor = None
+            raise AggregationProfileError(f"{self.code}_changed_during_read") from None
+        if _identity(before) != _identity(after_hash) or _identity(before) != _identity(
+            current_path
+        ):
+            os.close(descriptor)
+            self._descriptor = None
+            raise AggregationProfileError(f"{self.code}_changed_during_read")
+        if digest.hexdigest() != self.binding.sha256:
+            os.close(descriptor)
+            self._descriptor = None
+            raise AggregationProfileError(f"{self.code}_sha256_mismatch")
+        self._mapping = mmap.mmap(descriptor, before.st_size, access=mmap.ACCESS_READ)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        mapping = self._mapping
+        descriptor = self._descriptor
+        self._mapping = None
+        self._descriptor = None
+        try:
+            if mapping is not None:
+                mapping.close()
+            if descriptor is not None:
+                before = self._before
+                listed = self._listed
+                if before is not None and listed is not None:
+                    try:
+                        current_path = self.path.lstat()
+                    except OSError:
+                        raise AggregationProfileError(f"{self.code}_changed_during_read") from None
+                    identity = _identity(before)
+                    if (
+                        identity != _identity(listed)
+                        or identity != _identity(os.fstat(descriptor))
+                        or identity != _identity(current_path)
+                    ):
+                        raise AggregationProfileError(f"{self.code}_changed_during_read")
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def array(self, *, offset: int, count: int, sha256: str) -> npt.NDArray[np.float32]:
+        mapping = self._mapping
+        if mapping is None:
+            raise RuntimeError("mapped aggregation artifact is not open")
+        size = count * 4
+        if offset < 0 or size < 1 or offset + size > self.binding.size_bytes:
+            raise AggregationProfileError(f"{self.code}_segment_range_invalid")
+        view = memoryview(mapping)[offset : offset + size]
+        try:
+            if hashlib.sha256(view).hexdigest() != sha256:
+                raise AggregationProfileError(f"{self.code}_segment_sha256_mismatch")
+        finally:
+            view.release()
+        result = np.frombuffer(mapping, dtype="<f4", count=count, offset=offset)
+        result.flags.writeable = False
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class OpenedScoreArtifact:
+    """A verified compact score artifact whose arrays live for the open context."""
+
+    manifest: ScoreArtifactManifest
+    score_artifact_binding: ArtifactBinding
+    corpus_inventory_binding: ArtifactBinding
+    score_matrix_binding: ArtifactBinding
+    query_vector_matrix_binding: ArtifactBinding
+    inventory_manifest: CorpusInventoryManifest
+    inventory: tuple[CorpusInventoryRow, ...]
+    coverages: tuple[QueryScoreCoverage, ...]
+    _score_matrix: _MappedArtifact
+    _query_vector_matrix: _MappedArtifact
+
+    def scores_for(self, ordinal: int) -> npt.NDArray[np.float32]:
+        if type(ordinal) is not int:
+            raise AggregationProfileError("score_query_ordinal_invalid")
+        try:
+            coverage = self.coverages[ordinal]
+        except IndexError as exc:
+            raise AggregationProfileError("score_query_ordinal_invalid") from exc
+        if ordinal < 0 or coverage.ordinal != ordinal:
+            raise AggregationProfileError("score_query_ordinal_invalid")
+        return self._score_matrix.array(
+            offset=coverage.score_offset_bytes,
+            count=coverage.score_count,
+            sha256=coverage.score_sha256,
+        )
+
+    def query_vector_for(self, ordinal: int) -> npt.NDArray[np.float32]:
+        if type(ordinal) is not int:
+            raise AggregationProfileError("score_query_ordinal_invalid")
+        try:
+            coverage = self.coverages[ordinal]
+        except IndexError as exc:
+            raise AggregationProfileError("score_query_ordinal_invalid") from exc
+        if ordinal < 0 or coverage.ordinal != ordinal:
+            raise AggregationProfileError("score_query_ordinal_invalid")
+        return self._query_vector_matrix.array(
+            offset=coverage.query_vector_offset_bytes,
+            count=coverage.query_vector_count,
+            sha256=coverage.query_vector_sha256,
+        )
+
+
+def _artifact_binding(reader: _ScoreLineReader) -> ArtifactBinding:
+    return ArtifactBinding(sha256=reader.sha256, size_bytes=reader.size_bytes)
+
+
+def _load_inventory(
+    reader: _ScoreLineReader,
+    *,
+    expected: ArtifactBinding,
+    score_manifest: ScoreArtifactManifest,
+) -> tuple[CorpusInventoryManifest, tuple[CorpusInventoryRow, ...], ArtifactBinding]:
+    raw_manifest = reader.next_record()
+    if raw_manifest is None:
+        raise AggregationProfileError("corpus_inventory_empty")
+    try:
+        manifest = CorpusInventoryManifest.model_validate(raw_manifest)
+    except ValidationError as exc:
+        raise AggregationProfileError("corpus_inventory_manifest_invalid", line=1) from exc
+    rows: list[CorpusInventoryRow] = []
+    previous_row_index = -1
+    seen_views: set[tuple[str, str, ViewType]] = set()
+    for ordinal in range(manifest.corpus_row_count):
+        raw_row = reader.next_record()
+        if raw_row is None:
+            raise AggregationProfileError("corpus_inventory_row_missing", line=reader.line + 1)
+        try:
+            row = CorpusInventoryRow.model_validate(raw_row)
+        except ValidationError as exc:
+            raise AggregationProfileError("corpus_inventory_row_invalid", line=reader.line) from exc
+        view_key = (row.contract_revision_id, row.node_id, row.view_type)
+        if (
+            row.ordinal != ordinal
+            or row.row_index <= previous_row_index
+            or row.embedding_profile_id != score_manifest.embedding_profile_id
+            or view_key in seen_views
+        ):
+            raise AggregationProfileError("corpus_inventory_row_order_invalid", line=reader.line)
+        rows.append(row)
+        previous_row_index = row.row_index
+        seen_views.add(view_key)
+    if reader.next_record() is not None:
+        raise AggregationProfileError("corpus_inventory_trailing_record", line=reader.line)
+    binding = _artifact_binding(reader)
+    if binding != expected:
+        raise AggregationProfileError("corpus_inventory_binding_mismatch")
+    if (
+        manifest.generation_id != score_manifest.generation_id
+        or manifest.serving_database_sha256 != score_manifest.serving_database_sha256
+        or manifest.vector_sidecar_sha256 != score_manifest.vector_sidecar_sha256
+        or manifest.exact_row_corpus_sha256 != score_manifest.exact_row_corpus_sha256
+        or manifest.embedding_profile_id != score_manifest.embedding_profile_id
+        or manifest.corpus_row_count != score_manifest.corpus_row_count
+    ):
+        raise AggregationProfileError("corpus_inventory_manifest_binding_mismatch")
+    return manifest, tuple(rows), binding
+
+
+@contextmanager
+def open_score_artifact(
+    score_artifact_path: Path,
+    corpus_inventory_path: Path,
+    score_matrix_path: Path,
+    query_vector_matrix_path: Path,
+    expected_score_artifact_sha256: str | None = None,
+) -> Iterator[OpenedScoreArtifact]:
+    """Pin and verify compact v2 evidence for the lifetime of this context.
+
+    Arrays returned by ``scores_for`` and ``query_vector_for`` are zero-copy
+    read-only mmap views and must not outlive the context.
+    """
+
+    if (
+        expected_score_artifact_sha256 is not None
+        and _SHA256.fullmatch(expected_score_artifact_sha256) is None
+    ):
+        raise AggregationProfileError("expected_score_artifact_sha256_invalid")
+    with ExitStack() as stack:
+        reader = stack.enter_context(_ScoreLineReader(score_artifact_path))
+        raw_manifest = reader.next_record()
+        if raw_manifest is None:
+            raise AggregationProfileError("score_artifact_empty")
+        try:
+            manifest = ScoreArtifactManifest.model_validate(raw_manifest)
+        except ValidationError as exc:
+            raise AggregationProfileError("score_manifest_invalid", line=1) from exc
+        coverages: list[QueryScoreCoverage] = []
+        score_offset = 0
+        vector_offset = 0
+        for ordinal in range(manifest.query_count):
+            raw_coverage = reader.next_record()
+            if raw_coverage is None:
+                raise AggregationProfileError("score_query_coverage_missing", line=reader.line + 1)
+            try:
+                coverage = QueryScoreCoverage.model_validate(raw_coverage)
+            except ValidationError as exc:
+                raise AggregationProfileError(
+                    "score_query_coverage_invalid", line=reader.line
+                ) from exc
+            if (
+                coverage.ordinal != ordinal
+                or coverage.expected_rows != manifest.corpus_row_count
+                or coverage.score_offset_bytes != score_offset
+                or coverage.query_vector_offset_bytes != vector_offset
+            ):
+                raise AggregationProfileError(
+                    "score_query_coverage_order_invalid", line=reader.line
+                )
+            coverages.append(coverage)
+            score_offset += coverage.score_size_bytes
+            vector_offset += coverage.query_vector_size_bytes
+        if reader.next_record() is not None:
+            raise AggregationProfileError("score_artifact_trailing_record", line=reader.line)
+        score_artifact_binding = _artifact_binding(reader)
+        query_ids = tuple(item.query_id for item in coverages)
+        if len(query_ids) != len(set(query_ids)):
+            raise AggregationProfileError("score_query_id_duplicate")
+        if (
+            expected_score_artifact_sha256 is not None
+            and score_artifact_binding.sha256 != expected_score_artifact_sha256
+        ):
+            raise AggregationProfileError("score_artifact_sha256_mismatch")
+        if (
+            score_offset != manifest.score_matrix.size_bytes
+            or vector_offset != manifest.query_vector_matrix.size_bytes
+            or sum(item.score_count for item in coverages) != manifest.score_count
+        ):
+            raise AggregationProfileError("score_sidecar_coverage_incomplete")
+        inventory_reader = stack.enter_context(
+            _ScoreLineReader(corpus_inventory_path, code="corpus_inventory")
+        )
+        inventory_manifest, inventory, inventory_binding = _load_inventory(
+            inventory_reader,
+            expected=manifest.corpus_inventory,
+            score_manifest=manifest,
+        )
+        score_matrix = stack.enter_context(
+            _MappedArtifact(score_matrix_path, manifest.score_matrix, code="score_matrix")
+        )
+        query_vector_matrix = stack.enter_context(
+            _MappedArtifact(
+                query_vector_matrix_path,
+                manifest.query_vector_matrix,
+                code="query_vector_matrix",
+            )
+        )
+        opened = OpenedScoreArtifact(
+            manifest=manifest,
+            score_artifact_binding=score_artifact_binding,
+            corpus_inventory_binding=inventory_binding,
+            score_matrix_binding=manifest.score_matrix,
+            query_vector_matrix_binding=manifest.query_vector_matrix,
+            inventory_manifest=inventory_manifest,
+            inventory=inventory,
+            coverages=tuple(coverages),
+            _score_matrix=score_matrix,
+            _query_vector_matrix=query_vector_matrix,
+        )
+        for ordinal in range(manifest.query_count):
+            scores = opened.scores_for(ordinal)
+            if any(
+                not math.isfinite(float(value)) or not -1.0 <= float(value) <= 1.0
+                for value in scores
+            ):
+                del scores
+                raise AggregationProfileError("score_matrix_value_invalid")
+            del scores
+            vector = opened.query_vector_for(ordinal)
+            if any(not math.isfinite(float(value)) for value in vector):
+                del vector
+                raise AggregationProfileError("query_vector_value_invalid")
+            norm = float(np.linalg.norm(vector))
+            del vector
+            if not math.isfinite(norm) or not math.isclose(norm, 1.0, rel_tol=1e-5, abs_tol=1e-5):
+                raise AggregationProfileError("query_vector_norm_invalid")
+        yield opened
 
 
 def _query_sha256(query: GoldQuery) -> str:
@@ -419,74 +845,54 @@ def _ranking_metrics(
     }
 
 
-def _parse_scores(path: Path, gold: GoldDataset) -> ParsedScoreArtifact:
+def _parse_scores(
+    path: Path,
+    corpus_inventory_path: Path,
+    score_matrix_path: Path,
+    query_vector_matrix_path: Path,
+    gold: GoldDataset,
+    *,
+    release_gate: bool,
+) -> ParsedScoreArtifact:
     query_metrics: dict[AggregationPolicy, dict[str, dict[str, float | None]]] = {
         policy: {} for policy in POLICIES
     }
     query_contract_counts: dict[str, int] = {}
-    total_rows = 0
-    with _ScoreLineReader(path) as reader:
-        manifest_record = reader.next_record()
-        if manifest_record is None:
-            raise AggregationProfileError("score_artifact_empty")
-        try:
-            manifest = ScoreArtifactManifest.model_validate(manifest_record)
-        except ValidationError as exc:
-            raise AggregationProfileError("score_manifest_invalid", line=1) from exc
+    with open_score_artifact(
+        path,
+        corpus_inventory_path,
+        score_matrix_path,
+        query_vector_matrix_path,
+    ) as opened:
+        manifest = opened.manifest
         if manifest.gold_sha256 != gold.sha256:
             raise AggregationProfileError("score_gold_sha256_mismatch", line=1)
         if manifest.query_count != len(gold.queries):
             raise AggregationProfileError("score_query_count_mismatch", line=1)
-        manifest_sha256 = hashlib.sha256(_canonical_json_bytes(manifest_record)).hexdigest()
+        if release_gate and manifest.validation_profile != "release_grade":
+            raise AggregationProfileError("score_validation_profile_not_release_grade", line=1)
+        manifest_sha256 = hashlib.sha256(
+            _canonical_json_bytes(manifest.model_dump(mode="json"))
+        ).hexdigest()
 
-        for query in gold.queries:
-            coverage_record = reader.next_record()
-            if coverage_record is None:
-                raise AggregationProfileError("score_query_coverage_missing", line=reader.line + 1)
-            try:
-                coverage = QueryScoreCoverage.model_validate(coverage_record)
-            except ValidationError as exc:
-                raise AggregationProfileError(
-                    "score_query_coverage_invalid", line=reader.line
-                ) from exc
+        for query_index, query in enumerate(gold.queries):
+            coverage = opened.coverages[query_index]
             if coverage.query_id != query.query_id or coverage.query_sha256 != _query_sha256(query):
-                raise AggregationProfileError("score_query_binding_mismatch", line=reader.line)
-            if coverage.expected_rows != coverage.scored_rows:
-                raise AggregationProfileError("score_query_coverage_incomplete", line=reader.line)
+                raise AggregationProfileError("score_query_binding_mismatch", line=query_index + 2)
 
             contracts: dict[str, _ContractAccumulator] = {}
-            seen_rows: set[int] = set()
-            seen_views: set[tuple[str, str, ViewType]] = set()
-            previous_row_index = -1
-            for ordinal in range(coverage.scored_rows):
-                row_record = reader.next_record()
-                if row_record is None:
-                    raise AggregationProfileError("score_row_missing", line=reader.line + 1)
-                try:
-                    row = RowScore.model_validate(row_record)
-                except ValidationError as exc:
-                    raise AggregationProfileError("score_row_invalid", line=reader.line) from exc
-                if row.query_id != query.query_id or row.ordinal != ordinal:
-                    raise AggregationProfileError(
-                        "score_row_query_order_mismatch", line=reader.line
+            scores = opened.scores_for(query_index)
+            try:
+                for row, raw_score in zip(opened.inventory, scores, strict=True):
+                    contracts.setdefault(row.contract_revision_id, _ContractAccumulator()).add(
+                        row, float(raw_score)
                     )
-                if row.embedding_profile_id != manifest.embedding_profile_id:
-                    raise AggregationProfileError("score_row_profile_mismatch", line=reader.line)
-                if row.row_index in seen_rows or row.row_index <= previous_row_index:
-                    raise AggregationProfileError(
-                        "score_row_index_not_unique_sorted", line=reader.line
-                    )
-                view_key = (row.contract_revision_id, row.node_id, row.view_type)
-                if view_key in seen_views:
-                    raise AggregationProfileError("score_view_duplicate", line=reader.line)
-                seen_rows.add(row.row_index)
-                seen_views.add(view_key)
-                previous_row_index = row.row_index
-                contracts.setdefault(row.contract_revision_id, _ContractAccumulator()).add(row)
+            finally:
+                del scores
 
             if len(contracts) != coverage.active_contracts:
                 raise AggregationProfileError(
-                    "score_active_contract_count_mismatch", line=reader.line
+                    "score_active_contract_count_mismatch", line=query_index + 2
                 )
             policy_scores: dict[AggregationPolicy, dict[str, float]] = {
                 policy: {} for policy in POLICIES
@@ -506,15 +912,9 @@ def _parse_scores(path: Path, gold: GoldDataset) -> ParsedScoreArtifact:
                 )
                 query_metrics[policy][query.query_id] = _ranking_metrics(query, ranked)
             query_contract_counts[query.query_id] = len(contracts)
-            total_rows += coverage.scored_rows
+        artifact_sha256 = opened.score_artifact_binding.sha256
+        size_bytes = opened.score_artifact_binding.size_bytes
 
-        if reader.next_record() is not None:
-            raise AggregationProfileError("score_artifact_trailing_record", line=reader.line)
-        artifact_sha256 = reader.sha256
-        size_bytes = reader.size_bytes
-
-    if total_rows != manifest.row_count:
-        raise AggregationProfileError("score_manifest_row_count_mismatch", line=1)
     return ParsedScoreArtifact(
         manifest=manifest,
         manifest_sha256=manifest_sha256,
@@ -719,6 +1119,9 @@ def _release_gate(
 def build_aggregation_profile(
     gold_path: Path,
     score_artifact_path: Path,
+    corpus_inventory_path: Path,
+    score_matrix_path: Path,
+    query_vector_matrix_path: Path,
     *,
     release_gate: bool = True,
     expected_gold_sha256: str | None = None,
@@ -748,7 +1151,14 @@ def build_aggregation_profile(
         release_gate=release_gate,
     )
 
-    scores = _parse_scores(score_artifact_path, gold)
+    scores = _parse_scores(
+        score_artifact_path,
+        corpus_inventory_path,
+        score_matrix_path,
+        query_vector_matrix_path,
+        gold,
+        release_gate=release_gate,
+    )
     if (
         candidate_source_commit is not None
         and scores.manifest.source_commit != candidate_source_commit
@@ -848,11 +1258,17 @@ def build_aggregation_profile(
     manifest_payload = scores.manifest.model_dump(mode="json")
     payload: dict[str, Any] = {
         "artifact_bindings": {
+            "corpus_inventory_sha256": scores.manifest.corpus_inventory.sha256,
+            "corpus_inventory_size_bytes": scores.manifest.corpus_inventory.size_bytes,
             "generation_manifest_sha256": scores.manifest.generation_manifest_sha256,
             "gold_sha256": gold.sha256,
+            "query_vector_matrix_sha256": scores.manifest.query_vector_matrix.sha256,
+            "query_vector_matrix_size_bytes": scores.manifest.query_vector_matrix.size_bytes,
             "score_artifact_manifest_sha256": scores.manifest_sha256,
             "score_artifact_sha256": scores.artifact_sha256,
             "score_artifact_size_bytes": scores.size_bytes,
+            "score_matrix_sha256": scores.manifest.score_matrix.sha256,
+            "score_matrix_size_bytes": scores.manifest.score_matrix.size_bytes,
         },
         "bootstrap": {
             "ci": 0.95,
@@ -867,7 +1283,8 @@ def build_aggregation_profile(
             "maximum_active_contracts": max(scores.query_contract_counts.values()),
             "minimum_active_contracts": min(scores.query_contract_counts.values()),
             "query_count": len(query_ids),
-            "row_count": scores.manifest.row_count,
+            "corpus_row_count": scores.manifest.corpus_row_count,
+            "score_count": scores.manifest.score_count,
         },
         "definitions": _definitions(),
         "excluded_nonretrieval_slices": sorted(NON_RETRIEVAL_SLICES),
@@ -962,6 +1379,9 @@ def validate_aggregation_profile(
     profile_path: Path,
     gold_path: Path,
     score_artifact_path: Path,
+    corpus_inventory_path: Path,
+    score_matrix_path: Path,
+    query_vector_matrix_path: Path,
     generation_manifest_directory: Path,
     *,
     expected_profile_sha256: str,
@@ -981,6 +1401,9 @@ def validate_aggregation_profile(
     expected = build_aggregation_profile(
         gold_path,
         score_artifact_path,
+        corpus_inventory_path,
+        score_matrix_path,
+        query_vector_matrix_path,
         release_gate=True,
         expected_gold_sha256=hashlib.sha256(gold_bytes).hexdigest(),
         expected_source_commit=expected_source_commit,
@@ -1014,6 +1437,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Select and seal CardRAG document aggregation")
     parser.add_argument("--gold", type=Path, required=True)
     parser.add_argument("--scores", type=Path, required=True)
+    parser.add_argument("--corpus-inventory", type=Path, required=True)
+    parser.add_argument("--score-matrix", type=Path, required=True)
+    parser.add_argument("--query-vector-matrix", type=Path, required=True)
     parser.add_argument("--expected-gold-sha256")
     parser.add_argument("--expected-source-commit")
     parser.add_argument("--validate-profile", type=Path)
@@ -1048,6 +1474,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 validate_profile,
                 cast(Path, arguments.gold),
                 cast(Path, arguments.scores),
+                cast(Path, arguments.corpus_inventory),
+                cast(Path, arguments.score_matrix),
+                cast(Path, arguments.query_vector_matrix),
                 generation_directory,
                 expected_profile_sha256=expected_profile_sha256,
                 expected_source_commit=expected_source_commit,
@@ -1070,6 +1499,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         artifact = build_aggregation_profile(
             cast(Path, arguments.gold),
             cast(Path, arguments.scores),
+            cast(Path, arguments.corpus_inventory),
+            cast(Path, arguments.score_matrix),
+            cast(Path, arguments.query_vector_matrix),
             release_gate=not fixture_mode,
             expected_gold_sha256=cast(str | None, arguments.expected_gold_sha256),
             expected_source_commit=expected_source_commit,

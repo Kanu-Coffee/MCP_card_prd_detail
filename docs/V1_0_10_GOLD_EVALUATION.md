@@ -82,15 +82,29 @@ gold/query 순서와 전건 coverage를 검증합니다. 출력은 임시 파일
 한 번만 publish합니다. 기존 출력이 있으면 byte-identical 재실행만 허용합니다.
 
 v5의 세 lane은 native producer가 실제 `V5ExactRepository.search`, FTS lexical audit,
-`RerankerShadowLane.observe`를 호출합니다. 먼저 `cardrag-aggregation-capture`로 생성한
-`document-aggregation-scores.jsonl`을 요구하며, 이 파일의 query-vector hash, 모든 active
-row의 revision/node/view/input/profile/score, `expected_rows == scored_rows`, DB/sidecar와
-exact-row corpus binding을 query별 hash로 다시 결속합니다. 신규 query shard를 만들 때는
-실제 `V5ExactRepository.capture_unscoped_current_scores`를 다시 호출해 query-vector hash와
-모든 score가 artifact와 일치하는지도 확인합니다. exact 결과를 primary로 한 번만
-만든 뒤 lexical/reranker JSONL에는 byte-equivalent primary model을 복사하고 shadow 순위만
-별도 저장합니다. query별 immutable shard 때문에 중단 후 재개할 수 있으며, 완료된 shard는
-provider를 다시 호출하지 않습니다.
+`RerankerShadowLane.observe`를 호출합니다. 먼저 `cardrag-aggregation-capture`가 만든 네 파일을
+요구합니다.
+
+- `document-aggregation-scores.jsonl`: v2 manifest와 query별 offset/count/segment SHA
+- `document-aggregation-corpus-inventory.jsonl`: 고정 row provenance를 정확히 한 번 기록
+- `document-aggregation-score-matrix.f32`: query-major/row-major little-endian float32 점수
+- `document-aggregation-query-vectors.f32`: 4,096D little-endian float32 query 벡터
+
+각 파일은 95,000,000 bytes 이하이고, `score_count == query_count * corpus_row_count <=
+20,000,000`이므로 점수 행렬은 최대 80,000,000 bytes입니다. manifest가 나머지 세 파일의
+SHA-256과 크기를 결속합니다. native capture는 `expected_rows == scored_rows`, DB/sidecar와
+exact-row corpus binding을 확인하고, 실제 scorer를 512행(`VECTOR_BLOCK_ROWS`) 블록으로
+한 번 더 실행해 각 row의 provenance와 `<f4` 점수 bytes를 sidecar segment와 exact
+비교합니다. 전체 fresh
+row tuple은 만들지 않고 계약별 집계도 CONTRACT 값 하나와 child 상위 3개만 유지합니다.
+release 최소 300질의와 전체 20,000,000-score 한도에서 live corpus는 최대 66,666행이며,
+shared capture도 이 상한을 명시적으로 거부 경계로 사용합니다.
+
+exact 결과를 primary로 한 번만 만든 뒤 lexical/reranker JSONL에는 byte-equivalent primary
+model을 복사하고 shadow 순위만 별도 저장합니다. query별 immutable shard 때문에 중단 후
+재개할 수 있으며, 완료된 shard는 embedding/reranker provider를 다시 호출하지 않습니다.
+source DB는 시작 시 SHA-256과 inode identity를 잡고 모든 pathname 재사용 뒤 다시
+rehash/re-stat하므로 중간 atomic replacement도 성공으로 봉인하지 않습니다.
 
 aggregation score artifact의 `raw_*` coverage는 집계 profile 비교를 위한 unscoped current
 전수 행을 뜻합니다. 실제 exact API의 `expected/scored_*` coverage는 같은 질의에서 catalog
@@ -99,10 +113,26 @@ runtime 수가 raw보다 작을 수 있으며, capture는 raw row를 해당 acti
 결정적으로 제한해 run 순위를 만들고 API coverage/rank prefix와 대조합니다. discovery
 질의에서는 두 집합이 동일해야 합니다.
 
-답변은 별도 `cardrag.gold-answer-artifact.v1` JSONL이어야 합니다. manifest는 gold,
-generation manifest, answer profile과 `synthetic=false`를 봉인하고 각
-`cardrag.gold-answer.v1`은 query ID/hash와 실제 제시한 answer model을 포함합니다. native
-capture는 lexical/reranker 답변을 별도로 받지 않고 exact 답변을 그대로 보존합니다.
+답변은 retrieval과 분리한 두 단계로 만듭니다. 첫 단계 `bootstrap_retrieval`은
+`validation_profile=release_grade`, `release_eligible=false`, `answer_evidence=null`이며 gold answer
+label이나 producer answer evidence를 입력받지 않습니다. Native capture는 answer artifact 자체를
+받지 않고 고정 abstention을 내부에서 만듭니다. External observation은 run schema의 answer 필드를
+채우기 위해 별도의 canonical no-answer bootstrap artifact를 사용하지만, 모든 query에
+`제공된 검색 근거에서 답을 확인할 수 없습니다.`와 빈 evidence tuple만 넣고 gold label은 읽지
+않습니다. 생성 명령은 `V1_0_10_EXTERNAL_GOLD_PRODUCER.md`의 create-only 예제를 따릅니다. 이
+단계에서 source/DB/raw scores/run/attestation을 모두 검산합니다. 그 ranking으로 answer input을
+만든 뒤 producer는
+`cardrag.gold-answer-artifact.v1`, call ledger, state identity, immutable `state-bundle.jsonl`,
+producer receipt와 선택적 decision artifact를 봉인합니다. state bundle verifier는 reservation,
+request, shard, decision, ledger와 최종 `AnswerRecord`를 의미적으로 replay합니다.
+
+마지막 native `finalize-native-v5`는 bootstrap run의 contracts/spans/shadow를 그대로 두고 answer
+필드와 관련 hash만 교체합니다. provider client를 만들지 않으며 embedding/reranker/answer
+provider 호출 수는 0입니다. 세 native lane은 `qwen_structure_exact`의 동일 answer chain을
+공유합니다. external final은 최종 answer artifact로 observation을 다시 만들되 bootstrap과 다른
+immutable observation/sidecar/run/receipt 경로를 사용합니다. final
+receipt만 `capture_phase=final_release`, `validation_profile=release_grade`,
+`release_eligible=true`가 될 수 있습니다.
 
 v1.0.9와 Qwen 1,600-char page runtime은 v1.0.10 MCP에 존재하지 않으므로 current runtime을
 그 lane처럼 가장해 실행하지 않습니다. 두 lane은 `external_reproducible` 입력만 허용합니다.
@@ -110,18 +140,27 @@ v1.0.9와 Qwen 1,600-char page runtime은 v1.0.10 MCP에 존재하지 않으므�
 
 - `synthetic=false`, sealed gold/source commit/generation manifest/DB/sidecar/profile hash
 - corpus inventory 전 행의 row/evidence/contract/span/input/vector SHA
-- little-endian normalized query vector 원 bytes(base64)와 SHA
-- 모든 row의 independently recomputable dense score와 contiguous dense rank
+- little-endian float32 dense-score/query-vector sidecar의 shape, offset, segment SHA
+- corpus inventory를 한 번만 기록하고 query별 전체 row score는 sidecar에만 보존
 - v1.0.9의 경우 실제 v4 FTS에서 재계산한 top-250 lexical rank, dense top-250 cutoff 및
   `RRF_K=60`
 - `expected_rows == scored_rows`, `expected_contracts == scored_contracts`, query exact-once
 
-Qwen page 입력은 별도 `cardrag.evaluation-page-generation.v1` manifest와 read-only SQLite
+Qwen page 입력은 별도 `cardrag.evaluation-page-generation.v2` manifest와 read-only SQLite
 `cardrag.evaluation-page.v1` DB를 요구합니다. DB의 `evaluation_chunks` row provenance,
-`cardrag.page-window-1600.v1`, `maximum_chars=1600`, 4,096D normalized `vectors.f32`를 전부
-재검산합니다. 이 명시 계약을 구현한 실제 artifact가 없으면 `qwen_page`를 만들 수 없습니다.
+정확한 10-column 계약, source text/range proof, parent v5 source commit/generation
+manifest/serving DB binding, `cardrag.page-window-1600.v1`, `maximum_chars=1600`,
+`overlap_chars=160`, 4,096D normalized `vectors.f32`를 전부 재검산합니다. 이 명시 계약을
+구현한 실제 artifact가 없으면 `qwen_page`를 만들 수 없습니다.
 v1.0.9도 v4 DB의 inline 1,536D vectors와 FTS를 직접 재계산하므로 raw dense trace가 없는
 기존 report나 lane 이름만 적은 JSONL은 봉인되지 않습니다.
+
+정식 v1.0.9 seal은 source commit `fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113`뿐 아니라
+preserved generation `g-2208f0c6076649c4be915be1-d11f80f9af71`, generation manifest
+SHA-256 `dd12487e4f92a2d84362322f04d027421540c6bda27659e46cf6af553e216002`/
+542,209 bytes, serving DB SHA-256
+`d25be45bc5d39af6561e587635b08312913107b6f6416500da39ab9eb757d38f`/58,466,304
+bytes의 고정 anchor도 검사합니다.
 
 테스트의 `--fixture-mode`는 작은 schema fixture만 허용할 뿐 `synthetic=true`를 허용하지
 않습니다. fixture receipt와 capture-set receipt는 `release_eligible=false`로 봉인되므로
@@ -139,9 +178,10 @@ uv run cardrag-gold-capture native-v5 \
   --gold /candidate-evidence/gold.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
   --score-artifact /candidate-evidence/document-aggregation-scores.jsonl \
+  --score-corpus-inventory /candidate-evidence/document-aggregation-corpus-inventory.jsonl \
+  --score-matrix /candidate-evidence/document-aggregation-score-matrix.f32 \
+  --score-query-vector-matrix /candidate-evidence/document-aggregation-query-vectors.f32 \
   --expected-score-artifact-sha256 SCORE_SHA256 \
-  --answer-artifact /candidate-evidence/qwen-structure-answers.jsonl \
-  --expected-answer-artifact-sha256 ANSWER_SHA256 \
   --generation-manifest /candidate-generation/manifest.json \
   --generation-dir /candidate-generation/GENERATION_ID \
   --object-root /candidate-state/objects \
@@ -152,24 +192,33 @@ uv run cardrag-gold-capture native-v5 \
   --output-dir /candidate-evidence
 ```
 
-v1.0.9 또는 Qwen page observation은 각각 다음 명령으로 독립 검산·봉인합니다. Qwen page는
-`--vectors`가 필수이고 v1.0.9는 금지됩니다.
+v1.0.9 또는 Qwen page bootstrap observation은 각각 다음 명령으로 독립 검산·봉인합니다.
+Qwen page는 `--vectors`와 parent v5의 `--source-generation-manifest`/`--source-database`가
+필수이고 v1.0.9는 세 인자가 모두 금지됩니다. 아래 observation/run/receipt/sidecar는 모두
+`bootstrap/` 전용 경로이며 final 단계에서 덮어쓰지 않습니다.
 
 ```bash
 uv run cardrag-gold-capture external \
   --gold /candidate-evidence/gold.jsonl \
   --expected-gold-sha256 GOLD_SHA256 \
   --expected-source-commit "$SOURCE_COMMIT" \
-  --observation /candidate-evidence/qwen_page.capture-attestation.jsonl \
-  --expected-observation-sha256 OBSERVATION_SHA256 \
+  --observation /candidate-evidence/bootstrap/qwen_page.capture-attestation.jsonl \
+  --expected-observation-sha256 BOOTSTRAP_OBSERVATION_SHA256 \
   --inventory /candidate-evidence/raw/qwen-page-corpus.jsonl \
   --expected-inventory-sha256 INVENTORY_SHA256 \
   --generation-manifest /candidate-evidence/raw/qwen-page-manifest.json \
   --database /candidate-evidence/raw/qwen-page.sqlite3 \
+  --source-generation-manifest /candidate-generation/manifest.json \
+  --source-database /candidate-generation/GENERATION_ID/index.sqlite3 \
   --vectors /candidate-evidence/raw/qwen-page-vectors.f32 \
-  --output /candidate-evidence/qwen_page.jsonl \
-  --receipt /candidate-evidence/qwen_page.capture-receipt.json
+  --score-matrix /candidate-evidence/bootstrap/qwen_page.dense-scores.f32 \
+  --query-vector-matrix /candidate-evidence/bootstrap/qwen_page.query-vectors.f32 \
+  --output /candidate-evidence/bootstrap/qwen_page.jsonl \
+  --receipt /candidate-evidence/bootstrap/qwen_page.capture-receipt.json
 ```
+
+v1.0.9 bootstrap/final observation 생성에는 lexical sidecar와 preserved run/generation/manifest/DB
+네 anchor가 모두 필요합니다. Qwen page에는 lexical sidecar를 전달하지 않습니다.
 
 native 결과는 network 없이 `validate-native-v5`로 score/answer/generation/DB/sidecar/run/
 query shard/reranker artifacts를 원점에서 다시 읽을 수 있습니다.
@@ -180,7 +229,9 @@ uv run cardrag-gold-capture validate-native-v5 \
   --expected-gold-sha256 GOLD_SHA256 \
   --expected-source-commit "$SOURCE_COMMIT" \
   --score-artifact /candidate-evidence/document-aggregation-scores.jsonl \
-  --answer-artifact /candidate-evidence/qwen-structure-answers.jsonl \
+  --score-corpus-inventory /candidate-evidence/document-aggregation-corpus-inventory.jsonl \
+  --score-matrix /candidate-evidence/document-aggregation-score-matrix.f32 \
+  --score-query-vector-matrix /candidate-evidence/document-aggregation-query-vectors.f32 \
   --generation-manifest /candidate-generation/manifest.json \
   --generation-dir /candidate-generation/GENERATION_ID \
   --object-root /candidate-state/objects \
@@ -194,19 +245,126 @@ uv run cardrag-gold-capture validate-native-v5 \
   --receipt reranker_shadow=/candidate-evidence/reranker_shadow.capture-receipt.json
 ```
 
-외부 lane은 같은 `external` 명령을 같은 출력 경로로 재실행하는 것이 source validation입니다.
-입력 observation 자체를 각각 `v109_baseline.capture-attestation.jsonl`,
-`qwen_page.capture-attestation.jsonl`이라는 release evidence 이름으로 보존합니다. 마지막으로
-다섯 run·receipt·attestation을 `validate-set`에 전달하고 각 receipt의 SHA를 명시하여
-`gold-capture-set-receipt.json`을 봉인합니다. 세 native lane의 `--attestation`은 동일한
-`native-v5-attestation.jsonl`을 가리켜야 합니다. `validate-set`은 모든 gold query의 순서와
-전건 coverage, query vector/raw-row hash, expected/scored equality, source generation/DB/sidecar,
-run 결과 hash, source commit/profile 및 shadow primary 불변성의 canonical cross-binding을
-다시 확인합니다. 이 명령은 binding validator이지 source replay가 아니며, 대용량 source
-DB/vector를 다시 열거나 provider를 다시 호출하지 않습니다. 따라서 `validate-set` 출력만으로는
+답변 producer가 완료된 뒤 native bootstrap을 offline final로 승격합니다. 아래 answer retrieval
+경로는 모두 위 bootstrap을 가리키며, `--answer-retrieval-corpus-inventory`, dense matrix,
+query-vector matrix도 producer receipt와 다시 대조됩니다. decision artifact를 봉인한 profile이면
+`--answer-decision`과 `--expected-answer-decision-sha256` 쌍도 추가합니다.
+
+```bash
+uv run cardrag-gold-capture finalize-native-v5 \
+  --gold /candidate-evidence/gold.jsonl \
+  --expected-gold-sha256 GOLD_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
+  --score-artifact /candidate-evidence/document-aggregation-scores.jsonl \
+  --score-corpus-inventory /candidate-evidence/document-aggregation-corpus-inventory.jsonl \
+  --score-matrix /candidate-evidence/document-aggregation-score-matrix.f32 \
+  --score-query-vector-matrix /candidate-evidence/document-aggregation-query-vectors.f32 \
+  --generation-manifest /candidate-generation/manifest.json \
+  --generation-dir /candidate-generation/GENERATION_ID \
+  --object-root /candidate-state/objects \
+  --bootstrap-attestation /candidate-evidence/bootstrap/native-v5-attestation.jsonl \
+  --bootstrap-run qwen_structure_exact=/candidate-evidence/bootstrap/qwen_structure_exact.jsonl \
+  --bootstrap-run lexical_shadow=/candidate-evidence/bootstrap/lexical_shadow.jsonl \
+  --bootstrap-run reranker_shadow=/candidate-evidence/bootstrap/reranker_shadow.jsonl \
+  --bootstrap-receipt qwen_structure_exact=/candidate-evidence/bootstrap/qwen_structure_exact.capture-receipt.json \
+  --bootstrap-receipt lexical_shadow=/candidate-evidence/bootstrap/lexical_shadow.capture-receipt.json \
+  --bootstrap-receipt reranker_shadow=/candidate-evidence/bootstrap/reranker_shadow.capture-receipt.json \
+  --expected-bootstrap-receipt-sha256 qwen_structure_exact=EXACT_BOOTSTRAP_RECEIPT_SHA256 \
+  --expected-bootstrap-receipt-sha256 lexical_shadow=LEXICAL_BOOTSTRAP_RECEIPT_SHA256 \
+  --expected-bootstrap-receipt-sha256 reranker_shadow=RERANKER_BOOTSTRAP_RECEIPT_SHA256 \
+  --reranker-state-root /candidate-evidence/gold-capture-state \
+  --answer-input /candidate-evidence/answers/qwen_structure_exact.input.jsonl \
+  --expected-answer-input-sha256 ANSWER_INPUT_SHA256 \
+  --answer-producer-receipt /candidate-evidence/answers/qwen_structure_exact.producer-receipt.json \
+  --expected-answer-producer-receipt-sha256 ANSWER_RECEIPT_SHA256 \
+  --answer-artifact /candidate-evidence/answers/qwen_structure_exact.answers.jsonl \
+  --expected-answer-artifact-sha256 ANSWER_SHA256 \
+  --answer-call-ledger /candidate-evidence/answers/qwen_structure_exact.call-ledger.jsonl \
+  --answer-state-identity /candidate-evidence/answers/qwen_structure_exact.state-identity.json \
+  --answer-state-bundle /candidate-evidence/answers/qwen_structure_exact.state-bundle.jsonl \
+  --answer-profile-id ANSWER_PROFILE_ID \
+  --answer-retrieval-run /candidate-evidence/bootstrap/qwen_structure_exact.jsonl \
+  --expected-answer-retrieval-run-sha256 EXACT_BOOTSTRAP_RUN_SHA256 \
+  --answer-retrieval-capture-receipt /candidate-evidence/bootstrap/qwen_structure_exact.capture-receipt.json \
+  --expected-answer-retrieval-capture-receipt-sha256 EXACT_BOOTSTRAP_RECEIPT_SHA256 \
+  --answer-retrieval-attestation /candidate-evidence/bootstrap/native-v5-attestation.jsonl \
+  --expected-answer-retrieval-attestation-sha256 NATIVE_BOOTSTRAP_ATTESTATION_SHA256 \
+  --answer-retrieval-raw-score /candidate-evidence/document-aggregation-scores.jsonl \
+  --expected-answer-retrieval-raw-score-sha256 SCORE_SHA256 \
+  --answer-retrieval-corpus-inventory /candidate-evidence/document-aggregation-corpus-inventory.jsonl \
+  --expected-answer-retrieval-corpus-inventory-sha256 CORPUS_SHA256 \
+  --answer-retrieval-dense-score-matrix /candidate-evidence/document-aggregation-score-matrix.f32 \
+  --expected-answer-retrieval-dense-score-matrix-sha256 SCORE_MATRIX_SHA256 \
+  --answer-retrieval-query-vector-matrix /candidate-evidence/document-aggregation-query-vectors.f32 \
+  --expected-answer-retrieval-query-vector-matrix-sha256 QUERY_VECTOR_MATRIX_SHA256 \
+  --output-dir /candidate-evidence/final
+```
+
+외부 lane finalization은 같은 경로를 재실행하는 작업이 아닙니다. 최종 answer artifact로
+observation을 다시 만들고 `final/`의 새 immutable observation/sidecar/run/receipt 경로를
+사용합니다. Qwen page final seal의 전체 answer evidence 인자는 다음과 같습니다. 모든
+`--answer-retrieval-*` 경로는 AnswerInput을 만든 `bootstrap/` artifact를 가리킵니다.
+
+```bash
+uv run cardrag-gold-capture external \
+  --gold /candidate-evidence/gold.jsonl \
+  --expected-gold-sha256 GOLD_SHA256 \
+  --expected-source-commit "$SOURCE_COMMIT" \
+  --observation /candidate-evidence/final/qwen_page.capture-attestation.jsonl \
+  --expected-observation-sha256 FINAL_PAGE_OBSERVATION_SHA256 \
+  --inventory /candidate-evidence/raw/qwen-page-corpus.jsonl \
+  --expected-inventory-sha256 PAGE_INVENTORY_SHA256 \
+  --generation-manifest /candidate-evidence/raw/qwen-page-manifest.json \
+  --database /candidate-evidence/raw/qwen-page.sqlite3 \
+  --source-generation-manifest /candidate-generation/manifest.json \
+  --source-database /candidate-generation/GENERATION_ID/index.sqlite3 \
+  --vectors /candidate-evidence/raw/qwen-page-vectors.f32 \
+  --score-matrix /candidate-evidence/final/qwen_page.dense-scores.f32 \
+  --query-vector-matrix /candidate-evidence/final/qwen_page.query-vectors.f32 \
+  --output /candidate-evidence/final/qwen_page.jsonl \
+  --receipt /candidate-evidence/final/qwen_page.capture-receipt.json \
+  --answer-input /candidate-evidence/answers/qwen_page.input.jsonl \
+  --expected-answer-input-sha256 PAGE_ANSWER_INPUT_SHA256 \
+  --answer-producer-receipt /candidate-evidence/answers/qwen_page.producer-receipt.json \
+  --expected-answer-producer-receipt-sha256 PAGE_ANSWER_RECEIPT_SHA256 \
+  --answer-artifact /candidate-evidence/answers/qwen_page.answers.jsonl \
+  --expected-answer-artifact-sha256 PAGE_ANSWER_SHA256 \
+  --answer-call-ledger /candidate-evidence/answers/qwen_page.call-ledger.jsonl \
+  --answer-state-identity /candidate-evidence/answers/qwen_page.state-identity.json \
+  --answer-state-bundle /candidate-evidence/answers/qwen_page.state-bundle.jsonl \
+  --answer-profile-id cardrag.answer.extractive-k8.v1 \
+  --answer-retrieval-run /candidate-evidence/bootstrap/qwen_page.jsonl \
+  --expected-answer-retrieval-run-sha256 PAGE_BOOTSTRAP_RUN_SHA256 \
+  --answer-retrieval-capture-receipt /candidate-evidence/bootstrap/qwen_page.capture-receipt.json \
+  --expected-answer-retrieval-capture-receipt-sha256 PAGE_BOOTSTRAP_RECEIPT_SHA256 \
+  --answer-retrieval-attestation /candidate-evidence/bootstrap/qwen_page.capture-attestation.jsonl \
+  --expected-answer-retrieval-attestation-sha256 PAGE_BOOTSTRAP_OBSERVATION_SHA256 \
+  --answer-retrieval-raw-score /candidate-evidence/bootstrap/qwen_page.capture-attestation.jsonl \
+  --expected-answer-retrieval-raw-score-sha256 PAGE_BOOTSTRAP_OBSERVATION_SHA256 \
+  --answer-retrieval-corpus-inventory /candidate-evidence/raw/qwen-page-corpus.jsonl \
+  --expected-answer-retrieval-corpus-inventory-sha256 PAGE_INVENTORY_SHA256 \
+  --answer-retrieval-dense-score-matrix /candidate-evidence/bootstrap/qwen_page.dense-scores.f32 \
+  --expected-answer-retrieval-dense-score-matrix-sha256 PAGE_BOOTSTRAP_DENSE_SHA256 \
+  --answer-retrieval-query-vector-matrix /candidate-evidence/bootstrap/qwen_page.query-vectors.f32 \
+  --expected-answer-retrieval-query-vector-matrix-sha256 PAGE_BOOTSTRAP_QUERY_VECTOR_SHA256
+```
+
+v1.0.9 final observation은 `V1_0_10_EXTERNAL_GOLD_PRODUCER.md`에 고정한 preserved run,
+generation, manifest SHA, DB SHA 네 anchor와 final lexical path를 모두 다시 받습니다. final seal은
+core `--lexical-ranks`와 bootstrap `--answer-retrieval-lexical-ranks`/expected SHA를 추가하고,
+Qwen page는 이 lexical 인자들을 금지합니다. decision artifact를 쓴 lane은 decision path/SHA
+쌍도 추가합니다.
+
+마지막으로 다섯 final run·receipt·attestation을 `validate-set`에 전달하고 각 receipt의 SHA를
+명시하여 `gold-capture-set-receipt.json`을 봉인합니다. 세 native lane의 `--attestation`은 동일한
+final `native-v5-attestation.jsonl`을 가리켜야 합니다. `validate-set`은 모든 gold query의 순서와
+전건 coverage, compact corpus/score/query-vector segment hash, expected/scored equality, source
+generation/DB/sidecar, run 결과 hash, source commit/profile 및 shadow primary 불변성의 canonical
+cross-binding을 다시 확인합니다. 이 명령은 binding validator이지 source replay가 아니며, 대용량
+source DB/vector를 다시 열거나 provider를 다시 호출하지 않습니다. 따라서 `validate-set` 출력만으로는
 source가 실제로 재생·재검산되었다는 사실을 증명하지 못합니다. source 재검산은 바로 앞의
-`external` 재실행과 `validate-native-v5`가 담당합니다. 그 절차를 실제로 수행해 생성한 set
-receipt의 canonical full-file SHA를 release workflow에 전달하고 workflow가 다시 계산해
+distinct-path external final seal과 `validate-native-v5`가 담당합니다. 그 절차를 실제로 수행해
+생성한 set receipt의 canonical full-file SHA를 release workflow에 전달하고 workflow가 다시 계산해
 일치시킬 때 그 digest가 명시적 trust root가 됩니다. source replay를 생략한 self-asserted
 receipt는 단순 binding receipt일 뿐 release evidence가 될 수 없습니다.
 
@@ -216,28 +374,64 @@ uv run cardrag-gold-capture validate-set \
   --expected-gold-sha256 GOLD_SHA256 \
   --expected-source-commit "$SOURCE_COMMIT" \
   --native-score-artifact /candidate-evidence/document-aggregation-scores.jsonl \
-  --output /candidate-evidence/gold-capture-set-receipt.json \
-  --run v109_baseline=/candidate-evidence/v109_baseline.jsonl \
-  --run qwen_page=/candidate-evidence/qwen_page.jsonl \
-  --run qwen_structure_exact=/candidate-evidence/qwen_structure_exact.jsonl \
-  --run lexical_shadow=/candidate-evidence/lexical_shadow.jsonl \
-  --run reranker_shadow=/candidate-evidence/reranker_shadow.jsonl \
-  --receipt v109_baseline=/candidate-evidence/v109_baseline.capture-receipt.json \
-  --receipt qwen_page=/candidate-evidence/qwen_page.capture-receipt.json \
-  --receipt qwen_structure_exact=/candidate-evidence/qwen_structure_exact.capture-receipt.json \
-  --receipt lexical_shadow=/candidate-evidence/lexical_shadow.capture-receipt.json \
-  --receipt reranker_shadow=/candidate-evidence/reranker_shadow.capture-receipt.json \
-  --attestation v109_baseline=/candidate-evidence/v109_baseline.capture-attestation.jsonl \
-  --attestation qwen_page=/candidate-evidence/qwen_page.capture-attestation.jsonl \
-  --attestation qwen_structure_exact=/candidate-evidence/native-v5-attestation.jsonl \
-  --attestation lexical_shadow=/candidate-evidence/native-v5-attestation.jsonl \
-  --attestation reranker_shadow=/candidate-evidence/native-v5-attestation.jsonl \
+  --native-score-corpus-inventory /candidate-evidence/document-aggregation-corpus-inventory.jsonl \
+  --native-score-matrix /candidate-evidence/document-aggregation-score-matrix.f32 \
+  --native-score-query-vector-matrix /candidate-evidence/document-aggregation-query-vectors.f32 \
+  --external-inventory v109_baseline=/candidate-evidence/raw/v109_baseline.corpus.jsonl \
+  --external-inventory qwen_page=/candidate-evidence/raw/qwen-page-corpus.jsonl \
+  --external-score-matrix v109_baseline=/candidate-evidence/final/v109_baseline.dense-scores.f32 \
+  --external-score-matrix qwen_page=/candidate-evidence/final/qwen_page.dense-scores.f32 \
+  --external-query-vector-matrix v109_baseline=/candidate-evidence/final/v109_baseline.query-vectors.f32 \
+  --external-query-vector-matrix qwen_page=/candidate-evidence/final/qwen_page.query-vectors.f32 \
+  --external-lexical-ranks v109_baseline=/candidate-evidence/final/v109_baseline.lexical-ranks.jsonl \
+  --output /candidate-evidence/final/gold-capture-set-receipt.json \
+  --run v109_baseline=/candidate-evidence/final/v109_baseline.jsonl \
+  --run qwen_page=/candidate-evidence/final/qwen_page.jsonl \
+  --run qwen_structure_exact=/candidate-evidence/final/qwen_structure_exact.jsonl \
+  --run lexical_shadow=/candidate-evidence/final/lexical_shadow.jsonl \
+  --run reranker_shadow=/candidate-evidence/final/reranker_shadow.jsonl \
+  --receipt v109_baseline=/candidate-evidence/final/v109_baseline.capture-receipt.json \
+  --receipt qwen_page=/candidate-evidence/final/qwen_page.capture-receipt.json \
+  --receipt qwen_structure_exact=/candidate-evidence/final/qwen_structure_exact.capture-receipt.json \
+  --receipt lexical_shadow=/candidate-evidence/final/lexical_shadow.capture-receipt.json \
+  --receipt reranker_shadow=/candidate-evidence/final/reranker_shadow.capture-receipt.json \
+  --attestation v109_baseline=/candidate-evidence/final/v109_baseline.capture-attestation.jsonl \
+  --attestation qwen_page=/candidate-evidence/final/qwen_page.capture-attestation.jsonl \
+  --attestation qwen_structure_exact=/candidate-evidence/final/native-v5-attestation.jsonl \
+  --attestation lexical_shadow=/candidate-evidence/final/native-v5-attestation.jsonl \
+  --attestation reranker_shadow=/candidate-evidence/final/native-v5-attestation.jsonl \
   --expected-receipt-sha256 v109_baseline=V109_RECEIPT_SHA256 \
   --expected-receipt-sha256 qwen_page=PAGE_RECEIPT_SHA256 \
   --expected-receipt-sha256 qwen_structure_exact=EXACT_RECEIPT_SHA256 \
   --expected-receipt-sha256 lexical_shadow=LEXICAL_RECEIPT_SHA256 \
   --expected-receipt-sha256 reranker_shadow=RERANKER_RECEIPT_SHA256
 ```
+
+정식 `validate-set`에는 위 명령에 answer lane 세 개(`v109_baseline`, `qwen_page`,
+`qwen_structure_exact`) 각각의 다음 `LANE=value` 옵션도 정확히 한 번씩 전달합니다:
+`--answer-input`, `--expected-answer-input-sha256`, `--answer-producer-receipt`,
+`--expected-answer-producer-receipt-sha256`, `--answer-artifact`,
+`--expected-answer-artifact-sha256`, `--answer-call-ledger`, `--answer-state-identity`,
+`--answer-state-bundle`, `--answer-profile-id`, `--answer-retrieval-run`,
+`--expected-answer-retrieval-run-sha256`, `--answer-retrieval-capture-receipt`,
+`--expected-answer-retrieval-capture-receipt-sha256`, `--answer-retrieval-attestation`,
+`--expected-answer-retrieval-attestation-sha256`, `--answer-retrieval-raw-score`,
+`--expected-answer-retrieval-raw-score-sha256`, `--answer-retrieval-corpus-inventory`,
+`--expected-answer-retrieval-corpus-inventory-sha256`,
+`--answer-retrieval-dense-score-matrix`,
+`--expected-answer-retrieval-dense-score-matrix-sha256`,
+`--answer-retrieval-query-vector-matrix`,
+`--expected-answer-retrieval-query-vector-matrix-sha256`. v1.0.9에만
+`--answer-retrieval-lexical-ranks`와 그 expected SHA 옵션이 추가되고, decision을 사용한
+lane에만 decision path/SHA 쌍을 추가합니다.
+
+release checkout의 `validate-set`은 대용량 generation DB나 Qwen page DB를 요구하지 않습니다.
+각 answer chain에는 portable semantic verifier를 사용해 input/receipt/state-bundle/decision/
+answer/ledger를 replay하고, bootstrap run·receipt·attestation·raw-score manifest·corpus·binary
+sidecar 파일은 shared validator가 직접 rehash하여 producer receipt와 final lane receipt에
+있는 binding과 대조합니다. 반면 최초 seal과 `finalize-native-v5`는 DB와 generation을 여는
+strict source-replay 단계입니다. portable 검증은 source-replay를 대체하거나 self-asserted
+bootstrap을 승격하는 경로가 아닙니다.
 
 ## 익명 pairwise 블라인드 평가
 
@@ -258,7 +452,7 @@ bootstrap을 수행합니다. release gate는 자연스러움 delta의 CI95 하�
 
 ```json
 {"baseline_lane":"v109_baseline","baseline_run_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","candidate_lane":"qwen_structure_exact","candidate_run_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","gold_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","lane_identity_exposed_to_raters":false,"pair_count":300,"presentation_protocol":"anonymous-a-b.v1","query_count":300,"ratings_per_query":1,"rubric_id":"cardrag.blind-rubric.naturalness-factual-completeness.v1","schema_version":"cardrag.blind-evaluation-artifact.v1"}
-{"candidate_position":"left","factual_completeness_preference":"left","left_answer_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","naturalness_preference":"tie","pair_id":"pair-0001","query_id":"gold-001","rater_key":"anonymous-rater-01","right_answer_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","schema_version":"cardrag.blind-pairwise-rating.v1"}
+{"candidate_position":"left","factual_completeness_preference":"left","left_answer_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","naturalness_preference":"tie","pair_id":"pair-0001","query_id":"gold-001","rater_key":"r1","right_answer_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","schema_version":"cardrag.blind-pairwise-rating.v1"}
 ```
 
 ## 실행

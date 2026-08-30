@@ -9,7 +9,7 @@ import sqlite3
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date
@@ -28,7 +28,6 @@ from cardrag_mcp.audit import (
     ExhaustiveAuditStore,
     ExpectedContract,
     LoadedAudit,
-    query_vector_sha256,
 )
 from cardrag_mcp.embeddings import OpenRouterEmbedder
 from cardrag_mcp.models import (
@@ -147,15 +146,22 @@ class ExactCapturedRow:
 
 
 @dataclass(frozen=True, slots=True)
-class ExactScoreCapture:
-    """All unscoped active-row scores for one gold query."""
+class ExactScoreCaptureSummary:
+    """Bounded summary of one streamed unscoped active-row score capture."""
 
     query_sha256: str
     query_vector_sha256: str
+    query_vector_f32: bytes
     expected_active_contracts: int
     expected_rows: int
     scored_rows: int
     exact_blocks: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExactScoreCapture(ExactScoreCaptureSummary):
+    """Compatibility materialization of all streamed rows for one gold query."""
+
     rows: tuple[ExactCapturedRow, ...]
 
 
@@ -629,7 +635,38 @@ class V5ExactRepository:
         *,
         handle: GenerationHandle,
     ) -> ExactScoreCapture:
-        """Capture every score produced by the real exact scorer for evaluation."""
+        """Materialize the streaming capture for compatibility with existing callers."""
+
+        rows: list[ExactCapturedRow] = []
+        summary = await self.capture_unscoped_current_score_stream(
+            query,
+            handle,
+            score_sink=rows.append,
+            block_rows=VECTOR_BLOCK_ROWS,
+        )
+        return ExactScoreCapture(
+            query_sha256=summary.query_sha256,
+            query_vector_sha256=summary.query_vector_sha256,
+            query_vector_f32=summary.query_vector_f32,
+            expected_active_contracts=summary.expected_active_contracts,
+            expected_rows=summary.expected_rows,
+            scored_rows=summary.scored_rows,
+            exact_blocks=summary.exact_blocks,
+            rows=tuple(rows),
+        )
+
+    async def capture_unscoped_current_score_stream(
+        self,
+        query: str,
+        handle: GenerationHandle,
+        *,
+        score_sink: Callable[[ExactCapturedRow], None],
+        block_rows: int = VECTOR_BLOCK_ROWS,
+    ) -> ExactScoreCaptureSummary:
+        """Stream canonical active-row scores without retaining an all-row duplicate."""
+
+        if type(block_rows) is not int or not 1 <= block_rows <= 4096:
+            raise ValueError("score capture block_rows must be an integer from 1 through 4096")
 
         vectors = self._vectors(handle)
         request = ContractSearchRequest(query=query)
@@ -641,54 +678,68 @@ class V5ExactRepository:
             if revision_id in active_ids
         ]
         query_vector = await self._embed_query(request.query, self._primary_profile(handle))
-        raw_scores: dict[int, float] = {}
-        _scores_by_node, exact_blocks = self._score_rows(
-            vectors,
-            row_indices,
-            query_vector,
-            raw_scores=raw_scores,
-        )
-        if len(raw_scores) != len(row_indices):
-            raise RuntimeError("v5 score capture did not record every active row")
-        selected = set(row_indices)
+        query_vector_f32 = np.ascontiguousarray(query_vector, dtype="<f4").tobytes(order="C")
+        if len(query_vector_f32) != 4096 * 4:
+            raise RuntimeError("v5 query embedding has an invalid canonical byte length")
+        scored_rows = 0
+        exact_blocks = 0
         with handle.connect() as connection:
-            provenance = {
-                int(row[0]): (
-                    str(row[1]),
-                    str(row[2]),
-                    cast(ViewType, str(row[3])),
-                    str(row[4]),
-                    str(row[5]),
-                )
-                for row in connection.execute(
+            provenance_rows = iter(
+                connection.execute(
                     """SELECT row_index,contract_revision_id,node_id,view_type,
                               input_sha256,profile_id
                          FROM embedding_views ORDER BY row_index"""
                 )
-                if int(row[0]) in selected
-            }
-        if set(provenance) != selected:
-            raise RuntimeError("v5 score capture row provenance is incomplete")
-        rows = tuple(
-            ExactCapturedRow(
-                row_index=row_index,
-                contract_revision_id=provenance[row_index][0],
-                node_id=provenance[row_index][1],
-                view_type=provenance[row_index][2],
-                input_sha256=provenance[row_index][3],
-                embedding_profile_id=provenance[row_index][4],
-                score=raw_scores[row_index],
             )
-            for row_index in row_indices
-        )
-        return ExactScoreCapture(
+            current = next(provenance_rows, None)
+            for start in range(0, len(row_indices), block_rows):
+                selected = np.asarray(row_indices[start : start + block_rows], dtype=np.intp)
+                if not selected.size:
+                    continue
+                exact_blocks += 1
+                scores = vectors.matrix[selected] @ query_vector
+                if scores.dtype != np.dtype("float32") or not bool(np.isfinite(scores).all()):
+                    raise RuntimeError("v5 exact scoring produced an invalid float32 score")
+                for matrix_index, raw_score in zip(selected, scores, strict=True):
+                    row_index = int(matrix_index)
+                    while current is not None and int(current[0]) < row_index:
+                        current = next(provenance_rows, None)
+                    if current is None or int(current[0]) != row_index:
+                        raise RuntimeError("v5 score capture row provenance is incomplete")
+                    if (
+                        vectors.row_indices[row_index] != row_index
+                        or str(current[1]) != vectors.contract_revision_ids[row_index]
+                        or str(current[2]) != vectors.node_ids[row_index]
+                        or str(current[3]) != vectors.view_types[row_index]
+                        or str(current[5]) != vectors.profile_ids[row_index]
+                    ):
+                        raise RuntimeError("v5 score capture row provenance differs")
+                    score = float(raw_score)
+                    if not -1.0 <= score <= 1.0:
+                        raise RuntimeError("v5 exact scoring produced an out-of-range score")
+                    score_sink(
+                        ExactCapturedRow(
+                            row_index=row_index,
+                            contract_revision_id=str(current[1]),
+                            node_id=str(current[2]),
+                            view_type=cast(ViewType, str(current[3])),
+                            input_sha256=str(current[4]),
+                            embedding_profile_id=str(current[5]),
+                            score=score,
+                        )
+                    )
+                    scored_rows += 1
+                    current = next(provenance_rows, None)
+        if scored_rows != len(row_indices):
+            raise RuntimeError("v5 score capture did not stream every active row")
+        return ExactScoreCaptureSummary(
             query_sha256=hashlib.sha256(request.query.encode("utf-8")).hexdigest(),
-            query_vector_sha256=query_vector_sha256(query_vector),
+            query_vector_sha256=hashlib.sha256(query_vector_f32).hexdigest(),
+            query_vector_f32=query_vector_f32,
             expected_active_contracts=len(revisions),
             expected_rows=len(row_indices),
-            scored_rows=len(rows),
+            scored_rows=scored_rows,
             exact_blocks=exact_blocks,
-            rows=rows,
         )
 
     @staticmethod

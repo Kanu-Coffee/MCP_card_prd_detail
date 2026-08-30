@@ -63,11 +63,12 @@ services:
       - CARDRAG_GARBAGE_GRACE_DAYS=${CARDRAG_GARBAGE_GRACE_DAYS:-30}
       - CARDRAG_COLLECT_REMOTE_GARBAGE=${CARDRAG_COLLECT_REMOTE_GARBAGE:-false}
       - CARDRAG_CODEX_EXECUTABLE=/usr/local/bin/codex
-      - CARDRAG_CODEX_AUTH_ROOT=/var/lib/cardrag-worker/codex
-      - CODEX_HOME=/var/lib/cardrag-worker/codex
-      - HOME=/var/lib/cardrag-worker/home
+      - CARDRAG_CODEX_AUTH_ROOT=/var/lib/cardrag-codex-home
+      - CODEX_HOME=/var/lib/cardrag-codex-home
+      - HOME=/var/lib/cardrag-codex-home/home
     volumes:
       - worker-state:/var/lib/cardrag-worker
+      - codex-home:/var/lib/cardrag-codex-home
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g
@@ -86,3 +87,5 @@ services:
 volumes:
   worker-state:
     name: ${CARDRAG_WORKER_STATE_VOLUME:-cardrag-worker-v110-state}
+  codex-home:
+    name: ${CARDRAG_WORKER_CODEX_HOME_VOLUME:-cardrag-worker-v110-codex-home}

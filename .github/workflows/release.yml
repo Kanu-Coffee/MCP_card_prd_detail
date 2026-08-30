@@ -67,6 +67,7 @@ jobs:
       mcp_platform_digest: ${{ steps.version.outputs.mcp_platform_digest }}
       mcp_config_digest: ${{ steps.version.outputs.mcp_config_digest }}
       mcp_attestation_digest: ${{ steps.version.outputs.mcp_attestation_digest }}
+      portable_evidence_manifest_sha256: ${{ steps.version.outputs.portable_evidence_manifest_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -120,12 +121,76 @@ jobs:
             acceptance_report="$evidence_dir/gold-evaluation-report.json"
             aggregation_profile="$evidence_dir/document-aggregation-profile.json"
             aggregation_scores="$evidence_dir/document-aggregation-scores.jsonl"
+            aggregation_corpus_inventory="$evidence_dir/document-aggregation-corpus-inventory.jsonl"
+            aggregation_score_matrix="$evidence_dir/document-aggregation-score-matrix.f32"
+            aggregation_query_vector_matrix="$evidence_dir/document-aggregation-query-vectors.f32"
             capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"
             candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
             serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"
             legacy_historical="$evidence_dir/v109-kb-real-regression-baseline.json"
             legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"
             legacy_reaudit="$evidence_dir/v109-kb-v4-structure-reaudit.json"
+            portable_evidence_relative_paths=(
+              candidate-acceptance-receipt.json
+              gold-evaluation-report.json
+              gold-capture-set-receipt.json
+              gold.jsonl
+              blind-evaluation.jsonl
+              document-aggregation-profile.json
+              document-aggregation-scores.jsonl
+              document-aggregation-corpus-inventory.jsonl
+              document-aggregation-score-matrix.f32
+              document-aggregation-query-vectors.f32
+              serving-generation-manifest.json
+              v109-kb-real-regression-baseline.json
+              v109-structure-audit-execution.json
+              v109-kb-v4-structure-reaudit.json
+              v109_baseline.jsonl
+              qwen_page.jsonl
+              qwen_structure_exact.jsonl
+              lexical_shadow.jsonl
+              reranker_shadow.jsonl
+              v109_baseline.capture-receipt.json
+              qwen_page.capture-receipt.json
+              qwen_structure_exact.capture-receipt.json
+              lexical_shadow.capture-receipt.json
+              reranker_shadow.capture-receipt.json
+              v109_baseline.capture-attestation.jsonl
+              qwen_page.capture-attestation.jsonl
+              native-v5-attestation.jsonl
+              v109_baseline.corpus.jsonl
+              v109_baseline.dense-scores.f32
+              v109_baseline.query-vectors.f32
+              v109_baseline.lexical-ranks.jsonl
+              qwen_page.corpus.jsonl
+              qwen_page.dense-scores.f32
+              qwen_page.query-vectors.f32
+              answers/v109_baseline.input.jsonl
+              answers/v109_baseline.producer-receipt.json
+              answers/v109_baseline.answers.jsonl
+              answers/v109_baseline.call-ledger.jsonl
+              answers/v109_baseline.state-identity.json
+              answers/v109_baseline.state-bundle.jsonl
+              answers/qwen_page.input.jsonl
+              answers/qwen_page.producer-receipt.json
+              answers/qwen_page.answers.jsonl
+              answers/qwen_page.call-ledger.jsonl
+              answers/qwen_page.state-identity.json
+              answers/qwen_page.state-bundle.jsonl
+              answers/qwen_structure_exact.input.jsonl
+              answers/qwen_structure_exact.producer-receipt.json
+              answers/qwen_structure_exact.answers.jsonl
+              answers/qwen_structure_exact.call-ledger.jsonl
+              answers/qwen_structure_exact.state-identity.json
+              answers/qwen_structure_exact.state-bundle.jsonl
+              bootstrap/v109_baseline.jsonl
+              bootstrap/v109_baseline.capture-receipt.json
+              bootstrap/qwen_page.jsonl
+              bootstrap/qwen_page.capture-receipt.json
+              bootstrap/qwen_structure_exact.jsonl
+              bootstrap/qwen_structure_exact.capture-receipt.json
+              bootstrap/native-v5-attestation.jsonl
+            )
             [[ "$ACCEPTANCE_REPORT_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$AGGREGATION_PROFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$CAPTURE_SET_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -135,6 +200,589 @@ jobs:
             [[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"
             git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
+            portable_artifact_dir="$RUNNER_TEMP/cardrag-portable-evidence"
+            portable_validation_dir="$RUNNER_TEMP/cardrag-portable-validation-evidence"
+            portable_evidence_manifest_sha256=$(
+              python - \
+                "$evidence_dir" \
+                "$portable_artifact_dir" \
+                "$portable_validation_dir" \
+                "$CANDIDATE_SOURCE_COMMIT" \
+                "$GITHUB_SHA" \
+                "${portable_evidence_relative_paths[@]}" <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          import sys
+          from pathlib import Path, PurePosixPath
+
+          MAX_FILE_BYTES = 95_000_000
+          MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+          DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+          READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+          CREATE_FLAGS = (
+              os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+          )
+
+
+          def identity(value: os.stat_result) -> tuple[int, ...]:
+              return (
+                  value.st_dev,
+                  value.st_ino,
+                  value.st_mode,
+                  value.st_nlink,
+                  value.st_size,
+                  value.st_mtime_ns,
+                  value.st_ctime_ns,
+              )
+
+
+          def require_directory(value: os.stat_result) -> None:
+              assert stat.S_ISDIR(value.st_mode)
+
+
+          def require_regular(value: os.stat_result, *, maximum_bytes: int) -> None:
+              assert stat.S_ISREG(value.st_mode)
+              assert value.st_nlink == 1
+              assert 0 < value.st_size <= maximum_bytes
+
+
+          def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result = {}
+              for key, value in pairs:
+                  assert key not in result
+                  result[key] = value
+              return result
+
+
+          def strict_json(payload: bytes) -> object:
+              return json.loads(
+                  payload,
+                  object_pairs_hook=reject_duplicate_keys,
+                  parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+              )
+
+
+          def open_root(path: Path) -> tuple[int, tuple[int, ...]]:
+              listed = path.lstat()
+              require_directory(listed)
+              descriptor = os.open(path, DIRECTORY_FLAGS)
+              assert identity(os.fstat(descriptor)) == identity(listed)
+              return descriptor, identity(listed)
+
+
+          def open_parent(
+              root_descriptor: int, relative: PurePosixPath
+          ) -> tuple[int, str, list[int], list[tuple[int, str, int, tuple[int, ...]]]]:
+              assert not relative.is_absolute() and relative.parts
+              assert ".." not in relative.parts and "." not in relative.parts
+              descriptors = [os.dup(root_descriptor)]
+              checkpoints = []
+              for component in relative.parts[:-1]:
+                  parent = descriptors[-1]
+                  listed = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                  require_directory(listed)
+                  child = os.open(component, DIRECTORY_FLAGS, dir_fd=parent)
+                  expected = identity(listed)
+                  assert identity(os.fstat(child)) == expected
+                  checkpoints.append((parent, component, child, expected))
+                  descriptors.append(child)
+              return descriptors[-1], relative.parts[-1], descriptors, checkpoints
+
+
+          def verify_directories(
+              checkpoints: list[tuple[int, str, int, tuple[int, ...]]]
+          ) -> None:
+              for parent, component, child, expected in reversed(checkpoints):
+                  assert identity(os.fstat(child)) == expected
+                  assert identity(
+                      os.stat(component, dir_fd=parent, follow_symlinks=False)
+                  ) == expected
+
+
+          def write_all(descriptor: int, payload: bytes) -> None:
+              view = memoryview(payload)
+              while view:
+                  written = os.write(descriptor, view)
+                  assert written > 0
+                  view = view[written:]
+
+
+          def hash_pinned_descriptor(
+              descriptor: int, *, maximum_bytes: int
+          ) -> tuple[str, int]:
+              os.lseek(descriptor, 0, os.SEEK_SET)
+              digest = hashlib.sha256()
+              size = 0
+              while chunk := os.read(descriptor, 1024 * 1024):
+                  size += len(chunk)
+                  assert size <= maximum_bytes
+                  digest.update(chunk)
+              return digest.hexdigest(), size
+
+
+          def inspect_source(
+              root_descriptor: int,
+              raw_relative: str,
+              *,
+              first_line: bool = False,
+          ) -> tuple[str, int, bytes | None]:
+              relative = PurePosixPath(raw_relative)
+              parent, leaf, descriptors, checkpoints = open_parent(
+                  root_descriptor, relative
+              )
+              try:
+                  listed = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                  require_regular(listed, maximum_bytes=MAX_FILE_BYTES)
+                  expected = identity(listed)
+                  source = os.open(leaf, READ_FLAGS, dir_fd=parent)
+                  try:
+                      assert identity(os.fstat(source)) == expected
+                      digest = hashlib.sha256()
+                      size = 0
+                      line = bytearray()
+                      found_newline = not first_line
+                      while chunk := os.read(source, 1024 * 1024):
+                          size += len(chunk)
+                          assert size <= MAX_FILE_BYTES
+                          digest.update(chunk)
+                          if not found_newline:
+                              newline = chunk.find(b"\n")
+                              if newline < 0:
+                                  line.extend(chunk)
+                                  assert len(line) <= MAX_MANIFEST_BYTES
+                              else:
+                                  line.extend(chunk[:newline])
+                                  found_newline = True
+                      assert size == listed.st_size and (found_newline or not first_line)
+                      assert identity(os.fstat(source)) == expected
+                      assert identity(
+                          os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                      ) == expected
+                      verify_directories(checkpoints)
+                      return digest.hexdigest(), size, bytes(line) if first_line else None
+                  finally:
+                      os.close(source)
+              finally:
+                  for descriptor in reversed(descriptors):
+                      os.close(descriptor)
+
+
+          def copy_source(
+              source_root: int,
+              raw_relative: str,
+              destination_directory: int,
+              destination_name: str,
+          ) -> tuple[str, int]:
+              relative = PurePosixPath(raw_relative)
+              parent, leaf, descriptors, checkpoints = open_parent(
+                  source_root, relative
+              )
+              try:
+                  listed = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                  require_regular(listed, maximum_bytes=MAX_FILE_BYTES)
+                  expected_source = identity(listed)
+                  source = os.open(leaf, READ_FLAGS, dir_fd=parent)
+                  destination = os.open(
+                      destination_name,
+                      CREATE_FLAGS,
+                      0o600,
+                      dir_fd=destination_directory,
+                  )
+                  try:
+                      assert identity(os.fstat(source)) == expected_source
+                      digest = hashlib.sha256()
+                      size = 0
+                      while chunk := os.read(source, 1024 * 1024):
+                          size += len(chunk)
+                          assert size <= MAX_FILE_BYTES
+                          digest.update(chunk)
+                          write_all(destination, chunk)
+                      os.fsync(destination)
+                      assert size == listed.st_size
+                      assert identity(os.fstat(source)) == expected_source
+                      assert identity(
+                          os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                      ) == expected_source
+                      verify_directories(checkpoints)
+                      sealed_destination = identity(os.fstat(destination))
+                      require_regular(
+                          os.fstat(destination), maximum_bytes=MAX_FILE_BYTES
+                      )
+                      copied_sha256, copied_size = hash_pinned_descriptor(
+                          destination, maximum_bytes=MAX_FILE_BYTES
+                      )
+                      assert (copied_sha256, copied_size) == (digest.hexdigest(), size)
+                      assert identity(os.fstat(destination)) == sealed_destination
+                      assert identity(
+                          os.stat(
+                              destination_name,
+                              dir_fd=destination_directory,
+                              follow_symlinks=False,
+                          )
+                      ) == sealed_destination
+                      return digest.hexdigest(), size
+                  finally:
+                      os.close(destination)
+                      os.close(source)
+              finally:
+                  for descriptor in reversed(descriptors):
+                      os.close(descriptor)
+
+
+          def write_new_file(
+              directory: int, name: str, payload: bytes, *, maximum_bytes: int
+          ) -> str:
+              assert 0 < len(payload) <= maximum_bytes
+              descriptor = os.open(name, CREATE_FLAGS, 0o600, dir_fd=directory)
+              try:
+                  write_all(descriptor, payload)
+                  os.fsync(descriptor)
+                  sealed = identity(os.fstat(descriptor))
+                  require_regular(os.fstat(descriptor), maximum_bytes=maximum_bytes)
+                  digest, size = hash_pinned_descriptor(
+                      descriptor, maximum_bytes=maximum_bytes
+                  )
+                  assert size == len(payload) and digest == hashlib.sha256(payload).hexdigest()
+                  assert identity(os.fstat(descriptor)) == sealed
+                  assert identity(
+                      os.stat(name, dir_fd=directory, follow_symlinks=False)
+                  ) == sealed
+                  return digest
+              finally:
+                  os.close(descriptor)
+
+
+          def create_parent(
+              root: int, relative: PurePosixPath
+          ) -> tuple[int, str, list[int]]:
+              assert not relative.is_absolute() and relative.parts
+              assert ".." not in relative.parts and "." not in relative.parts
+              descriptors = [os.dup(root)]
+              for component in relative.parts[:-1]:
+                  parent = descriptors[-1]
+                  try:
+                      listed = os.stat(
+                          component, dir_fd=parent, follow_symlinks=False
+                      )
+                  except FileNotFoundError:
+                      os.mkdir(component, 0o700, dir_fd=parent)
+                      listed = os.stat(
+                          component, dir_fd=parent, follow_symlinks=False
+                      )
+                  require_directory(listed)
+                  child = os.open(component, DIRECTORY_FLAGS, dir_fd=parent)
+                  assert identity(os.fstat(child)) == identity(listed)
+                  descriptors.append(child)
+              return descriptors[-1], relative.parts[-1], descriptors
+
+
+          evidence_root = Path(sys.argv[1])
+          artifact_root = Path(sys.argv[2])
+          validation_root = Path(sys.argv[3])
+          source_commit = sys.argv[4]
+          tag_commit = sys.argv[5]
+          relative_paths = list(sys.argv[6:])
+          assert relative_paths and len(relative_paths) == len(set(relative_paths))
+          source_root, source_root_identity = open_root(evidence_root)
+          artifact_parent, _artifact_parent_identity = open_root(artifact_root.parent)
+          try:
+              try:
+                  os.stat(
+                      artifact_root.name,
+                      dir_fd=artifact_parent,
+                      follow_symlinks=False,
+                  )
+              except FileNotFoundError:
+                  pass
+              else:
+                  raise AssertionError("portable artifact root already exists")
+              os.mkdir(artifact_root.name, 0o700, dir_fd=artifact_parent)
+              artifact_listed = os.stat(
+                  artifact_root.name, dir_fd=artifact_parent, follow_symlinks=False
+              )
+              require_directory(artifact_listed)
+              artifact_directory = os.open(
+                  artifact_root.name, DIRECTORY_FLAGS, dir_fd=artifact_parent
+              )
+              assert identity(os.fstat(artifact_directory)) == identity(artifact_listed)
+              os.mkdir("files", 0o700, dir_fd=artifact_directory)
+              files_listed = os.stat(
+                  "files", dir_fd=artifact_directory, follow_symlinks=False
+              )
+              require_directory(files_listed)
+              files_directory = os.open(
+                  "files", DIRECTORY_FLAGS, dir_fd=artifact_directory
+              )
+              assert validation_root.parent == artifact_root.parent
+              try:
+                  os.stat(
+                      validation_root.name,
+                      dir_fd=artifact_parent,
+                      follow_symlinks=False,
+                  )
+              except FileNotFoundError:
+                  pass
+              else:
+                  raise AssertionError("portable validation root already exists")
+              os.mkdir(validation_root.name, 0o700, dir_fd=artifact_parent)
+              validation_listed = os.stat(
+                  validation_root.name,
+                  dir_fd=artifact_parent,
+                  follow_symlinks=False,
+              )
+              require_directory(validation_listed)
+              validation_directory = os.open(
+                  validation_root.name,
+                  DIRECTORY_FLAGS,
+                  dir_fd=artifact_parent,
+              )
+              assert identity(os.fstat(validation_directory)) == identity(
+                  validation_listed
+              )
+              try:
+                  generation_sha256s = set()
+                  for lane in (
+                      "v109_baseline",
+                      "qwen_page",
+                      "qwen_structure_exact",
+                      "lexical_shadow",
+                      "reranker_shadow",
+                  ):
+                      _sha256, _size, first_line = inspect_source(
+                          source_root, f"{lane}.jsonl", first_line=True
+                      )
+                      assert first_line is not None
+                      run_manifest = strict_json(first_line)
+                      assert isinstance(run_manifest, dict)
+                      generation_sha256 = run_manifest["generation_manifest_sha256"]
+                      assert isinstance(generation_sha256, str)
+                      assert len(generation_sha256) == 64
+                      assert set(generation_sha256) <= set("0123456789abcdef")
+                      generation_sha256s.add(generation_sha256)
+                  _receipt_sha256, _receipt_size, receipt_line = inspect_source(
+                      source_root,
+                      "candidate-acceptance-receipt.json",
+                      first_line=True,
+                  )
+                  assert receipt_line is not None
+                  candidate_receipt = strict_json(receipt_line)
+                  assert isinstance(candidate_receipt, dict)
+                  assert set(candidate_receipt) == {
+                      "channel",
+                      "compose_project",
+                      "evidence",
+                      "generation_id",
+                      "issuers",
+                      "release_eligible",
+                      "release_version",
+                      "schema_version",
+                      "source_commit",
+                  }
+                  assert candidate_receipt["schema_version"] == (
+                      "cardrag.candidate-acceptance-receipt.v1"
+                  )
+                  assert candidate_receipt["source_commit"] == source_commit
+                  evidence_bindings = candidate_receipt["evidence"]
+                  expected_evidence_keys = {
+                      "candidate_pointer",
+                      "effective_config",
+                      "generation_cas",
+                      "generation_manifest",
+                      "generation_ready",
+                      "mcp_smoke",
+                      "native_cache_after",
+                      "native_cache_audit",
+                      "native_cache_before",
+                      "rollback_ledger",
+                      "v109_identity",
+                      "worker_metrics",
+                  }
+                  assert isinstance(evidence_bindings, dict)
+                  assert set(evidence_bindings) == expected_evidence_keys
+                  candidate_artifacts = {}
+                  for binding in evidence_bindings.values():
+                      assert isinstance(binding, dict) and set(binding) == {
+                          "path",
+                          "sha256",
+                          "size_bytes",
+                      }
+                      candidate_path = binding["path"]
+                      assert isinstance(candidate_path, str) and candidate_path
+                      candidate_relative = PurePosixPath(candidate_path)
+                      assert not candidate_relative.is_absolute()
+                      assert ".." not in candidate_relative.parts
+                      candidate_sha256 = binding["sha256"]
+                      candidate_size = binding["size_bytes"]
+                      assert isinstance(candidate_sha256, str)
+                      assert len(candidate_sha256) == 64
+                      assert set(candidate_sha256) <= set("0123456789abcdef")
+                      assert isinstance(candidate_size, int)
+                      assert 0 < candidate_size <= MAX_FILE_BYTES
+                      assert candidate_path not in candidate_artifacts
+                      candidate_artifacts[candidate_path] = (
+                          candidate_sha256,
+                          candidate_size,
+                      )
+                  dynamic_paths = [
+                      *(f"generation-manifests/{sha256}.json" for sha256 in sorted(generation_sha256s)),
+                      *sorted(candidate_artifacts),
+                  ]
+                  for dynamic_path in dynamic_paths:
+                      if dynamic_path not in relative_paths:
+                          relative_paths.append(dynamic_path)
+                  assert len(relative_paths) == len(set(relative_paths))
+                  entries = []
+                  asset_names = set()
+                  for raw_relative in relative_paths:
+                      relative = PurePosixPath(raw_relative)
+                      assert not relative.is_absolute() and ".." not in relative.parts
+                      asset_name = (
+                          "evaluation-evidence--" + raw_relative.replace("/", "--")
+                      )
+                      assert "/" not in asset_name and asset_name not in asset_names
+                      asset_names.add(asset_name)
+                      digest, size = copy_source(
+                          source_root,
+                          raw_relative,
+                          files_directory,
+                          asset_name,
+                      )
+                      candidate_binding = candidate_artifacts.get(raw_relative)
+                      if candidate_binding is not None:
+                          assert (digest, size) == candidate_binding
+                      snapshot_parent, snapshot_leaf, snapshot_descriptors = create_parent(
+                          validation_directory,
+                          relative,
+                      )
+                      try:
+                          os.link(
+                              asset_name,
+                              snapshot_leaf,
+                              src_dir_fd=files_directory,
+                              dst_dir_fd=snapshot_parent,
+                              follow_symlinks=False,
+                          )
+                          snapshot_listed = os.stat(
+                              snapshot_leaf,
+                              dir_fd=snapshot_parent,
+                              follow_symlinks=False,
+                          )
+                          assert stat.S_ISREG(snapshot_listed.st_mode)
+                          assert snapshot_listed.st_nlink == 2
+                          snapshot_descriptor = os.open(
+                              snapshot_leaf,
+                              READ_FLAGS,
+                              dir_fd=snapshot_parent,
+                          )
+                          try:
+                              os.fchmod(snapshot_descriptor, 0o400)
+                              sealed_snapshot = identity(os.fstat(snapshot_descriptor))
+                              assert sealed_snapshot[3] == 2
+                              assert identity(
+                                  os.stat(
+                                      asset_name,
+                                      dir_fd=files_directory,
+                                      follow_symlinks=False,
+                                  )
+                              ) == sealed_snapshot
+                              assert identity(
+                                  os.stat(
+                                      snapshot_leaf,
+                                      dir_fd=snapshot_parent,
+                                      follow_symlinks=False,
+                                  )
+                              ) == sealed_snapshot
+                          finally:
+                              os.close(snapshot_descriptor)
+                      finally:
+                          for descriptor in reversed(snapshot_descriptors):
+                              os.close(descriptor)
+                      entries.append(
+                          {
+                              "relative_path": raw_relative,
+                              "release_asset_name": asset_name,
+                              "sha256": digest,
+                              "size_bytes": size,
+                          }
+                      )
+                  assert set(os.listdir(files_directory)) == asset_names
+                  manifest = {
+                      "schema": "cardrag.portable-evaluation-evidence.v1",
+                      "source_commit": source_commit,
+                      "tag_commit": tag_commit,
+                      "maximum_file_bytes": MAX_FILE_BYTES,
+                      "file_count": len(entries),
+                      "files": entries,
+                  }
+                  manifest_payload = (
+                      json.dumps(
+                          manifest,
+                          ensure_ascii=False,
+                          sort_keys=True,
+                          separators=(",", ":"),
+                      ).encode("utf-8")
+                      + b"\n"
+                  )
+                  manifest_sha256 = write_new_file(
+                      artifact_directory,
+                      "portable-evidence-manifest.json",
+                      manifest_payload,
+                      maximum_bytes=MAX_MANIFEST_BYTES,
+                  )
+                  assert set(os.listdir(artifact_directory)) == {
+                      "files",
+                      "portable-evidence-manifest.json",
+                  }
+                  sealed_files = identity(os.fstat(files_directory))
+                  assert identity(
+                      os.stat("files", dir_fd=artifact_directory, follow_symlinks=False)
+                  ) == sealed_files
+                  sealed_artifact = identity(os.fstat(artifact_directory))
+                  assert identity(
+                      os.stat(
+                          artifact_root.name,
+                          dir_fd=artifact_parent,
+                          follow_symlinks=False,
+                      )
+                  ) == sealed_artifact
+                  sealed_validation = identity(os.fstat(validation_directory))
+                  assert identity(
+                      os.stat(
+                          validation_root.name,
+                          dir_fd=artifact_parent,
+                          follow_symlinks=False,
+                      )
+                  ) == sealed_validation
+                  assert identity(os.fstat(source_root)) == source_root_identity
+                  assert identity(evidence_root.lstat()) == source_root_identity
+                  sealed_artifact_parent = identity(os.fstat(artifact_parent))
+                  assert identity(artifact_root.parent.lstat()) == sealed_artifact_parent
+                  print(manifest_sha256)
+              finally:
+                  os.close(validation_directory)
+                  os.close(files_directory)
+                  os.close(artifact_directory)
+          finally:
+              os.close(artifact_parent)
+              os.close(source_root)
+          PY
+            )
+            [[ "$portable_evidence_manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
+            evidence_dir=$(realpath --canonicalize-existing "$portable_validation_dir")
+            acceptance_report="$evidence_dir/gold-evaluation-report.json"
+            aggregation_profile="$evidence_dir/document-aggregation-profile.json"
+            aggregation_scores="$evidence_dir/document-aggregation-scores.jsonl"
+            aggregation_corpus_inventory="$evidence_dir/document-aggregation-corpus-inventory.jsonl"
+            aggregation_score_matrix="$evidence_dir/document-aggregation-score-matrix.f32"
+            aggregation_query_vector_matrix="$evidence_dir/document-aggregation-query-vectors.f32"
+            capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"
+            candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
+            serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"
+            legacy_historical="$evidence_dir/v109-kb-real-regression-baseline.json"
+            legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"
+            legacy_reaudit="$evidence_dir/v109-kb-v4-structure-reaudit.json"
             mapfile -d '' candidate_evidence_paths < <(
               git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
             )
@@ -198,6 +846,9 @@ jobs:
             .venv/bin/python -m cardrag_mcp.aggregation_profile \
               --gold "$evidence_dir/gold.jsonl" \
               --scores "$aggregation_scores" \
+              --corpus-inventory "$aggregation_corpus_inventory" \
+              --score-matrix "$aggregation_score_matrix" \
+              --query-vector-matrix "$aggregation_query_vector_matrix" \
               --validate-profile "$aggregation_profile" \
               --expected-profile-sha256 "$AGGREGATION_PROFILE_SHA256" \
               --generation-manifest-dir "$evidence_dir/generation-manifests" \
@@ -230,8 +881,27 @@ jobs:
               --gold "$evidence_dir/gold.jsonl"
               --expected-gold-sha256 "$gold_sha256"
               --native-score-artifact "$aggregation_scores"
+              --native-score-corpus-inventory "$aggregation_corpus_inventory"
+              --native-score-matrix "$aggregation_score_matrix"
+              --native-score-query-vector-matrix "$aggregation_query_vector_matrix"
               --expected-source-commit "$CANDIDATE_SOURCE_COMMIT"
               --output "$capture_set_receipt"
+            )
+            capture_args+=(
+              --external-inventory \
+                "v109_baseline=$evidence_dir/v109_baseline.corpus.jsonl"
+              --external-inventory \
+                "qwen_page=$evidence_dir/qwen_page.corpus.jsonl"
+              --external-score-matrix \
+                "v109_baseline=$evidence_dir/v109_baseline.dense-scores.f32"
+              --external-score-matrix \
+                "qwen_page=$evidence_dir/qwen_page.dense-scores.f32"
+              --external-query-vector-matrix \
+                "v109_baseline=$evidence_dir/v109_baseline.query-vectors.f32"
+              --external-query-vector-matrix \
+                "qwen_page=$evidence_dir/qwen_page.query-vectors.f32"
+              --external-lexical-ranks \
+                "v109_baseline=$evidence_dir/v109_baseline.lexical-ranks.jsonl"
             )
             for lane in \
               v109_baseline \
@@ -256,6 +926,93 @@ jobs:
                 )
               fi
             done
+            for answer_lane in \
+              v109_baseline \
+              qwen_page \
+              qwen_structure_exact; do
+              answer_input="$evidence_dir/answers/${answer_lane}.input.jsonl"
+              answer_producer_receipt="$evidence_dir/answers/${answer_lane}.producer-receipt.json"
+              answer_artifact="$evidence_dir/answers/${answer_lane}.answers.jsonl"
+              answer_call_ledger="$evidence_dir/answers/${answer_lane}.call-ledger.jsonl"
+              answer_state_identity="$evidence_dir/answers/${answer_lane}.state-identity.json"
+              answer_state_bundle="$evidence_dir/answers/${answer_lane}.state-bundle.jsonl"
+              answer_retrieval_run="$evidence_dir/bootstrap/${answer_lane}.jsonl"
+              answer_retrieval_receipt="$evidence_dir/bootstrap/${answer_lane}.capture-receipt.json"
+              case "$answer_lane" in
+                v109_baseline)
+                  answer_retrieval_attestation="$evidence_dir/v109_baseline.capture-attestation.jsonl"
+                  answer_retrieval_raw_score="$answer_retrieval_attestation"
+                  answer_retrieval_corpus="$evidence_dir/v109_baseline.corpus.jsonl"
+                  answer_retrieval_dense="$evidence_dir/v109_baseline.dense-scores.f32"
+                  answer_retrieval_query="$evidence_dir/v109_baseline.query-vectors.f32"
+                  answer_retrieval_lexical="$evidence_dir/v109_baseline.lexical-ranks.jsonl"
+                  ;;
+                qwen_page)
+                  answer_retrieval_attestation="$evidence_dir/qwen_page.capture-attestation.jsonl"
+                  answer_retrieval_raw_score="$answer_retrieval_attestation"
+                  answer_retrieval_corpus="$evidence_dir/qwen_page.corpus.jsonl"
+                  answer_retrieval_dense="$evidence_dir/qwen_page.dense-scores.f32"
+                  answer_retrieval_query="$evidence_dir/qwen_page.query-vectors.f32"
+                  ;;
+                qwen_structure_exact)
+                  answer_retrieval_attestation="$evidence_dir/bootstrap/native-v5-attestation.jsonl"
+                  answer_retrieval_raw_score="$aggregation_scores"
+                  answer_retrieval_corpus="$aggregation_corpus_inventory"
+                  answer_retrieval_dense="$aggregation_score_matrix"
+                  answer_retrieval_query="$aggregation_query_vector_matrix"
+                  ;;
+                *) exit 1 ;;
+              esac
+              capture_args+=(
+                --answer-input "$answer_lane=$answer_input"
+                --expected-answer-input-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_input" | awk '{print $1}')"
+                --answer-producer-receipt "$answer_lane=$answer_producer_receipt"
+                --expected-answer-producer-receipt-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_producer_receipt" | awk '{print $1}')"
+                --answer-artifact "$answer_lane=$answer_artifact"
+                --expected-answer-artifact-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_artifact" | awk '{print $1}')"
+                --answer-call-ledger "$answer_lane=$answer_call_ledger"
+                --answer-state-identity "$answer_lane=$answer_state_identity"
+                --answer-state-bundle "$answer_lane=$answer_state_bundle"
+                --answer-profile-id "$answer_lane=cardrag.answer.extractive-k8.v1"
+                --answer-retrieval-run "$answer_lane=$answer_retrieval_run"
+                --expected-answer-retrieval-run-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_run" | awk '{print $1}')"
+                --answer-retrieval-capture-receipt \
+                  "$answer_lane=$answer_retrieval_receipt"
+                --expected-answer-retrieval-capture-receipt-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_receipt" | awk '{print $1}')"
+                --answer-retrieval-attestation \
+                  "$answer_lane=$answer_retrieval_attestation"
+                --expected-answer-retrieval-attestation-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_attestation" | awk '{print $1}')"
+                --answer-retrieval-raw-score "$answer_lane=$answer_retrieval_raw_score"
+                --expected-answer-retrieval-raw-score-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_raw_score" | awk '{print $1}')"
+                --answer-retrieval-corpus-inventory \
+                  "$answer_lane=$answer_retrieval_corpus"
+                --expected-answer-retrieval-corpus-inventory-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_corpus" | awk '{print $1}')"
+                --answer-retrieval-dense-score-matrix \
+                  "$answer_lane=$answer_retrieval_dense"
+                --expected-answer-retrieval-dense-score-matrix-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_dense" | awk '{print $1}')"
+                --answer-retrieval-query-vector-matrix \
+                  "$answer_lane=$answer_retrieval_query"
+                --expected-answer-retrieval-query-vector-matrix-sha256 \
+                  "$answer_lane=$(sha256sum "$answer_retrieval_query" | awk '{print $1}')"
+              )
+              if [[ "$answer_lane" == "v109_baseline" ]]; then
+                capture_args+=(
+                  --answer-retrieval-lexical-ranks \
+                    "$answer_lane=$answer_retrieval_lexical"
+                  --expected-answer-retrieval-lexical-ranks-sha256 \
+                    "$answer_lane=$(sha256sum "$answer_retrieval_lexical" | awk '{print $1}')"
+                )
+              fi
+            done
             # validate-set revalidates canonical bindings; it does not replay the
             # source DB/vector/provider capture and cannot prove replay by itself.
             # This digest is a release trust root only when source replay evidence
@@ -274,6 +1031,7 @@ jobs:
               echo "mcp_platform_digest=$mcp_platform_digest"
               echo "mcp_config_digest=$mcp_config_digest"
               echo "mcp_attestation_digest=$mcp_attestation_digest"
+              echo "portable_evidence_manifest_sha256=$portable_evidence_manifest_sha256"
             } >> "$GITHUB_OUTPUT"
           fi
           python - "$version" <<'PY'
@@ -301,6 +1059,16 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the exact portable evaluation evidence
+        if: ${{ inputs.version == '1.0.10' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: portable-evidence-${{ steps.version.outputs.version }}
+          path: ${{ runner.temp }}/cardrag-portable-evidence
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
 
       - name: Require successful CI for this commit
         env:
@@ -906,6 +1674,209 @@ jobs:
           name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
           path: strict-filesystem-scan
 
+      - name: Download the exact portable evaluation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: portable-evidence-${{ needs.validate.outputs.version }}
+          path: portable-evidence
+
+      - name: Revalidate complete portable evidence before registry mutation
+        env:
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+          PORTABLE_EVIDENCE_MANIFEST_SHA256: ${{ needs.validate.outputs.portable_evidence_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          python - \
+            portable-evidence \
+            "$PORTABLE_EVIDENCE_MANIFEST_SHA256" \
+            "$CANDIDATE_SOURCE_COMMIT" \
+            "$GITHUB_SHA" <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          import sys
+          from pathlib import Path, PurePosixPath
+
+          MAX_FILE_BYTES = 95_000_000
+          MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+          DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+          READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+
+
+          def identity(value: os.stat_result) -> tuple[int, ...]:
+              return (
+                  value.st_dev,
+                  value.st_ino,
+                  value.st_mode,
+                  value.st_nlink,
+                  value.st_size,
+                  value.st_mtime_ns,
+                  value.st_ctime_ns,
+              )
+
+
+          def open_directory_at(
+              parent: int, name: str
+          ) -> tuple[int, tuple[int, ...]]:
+              listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              assert stat.S_ISDIR(listed.st_mode)
+              descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
+              expected = identity(listed)
+              assert identity(os.fstat(descriptor)) == expected
+              return descriptor, expected
+
+
+          def read_regular_at(
+              parent: int, name: str, *, maximum_bytes: int, keep_bytes: bool
+          ) -> tuple[str, int, bytes | None]:
+              listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              assert stat.S_ISREG(listed.st_mode) and listed.st_nlink == 1
+              assert 0 < listed.st_size <= maximum_bytes
+              expected = identity(listed)
+              descriptor = os.open(name, READ_FLAGS, dir_fd=parent)
+              try:
+                  assert identity(os.fstat(descriptor)) == expected
+                  digest = hashlib.sha256()
+                  size = 0
+                  chunks = [] if keep_bytes else None
+                  while chunk := os.read(descriptor, 1024 * 1024):
+                      size += len(chunk)
+                      assert size <= maximum_bytes
+                      digest.update(chunk)
+                      if chunks is not None:
+                          chunks.append(chunk)
+                  assert size == listed.st_size
+                  assert identity(os.fstat(descriptor)) == expected
+                  assert identity(
+                      os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  ) == expected
+                  return (
+                      digest.hexdigest(),
+                      size,
+                      b"".join(chunks) if chunks is not None else None,
+                  )
+              finally:
+                  os.close(descriptor)
+
+
+          def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              result = {}
+              for key, value in pairs:
+                  assert key not in result
+                  result[key] = value
+              return result
+
+
+          bundle_path = Path(sys.argv[1])
+          expected_manifest_sha256 = sys.argv[2]
+          expected_source_commit = sys.argv[3]
+          expected_tag_commit = sys.argv[4]
+          assert len(expected_manifest_sha256) == 64
+          assert set(expected_manifest_sha256) <= set("0123456789abcdef")
+          bundle_listed = bundle_path.lstat()
+          assert stat.S_ISDIR(bundle_listed.st_mode)
+          bundle_identity = identity(bundle_listed)
+          bundle = os.open(bundle_path, DIRECTORY_FLAGS)
+          try:
+              assert identity(os.fstat(bundle)) == bundle_identity
+              assert set(os.listdir(bundle)) == {
+                  "files",
+                  "portable-evidence-manifest.json",
+              }
+              files, files_identity = open_directory_at(bundle, "files")
+              try:
+                  manifest_sha256, _manifest_size, manifest_bytes = read_regular_at(
+                      bundle,
+                      "portable-evidence-manifest.json",
+                      maximum_bytes=MAX_MANIFEST_BYTES,
+                      keep_bytes=True,
+                  )
+                  assert manifest_sha256 == expected_manifest_sha256
+                  assert manifest_bytes is not None
+                  manifest = json.loads(
+                      manifest_bytes,
+                      object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=lambda value: (_ for _ in ()).throw(
+                          ValueError(value)
+                      ),
+                  )
+                  assert isinstance(manifest, dict)
+                  assert manifest_bytes == (
+                      json.dumps(
+                          manifest,
+                          ensure_ascii=False,
+                          sort_keys=True,
+                          separators=(",", ":"),
+                      ).encode("utf-8")
+                      + b"\n"
+                  )
+                  assert set(manifest) == {
+                      "file_count",
+                      "files",
+                      "maximum_file_bytes",
+                      "schema",
+                      "source_commit",
+                      "tag_commit",
+                  }
+                  assert manifest["schema"] == "cardrag.portable-evaluation-evidence.v1"
+                  assert manifest["source_commit"] == expected_source_commit
+                  assert manifest["tag_commit"] == expected_tag_commit
+                  assert manifest["maximum_file_bytes"] == MAX_FILE_BYTES
+                  entries = manifest["files"]
+                  assert isinstance(entries, list) and entries
+                  assert manifest["file_count"] == len(entries)
+                  relative_paths = set()
+                  asset_names = set()
+                  for entry in entries:
+                      assert isinstance(entry, dict) and set(entry) == {
+                          "relative_path",
+                          "release_asset_name",
+                          "sha256",
+                          "size_bytes",
+                      }
+                      relative_path = entry["relative_path"]
+                      asset_name = entry["release_asset_name"]
+                      sha256 = entry["sha256"]
+                      size_bytes = entry["size_bytes"]
+                      assert isinstance(relative_path, str) and relative_path
+                      relative = PurePosixPath(relative_path)
+                      assert not relative.is_absolute() and ".." not in relative.parts
+                      assert relative_path not in relative_paths
+                      relative_paths.add(relative_path)
+                      assert asset_name == (
+                          "evaluation-evidence--" + relative_path.replace("/", "--")
+                      )
+                      assert "/" not in asset_name and asset_name not in asset_names
+                      asset_names.add(asset_name)
+                      assert isinstance(sha256, str) and len(sha256) == 64
+                      assert set(sha256) <= set("0123456789abcdef")
+                      assert isinstance(size_bytes, int)
+                      assert 0 < size_bytes <= MAX_FILE_BYTES
+                      observed_sha256, observed_size, _payload = read_regular_at(
+                          files,
+                          asset_name,
+                          maximum_bytes=MAX_FILE_BYTES,
+                          keep_bytes=False,
+                      )
+                      assert (observed_sha256, observed_size) == (sha256, size_bytes)
+                  assert set(os.listdir(files)) == asset_names
+                  assert identity(os.fstat(files)) == files_identity
+                  assert identity(
+                      os.stat("files", dir_fd=bundle, follow_symlinks=False)
+                  ) == files_identity
+                  assert set(os.listdir(bundle)) == {
+                      "files",
+                      "portable-evidence-manifest.json",
+                  }
+                  assert identity(os.fstat(bundle)) == bundle_identity
+                  assert identity(bundle_path.lstat()) == bundle_identity
+              finally:
+                  os.close(files)
+          finally:
+              os.close(bundle)
+          PY
+
       - name: Publish only the receipt-bound and successfully scanned digest
         id: resolved
         env:
@@ -1273,8 +2244,10 @@ jobs:
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
           CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
           SIGNATURE_SHA256: ${{ steps.signature.outputs.sha256 }}
+          PORTABLE_EVIDENCE_MANIFEST_SHA256: ${{ needs.validate.outputs.portable_evidence_manifest_sha256 }}
         run: |
           python - <<'PY'
+          import hashlib
           import json
           import os
           from pathlib import Path
@@ -1290,8 +2263,19 @@ jobs:
           assert scan_receipt["attestation_manifest_digest"] == os.environ[
               "ATTESTATION_DIGEST"
           ]
+          portable_manifest_path = Path("portable-evidence/portable-evidence-manifest.json")
+          portable_manifest_bytes = portable_manifest_path.read_bytes()
+          assert hashlib.sha256(portable_manifest_bytes).hexdigest() == os.environ[
+              "PORTABLE_EVIDENCE_MANIFEST_SHA256"
+          ]
+          portable_evidence = json.loads(portable_manifest_bytes)
+          assert portable_evidence["schema"] == "cardrag.portable-evaluation-evidence.v1"
+          assert portable_evidence["source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
+          assert portable_evidence["tag_commit"] == os.environ["GITHUB_SHA"]
+          assert portable_evidence["maximum_file_bytes"] == 95_000_000
+          assert portable_evidence["file_count"] == len(portable_evidence["files"])
           manifest = {
-              "schema": "cardrag.container-release-part.v5",
+              "schema": "cardrag.container-release-part.v6",
               "role": role,
               "version": os.environ["VERSION"],
               "git_sha": os.environ["GITHUB_SHA"],
@@ -1308,6 +2292,7 @@ jobs:
                   f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
               ],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "portable_evidence": portable_evidence,
               "strict_scan": {
                   "receipt_path": scan_receipt_path.as_posix(),
                   "receipt_sha256": os.environ["SCAN_RECEIPT_SHA256"],
@@ -1392,6 +2377,12 @@ jobs:
           name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
           path: release-parts/filesystem
 
+      - name: Download exact portable evaluation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: portable-evidence-${{ needs.validate.outputs.version }}
+          path: release-parts/portable-evidence
+
       - name: Revalidate tag and assemble deterministic release metadata
         env:
           VERSION: ${{ needs.validate.outputs.version }}
@@ -1405,6 +2396,7 @@ jobs:
           MCP_PLATFORM_DIGEST: ${{ needs.validate.outputs.mcp_platform_digest }}
           MCP_CONFIG_DIGEST: ${{ needs.validate.outputs.mcp_config_digest }}
           MCP_ATTESTATION_DIGEST: ${{ needs.validate.outputs.mcp_attestation_digest }}
+          PORTABLE_EVIDENCE_MANIFEST_SHA256: ${{ needs.validate.outputs.portable_evidence_manifest_sha256 }}
         run: |
           set -euo pipefail
           test "$(git cat-file -t "refs/tags/v$VERSION")" = tag
@@ -1421,7 +2413,8 @@ jobs:
           import hashlib
           import json
           import os
-          from pathlib import Path
+          import stat
+          from pathlib import Path, PurePosixPath
 
           source = Path("release-parts")
           role_paths = [source / f"release-{role}.json" for role in ("worker", "mcp")]
@@ -1431,7 +2424,7 @@ jobs:
           expected_roles = {"worker", "mcp"}
           assert len(parts) == 2, role_paths
           assert set(roles) == expected_roles, roles
-          assert all(part["schema"] == "cardrag.container-release-part.v5" for part in parts)
+          assert all(part["schema"] == "cardrag.container-release-part.v6" for part in parts)
           assert all(part["version"] == os.environ["VERSION"] for part in parts)
           assert all(part["git_sha"] == os.environ["GITHUB_SHA"] for part in parts)
           assert all(
@@ -1446,8 +2439,311 @@ jobs:
           assert all(part["workflow"] == os.environ["GITHUB_WORKFLOW_REF"] for part in parts)
           assert len({part["digest"] for part in parts}) == 2
 
+          MAX_PORTABLE_BYTES = 95_000_000
+          DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+          READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+          CREATE_FLAGS = (
+              os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+          )
+
+          def identity(value: os.stat_result) -> tuple[int, ...]:
+              return (
+                  value.st_dev,
+                  value.st_ino,
+                  value.st_mode,
+                  value.st_nlink,
+                  value.st_size,
+                  value.st_mtime_ns,
+                  value.st_ctime_ns,
+              )
+
+          def open_root(path: Path) -> tuple[int, tuple[int, ...]]:
+              listed = path.lstat()
+              assert stat.S_ISDIR(listed.st_mode)
+              descriptor = os.open(path, DIRECTORY_FLAGS)
+              expected = identity(listed)
+              assert identity(os.fstat(descriptor)) == expected
+              return descriptor, expected
+
+          def open_directory_at(
+              parent: int, name: str
+          ) -> tuple[int, tuple[int, ...]]:
+              listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              assert stat.S_ISDIR(listed.st_mode)
+              descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
+              expected = identity(listed)
+              assert identity(os.fstat(descriptor)) == expected
+              return descriptor, expected
+
+          def read_regular_at(
+              parent: int, name: str, *, maximum_bytes: int, keep_bytes: bool
+          ) -> tuple[str, int, bytes | None]:
+              listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              assert stat.S_ISREG(listed.st_mode) and listed.st_nlink == 1
+              assert 0 < listed.st_size <= maximum_bytes
+              expected = identity(listed)
+              descriptor = os.open(name, READ_FLAGS, dir_fd=parent)
+              try:
+                  assert identity(os.fstat(descriptor)) == expected
+                  digest = hashlib.sha256()
+                  chunks = [] if keep_bytes else None
+                  size = 0
+                  while chunk := os.read(descriptor, 1024 * 1024):
+                      size += len(chunk)
+                      assert size <= maximum_bytes
+                      digest.update(chunk)
+                      if chunks is not None:
+                          chunks.append(chunk)
+                  assert size == listed.st_size
+                  assert identity(os.fstat(descriptor)) == expected
+                  assert identity(
+                      os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  ) == expected
+                  return (
+                      digest.hexdigest(),
+                      size,
+                      b"".join(chunks) if chunks is not None else None,
+                  )
+              finally:
+                  os.close(descriptor)
+
+          def open_relative(
+              root: int, relative: PurePosixPath
+          ) -> tuple[int, str, list[int], list[tuple[int, str, int, tuple[int, ...]]]]:
+              assert not relative.is_absolute() and relative.parts
+              assert ".." not in relative.parts and "." not in relative.parts
+              descriptors = [os.dup(root)]
+              checkpoints = []
+              for component in relative.parts[:-1]:
+                  parent = descriptors[-1]
+                  child, expected = open_directory_at(parent, component)
+                  checkpoints.append((parent, component, child, expected))
+                  descriptors.append(child)
+              return descriptors[-1], relative.parts[-1], descriptors, checkpoints
+
+          def hash_relative(root: int, relative: PurePosixPath) -> tuple[str, int]:
+              parent, leaf, descriptors, checkpoints = open_relative(root, relative)
+              try:
+                  digest, size, _payload = read_regular_at(
+                      parent,
+                      leaf,
+                      maximum_bytes=MAX_PORTABLE_BYTES,
+                      keep_bytes=False,
+                  )
+                  for ancestor, name, child, expected in reversed(checkpoints):
+                      assert identity(os.fstat(child)) == expected
+                      assert identity(
+                          os.stat(name, dir_fd=ancestor, follow_symlinks=False)
+                      ) == expected
+                  return digest, size
+              finally:
+                  for descriptor in reversed(descriptors):
+                      os.close(descriptor)
+
+          def write_all(descriptor: int, payload: bytes) -> None:
+              view = memoryview(payload)
+              while view:
+                  written = os.write(descriptor, view)
+                  assert written > 0
+                  view = view[written:]
+
+          def copy_regular_at(
+              source_directory: int,
+              source_name: str,
+              destination_directory: int,
+              destination_name: str,
+          ) -> tuple[str, int]:
+              listed = os.stat(
+                  source_name, dir_fd=source_directory, follow_symlinks=False
+              )
+              assert stat.S_ISREG(listed.st_mode) and listed.st_nlink == 1
+              assert 0 < listed.st_size <= MAX_PORTABLE_BYTES
+              expected_source = identity(listed)
+              source_descriptor = os.open(
+                  source_name, READ_FLAGS, dir_fd=source_directory
+              )
+              destination_descriptor = os.open(
+                  destination_name,
+                  CREATE_FLAGS,
+                  0o600,
+                  dir_fd=destination_directory,
+              )
+              try:
+                  assert identity(os.fstat(source_descriptor)) == expected_source
+                  digest = hashlib.sha256()
+                  size = 0
+                  while chunk := os.read(source_descriptor, 1024 * 1024):
+                      size += len(chunk)
+                      assert size <= MAX_PORTABLE_BYTES
+                      digest.update(chunk)
+                      write_all(destination_descriptor, chunk)
+                  os.fsync(destination_descriptor)
+                  assert size == listed.st_size
+                  assert identity(os.fstat(source_descriptor)) == expected_source
+                  assert identity(
+                      os.stat(
+                          source_name,
+                          dir_fd=source_directory,
+                          follow_symlinks=False,
+                      )
+                  ) == expected_source
+                  sealed_destination = identity(os.fstat(destination_descriptor))
+                  os.lseek(destination_descriptor, 0, os.SEEK_SET)
+                  copied_digest = hashlib.sha256()
+                  copied_size = 0
+                  while chunk := os.read(destination_descriptor, 1024 * 1024):
+                      copied_size += len(chunk)
+                      assert copied_size <= MAX_PORTABLE_BYTES
+                      copied_digest.update(chunk)
+                  assert (copied_digest.hexdigest(), copied_size) == (
+                      digest.hexdigest(),
+                      size,
+                  )
+                  assert identity(os.fstat(destination_descriptor)) == sealed_destination
+                  assert identity(
+                      os.stat(
+                          destination_name,
+                          dir_fd=destination_directory,
+                          follow_symlinks=False,
+                      )
+                  ) == sealed_destination
+                  return digest.hexdigest(), size
+              finally:
+                  os.close(destination_descriptor)
+                  os.close(source_descriptor)
+
+          workspace, _workspace_identity = open_root(Path.cwd())
+          try:
+              os.stat("release-assets", dir_fd=workspace, follow_symlinks=False)
+          except FileNotFoundError:
+              pass
+          else:
+              raise AssertionError("release-assets already exists")
+          os.mkdir("release-assets", 0o700, dir_fd=workspace)
+          assets_descriptor, _assets_initial_identity = open_directory_at(
+              workspace, "release-assets"
+          )
           assets = Path("release-assets")
-          assets.mkdir()
+          portable_source = source / "portable-evidence"
+          portable_bundle, portable_bundle_identity = open_root(portable_source)
+          portable_files_descriptor, portable_files_identity = open_directory_at(
+              portable_bundle, "files"
+          )
+          assert set(os.listdir(portable_bundle)) == {
+              "files",
+              "portable-evidence-manifest.json",
+          }
+          manifest_sha256, _manifest_size, portable_manifest_bytes = read_regular_at(
+              portable_bundle,
+              "portable-evidence-manifest.json",
+              maximum_bytes=2 * 1024 * 1024,
+              keep_bytes=True,
+          )
+          assert manifest_sha256 == os.environ["PORTABLE_EVIDENCE_MANIFEST_SHA256"]
+          assert portable_manifest_bytes is not None
+          portable_evidence = json.loads(portable_manifest_bytes)
+          assert set(portable_evidence) == {
+              "file_count",
+              "files",
+              "maximum_file_bytes",
+              "schema",
+              "source_commit",
+              "tag_commit",
+          }
+          assert portable_evidence["schema"] == "cardrag.portable-evaluation-evidence.v1"
+          assert portable_evidence["source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
+          assert portable_evidence["tag_commit"] == os.environ["GITHUB_SHA"]
+          assert portable_evidence["maximum_file_bytes"] == 95_000_000
+          portable_files = portable_evidence["files"]
+          assert portable_evidence["file_count"] == len(portable_files)
+          assert portable_files and all(
+              part["portable_evidence"] == portable_evidence for part in parts
+          )
+          relative_paths = set()
+          release_asset_names = set()
+          checkout_root, checkout_root_identity = open_root(
+              Path("release-evidence") / f"v{os.environ['VERSION']}"
+          )
+
+          for entry in portable_files:
+              assert set(entry) == {
+                  "relative_path",
+                  "release_asset_name",
+                  "sha256",
+                  "size_bytes",
+              }
+              relative_path = entry["relative_path"]
+              release_asset_name = entry["release_asset_name"]
+              assert isinstance(relative_path, str) and relative_path
+              relative = PurePosixPath(relative_path)
+              assert not relative.is_absolute() and ".." not in relative.parts
+              assert relative_path not in relative_paths
+              relative_paths.add(relative_path)
+              assert release_asset_name == (
+                  "evaluation-evidence--" + relative_path.replace("/", "--")
+              )
+              assert "/" not in release_asset_name
+              assert release_asset_name not in release_asset_names
+              release_asset_names.add(release_asset_name)
+              assert isinstance(entry["size_bytes"], int)
+              assert 0 < entry["size_bytes"] <= 95_000_000
+              assert isinstance(entry["sha256"], str) and len(entry["sha256"]) == 64
+              assert set(entry["sha256"]) <= set("0123456789abcdef")
+              artifact_sha256, artifact_size = copy_regular_at(
+                  portable_files_descriptor,
+                  release_asset_name,
+                  assets_descriptor,
+                  release_asset_name,
+              )
+              checkout_sha256, checkout_size = hash_relative(checkout_root, relative)
+              assert artifact_size == checkout_size == entry["size_bytes"]
+              assert artifact_sha256 == checkout_sha256 == entry["sha256"]
+          assert set(os.listdir(portable_files_descriptor)) == release_asset_names
+          assert identity(os.fstat(portable_files_descriptor)) == portable_files_identity
+          assert identity(
+              os.stat("files", dir_fd=portable_bundle, follow_symlinks=False)
+          ) == portable_files_identity
+          assert set(os.listdir(portable_bundle)) == {
+              "files",
+              "portable-evidence-manifest.json",
+          }
+          assert identity(os.fstat(portable_bundle)) == portable_bundle_identity
+          assert identity(portable_source.lstat()) == portable_bundle_identity
+          assert identity(os.fstat(checkout_root)) == checkout_root_identity
+          assert identity(
+              (Path("release-evidence") / f"v{os.environ['VERSION']}").lstat()
+          ) == checkout_root_identity
+          manifest_destination = os.open(
+              "portable-evidence-manifest.json",
+              CREATE_FLAGS,
+              0o600,
+              dir_fd=assets_descriptor,
+          )
+          try:
+              write_all(manifest_destination, portable_manifest_bytes)
+              os.fsync(manifest_destination)
+              sealed_manifest = identity(os.fstat(manifest_destination))
+              os.lseek(manifest_destination, 0, os.SEEK_SET)
+              copied_manifest = hashlib.sha256()
+              copied_manifest_size = 0
+              while chunk := os.read(manifest_destination, 1024 * 1024):
+                  copied_manifest_size += len(chunk)
+                  copied_manifest.update(chunk)
+              assert copied_manifest_size == len(portable_manifest_bytes)
+              assert copied_manifest.hexdigest() == manifest_sha256
+              assert identity(os.fstat(manifest_destination)) == sealed_manifest
+              assert identity(
+                  os.stat(
+                      "portable-evidence-manifest.json",
+                      dir_fd=assets_descriptor,
+                      follow_symlinks=False,
+                  )
+              ) == sealed_manifest
+          finally:
+              os.close(manifest_destination)
+              os.close(checkout_root)
+              os.close(portable_files_descriptor)
+              os.close(portable_bundle)
           filesystem_source = source / "filesystem"
           filesystem_receipt_path = filesystem_source / "strict-filesystem-scan.json"
           filesystem_report_path = filesystem_source / "trivy-filesystem.json"
@@ -1600,13 +2896,14 @@ jobs:
                   (assets / scan_path.name).write_bytes(scan_path.read_bytes())
 
           manifest = {
-              "schema": "cardrag.container-release.v5",
+              "schema": "cardrag.container-release.v6",
               "version": os.environ["VERSION"],
               "git_sha": os.environ["GITHUB_SHA"],
               "candidate_source_commit": os.environ["CANDIDATE_SOURCE_COMMIT"],
               "candidate_image_repository": os.environ["CANDIDATE_IMAGE_REPOSITORY"],
               "image": os.environ["IMAGE_NAME"],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
+              "portable_evidence": portable_evidence,
               "strict_filesystem_scan": filesystem_scan,
               "roles": {role: roles[role] for role in ("worker", "mcp")},
           }
@@ -1629,13 +2926,26 @@ jobs:
                   f"Candidate source commit: `{os.environ['CANDIDATE_SOURCE_COMMIT']}`",
                   "",
                   "첨부된 `release-manifest.json`, 역할별 manifest, strict image/filesystem "
-                  "Trivy/Gitleaks JSON 및 DB metadata, Cosign 검증 결과와 `SHA256SUMS`에서 게시 증거를 "
-                  "확인할 수 있습니다.",
+                  "Trivy/Gitleaks JSON 및 DB metadata, Cosign 검증 결과, compact evaluation "
+                  "evidence와 `SHA256SUMS`에서 게시 증거를 확인할 수 있습니다.",
               ]
           )
           Path("release-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
+          sealed_assets = identity(os.fstat(assets_descriptor))
+          assert identity(
+              os.stat("release-assets", dir_fd=workspace, follow_symlinks=False)
+          ) == sealed_assets
+          sealed_workspace = identity(os.fstat(workspace))
+          assert identity(Path.cwd().lstat()) == sealed_workspace
+          os.close(assets_descriptor)
+          os.close(workspace)
           PY
 
+          mapfile -t portable_release_assets < <(
+            jq -er '.files[].release_asset_name' \
+              release-assets/portable-evidence-manifest.json
+          )
+          ((${#portable_release_assets[@]} > 0))
           (
             cd release-assets
             sha256sum \
@@ -1660,7 +2970,9 @@ jobs:
               trivy-mcp.json \
               trivy-version-mcp.json \
               trivy-version-worker.json \
-              trivy-worker.json > SHA256SUMS
+              trivy-worker.json \
+              portable-evidence-manifest.json \
+              "${portable_release_assets[@]}" > SHA256SUMS
           )
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1701,8 +3013,17 @@ jobs:
             release-assets/trivy-mcp.json
             release-assets/trivy-version-worker.json
             release-assets/trivy-version-mcp.json
+            release-assets/portable-evidence-manifest.json
             release-assets/SHA256SUMS
           )
+          mapfile -t portable_release_assets < <(
+            jq -er '.files[].release_asset_name' \
+              release-assets/portable-evidence-manifest.json
+          )
+          ((${#portable_release_assets[@]} > 0))
+          for portable_asset in "${portable_release_assets[@]}"; do
+            assets+=("release-assets/$portable_asset")
+          done
           (cd release-assets && sha256sum --check SHA256SUMS)
           release_lookup="$RUNNER_TEMP/cardrag-release-lookup.json"
           release_json="$RUNNER_TEMP/cardrag-release.json"
@@ -1860,8 +3181,17 @@ jobs:
             release-assets/trivy-mcp.json
             release-assets/trivy-version-worker.json
             release-assets/trivy-version-mcp.json
+            release-assets/portable-evidence-manifest.json
             release-assets/SHA256SUMS
           )
+          mapfile -t portable_release_assets < <(
+            jq -er '.files[].release_asset_name' \
+              release-assets/portable-evidence-manifest.json
+          )
+          ((${#portable_release_assets[@]} > 0))
+          for portable_asset in "${portable_release_assets[@]}"; do
+            assets+=("release-assets/$portable_asset")
+          done
           (cd release-assets && sha256sum --check SHA256SUMS)
           release_view="$RUNNER_TEMP/cardrag-release-view.json"
           expected_assets=$(

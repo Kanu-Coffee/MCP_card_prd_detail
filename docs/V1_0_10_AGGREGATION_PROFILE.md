@@ -14,18 +14,31 @@ release gold 질의에서 모든 활성 embedding row를 exact 채점한 immutab
 
 ## Sealed score input
 
-`document-aggregation-scores.jsonl`은 UTF-8 canonical JSONL입니다. 첫 줄은
-`cardrag.document-aggregation-score-artifact.v1` manifest이고 다음 record는 gold 파일 순서와
-동일하게 질의 coverage record 하나, 그 질의의 row score record 전부가 이어집니다.
+점수 증거는 Git/GitHub에 올릴 수 있는 네 개의 독립 파일로 봉인됩니다. 각 파일의 hard cap은
+정확히 95,000,000 bytes입니다.
+
+- `document-aggregation-scores.jsonl`: v2 manifest 한 줄과 gold 순서의 query coverage 300~500줄
+- `document-aggregation-corpus-inventory.jsonl`: 고정 코퍼스 행 provenance 한 벌
+- `document-aggregation-score-matrix.f32`: query-major/row-major little-endian float32 점수 행렬
+- `document-aggregation-query-vectors.f32`: query-major 4,096D little-endian float32 벡터 행렬
+
+첫 파일의 schema는 `cardrag.document-aggregation-score-artifact.v2`입니다. v1의 질의별 전체
+row JSON 반복은 release와 fixture 모두에서 읽지 않습니다. `score_count`는
+`query_count * corpus_row_count`와 같고 최대 20,000,000이므로 score matrix는 최대
+80,000,000 bytes입니다. query vector matrix와 inventory도 별도 cap을 넘을 수 없습니다.
+캡처는 이 크기를 provider 호출 전에 산술적으로 예측합니다.
 
 Manifest는 다음 항목에 결속됩니다.
 
-- gold SHA-256과 query/row count
+- gold SHA-256과 query/corpus-row/score count
 - source commit, generation ID, generation manifest SHA-256
 - serving database SHA-256, vector sidecar SHA-256, 비순환 `exact_row_corpus_sha256`
 - Qwen embedding profile ID, `qwen/qwen3-embedding-8b`, 4,096D
 - `exact=true`, `approximate=false`, `temporal_scope_policy=gold-query.v1`
 - 점수 생성 당시 runtime aggregation status/policy/sealed profile SHA-256
+- inventory, score matrix, query-vector matrix의 정확한 SHA-256/size와
+  `little-endian`/`float32`/`row-major` literal
+- 실제 release 캡처인지 합성 fixture인지 구분하는 `validation_profile`
 
 profile 생성과 release 재검증은 `--expected-source-commit`을 필수 trust input으로 받아 score
 manifest의 source commit과 비교합니다. release workflow는 승인된 40자리
@@ -33,21 +46,22 @@ manifest의 source commit과 비교합니다. release workflow는 승인된 40�
 결속이 모두 유효해도 재사용할 수 없습니다. tag commit은 이 candidate의 evidence-only
 descendant여야 하며 허용 diff는 `release-evidence/v1.0.10/` 아래로 제한됩니다.
 
-질의 coverage record는 `query_id`, 질문 원문의 SHA-256, 실제 little-endian float32
-query vector SHA-256, `expected_rows`, `scored_rows`, `active_contracts`를 기록합니다.
-`expected_rows != scored_rows`이면 즉시 실패합니다. 각
-`cardrag.document-aggregation-row-score.v1` record는 다음을 포함합니다.
+`cardrag.document-aggregation-corpus-inventory.v1` manifest 뒤에는
+`cardrag.document-aggregation-corpus-row.v1`이 정확한 matrix column 순서로 옵니다. 각 행은 연속
+`ordinal`, 엄격히 증가하는 v5 `row_index`, `contract_revision_id`, `node_id`, `view_type`, embedding
+input SHA-256/profile ID를 가집니다. 중복 view는 거부하며 모든 계약에는 단일 `CONTRACT`와 하나
+이상의 child가 있어야 합니다.
 
-- 질의 내 연속 `ordinal`과 엄격히 증가하는 sidecar `row_index`
-- `contract_revision_id`, `node_id`, `view_type`
-- embedding input SHA-256과 embedding profile ID
-- 정규화된 exact inner-product score (`-1.0..1.0`의 JSON float)
+각 `cardrag.document-aggregation-query-coverage.v2` record는 연속 query `ordinal`, 질문 SHA-256,
+active contract/row count와 두 binary segment의 연속 offset, size, count, SHA-256을 기록합니다.
+점수 segment는 inventory와 같은 수의 유한한 `[-1,1]` float32이고 query vector는 정확히 4,096개의
+유한한 정규화 float32입니다. segment 사이 hole, overlap, swap, truncation, trailing byte, 1-ULP
+변조도 전체 파일 hash 또는 segment hash에서 실패합니다.
 
-각 질의에서 `(contract_revision_id,node_id,view_type)`와 `row_index`는 중복될 수 없고, 모든
-계약에는 단일 `CONTRACT` row와 하나 이상의 non-`CONTRACT` row가 있어야 합니다. bool,
-NaN/Infinity, duplicate JSON key, 비canonical encoding, symlink/non-regular 입력은 거부합니다.
-입력은 최대 4 GiB까지 single-pass로 읽고 읽기 전후 inode/size/mtime/ctime 결속을 확인하며,
-메모리에는 계약별 상위 child 점수만 유지합니다.
+검증기는 binary 전체를 메모리에 복사하지 않고 O_NOFOLLOW로 hash-pin한 mmap segment를 순회합니다.
+JSON duplicate key, 비canonical encoding, symlink/non-regular/교체·변경 입력도 거부합니다. profile은
+작은 query coverage와 inventory만 메모리에 유지하고 정책 metric은 각 score segment에서 다시
+계산합니다. release mode는 `validation_profile=release_grade`만 허용합니다.
 
 ## Selection and fail-closed gate
 
@@ -84,7 +98,22 @@ M0 manifest SHA가 profile에 들어가고 M1이 profile hash를 담는 2단계 
 먼저 실제 candidate의 모든 current/ambiguous row를 런타임과 동일한 exact scorer로 캡처합니다.
 query별 immutable shard, canonical progress hash chain, generation/DB/vector/exact-row identity가
 중단 재개와 변조 검출에 사용됩니다. 기본 모드는 release gold 계약을 요구하며, 테스트에서만
-`--fixture-mode`를 사용할 수 있습니다.
+`--fixture-mode`를 사용할 수 있습니다. state에는 inventory와 query별
+`coverage.json`/`scores.f32`/`query-vector.f32` 3종 세트를 0600 immutable 파일로 저장합니다.
+유효한 완료 세트는 progress pointer가 유실돼도 provider를 다시 호출하지 않습니다. 일부만 남은
+세트, orphan, ordinal skip은 자동 추측하지 않고 실패시킵니다.
+
+실제 scorer는 `capture_unscoped_current_score_stream`으로 기본 512행(허용 상한 4,096행)씩
+little-endian float32 score를 state shard에 직접 기록합니다. 따라서 기존 호환 API처럼 전체 row
+tuple과 raw-score dictionary를 동시에 만들지 않으며, query embedding provider 호출은 질의당 한
+번뿐입니다. 이미 완료·검증된 3종 세트는 resume에서 provider를 전혀 호출하지 않습니다.
+
+캡처 시작 시 generation DB와 vector sidecar를 SHA-256 및
+`dev/ino/size/mtime/ctime`으로 checkpoint합니다. handle load, inventory, 각 질의 전후에는 inode
+identity를 확인하고 최종 네 파일을 publish·재검증한 뒤 두 generation 입력을 다시 전부 hash합니다.
+동일 byte로 atomic path replacement를 하더라도 inode/ctime 차이로 실패하므로 manifest의 DB/vector
+hash가 실제 score 계산에 사용된 generation과 분리될 수 없습니다. OpenRouter key를 사용하는 CLI는
+secret을 읽기 전에 base URL을 공식 `https://openrouter.ai/api/v1`로 제한합니다.
 
 ```bash
 SOURCE_COMMIT=$(git rev-parse HEAD)
@@ -94,6 +123,12 @@ uv run cardrag-aggregation-capture \
   --generation-dir /candidate/generations/GENERATION_ID \
   --object-root /candidate/objects \
   --output release-evidence/v1.0.10/document-aggregation-scores.jsonl \
+  --corpus-inventory-output \
+    release-evidence/v1.0.10/document-aggregation-corpus-inventory.jsonl \
+  --score-matrix-output \
+    release-evidence/v1.0.10/document-aggregation-score-matrix.f32 \
+  --query-vector-matrix-output \
+    release-evidence/v1.0.10/document-aggregation-query-vectors.f32 \
   --state-dir /candidate/aggregation-capture-state \
   --source-commit "$SOURCE_COMMIT" \
   --openrouter-api-key-file /run/secrets/openrouter_api_key
@@ -106,6 +141,11 @@ GOLD_SHA256=$(sha256sum release-evidence/v1.0.10/gold.jsonl | awk '{print $1}')
 uv run python -m cardrag_mcp.aggregation_profile \
   --gold release-evidence/v1.0.10/gold.jsonl \
   --scores release-evidence/v1.0.10/document-aggregation-scores.jsonl \
+  --corpus-inventory \
+    release-evidence/v1.0.10/document-aggregation-corpus-inventory.jsonl \
+  --score-matrix release-evidence/v1.0.10/document-aggregation-score-matrix.f32 \
+  --query-vector-matrix \
+    release-evidence/v1.0.10/document-aggregation-query-vectors.f32 \
   --expected-gold-sha256 "$GOLD_SHA256" \
   --expected-source-commit "$SOURCE_COMMIT" \
   --generation-manifest-dir release-evidence/v1.0.10/generation-manifests \
@@ -164,6 +204,11 @@ PROFILE_SHA256=$(sha256sum \
 uv run python -m cardrag_mcp.aggregation_profile \
   --gold release-evidence/v1.0.10/gold.jsonl \
   --scores release-evidence/v1.0.10/document-aggregation-scores.jsonl \
+  --corpus-inventory \
+    release-evidence/v1.0.10/document-aggregation-corpus-inventory.jsonl \
+  --score-matrix release-evidence/v1.0.10/document-aggregation-score-matrix.f32 \
+  --query-vector-matrix \
+    release-evidence/v1.0.10/document-aggregation-query-vectors.f32 \
   --validate-profile release-evidence/v1.0.10/document-aggregation-profile.json \
   --expected-profile-sha256 "$PROFILE_SHA256" \
   --expected-source-commit "$SOURCE_COMMIT" \

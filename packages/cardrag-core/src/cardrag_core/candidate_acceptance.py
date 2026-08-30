@@ -1,8 +1,9 @@
 """Fail-closed verifier for the v1.0.10 real-candidate acceptance receipt.
 
-The receipt is an independently approved trust root.  It does not manufacture
-runtime evidence: it binds exact canonical evidence files and replays their
-cross-contract invariants without opening Docker, WebDAV, or either runtime.
+The receipt is a canonical technical trust root.  It does not manufacture
+runtime evidence or imply a separate human approval: it binds exact canonical
+evidence files and replays their cross-contract invariants without opening
+Docker, WebDAV, or either runtime.
 """
 
 from __future__ import annotations
@@ -143,12 +144,17 @@ class CandidateImageIdentity(_CanonicalModel):
 
 
 class EffectiveConfigEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-effective-config.v1"]
+    schema_version: Literal["cardrag.candidate-effective-config.v2"]
     source_commit: SourceCommit
     release_version: Literal["1.0.10"]
     compose_project: Literal["cardrag-v110-candidate"]
     channel: Literal["candidate-v1.0.10"]
     worker_volume: Literal["cardrag-worker-v110-state"]
+    worker_state_mount_path: Literal["/var/lib/cardrag-worker"]
+    worker_codex_home_volume: Literal["cardrag-worker-v110-codex-home"]
+    worker_codex_home_mount_path: Literal["/var/lib/cardrag-codex-home"]
+    worker_codex_auth_root: Literal["/var/lib/cardrag-codex-home"]
+    worker_home: Literal["/var/lib/cardrag-codex-home/home"]
     mcp_volume: Literal["cardrag-mcp-v110-state"]
     mcp_host: Literal["127.0.0.1"]
     mcp_port: Literal[18010]
@@ -253,7 +259,7 @@ class IssuerRunMetrics(_CanonicalModel):
 
 
 class WorkerMetricsEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-worker-metrics.v1"]
+    schema_version: Literal["cardrag.candidate-worker-metrics.v2"]
     source_commit: SourceCommit
     generation_id: str
     generation_manifest_sha256: Sha256Hex
@@ -269,6 +275,17 @@ class WorkerMetricsEvidence(_CanonicalModel):
     systempaths_unconfined_verified: Literal[False]
     privileged_verified: Literal[False]
     cap_add_count_verified: Literal[0]
+    worker_state_mount_path: Literal["/var/lib/cardrag-worker"]
+    codex_home_mount_path: Literal["/var/lib/cardrag-codex-home"]
+    codex_auth_root: Literal["/var/lib/cardrag-codex-home"]
+    codex_home: Literal["/var/lib/cardrag-codex-home"]
+    home: Literal["/var/lib/cardrag-codex-home/home"]
+    codex_home_separate_volume_verified: Literal[True]
+    worker_state_legacy_codex_auth_entries: Literal[0]
+    codex_auth_json_mode: Literal["0600"]
+    codex_auth_json_uid_gid: Literal["10001:10001"]
+    codex_login_status_verified: Literal[True]
+    codex_login_status_output_retained: Literal[False]
     codex_version_verified: Literal[True]
     bubblewrap_version_verified: Literal[True]
     bubblewrap_user_namespace_verified: Literal[True]
@@ -1030,6 +1047,11 @@ def verify_candidate_acceptance(
         or worker.effective_config_sha256 != effective_config_sha256
         or worker.runtime_image_repo_digest != config.worker_image.compose_image_reference
         or worker.runtime_container_image_id != config.worker_image.platform_config_digest
+        or worker.worker_state_mount_path != config.worker_state_mount_path
+        or worker.codex_home_mount_path != config.worker_codex_home_mount_path
+        or worker.codex_auth_root != config.worker_codex_auth_root
+        or worker.codex_home != config.worker_codex_home_mount_path
+        or worker.home != config.worker_home
         or worker.documents != manifest.counts.documents
         or worker.chunks != manifest.counts.chunks
         or worker.embedding_rows != manifest.vector_sidecar.row_count

@@ -48,7 +48,13 @@ port 8000, `/health/ready` healthcheck를 유지합니다.
 
 Worker final은 bubblewrap과 기존 운영 wrapper 요구 때문에 pinned `latest-dev`를
 사용합니다. numeric UID/GID `10001:10001`, mode 0700의
-`/var/lib/cardrag-worker`, 기존 labels와 `cardrag-worker run` entrypoint를 유지합니다.
+`/var/lib/cardrag-worker`, `/var/lib/cardrag-codex-home`과 그 `home/` 자식을 image에
+둡니다. 빈 named volume의 첫 mount copy-up 뒤에도 UID/GID 10001이 쓸 수 있어야 합니다.
+Worker recovery state와 Codex OAuth/log/cache는 각각 `cardrag-worker-v110-state`,
+`cardrag-worker-v110-codex-home`이라는 서로 다른 volume에 저장합니다.
+`CARDRAG_CODEX_AUTH_ROOT`와 `CODEX_HOME`은 후자의 mount root,
+`HOME`은 `/var/lib/cardrag-codex-home/home`으로 고정합니다. 기존 labels와
+`cardrag-worker run` entrypoint를 유지합니다.
 Compose의 read-only rootfs, tmpfs, `cap_drop: [ALL]`, `no-new-privileges` 조건은 별도
 runtime smoke에서 그대로 검증해야 합니다. OCR provider는 Codex를 항상
 `--sandbox read-only`로 실행하므로 nested Linux sandbox가 시작되지 않으면 단순한 검증
@@ -67,6 +73,12 @@ web search, plan, user-input tool도 끅니다. `--image`는 이미지를 모델
 인증 store를 읽을 수 있는 Codex 부모 binary 자체의 compromise는 이 경계의 주장이
 아니며, untrusted OCR 내용에 일반 파일-read/command 도구를 제공하지 않는 것이
 검증 대상입니다.
+candidate runtime smoke는 두 mount의 Docker volume source가 서로 다른 exact 이름인지,
+세 환경변수가 위 경로와 같은지, 새 `auth.json`이 UID/GID 10001 및 mode 0600인지,
+`codex login status`가 출력을 보존하지 않은 채 성공하는지 확인합니다. Worker state의
+기존 `/codex`와 `/home`은 filename 및 token-form 결과만 남기는 redacted audit로 검사하며,
+cutover 증거에는 legacy Codex auth entry가 0이어야 합니다. 토큰 값과 `auth.json`
+내용 또는 SHA-256은 acceptance evidence에 넣지 않습니다.
 추가로 신규 provider stdout, checkpoint, 이전 local seal, native/adopted remote cache의
 OCR 본문 모두에 대해 OpenRouter, GitHub, JWT, long `sk-` credential token form을
 검사합니다. match하면 local seal/cache/downstream 처리 전에 typed systemic error로
@@ -141,7 +153,10 @@ fail-closed로 통과하기 전까지 차단합니다.
    Docker의 protected system paths는 유지하며 `systempaths=unconfined`를 추가하지
    않습니다. 별도 raw `bwrap --uid/--gid` 호출은 Codex가 실제 사용하는 namespace 설정과
    다르므로 이 증거를 대신하지 않습니다.
-5. MCP를 UID 10001, read-only rootfs로 기동하고 `/health/ready`가 200을 반환하는지
+5. Worker state와 Codex home이 exact 별도 named volume인지, mountpoint copy-up 소유권과
+   mode, `auth.json` 0600/10001:10001, 비출력 `codex login status`, state 내 legacy Codex
+   auth entry 0을 검사합니다.
+6. MCP를 UID 10001, read-only rootfs로 기동하고 `/health/ready`가 200을 반환하는지
    healthcheck와 함께 검사합니다.
 
 digest나 exact APK version을 갱신할 때는 manifest의 linux/amd64 child, Python/glibc

@@ -1,8 +1,8 @@
 # CardRAG 배포 파일
 
 현재 보호 대상 운영은 v1.0.9이며, v1.0.10은 별도 후보 overlay로 검증합니다. 두
-버전은 같은 Compose project·상태 volume·WebDAV base URL·채널 포인터·호스트
-포트를 공유하지 않습니다.
+버전은 같은 Compose project·Worker 상태 volume·Codex 인증 volume·WebDAV base
+URL·채널 포인터·호스트 포트를 공유하지 않습니다.
 
 Worker/MCP base image, exact Wolfi package, strict final-image scan과 sandbox/readiness
 release gate는 [컨테이너 런타임 계약](../docs/V1_0_10_CONTAINER_RUNTIME.md)을 따릅니다.
@@ -33,9 +33,12 @@ deploy/
   정의합니다. 상태 volume 이름은 `CARDRAG_WORKER_STATE_VOLUME`과
   `CARDRAG_MCP_STATE_VOLUME`로 명시할 수 있습니다. Worker base의 기본 목적지는
   v1.0.10 전용 `cardrag-worker-v110-state`이며 v1.0.9 운영 volume은 seed overlay의
-  read-only source로만 연결합니다.
+  read-only source로만 연결합니다. Worker의 Codex 인증은 state와 겹치지 않는
+  `CARDRAG_WORKER_CODEX_HOME_VOLUME`에 별도로 두며 기본값은
+  `cardrag-worker-v110-codex-home`입니다.
 - `compose.candidate.yaml`은 `candidate-v1.0.10` 포인터, 후보 전용 volume 및
-  WebDAV URL을 강제합니다. Worker 후보는 원격 GC를 하지 않고 MCP 후보는 기본
+  WebDAV URL을 강제합니다. Worker 후보는 state와 Codex 인증 volume을 각각 위의
+  두 exact v1.0.10 이름으로 고정하고 원격 GC를 하지 않으며, MCP 후보는 기본
   `127.0.0.1:18010`만 사용합니다. MCP overlay의 안전한 port 교체에는 Docker
   Compose v2.24.4 이상이 필요합니다.
 - Worker `compose.cache-seed.yaml`은 terminal 상태가 확인된 v1.0.9 Worker volume을
@@ -85,12 +88,15 @@ set -euo pipefail
 [[ "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+: "${CARDRAG_PRESERVED_RUN_ID:?the audited interrupted run ID is required}"
+[[ "$CARDRAG_PRESERVED_RUN_ID" =~ ^[0-9a-f]{32}$ ]]
 
 docker compose --env-file /etc/cardrag/candidate-worker.env \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
   -f deploy/worker/compose.secrets.yaml \
-  run --name cardrag-v110-candidate-worker-acceptance worker run
+  run --name cardrag-v110-candidate-worker-acceptance \
+  worker resume "$CARDRAG_PRESERVED_RUN_ID"
 
 docker compose --env-file /etc/cardrag/candidate-mcp.env \
   -f deploy/mcp/compose.yaml \
@@ -98,6 +104,10 @@ docker compose --env-file /etc/cardrag/candidate-mcp.env \
   -f deploy/mcp/compose.secrets.yaml \
   up -d --wait
 ```
+
+위 run ID의 read-only 상태·checkpoint gate는
+[v1.0.10 migration](../docs/V1_0_10_MIGRATION.md)의 canonical 명령으로 먼저 통과해야
+합니다. 새 run을 만드는 인자 없는 `worker run`으로 대체하지 않습니다.
 
 candidate overlay는 public repository를 YAML에 고정하고 위 receipt-bound `sha256` index
 digest 변수가 없으면 Compose render를 거부합니다. base의 local image와 `build:` fallback을

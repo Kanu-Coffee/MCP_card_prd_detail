@@ -11,10 +11,13 @@ LibreChat 경로는 명시적 cutover 승인 전까지 변경하지 않습니다
 3. [candidate migration과 rollback](V1_0_10_MIGRATION.md)
 4. [acceptance gates](V1_0_10_ACCEPTANCE.md)
 5. [gold evaluation](V1_0_10_GOLD_EVALUATION.md)
-6. [document aggregation profile](V1_0_10_AGGREGATION_PROFILE.md)
-7. [candidate acceptance receipt](V1_0_10_CANDIDATE_ACCEPTANCE.md)
-8. [Chainguard/Wolfi 컨테이너 런타임](V1_0_10_CONTAINER_RUNTIME.md)
-9. [배포 overlay와 secrets](../deploy/README.md)
+6. [gold 작성·블라인드 리뷰 도구](V1_0_10_GOLD_REVIEW_TOOL.md)
+7. [외부 v1.0.9·Qwen page lane producer](V1_0_10_EXTERNAL_GOLD_PRODUCER.md)
+8. [source-extractive answer artifact producer](V1_0_10_GOLD_ANSWER_ARTIFACT.md)
+9. [document aggregation profile](V1_0_10_AGGREGATION_PROFILE.md)
+10. [candidate acceptance receipt](V1_0_10_CANDIDATE_ACCEPTANCE.md)
+11. [Chainguard/Wolfi 컨테이너 런타임](V1_0_10_CONTAINER_RUNTIME.md)
+12. [배포 overlay와 secrets](../deploy/README.md)
 
 ## 기존 운영 기록
 

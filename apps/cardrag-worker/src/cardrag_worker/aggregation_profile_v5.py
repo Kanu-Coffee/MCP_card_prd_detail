@@ -4,7 +4,10 @@ The statistical evaluator lives in ``cardrag-mcp``.  The finite Worker does
 not repeat that expensive evaluation, but it only accepts the evaluator's
 canonical artifact when an operator also supplies its independently verified
 file SHA-256.  The selected core profile is then carried to the exporter and
-generation manifest without trusting an untyped JSON fragment.
+generation manifest without trusting an untyped JSON fragment.  Compact score
+evidence is represented by a canonical manifest plus three separately bound
+portable artifacts; the Worker validates those bindings without reopening the
+large offline score matrices at runtime.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ from pydantic import ValidationError
 
 PROFILE_ARTIFACT_SCHEMA_VERSION = "cardrag.document-aggregation-profile-artifact.v1"
 MAX_PROFILE_ARTIFACT_BYTES = 32 * 1024 * 1024
+MAX_PORTABLE_ARTIFACT_BYTES = 95_000_000
+MAX_SCORE_COUNT = 20_000_000
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
@@ -46,16 +51,25 @@ _TOP_LEVEL_KEYS = frozenset(
 )
 _BINDING_KEYS = frozenset(
     {
+        "corpus_inventory_sha256",
+        "corpus_inventory_size_bytes",
         "generation_manifest_sha256",
         "gold_sha256",
+        "query_vector_matrix_sha256",
+        "query_vector_matrix_size_bytes",
         "score_artifact_manifest_sha256",
         "score_artifact_sha256",
         "score_artifact_size_bytes",
+        "score_matrix_sha256",
+        "score_matrix_size_bytes",
     }
 )
 _SCORE_MANIFEST_KEYS = frozenset(
     {
         "approximate",
+        "byte_order",
+        "corpus_inventory",
+        "corpus_row_count",
         "embedding_dimension",
         "embedding_model",
         "embedding_profile_id",
@@ -64,19 +78,25 @@ _SCORE_MANIFEST_KEYS = frozenset(
         "generation_id",
         "generation_manifest_sha256",
         "gold_sha256",
+        "matrix_order",
         "query_count",
-        "row_count",
+        "query_vector_matrix",
         "runtime_document_aggregation_policy",
         "runtime_document_aggregation_status",
         "runtime_sealed_profile_sha256",
+        "scalar_type",
         "schema_version",
+        "score_count",
+        "score_matrix",
         "scoring_contract",
         "serving_database_sha256",
         "source_commit",
         "temporal_scope_policy",
+        "validation_profile",
         "vector_sidecar_sha256",
     }
 )
+_ARTIFACT_BINDING_KEYS = frozenset({"sha256", "size_bytes"})
 
 
 class AggregationProfileV5Error(RuntimeError):
@@ -102,8 +122,18 @@ class VerifiedAggregationProfileV5:
             raise ValueError("aggregation profile artifact SHA-256 is invalid")
 
 
-def _identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+def _identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _read_regular(path: Path) -> bytes:
@@ -124,24 +154,36 @@ def _read_regular(path: Path) -> bytes:
         raise AggregationProfileV5Error("profile_artifact_open_failed") from exc
     try:
         before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise AggregationProfileV5Error("profile_artifact_not_regular")
+        if before.st_size <= 0 or before.st_size > MAX_PROFILE_ARTIFACT_BYTES:
+            raise AggregationProfileV5Error("profile_artifact_size_invalid")
+        if _identity(listed) != _identity(before):
+            raise AggregationProfileV5Error("profile_artifact_changed_during_read")
         remaining = before.st_size
         chunks: list[bytes] = []
+        size = 0
         while remaining:
             chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
                 raise AggregationProfileV5Error("profile_artifact_changed_during_read")
+            if len(chunk) > MAX_PROFILE_ARTIFACT_BYTES - size:
+                raise AggregationProfileV5Error("profile_artifact_size_invalid")
             chunks.append(chunk)
+            size += len(chunk)
             remaining -= len(chunk)
         if os.read(descriptor, 1):
             raise AggregationProfileV5Error("profile_artifact_changed_during_read")
         after = os.fstat(descriptor)
+        try:
+            current = path.lstat()
+        except OSError:
+            raise AggregationProfileV5Error("profile_artifact_changed_during_read") from None
+        identity = _identity(before)
+        if size != before.st_size or identity != _identity(after) or identity != _identity(current):
+            raise AggregationProfileV5Error("profile_artifact_changed_during_read")
     finally:
         os.close(descriptor)
-    if _identity(before) != _identity(after) or (listed.st_dev, listed.st_ino) != (
-        before.st_dev,
-        before.st_ino,
-    ):
-        raise AggregationProfileV5Error("profile_artifact_changed_during_read")
     return b"".join(chunks)
 
 
@@ -174,6 +216,21 @@ def _positive_int(value: object, *, code: str) -> int:
     if type(value) is not int or value < 1:
         raise AggregationProfileV5Error(code)
     return value
+
+
+def _artifact_binding(
+    value: object,
+    *,
+    code: str,
+) -> tuple[str, int]:
+    binding = _mapping(value, code=code)
+    if set(binding) != _ARTIFACT_BINDING_KEYS:
+        raise AggregationProfileV5Error(code)
+    digest = _sha256(binding.get("sha256"), code=code)
+    size = _positive_int(binding.get("size_bytes"), code=code)
+    if size > MAX_PORTABLE_ARTIFACT_BYTES:
+        raise AggregationProfileV5Error(code)
+    return digest, size
 
 
 def load_verified_aggregation_profile_v5(
@@ -269,7 +326,41 @@ def load_verified_aggregation_profile_v5(
         bindings.get("score_artifact_size_bytes"),
         code="profile_bindings_invalid",
     )
-    if score_artifact_size_bytes > 4 * 1024 * 1024 * 1024:
+    corpus_inventory_binding = (
+        _sha256(
+            bindings.get("corpus_inventory_sha256"),
+            code="profile_bindings_invalid",
+        ),
+        _positive_int(
+            bindings.get("corpus_inventory_size_bytes"),
+            code="profile_bindings_invalid",
+        ),
+    )
+    score_matrix_binding = (
+        _sha256(bindings.get("score_matrix_sha256"), code="profile_bindings_invalid"),
+        _positive_int(
+            bindings.get("score_matrix_size_bytes"),
+            code="profile_bindings_invalid",
+        ),
+    )
+    query_vector_matrix_binding = (
+        _sha256(
+            bindings.get("query_vector_matrix_sha256"),
+            code="profile_bindings_invalid",
+        ),
+        _positive_int(
+            bindings.get("query_vector_matrix_size_bytes"),
+            code="profile_bindings_invalid",
+        ),
+    )
+    if score_artifact_size_bytes > MAX_PORTABLE_ARTIFACT_BYTES or any(
+        size > MAX_PORTABLE_ARTIFACT_BYTES
+        for _digest, size in (
+            corpus_inventory_binding,
+            score_matrix_binding,
+            query_vector_matrix_binding,
+        )
+    ):
         raise AggregationProfileV5Error("profile_bindings_invalid")
     if (
         generation_manifest_sha256 != profile.generation_manifest_sha256
@@ -301,14 +392,34 @@ def load_verified_aggregation_profile_v5(
         score_manifest.get("query_count"),
         code="profile_score_manifest_invalid",
     )
-    row_count = _positive_int(
-        score_manifest.get("row_count"),
+    corpus_row_count = _positive_int(
+        score_manifest.get("corpus_row_count"),
         code="profile_score_manifest_invalid",
     )
-    if not 300 <= query_count <= 500 or row_count > 20_000_000:
-        raise AggregationProfileV5Error("profile_score_manifest_invalid")
+    score_count = _positive_int(
+        score_manifest.get("score_count"),
+        code="profile_score_manifest_invalid",
+    )
     if (
-        score_manifest.get("schema_version") != "cardrag.document-aggregation-score-artifact.v1"
+        not 300 <= query_count <= 500
+        or score_count > MAX_SCORE_COUNT
+        or score_count != query_count * corpus_row_count
+    ):
+        raise AggregationProfileV5Error("profile_score_manifest_invalid")
+    manifest_corpus_inventory = _artifact_binding(
+        score_manifest.get("corpus_inventory"),
+        code="profile_score_manifest_invalid",
+    )
+    manifest_score_matrix = _artifact_binding(
+        score_manifest.get("score_matrix"),
+        code="profile_score_manifest_invalid",
+    )
+    manifest_query_vector_matrix = _artifact_binding(
+        score_manifest.get("query_vector_matrix"),
+        code="profile_score_manifest_invalid",
+    )
+    if (
+        score_manifest.get("schema_version") != "cardrag.document-aggregation-score-artifact.v2"
         or score_manifest.get("generation_id") != profile.generation_id
         or score_manifest.get("generation_manifest_sha256") != profile.generation_manifest_sha256
         or score_manifest.get("gold_sha256") != profile.gold_sha256
@@ -324,6 +435,15 @@ def load_verified_aggregation_profile_v5(
         or score_manifest.get("runtime_document_aggregation_status") != "candidate_default"
         or score_manifest.get("runtime_document_aggregation_policy") != "max_child"
         or score_manifest.get("runtime_sealed_profile_sha256") is not None
+        or score_manifest.get("byte_order") != "little-endian"
+        or score_manifest.get("scalar_type") != "float32"
+        or score_manifest.get("matrix_order") != "row-major"
+        or score_manifest.get("validation_profile") != "release_grade"
+        or manifest_corpus_inventory != corpus_inventory_binding
+        or manifest_score_matrix != score_matrix_binding
+        or manifest_query_vector_matrix != query_vector_matrix_binding
+        or manifest_score_matrix[1] != score_count * 4
+        or manifest_query_vector_matrix[1] != query_count * 4096 * 4
     ):
         raise AggregationProfileV5Error("profile_score_manifest_mismatch")
 
@@ -333,15 +453,17 @@ def load_verified_aggregation_profile_v5(
         != {
             "all_queries_exact",
             "approximate",
+            "corpus_row_count",
             "maximum_active_contracts",
             "minimum_active_contracts",
             "query_count",
-            "row_count",
+            "score_count",
         }
         or coverage.get("all_queries_exact") is not True
         or coverage.get("approximate") is not False
         or coverage.get("query_count") != query_count
-        or coverage.get("row_count") != row_count
+        or coverage.get("corpus_row_count") != corpus_row_count
+        or coverage.get("score_count") != score_count
     ):
         raise AggregationProfileV5Error("profile_coverage_invalid")
     maximum_contracts = _positive_int(
@@ -365,6 +487,7 @@ def load_verified_aggregation_profile_v5(
 __all__ = [
     "AggregationProfileV5Error",
     "MAX_PROFILE_ARTIFACT_BYTES",
+    "MAX_PORTABLE_ARTIFACT_BYTES",
     "PROFILE_ARTIFACT_SCHEMA_VERSION",
     "VerifiedAggregationProfileV5",
     "load_verified_aggregation_profile_v5",

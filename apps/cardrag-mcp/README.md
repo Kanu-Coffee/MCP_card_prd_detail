@@ -144,6 +144,17 @@ query-vector, every-row score, and complete coverage bindings; a self-asserted
 lane JSONL is rejected. See `docs/V1_0_10_GOLD_EVALUATION.md` for the artifact
 schemas and release revalidation commands.
 
+The installed offline authoring helpers are `cardrag-gold-review` for the
+corpus-only gold draft and loopback human-review flows,
+`cardrag-gold-external-producer` for the historical v1.0.9 and Qwen page
+artifacts, and `cardrag-gold-answer-artifact` for source-extractive answer
+artifacts. They are not imported by the MCP server and do not expose additional
+MCP tools. Their detailed operator contracts are in
+[`V1_0_10_GOLD_REVIEW_TOOL.md`](../../docs/V1_0_10_GOLD_REVIEW_TOOL.md),
+[`V1_0_10_EXTERNAL_GOLD_PRODUCER.md`](../../docs/V1_0_10_EXTERNAL_GOLD_PRODUCER.md),
+and
+[`V1_0_10_GOLD_ANSWER_ARTIFACT.md`](../../docs/V1_0_10_GOLD_ANSWER_ARTIFACT.md).
+
 The process listens on `127.0.0.1:8000` by default.  `/health/live` and the
 minimal `/health/ready` response are public; MCP, resources, metrics, and PDF
 downloads require the configured static bearer token.

@@ -20,11 +20,11 @@ receipt schema는 `cardrag.candidate-acceptance-receipt.v1`이고 release versio
 
 | receipt binding | 증명해야 하는 계약 |
 |---|---|
-| `effective_config` | public candidate repository의 rendered `repository@OCI-index`, 정확히 2-descriptor OCI index/platform/config/attestation digest와 subject, revision/version/entrypoint/user, 별도 project/channel/volume/loopback port, read-only rootfs, all-cap drop, no-new-privileges, Worker에만 `seccomp=unconfined`/`apparmor=unconfined`, systempaths 완화·privileged·cap-add 0, v1.0.9 RW mount 0, Worker/MCP state·reserve·DB·sidecar·download·audit exact capacity, Qwen 4,096D FP32 L2와 exact-all-active-rows 정책 |
+| `effective_config` | `cardrag.candidate-effective-config.v2`; public candidate repository의 rendered `repository@OCI-index`, 정확히 2-descriptor OCI index/platform/config/attestation digest와 subject, revision/version/entrypoint/user, 별도 project/channel/volume/loopback port, Worker state `cardrag-worker-v110-state:/var/lib/cardrag-worker`와 Codex home `cardrag-worker-v110-codex-home:/var/lib/cardrag-codex-home`, exact `CARDRAG_CODEX_AUTH_ROOT`/`CODEX_HOME`/`HOME`, read-only rootfs, all-cap drop, no-new-privileges, Worker에만 `seccomp=unconfined`/`apparmor=unconfined`, systempaths 완화·privileged·cap-add 0, v1.0.9 RW mount 0, Worker/MCP state·reserve·DB·sidecar·download·audit exact capacity, Qwen 4,096D FP32 L2와 exact-all-active-rows 정책 |
 | `generation_manifest` | canonical v5 manifest, sealed aggregation/retrieval profile, 구조 coverage 100%, cross-contract 0, vector sidecar |
 | `generation_ready` | manifest, SQLite와 sidecar SHA/size |
 | `candidate_pointer` | candidate generation의 manifest/READY |
-| `worker_metrics` | rendered image RepoDigest와 실제 container image ID가 sealed index/config digest와 같은 exact effective-config/image에서 UID 10001, read-only rootfs/cap-drop/NNP, Worker-only seccomp/AppArmor unconfined와 systempaths 완화·privileged·cap-add 0, Codex·bubblewrap version, bubblewrap user namespace와 Codex read-only sandbox smoke, Codex OCR exact no-read/exec-tool argv·empty shell-env inheritance, 카드사별 acquired=succeeded·failed=0인 full 4-card-company run, 문서/chunk/row/sidecar/구조 count, PDF/OCR cache hit/miss, provider 및 publication count |
+| `worker_metrics` | `cardrag.candidate-worker-metrics.v2`; rendered image RepoDigest와 실제 container image ID가 sealed index/config digest와 같은 exact effective-config/image에서 UID 10001, read-only rootfs/cap-drop/NNP, Worker-only seccomp/AppArmor unconfined와 systempaths 완화·privileged·cap-add 0, 별도 Codex volume/mount/env, state legacy auth entry 0, `auth.json` 0600·10001:10001, 출력 미보존 `codex login status`, Codex·bubblewrap version, bubblewrap user namespace와 Codex read-only sandbox smoke, Codex OCR exact no-read/exec-tool argv·empty shell-env inheritance, 카드사별 acquired=succeeded·failed=0인 full 4-card-company run, 문서/chunk/row/sidecar/구조 count, PDF/OCR cache hit/miss, provider 및 publication count |
 | `mcp_smoke` | rendered image RepoDigest와 실제 container image ID가 sealed index/config digest와 같은 exact effective-config/image에서 UID 10001/read-only rootfs/all-cap drop/no-new-privileges/readiness, v5, 8개 tool discovery/call, active contract 및 embedding row 전수채점, exact block, cross-contract 0, bundle/revision/legacy adapter, PDF 206·`%PDF-`·Content-Range |
 | `native_cache_before`, `native_cache_after` | 동일 native namespace의 정렬된 exact-path 200/404 control inventory |
 | `native_cache_audit` | exact-path GET-only hit/miss, HEAD 0과 native create/modify/delete/write/publication 0 |
@@ -53,6 +53,9 @@ exact-path GET hit/miss와 Worker run의 OCR cache hit/miss도 서로 같은 관
 - effective config → Worker/MCP, stable/OCR/GC approval false, experimental map-reduce false,
   Worker-only seccomp/AppArmor unconfined, systempaths 완화·privileged·cap-add 0,
   sealed embedding provider/token profile 및 aggregation/retrieval policy binding
+- Worker state와 Codex home의 exact 별도 volume/mount/env, state legacy `/codex`·`/home`
+  auth entry 0, `auth.json` private metadata와 비출력 login-status 성공. auth bytes나 hash는
+  receipt에 기록하지 않음
 - Compose rendered `repository@OCI-index` → platform manifest의 config digest → 실제 Worker/MCP
   container `.Image` ID와 local RepoDigest의 exact binding. local/tag/build fallback은 허용하지 않음
 - Worker 64 GiB state/2 GiB reserve/16 GiB sidecar/4 GiB DB/32 GiB startup floor와 MCP

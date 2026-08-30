@@ -1,10 +1,36 @@
 import copy
+import hashlib
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _portable_publish_verifier(workflow: str) -> str:
+    step = workflow.split(
+        "      - name: Revalidate complete portable evidence before registry mutation\n", 1
+    )[1].split("\n      - name: Publish only the receipt-bound", 1)[0]
+    embedded = step.split("            \"$GITHUB_SHA\" <<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0]
+    return "\n".join(line[10:] for line in embedded.splitlines()) + "\n"
+
+
+def _run_portable_verifier(
+    workflow: str,
+    bundle: Path,
+    manifest_sha256: str,
+    source_commit: str,
+    tag_commit: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - interpreter and embedded workflow code are controlled
+        (sys.executable, "-", str(bundle), manifest_sha256, source_commit, tag_commit),
+        input=_portable_publish_verifier(workflow),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _public_package_is_valid(tmp_path: Path, package: object) -> bool:
@@ -109,6 +135,319 @@ def test_release_legacy_validator_binds_the_contemporaneous_execution_record() -
 
     assert 'legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"' in workflow
     assert '--historical-source-artifact "$legacy_historical_source"' in workflow
+
+
+def test_release_validates_the_complete_compact_v2_score_evidence() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
+    operator_documents = (
+        (ROOT / "docs/V1_0_10_AGGREGATION_PROFILE.md").read_text(encoding="utf-8"),
+        (ROOT / "docs/V1_0_10_GOLD_EVALUATION.md").read_text(encoding="utf-8"),
+    )
+
+    for contract in (
+        'aggregation_corpus_inventory="$evidence_dir/document-aggregation-corpus-inventory.jsonl"',
+        'aggregation_score_matrix="$evidence_dir/document-aggregation-score-matrix.f32"',
+        'aggregation_query_vector_matrix="$evidence_dir/document-aggregation-query-vectors.f32"',
+        '--corpus-inventory "$aggregation_corpus_inventory"',
+        '--score-matrix "$aggregation_score_matrix"',
+        '--query-vector-matrix "$aggregation_query_vector_matrix"',
+        '--native-score-artifact "$aggregation_scores"',
+        '--native-score-corpus-inventory "$aggregation_corpus_inventory"',
+        '--native-score-matrix "$aggregation_score_matrix"',
+        '--native-score-query-vector-matrix "$aggregation_query_vector_matrix"',
+        '"v109_baseline=$evidence_dir/v109_baseline.corpus.jsonl"',
+        '"qwen_page=$evidence_dir/qwen_page.corpus.jsonl"',
+        '"v109_baseline=$evidence_dir/v109_baseline.dense-scores.f32"',
+        '"qwen_page=$evidence_dir/qwen_page.dense-scores.f32"',
+        '"v109_baseline=$evidence_dir/v109_baseline.query-vectors.f32"',
+        '"qwen_page=$evidence_dir/qwen_page.query-vectors.f32"',
+        '"v109_baseline=$evidence_dir/v109_baseline.lexical-ranks.jsonl"',
+    ):
+        assert contract in validate_job
+
+    assert validate_job.count("--external-inventory") == 2
+    assert validate_job.count("--external-score-matrix") == 2
+    assert validate_job.count("--external-query-vector-matrix") == 2
+    assert validate_job.count("--external-lexical-ranks") == 1
+    assert "qwen_page.lexical-ranks" not in validate_job
+    assert "document-aggregation-query-vector-matrix.f32" not in validate_job
+    for document in operator_documents:
+        assert "document-aggregation-query-vectors.f32" in document
+        assert "document-aggregation-query-vector-matrix.f32" not in document
+
+
+def test_release_binds_exactly_three_portable_answer_evidence_chains() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
+    answer_loop = validate_job.split("            for answer_lane in \\\n", 1)[1].split(
+        "            # validate-set revalidates canonical bindings", 1
+    )[0]
+
+    assert answer_loop.startswith(
+        "              v109_baseline \\\n              qwen_page \\\n              qwen_structure_exact; do\n"
+    )
+    assert "lexical_shadow" not in answer_loop
+    assert "reranker_shadow" not in answer_loop
+    for suffix in (
+        "input.jsonl",
+        "producer-receipt.json",
+        "answers.jsonl",
+        "call-ledger.jsonl",
+        "state-identity.json",
+        "state-bundle.jsonl",
+    ):
+        assert f"$evidence_dir/answers/${{answer_lane}}.{suffix}" in answer_loop
+    for flag in (
+        "--answer-input",
+        "--expected-answer-input-sha256",
+        "--answer-producer-receipt",
+        "--expected-answer-producer-receipt-sha256",
+        "--answer-artifact",
+        "--expected-answer-artifact-sha256",
+        "--answer-call-ledger",
+        "--answer-state-identity",
+        "--answer-state-bundle",
+        "--answer-profile-id",
+        "--answer-retrieval-run",
+        "--expected-answer-retrieval-run-sha256",
+        "--answer-retrieval-capture-receipt",
+        "--expected-answer-retrieval-capture-receipt-sha256",
+        "--answer-retrieval-attestation",
+        "--expected-answer-retrieval-attestation-sha256",
+        "--answer-retrieval-raw-score",
+        "--expected-answer-retrieval-raw-score-sha256",
+        "--answer-retrieval-corpus-inventory",
+        "--expected-answer-retrieval-corpus-inventory-sha256",
+        "--answer-retrieval-dense-score-matrix",
+        "--expected-answer-retrieval-dense-score-matrix-sha256",
+        "--answer-retrieval-query-vector-matrix",
+        "--expected-answer-retrieval-query-vector-matrix-sha256",
+    ):
+        assert answer_loop.count(flag) == 1
+
+    assert '"$answer_lane=cardrag.answer.extractive-k8.v1"' in answer_loop
+    assert answer_loop.count("--answer-retrieval-lexical-ranks") == 1
+    assert answer_loop.count("--expected-answer-retrieval-lexical-ranks-sha256") == 1
+    assert '[[ "$answer_lane" == "v109_baseline" ]]' in answer_loop
+    assert "--answer-decision" not in answer_loop
+    assert "--expected-answer-decision-sha256" not in answer_loop
+    assert "--database " not in validate_job
+    assert "--vectors " not in validate_job
+
+
+def test_release_caps_packages_and_publishes_every_portable_evidence_file() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    path_block = workflow.split("            portable_evidence_relative_paths=(\n", 1)[1].split(
+        "\n            )", 1
+    )[0]
+    portable_paths = tuple(line.strip() for line in path_block.splitlines() if line.strip())
+    assert len(portable_paths) == len(set(portable_paths))
+    assert all("*" not in path and "?" not in path for path in portable_paths)
+
+    compact_paths = {
+        "document-aggregation-scores.jsonl",
+        "document-aggregation-corpus-inventory.jsonl",
+        "document-aggregation-score-matrix.f32",
+        "document-aggregation-query-vectors.f32",
+        "v109_baseline.corpus.jsonl",
+        "v109_baseline.dense-scores.f32",
+        "v109_baseline.query-vectors.f32",
+        "v109_baseline.lexical-ranks.jsonl",
+        "qwen_page.corpus.jsonl",
+        "qwen_page.dense-scores.f32",
+        "qwen_page.query-vectors.f32",
+        "bootstrap/v109_baseline.jsonl",
+        "bootstrap/v109_baseline.capture-receipt.json",
+        "bootstrap/qwen_page.jsonl",
+        "bootstrap/qwen_page.capture-receipt.json",
+        "bootstrap/qwen_structure_exact.jsonl",
+        "bootstrap/qwen_structure_exact.capture-receipt.json",
+        "bootstrap/native-v5-attestation.jsonl",
+    }
+    for lane in ("v109_baseline", "qwen_page", "qwen_structure_exact"):
+        compact_paths.update(
+            {
+                f"answers/{lane}.input.jsonl",
+                f"answers/{lane}.producer-receipt.json",
+                f"answers/{lane}.answers.jsonl",
+                f"answers/{lane}.call-ledger.jsonl",
+                f"answers/{lane}.state-identity.json",
+                f"answers/{lane}.state-bundle.jsonl",
+            }
+        )
+    assert compact_paths.issubset(portable_paths)
+
+    for contract in (
+        'portable_validation_dir="$RUNNER_TEMP/cardrag-portable-validation-evidence"',
+        "MAX_FILE_BYTES = 95_000_000",
+        'getattr(os, "O_NOFOLLOW", 0)',
+        "os.O_DIRECTORY",
+        "value.st_dev",
+        "value.st_ino",
+        "value.st_mode",
+        "value.st_nlink",
+        "value.st_size",
+        "value.st_mtime_ns",
+        "value.st_ctime_ns",
+        "hash_pinned_descriptor",
+        "os.fsync(destination)",
+        "os.link(",
+        '"schema": "cardrag.portable-evaluation-evidence.v1"',
+        '"maximum_file_bytes": MAX_FILE_BYTES',
+        "name: portable-evidence-${{ steps.version.outputs.version }}",
+        "name: portable-evidence-${{ needs.validate.outputs.version }}",
+        '"portable_evidence": portable_evidence',
+        '"${portable_release_assets[@]}" > SHA256SUMS',
+        'assets+=("release-assets/$portable_asset")',
+    ):
+        assert contract in workflow
+    assert workflow.count('"portable_evidence": portable_evidence') == 2
+    assert workflow.count("Download the exact portable evaluation evidence") == 1
+    assert workflow.count("Download exact portable evaluation evidence") == 1
+    assert "portable-evidence-manifest.json" in workflow
+
+
+def test_release_validators_read_the_manifest_bound_preserved_path_snapshot() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
+    snapshot_binding = 'evidence_dir=$(realpath --canonicalize-existing "$portable_validation_dir")'
+    assert snapshot_binding in validate_job
+    binding_index = validate_job.index(snapshot_binding)
+    for invocation in (
+        "candidate_validation=$(",
+        ".venv/bin/python -m cardrag_worker.legacy_v4_audit",
+        ".venv/bin/python -m cardrag_mcp.aggregation_profile",
+        '.venv/bin/python -m cardrag_mcp.evaluation "${validator_args[@]}"',
+        '.venv/bin/python -m cardrag_mcp.gold_capture "${capture_args[@]}"',
+    ):
+        assert binding_index < validate_job.index(invocation)
+    for contract in (
+        '--evidence-root "$evidence_dir"',
+        '--generation-manifest-dir "$evidence_dir/generation-manifests"',
+        'candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"',
+        'capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"',
+        "src_dir_fd=files_directory",
+        "dst_dir_fd=snapshot_parent",
+        "snapshot_listed.st_nlink == 2",
+        "os.fchmod(snapshot_descriptor, 0o400)",
+    ):
+        assert contract in validate_job
+
+
+def test_portable_preparse_includes_all_candidate_acceptance_evidence() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
+    expected_keys = {
+        "candidate_pointer",
+        "effective_config",
+        "generation_cas",
+        "generation_manifest",
+        "generation_ready",
+        "mcp_smoke",
+        "native_cache_after",
+        "native_cache_audit",
+        "native_cache_before",
+        "rollback_ledger",
+        "v109_identity",
+        "worker_metrics",
+    }
+    key_block = validate_job.split("                  expected_evidence_keys = {\n", 1)[1].split(
+        "\n                  }", 1
+    )[0]
+    observed_keys = {line.strip().strip('",') for line in key_block.splitlines() if line.strip()}
+    assert observed_keys == expected_keys
+    for contract in (
+        "assert set(evidence_bindings) == expected_evidence_keys",
+        "assert isinstance(binding, dict) and set(binding) == {",
+        "candidate_artifacts[candidate_path] = (",
+        "candidate_binding = candidate_artifacts.get(raw_relative)",
+        "assert (digest, size) == candidate_binding",
+        'f"generation-manifests/{sha256}.json"',
+    ):
+        assert contract in validate_job
+
+
+def test_publish_revalidates_the_entire_portable_bundle_before_any_copy() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
+    verifier_index = publish_job.index("Revalidate complete portable evidence before registry mutation")
+    assert verifier_index < publish_job.index('"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy')
+    verifier = _portable_publish_verifier(workflow)
+    for contract in (
+        "assert set(os.listdir(bundle)) == {",
+        "assert set(os.listdir(files)) == asset_names",
+        'assert manifest["file_count"] == len(entries)',
+        'assert manifest["source_commit"] == expected_source_commit',
+        'assert manifest["tag_commit"] == expected_tag_commit',
+        "assert manifest_sha256 == expected_manifest_sha256",
+        "assert identity(os.fstat(descriptor)) == expected",
+        "follow_symlinks=False",
+        "assert 0 < listed.st_size <= maximum_bytes",
+    ):
+        assert contract in verifier
+
+
+def test_portable_publish_verifier_rejects_extra_symlink_and_same_inode_tamper(
+    tmp_path: Path,
+) -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    source_commit = "a" * 40
+    tag_commit = "b" * 40
+    bundle = tmp_path / "portable-evidence"
+    files = bundle / "files"
+    files.mkdir(parents=True)
+    relative_path = "answers/qwen_page.state-bundle.jsonl"
+    asset_name = "evaluation-evidence--answers--qwen_page.state-bundle.jsonl"
+    payload = b'{"schema":"fixture"}\n'
+    artifact = files / asset_name
+    artifact.write_bytes(payload)
+    manifest = {
+        "file_count": 1,
+        "files": [
+            {
+                "relative_path": relative_path,
+                "release_asset_name": asset_name,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        ],
+        "maximum_file_bytes": 95_000_000,
+        "schema": "cardrag.portable-evaluation-evidence.v1",
+        "source_commit": source_commit,
+        "tag_commit": tag_commit,
+    }
+    manifest_payload = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    manifest_path = bundle / "portable-evidence-manifest.json"
+    manifest_path.write_text(manifest_payload, encoding="utf-8")
+    manifest_sha256 = hashlib.sha256(manifest_payload.encode()).hexdigest()
+
+    assert (
+        _run_portable_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode == 0
+    )
+
+    extra = files / "unexpected"
+    extra.write_bytes(b"extra")
+    assert (
+        _run_portable_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode != 0
+    )
+    extra.unlink()
+
+    real_files = bundle / "real-files"
+    files.rename(real_files)
+    files.symlink_to(real_files.name, target_is_directory=True)
+    assert (
+        _run_portable_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode != 0
+    )
+    files.unlink()
+    real_files.rename(files)
+
+    original_inode = artifact.stat().st_ino
+    artifact.write_bytes(b'{"schema":"tampered"}\n')
+    assert artifact.stat().st_ino == original_inode
+    assert (
+        _run_portable_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode != 0
+    )
 
 
 def test_public_registry_jobs_use_environment_only_to_scope_secrets() -> None:
@@ -277,7 +616,7 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
         "ATTESTATION_DIGEST: ${{ steps.resolved.outputs.attestation_digest }}",
     ):
         assert binding in record_step
-    assert '"schema": "cardrag.container-release-part.v5"' in publish_job
+    assert '"schema": "cardrag.container-release-part.v6"' in publish_job
     assert '"candidate_source_commit": os.environ["CANDIDATE_SOURCE_COMMIT"]' in publish_job
     assert "needs: [validate, strict-filesystem-scan, strict-image-scan]" in workflow
     assert workflow.count("-f .github/scripts/validate-candidate-oci-index.jq") == 2
@@ -445,8 +784,11 @@ def test_repository_gitleaks_policy_rejects_openrouter_and_github_tokens(tmp_pat
     assert _raw_evidence_is_gitleaks_clean(tmp_path / "safe", safe_payloads)
 
     injected_tokens = {
-        "github": ("reuse_key", "github_pat_" + "a" * 82),
-        "openrouter": ("tokenizer_sha256", "sk-or-v1-" + "0123456789abcdef" * 4),
+        "github": ("reuse_key", "".join(("github", "_pat_", "a" * 82))),
+        "openrouter": (
+            "tokenizer_sha256",
+            "".join(("sk-or", "-v1-", "0123456789abcdef" * 4)),
+        ),
     }
     for name, (field, token) in injected_tokens.items():
         payloads = copy.deepcopy(safe_payloads)
@@ -469,7 +811,7 @@ def test_release_metadata_preserves_scan_and_candidate_source_identity() -> None
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
     for required in (
-        '"schema": "cardrag.container-release.v5"',
+        '"schema": "cardrag.container-release.v6"',
         'part["digest"] == os.environ[f"{role.upper()}_DIGEST"]',
         'part["candidate_source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]',
         'part["platform_config_digest"] == os.environ[',

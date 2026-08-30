@@ -111,6 +111,14 @@ claim is that untrusted OCR content has no model-callable general file-read or
 command-execution route to `/run/secrets` or `CODEX_HOME`, not that a compromised
 Codex executable cannot read its own authentication store.
 
+Container deployments persist Codex data in the dedicated
+`cardrag-worker-v110-codex-home` volume at `/var/lib/cardrag-codex-home`.
+`CARDRAG_CODEX_AUTH_ROOT` and `CODEX_HOME` equal that mount root, while `HOME`
+is its owned mode-0700 `home/` child. The Worker recovery volume remains mounted
+only at `/var/lib/cardrag-worker`; settings reject an auth root that is equal to,
+inside, or above the Worker state path. Migration copies only `auth.json` and
+does not copy Codex logs, cache, sessions, or the former general home.
+
 As defense in depth, fresh provider stdout, resumable checkpoints, retained
 local OCR, and both native/adopted remote-cache bodies are rejected systemically
 before a local seal or downstream publication when they match a standard

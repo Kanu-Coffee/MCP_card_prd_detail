@@ -30,3 +30,5 @@ services:
 volumes:
   worker-state:
     name: cardrag-worker-v110-state
+  codex-home:
+    name: cardrag-worker-v110-codex-home
