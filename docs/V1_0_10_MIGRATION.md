@@ -46,7 +46,7 @@ copy와 prune을 하지 않습니다. secret 값과 tokenized URL은 inventory�
 전체 Compose JSON을 터미널, 파일 또는 `tee`로 보내지 않고 아래 비민감 assertion의
 boolean 결과만 출력합니다.
 
-먼저 독립 승인된 candidate acceptance validation에서 role별 OCI index reference와 platform
+먼저 canonical candidate acceptance validation에서 role별 OCI index reference와 platform
 config digest를 옮깁니다. tag, local image, public repository, short digest는 허용하지 않습니다.
 아래 네 변수는 같은 shell과 이후 candidate 명령 전체에서 유지해야 합니다.
 
@@ -138,7 +138,7 @@ exact four-issuer set, port, `CARDRAG_OCR_CACHE_MODE=read-only`,
 `CARDRAG_REMOTE_GC_APPROVED=false`, Qwen 4,096D, Worker capacity, MCP
 legacy/resident/sidecar/DB/download/state/reserve 및 두 audit job/byte cap을 모두
 assert합니다. 이 assertion이 성공한 sanitized effective-config 결과만 candidate acceptance
-receipt의 config SHA 근거로 승인합니다. canonical effective-config evidence에는 위 image
+receipt의 config SHA 근거로 결속합니다. canonical effective-config evidence에는 위 image
 reference와 config digest도 함께 기록합니다. candidate overlay는 private repository를
 YAML에 고정하고 receipt-bound index digest 변수가 없으면 render를 거부하며 base의 local
 `image`/`build` fallback을 제거합니다. capacity와 issuer 값을

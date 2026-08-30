@@ -7,6 +7,11 @@ name = "cardrag-mcp"
 version = "1.0.10"
 description = "Read-only CardRAG serving database MCP"
 requires-python = ">=3.12,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+]
 dependencies = [
   "cardrag-core",
   "fastapi>=0.116,<1",

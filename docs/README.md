@@ -26,3 +26,9 @@ LibreChat 경로는 명시적 cutover 승인 전까지 변경하지 않습니다
 Worker는 유일한 WebDAV writer이고 MCP는 검증된 generation을 로컬 read-only로
 서비스합니다. v1.0.10 candidate acceptance는 stable 전환이나 구버전 cleanup을
 자동 승인하지 않습니다.
+
+## 라이선스
+
+프로젝트 자체 코드와 문서는 [Apache License 2.0](../LICENSE)으로 공개됩니다.
+외부 구성요소에는 각 구성요소의 라이선스가 적용되며 자세한 내용은
+[제3자 고지](../THIRD_PARTY_NOTICES.md)에 기록합니다.

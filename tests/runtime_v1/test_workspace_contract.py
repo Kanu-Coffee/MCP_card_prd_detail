@@ -40,6 +40,32 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
     assert worker_runtime_version == versions.pop()
 
 
+def test_workspace_is_distributed_under_apache_2_0() -> None:
+    package_paths = [
+        "packages/cardrag-core",
+        "apps/cardrag-worker",
+        "apps/cardrag-mcp",
+    ]
+    projects = [_project(path) for path in package_paths]
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+    for path, project in zip(package_paths, projects, strict=True):
+        assert project["license"] == "Apache-2.0"
+        assert project["license-files"] == ["LICENSE"]
+        assert "License :: OSI Approved :: Apache Software License" in project["classifiers"]
+        assert (ROOT / path / "LICENSE").read_text(encoding="utf-8") == license_text
+
+    assert "Apache License\n                           Version 2.0, January 2004" in license_text
+    assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in license_text
+    assert "END OF TERMS AND CONDITIONS" in license_text
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    assert "[Apache License 2.0](LICENSE)" in readme
+    assert "Apache License, Version 2.0" in notices
+    assert "Proprietary" not in notices
+
+
 def test_default_deployment_has_only_worker_and_mcp() -> None:
     root_compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
     assert "deploy/worker/compose.yaml" in root_compose

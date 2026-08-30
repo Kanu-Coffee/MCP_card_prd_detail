@@ -288,7 +288,8 @@ object여야 하며 lightweight tag는 local `git cat-file -t`와 remote peeled 
 [Candidate acceptance receipt](V1_0_10_CANDIDATE_ACCEPTANCE.md)는 exact candidate source
 commit, 격리 effective config와 image identity, generation/Worker/MCP/native-cache/CAS/rollback,
 v1.0.9 before/after identity를 12개 canonical evidence file로 결속합니다. release workflow는
-독립 승인된 receipt SHA-256을 필수 입력으로 받고, candidate source 이후 tag까지의 변경이
+canonical receipt의 full-file SHA-256을 필수 기술 입력으로 받고, candidate source 이후
+tag까지의 변경이
 `release-evidence/v1.0.10/**`에만 있는 evidence-only commit인지 fail-closed 검증합니다.
 Receipt verifier는 source replay를 대신하지 않으며 실제 receipt가 없으면 release는
 의도대로 차단됩니다.
@@ -299,8 +300,8 @@ platform config, SBOM/SLSA attestation manifest digest를 봉인하고, rendered
 `repository@index`, 실제 container config ID/RepoDigest 및 dispatch의 두 image digest 입력과
 다시 대조합니다. candidate overlay는 exact private digest 없이 render하지 않고 local build
 fallback을 제거합니다. release strict job은 바로 그 digest의 scanner JSON·fresh DB
-metadata·SBOM·provenance를 해시로 보존합니다. public environment 승인 후 checksum-pinned
-recursive OCI copy를 수행하고 destination index/child/config/attestation digest를
+metadata·SBOM·provenance를 해시로 보존합니다. credential-scoped environment job에서
+checksum-pinned recursive OCI copy를 수행하고 destination index/child/config/attestation digest를
 재검증하므로 `accepted == runtime-tested == scanned == published`가 아니면 tag나 release를
 게시하지 않습니다.
 
@@ -345,13 +346,13 @@ publication call이 0건이고 해당 reuse-key manifest/READY가 생성·변경
 exact-path before/after GET evidence로 봉인합니다. Generation CAS는 별도 artifact
 ledger로 기록합니다.
 
-## 승인 경계
+## 자동 release 밖의 운영 변경 경계
 
-아래는 acceptance 결과 보고 뒤 별도 승인 없이는 수행하지 않습니다.
+자동 release workflow는 tag에 결속된 image publication과 GitHub release만 담당합니다. 아래
+운영 변경은 그 dispatch에 포함되지 않으며 별도 운영 결정 없이는 수행하지 않습니다.
 
 - stable pointer PUT과 stable Worker/MCP 재시작 또는 교체
 - shared native/adopted OCR cache publication
 - `/opt/cardrag/current` 변경
 - 운영 v1.0.9 volume/image/snapshot cleanup
 - LibreChat endpoint 또는 tool 소비 경로 변경
-- tag, release, image push와 외부 PR/merge

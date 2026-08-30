@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ PLATFORM_HEX = "b" * 64
 PLATFORM_DIGEST = f"sha256:{PLATFORM_HEX}"
 ATTESTATION_DIGEST = f"sha256:{'c' * 64}"
 CONFIG_DIGEST = f"sha256:{'1' * 64}"
+EMPTY_CONFIG_DIGEST = f"sha256:{hashlib.sha256(b'{}').hexdigest()}"
 
 
 def _jq(policy: str, document: dict[str, Any], *arguments: str) -> bool:
@@ -184,7 +186,7 @@ def _attestation_manifest() -> dict[str, Any]:
         "config": {
             "mediaType": "application/vnd.oci.empty.v1+json",
             "size": 2,
-            "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fbf4fc21fe77e8310c060f61caaff8a",
+            "digest": EMPTY_CONFIG_DIGEST,
             "data": "e30=",
         },
         "subject": {
@@ -417,7 +419,8 @@ def test_documented_public_source_candidate_producer_matches_the_provenance_poli
     assert "docker buildx build ." not in document
     assert "외부 trust boundary" in document
     assert "raw SLSA statement" in document
-    assert "hard external release blocker" in document
+    assert "기술적 release blocker" in document
+    assert "hard external release blocker" not in document
 
 
 @pytest.mark.parametrize(

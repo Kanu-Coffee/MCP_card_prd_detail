@@ -1,7 +1,8 @@
 # Third-Party Notices
 
-CardRAG's own code and container images are distributed under the project's
-Proprietary license. Third-party components remain subject to their own license
+CardRAG's project-authored source code and documentation are distributed under
+the Apache License, Version 2.0; see `LICENSE`. Container images combine that
+work with third-party components, which remain subject to their own license
 terms. This summary is informational and is not a replacement for those terms.
 
 The locked Python dependency names, versions, source artifacts, and hashes are
@@ -24,5 +25,6 @@ license files. Notable runtime components include:
   Dockerfile
 
 The release workflow attaches an SBOM attestation to each Worker and MCP image.
-This notice is copied into both images at
-`/usr/share/doc/cardrag/THIRD_PARTY_NOTICES.md`.
+The project `LICENSE` and this notice are copied into both images at
+`/usr/share/doc/cardrag/LICENSE` and
+`/usr/share/doc/cardrag/THIRD_PARTY_NOTICES.md`, respectively.

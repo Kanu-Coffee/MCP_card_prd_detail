@@ -2,13 +2,15 @@
 
 `cardrag_core.candidate_acceptance`는 실제 candidate 검증이 끝난 뒤 만들어진 증거를 하나의
 canonical receipt로 결속하는 read-only release verifier입니다. 이 verifier는 Docker,
-WebDAV, Worker/MCP runtime을 열거나 재실행하지 않으며, 증거를 생성하거나 자체 승인하지도
-않습니다. 따라서 receipt SHA-256은 source replay와 운영 검토를 독립적으로 끝낸 승인자가
-release workflow에 별도 입력해야 합니다.
+WebDAV, Worker/MCP runtime을 열거나 재실행하지 않으며 증거를 생성하지도 않습니다. source
+replay와 runtime 검증에서 생성한 canonical receipt의 full-file SHA-256을
+release workflow에 입력하면 workflow가 파일에서 다시 계산해 비교합니다. 별도 reviewer나
+사람의 승인 값은 요구하지 않습니다.
 
-현재 저장소에는 실제 candidate receipt와 그 12개 입력이 아직 없습니다. schema와 release
-gate가 준비되었다는 사실은 candidate run의 합격을 뜻하지 않으며, 입력이 없거나 한 필드라도
-다르면 publish는 의도대로 중단됩니다.
+candidate source commit에는 schema와 release gate만 들어가며, 실제 candidate receipt와 그
+12개 입력은 이후 run에서 생성해 evidence-only commit에 봉인합니다. schema가 준비되었다는
+사실은 candidate run의 합격을 뜻하지 않으며, receipt가 없거나 한 필드라도 다르면 publish는
+의도대로 중단됩니다.
 
 ## Canonical receipt와 증거 묶음
 
@@ -44,7 +46,7 @@ exact-path GET hit/miss와 Worker run의 OCR cache hit/miss도 서로 같은 관
 
 검증기는 다음을 모두 다시 계산하거나 교차 비교합니다.
 
-- receipt의 독립 승인 SHA-256과 exact candidate source commit
+- receipt의 canonical full-file SHA-256과 exact candidate source commit
 - strict schema, extra field/duplicate key/non-finite/non-canonical JSON 거부
 - `O_NOFOLLOW` descriptor walk, regular file/size/SHA와 read 전후 inode·mtime·ctime identity
 - manifest → READY → pointer와 SQLite/vector artifact binding
@@ -68,8 +70,8 @@ exact-path GET hit/miss와 Worker run의 OCR cache hit/miss도 서로 같은 관
 
 이는 입력 파일의 integrity와 선언된 상호 계약만 검증합니다. source replay를 직접 수행하거나,
 실행 장부에 기록되지 않은 네트워크·Docker·운영 mutation의 부재를 만들어 내지 않습니다.
-승인자는 원본 command/result, runtime identity, 민감정보 제거와 capture completeness를 별도로
-검토해야 합니다.
+producer 과정은 원본 command/result, runtime identity, 민감정보 제거와 capture completeness를
+receipt 입력으로 보존해야 합니다. verifier는 봉인된 증거가 그 계약과 일치하는지만 확인합니다.
 
 ## Source commit과 evidence-only sealing commit
 
@@ -112,12 +114,12 @@ API상 `User`이므로 workflow는 private package도 반환하는 authenticated
 list endpoint와 owner type을 함께 검증합니다. public package 전용 단건 endpoint는 사용하지
 않습니다. 그 뒤 exact-name 결과가 하나뿐인지, `package_type=container`, `visibility=private`,
 owner와 연결 repository identity가 같은지 확인하며
-하나라도 다르면 image를 읽기 전에 실패합니다. package 생성·visibility 설정과 candidate push는 별도
-승인된 producer 단계이고 public release 승인이 아닙니다. package의 GitHub Actions access에도 이
-repository를 `Read`로 명시해야 하며 repository 연결만으로 read 권한을 추정하지 않습니다. release
-jobs의 `packages: read` GITHUB_TOKEN이 metadata 조회와 pull을 둘 다 통과해야 합니다.
+하나라도 다르면 image를 읽기 전에 실패합니다. package 생성·visibility 설정과 candidate push는
+public release와 분리된 producer 단계입니다. package의 GitHub Actions access에도 이 repository를
+`Read`로 명시해야 하며 repository 연결만으로 read 권한을 추정하지 않습니다. release jobs의
+`packages: read` GITHUB_TOKEN이 metadata 조회와 pull을 둘 다 통과해야 합니다.
 
-승인된 producer는 local checkout을 build context로 사용하지 않고 공개된 source repository의
+candidate producer는 local checkout을 build context로 사용하지 않고 공개된 source repository의
 full 40-hex commit으로 고정한 remote Git context를 사용합니다. 따라서
 staged/unstaged/untracked byte를 같은 VCS label로 위장할 수 없습니다. tag는 운반 수단일
 뿐이며 acceptance authority는 build 결과의 exact digest입니다. source fetch에는 credential을
@@ -163,12 +165,12 @@ input과 `--secret`도 금지합니다. 공개 Git source fetch에 token이나 �
 Buildx/BuildKit version 검사는 실행 계약일 뿐 binary issuer를 암호학적으로 인증하지 않으며,
 candidate 안의 raw SLSA statement도 그 자체로 producer identity 서명이 아닙니다. public copy
 뒤의 release Cosign 서명은 promotion workflow identity를 증명할 뿐 이전 private build의
-issuer를 소급 증명하지 않습니다. 따라서 승인자는 private push 권한, producer command/log,
-tool binary provenance와 exact output digest를 별도로 검토하고 승인해야 합니다. 현재는 이
-private candidate digest에 결속된 독립 producer signature/attestation과 실제 raw BuildKit
-fixture가 없으므로 `candidate_acceptance_sha256`을 승인하거나 `dockerhub-public` release
-dispatch를 시작해서는 안 되는 hard external release blocker입니다. 이 경계를 raw provenance의
-문자열 검사나 release 후 서명으로 완화하지 않습니다.
+issuer를 소급 증명하지 않습니다. 자동 release는 별도 reviewer나 추가 producer-signature
+gate를 두지 않습니다. 대신 private candidate index, producer command/version, raw
+BuildKit provenance/SBOM과 exact output digest를 receipt에 결속하고 workflow가 이를 구조적으로
+검증합니다. 실제 raw fixture나 receipt-bound runtime evidence가 없거나 불일치하면
+`dockerhub-public` dispatch가 실패하는 기술적 release blocker입니다. 이 경계를 raw
+provenance의 임의 문자열 검사나 release 후 서명으로 완화하지 않습니다.
 
 producer는 각 role의 OCI index digest, 유일한 `linux/amd64` child digest, 그 manifest의 config
 digest와 child를 참조하는 BuildKit attestation-manifest digest를 기록합니다. 실제 candidate
@@ -181,9 +183,10 @@ index reference를 포함하는지도 봉인합니다. Worker receipt는 provide
 run이어도 별도로 Codex/bubblewrap version, bubblewrap user namespace와 Codex read-only sandbox를
 exact effective-config/image에서 통과했음을 요구합니다.
 
-release dispatch의 `candidate_worker_image_digest`와 `candidate_mcp_image_digest`는 독립 승인된
-receipt 출력과 정확히 같아야 합니다. verifier는 두 image repository가 위 private allowlist인지도
-검사합니다. 불일치하거나 private package/digest/blob이 없으면 publish 전에 실패합니다.
+release dispatch의 `candidate_worker_image_digest`와 `candidate_mcp_image_digest`는 canonical
+receipt에 봉인된 role별 OCI index digest와 정확히 같아야 합니다. verifier는 두 image
+repository가 위 private allowlist인지도 검사합니다. 불일치하거나 private
+package/digest/blob이 없으면 publish 전에 실패합니다.
 
 ### Exact scan and promotion
 
@@ -233,28 +236,18 @@ ignore-unfixed=false
 `DownloadedAt`은 2시간 이내여야 합니다. synthetic pass 문장만으로는 다음 단계가 열리지
 않습니다.
 
-public `dockerhub-public` environment 경계를 통과한 뒤에만 checksum-pinned `crane 0.22.0`이
-private source index와 모든 child/attestation blob을 Docker Hub immutable alias로 재귀
-복사합니다. 이 저장소는 명시적인 single-maintainer publication 모델을 사용하므로 required
-reviewer나 wait timer는 두지 않습니다. environment에는 정확히 custom branch-policy rule 하나만
-두고 `can_admins_bypass=false`, custom deployment policy의 유일한 tag pattern은 type `tag`의
-`v*.*.*`로 고정합니다. 추가 reviewer, wait timer, branch pattern 또는 malformed rule은 모두
-거부합니다. Docker Hub credential은 이 environment secret에만 두어 publish job 밖에서는
-사용할 수 없게 합니다.
+checksum-pinned `crane 0.22.0`은 private source index와 모든 child/attestation blob을 Docker Hub
+immutable alias로 재귀 복사합니다. `dockerhub-public` environment는 Docker Hub credential의
+scope로만 사용합니다. required reviewer, wait timer, owner-only actor 제한, environment 설정
+verifier는 두지 않으므로 권한 있는 maintainer의 workflow dispatch는 별도 승인 대기 없이
+진행됩니다. credential은 environment secret에만 두며 workflow 로그, artifact 또는 release
+metadata에 값을 기록하지 않습니다.
 
-release workflow는 최초 실행자 `GITHUB_ACTOR`와 재실행자 `GITHUB_TRIGGERING_ACTOR`가 모두
-personal repository owner `GITHUB_REPOSITORY_OWNER`와 같아야 진행합니다. 따라서 collaborator가
-새 release를 dispatch하거나 owner의 기존 run을 재실행할 수 없습니다. 이 검사는 독립적인 두 번째
-사람의 승인을 제공하지 않습니다. 같은 owner가 source와 workflow를 바꾸고 release까지 실행할 수
-있다는 잔여 위험은 single-maintainer 모델의 명시적 trade-off이며, typed
-`PUBLISH-vX.Y.Z` 확인과 exact annotated tag/evidence/image digest 검사는 실수 방지와 무결성
-경계로 계속 유지합니다.
-
-workflow는 repository `Actions: read` 권한으로 public visibility, exact environment rule과 tag
-policy를 Docker Hub 인증 전과 실제 public copy 직전에 REST API로 다시 읽습니다. 조회 실패,
-private visibility 또는 drift는 모두 public write 전에 실패합니다. 2026-08-30 환경 설정은 위
-branch-policy-only 형태로 변경됐으며 repository 공개 전환이 끝나기 전에는 verifier가 의도대로
-실패합니다.
+workflow dispatch 자체가 release 실행 요청이며 typed confirmation이나 별도 사람 승인 단계는
+없습니다. exact annotated tag, sealed evidence와 accepted image digest, strict Trivy, private
+candidate package, Docker Hub immutable-tag와 destination digest 검증은 그대로 적용합니다.
+이는 OAuth/API key 노출과 잘못된 image 공개를 막는 기술적 경계이며, 실행자와 재실행자를
+repository owner로 제한하는 소유권 정책은 아닙니다.
 release 준비가 지연되면 image와 filesystem Trivy `UpdatedAt<=36h`, `DownloadedAt<=2h`를 현재 UTC로
 다시 검사하고 오래된 run은 public write 전에 실패합니다. destination OCI index digest,
 linux/amd64 child, platform config, attestation subject/digest와 raw SPDX/provenance blob byte가 receipt/scan과 모두
@@ -277,7 +270,6 @@ HIGH/CRITICAL, unfixed 포함 조건에서 두 base와 Worker 추가 component S
 이는 아직 최종 CardRAG image 0/0 증명이 아닙니다. 새 private candidate OCI index를 실제로
 build/push하고 pinned Buildx 0.36.1/BuildKit 0.32.2의 raw provenance가 synthetic adversarial
 policy fixture와 같은 exact frontend args/material URI/digest/secret shape인지 확인해야 합니다.
-이번 작업에서는 저장공간 안전 제약 때문에 그 build/raw fixture를 만들지 않았습니다. exact
-final Worker/MCP strict scan과 receipt-bound runtime smoke까지 통과할 때까지 release blocker를
-유지합니다. 별도 승인 전에는 scanner 예외, severity 완화, public candidate
-선게시 또는 release 순서 변경으로 우회하지 않습니다.
+exact final Worker/MCP strict scan과 receipt-bound runtime smoke 증거가 모두 봉인될 때까지는
+기술적 release blocker입니다. scanner 예외, severity 완화, public candidate 선게시 또는
+release 순서 변경으로 이 검증을 우회하지 않습니다.

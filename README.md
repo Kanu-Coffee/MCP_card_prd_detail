@@ -59,3 +59,10 @@ terminal인 것을 확인한 뒤 seed command에서만 read-only로 mount합니�
 
 MCP host port는 loopback에만 bind합니다. 외부 공개 시 TLS reverse proxy와 Bearer
 token을 사용하고 실제 credential은 repository에 저장하지 않습니다.
+
+## 라이선스
+
+CardRAG의 프로젝트 자체 코드는 [Apache License 2.0](LICENSE)으로 공개됩니다.
+상업적 이용, 수정, 재배포가 허용되며 재배포 시 라이선스 조건을 따라야 합니다.
+번들 및 컨테이너에 포함되는 외부 구성요소의 라이선스는
+[제3자 고지](THIRD_PARTY_NOTICES.md)를 참고하십시오.

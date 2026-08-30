@@ -84,7 +84,10 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     assert "--ignore-unfixed" not in DOCKERFILE
     assert "ARG CODEX_VERSION=0.147.0" in DOCKERFILE
     assert ("ARG CODEX_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36") in DOCKERFILE
-    assert "sha256sum --check --strict" in worker_runtime
+    # The pinned Wolfi runtime provides BusyBox sha256sum, which implements the
+    # POSIX-style short check flag but not GNU's --check/--strict long options.
+    assert "sha256sum -c /tmp/codex.sha256" in worker_runtime
+    assert "sha256sum --check --strict" not in worker_runtime
     assert "ln -s codex /usr/local/bin/codex-linux-sandbox" in worker_runtime
     assert "codex --version" in worker_runtime
     assert "USER 10001:10001" in worker_runtime
@@ -92,6 +95,16 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     assert 'org.opencontainers.image.title="CardRAG Worker"' in worker
     assert 'ENTRYPOINT ["cardrag-worker"]' in worker
     assert 'CMD ["run"]' in worker
+
+
+def test_runtime_images_publish_apache_2_0_license_metadata() -> None:
+    runtime = _stage("runtime")
+    worker_runtime = _stage("worker-runtime")
+
+    for stage in (runtime, worker_runtime):
+        assert 'org.opencontainers.image.licenses="Apache-2.0"' in stage
+        assert "COPY --chmod=0444 LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/cardrag/" in stage
+    assert "Proprietary" not in DOCKERFILE
 
 
 def test_runtime_docs_record_fail_closed_verification_gap() -> None:

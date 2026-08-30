@@ -54,7 +54,7 @@ source commit을 가리켜야 합니다. 각 query의 primary contracts/spans/an
 
 `v109_baseline`은 위 historical commit에 계속 고정하지만 나머지 네 candidate lane은
 생성·재검증·release에서 모두 명시적인 `--expected-source-commit`과 일치해야 합니다.
-release workflow는 별도 승인 입력 `candidate_source_commit`을 이 값으로 전달하므로,
+release workflow는 필수 기술 입력 `candidate_source_commit`을 이 값으로 전달하므로,
 내부적으로 서로 일관되더라도 다른 candidate commit에서 생성한 run·score·attestation은 새
 tag의 evidence로 재사용할 수 없습니다.
 
@@ -205,10 +205,10 @@ run 결과 hash, source commit/profile 및 shadow primary 불변성의 canonical
 다시 확인합니다. 이 명령은 binding validator이지 source replay가 아니며, 대용량 source
 DB/vector를 다시 열거나 provider를 다시 호출하지 않습니다. 따라서 `validate-set` 출력만으로는
 source가 실제로 재생·재검산되었다는 사실을 증명하지 못합니다. source 재검산은 바로 앞의
-`external` 재실행과 `validate-native-v5`가 담당합니다. 그 절차를 실제로 수행한 뒤 별도
-승인자가 set receipt 전체 SHA를 승인했을 때만 그 digest가 release workflow의 명시적 trust
-root가 됩니다. source replay를 생략했거나 승인되지 않은 self-asserted receipt는 단순 binding
-receipt일 뿐 release evidence가 될 수 없습니다.
+`external` 재실행과 `validate-native-v5`가 담당합니다. 그 절차를 실제로 수행해 생성한 set
+receipt의 canonical full-file SHA를 release workflow에 전달하고 workflow가 다시 계산해
+일치시킬 때 그 digest가 명시적 trust root가 됩니다. source replay를 생략한 self-asserted
+receipt는 단순 binding receipt일 뿐 release evidence가 될 수 없습니다.
 
 ```bash
 uv run cardrag-gold-capture validate-set \
@@ -295,7 +295,7 @@ report의 `release_gate.status`를 `not_evaluated`로 남깁니다.
 `release-evidence/v1.0.10/gold-evaluation-report.json`에 봉인하고, 그 파일의 SHA-256을
 release workflow의 `acceptance_report_sha256` 입력으로 전달합니다. 다섯 capture receipt를
 묶은 `gold-capture-set-receipt.json`의 SHA-256도
-`capture_set_receipt_sha256` 승인 입력으로 별도 전달합니다. 정식 evidence
+`capture_set_receipt_sha256` 필수 기술 입력으로 별도 전달합니다. 정식 evidence
 directory에는 `gold.jsonl`, 다섯 `<lane>.jsonl`, `blind-evaluation.jsonl`, report와 각 run
 manifest가 참조한 원본 generation manifest를
 `generation-manifests/<sha256>.json`, 다섯 `<lane>.capture-receipt.json`, capture set

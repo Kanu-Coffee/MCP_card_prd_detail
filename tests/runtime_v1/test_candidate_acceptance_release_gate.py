@@ -7,41 +7,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _public_environment_policy_is_valid(
-    tmp_path: Path,
-    repository: dict[str, object],
-    environment: dict[str, object],
-    policies: dict[str, object],
-) -> bool:
-    jq = shutil.which("jq")
-    assert jq is not None
-    repository_path = tmp_path / "repository.json"
-    environment_path = tmp_path / "environment.json"
-    policies_path = tmp_path / "policies.json"
-    repository_path.write_text(json.dumps(repository), encoding="utf-8")
-    environment_path.write_text(json.dumps(environment), encoding="utf-8")
-    policies_path.write_text(json.dumps(policies), encoding="utf-8")
-    result = subprocess.run(  # noqa: S603 - executable and filter are repository-controlled
-        (
-            jq,
-            "-e",
-            "--slurpfile",
-            "repository",
-            str(repository_path),
-            "--slurpfile",
-            "policies",
-            str(policies_path),
-            "-f",
-            str(ROOT / ".github/actions/verify-public-release-environment/validate-environment.jq"),
-            str(environment_path),
-        ),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
-
-
 def _private_package_list_is_valid(tmp_path: Path, pages: list[object]) -> bool:
     jq = shutil.which("jq")
     assert jq is not None
@@ -121,185 +86,31 @@ def test_release_legacy_validator_binds_the_contemporaneous_execution_record() -
     assert '--historical-source-artifact "$legacy_historical_source"' in workflow
 
 
-def test_public_registry_jobs_revalidate_single_maintainer_environment_safeguards() -> None:
+def test_public_registry_jobs_use_environment_only_to_scope_secrets() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    action = (ROOT / ".github/actions/verify-public-release-environment/action.yml").read_text(
-        encoding="utf-8"
-    )
-    verifier = (ROOT / ".github/actions/verify-public-release-environment/verify.sh").read_text(
-        encoding="utf-8"
-    )
     validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
     preflight_job = workflow.split("  registry-preflight:\n", 1)[1].split("  publish:\n", 1)[0]
     publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
 
+    assert workflow.count("environment: dockerhub-public") == 2
+    assert "environment: dockerhub-public" in preflight_job
+    assert "environment: dockerhub-public" in publish_job
     assert "actions: read" in preflight_job
     assert "actions: read" in publish_job
-    assert 'test "$GITHUB_ACTOR" = "$GITHUB_REPOSITORY_OWNER"' in validate_job
-    assert 'test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_REPOSITORY_OWNER"' in validate_job
-    assert preflight_job.count("uses: ./.github/actions/verify-public-release-environment") == 1
-    assert publish_job.count("uses: ./.github/actions/verify-public-release-environment") == 1
-    assert preflight_job.index("verify-public-release-environment") < preflight_job.index(
-        "Authenticate for immutable-tag preflight"
-    )
-    assert preflight_job.index("Verify single-maintainer Docker Hub safeguards") < (
-        preflight_job.index("password: ${{ secrets.DOCKERHUB_TOKEN }}")
-    )
-    assert publish_job.index(
-        "Reconfirm single-maintainer Docker Hub safeguards before authentication"
-    ) < publish_job.index("password: ${{ secrets.DOCKERHUB_TOKEN }}")
-    assert publish_job.index(
-        "bash .github/actions/verify-public-release-environment/verify.sh"
-    ) < publish_job.index('"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy')
-    assert (
-        "404)\n"
-        "                bash .github/actions/verify-public-release-environment/verify.sh\n"
-        '                "$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy'
-    ) in publish_job
-    assert 'bash "$GITHUB_ACTION_PATH/verify.sh"' in action
-    assert '"repos/${GITHUB_REPOSITORY}"' in verifier
-    assert "repos/${GITHUB_REPOSITORY}/environments/dockerhub-public" in verifier
-    assert "deployment-branch-policies?per_page=100" in verifier
-    assert "X-GitHub-Api-Version: 2026-03-10" in verifier
-    assert "approved_reviewers" not in verifier
-    assert "single-maintainer safeguards" in action
-    assert not (ROOT / ".github/actions/verify-public-release-environment/approved-reviewers.json").exists()
-
-
-def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path: Path) -> None:
-    repository: dict[str, object] = {
-        "private": False,
-        "visibility": "public",
-        "owner": {"type": "User"},
-    }
-    branch_policy_rule: dict[str, object] = {
-        "id": 64062336,
-        "node_id": "GA_kwDOT1xdyc4D0YOA",
-        "type": "branch_policy",
-    }
-    environment: dict[str, object] = {
-        "name": "dockerhub-public",
-        "can_admins_bypass": False,
-        "protection_rules": [branch_policy_rule],
-        "deployment_branch_policy": {
-            "protected_branches": False,
-            "custom_branch_policies": True,
-        },
-    }
-    policies: dict[str, object] = {
-        "total_count": 1,
-        "branch_policies": [{"id": 2, "name": "v*.*.*", "type": "tag"}],
-    }
-    assert _public_environment_policy_is_valid(
-        tmp_path,
-        repository,
-        environment,
-        policies,
-    )
-
-    mutations: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
-    for key, value in (
-        ("name", "not-public"),
-        ("can_admins_bypass", True),
-        ("deployment_branch_policy", None),
-        ("protection_rules", []),
-    ):
-        changed_environment = copy.deepcopy(environment)
-        changed_environment[key] = value
-        mutations.append(
-            (
-                copy.deepcopy(repository),
-                changed_environment,
-                copy.deepcopy(policies),
-            )
-        )
-
-    for key, value in (
-        ("id", 0),
-        ("node_id", ""),
-        ("type", "required_reviewers"),
-        ("unexpected", True),
-    ):
-        changed_environment = copy.deepcopy(environment)
-        changed_environment["protection_rules"][0][key] = value  # type: ignore[index]
-        mutations.append(
-            (
-                copy.deepcopy(repository),
-                changed_environment,
-                copy.deepcopy(policies),
-            )
-        )
-
-    for unexpected_rule in (
-        {
-            "id": 64062337,
-            "node_id": "GA_kwDOT1xdyc4D0YOB",
-            "type": "required_reviewers",
-            "prevent_self_review": False,
-            "reviewers": [],
-        },
-        {
-            "id": 64062338,
-            "node_id": "GA_kwDOT1xdyc4D0YOC",
-            "type": "wait_timer",
-            "wait_timer": 1,
-        },
-    ):
-        extra_rule = copy.deepcopy(environment)
-        extra_rule["protection_rules"].append(unexpected_rule)  # type: ignore[union-attr]
-        mutations.append(
-            (
-                copy.deepcopy(repository),
-                extra_rule,
-                copy.deepcopy(policies),
-            )
-        )
-
-    for key, value in (
-        ("total_count", 0),
-        ("branch_policies", []),
-        ("branch_policies", [{"id": 3, "name": "main", "type": "branch"}]),
-        ("branch_policies", [{"id": 4, "name": "v*.*.*", "type": "branch"}]),
-        ("branch_policies", [{"id": 5, "name": "v*.*.*"}]),
-    ):
-        changed_policies = copy.deepcopy(policies)
-        changed_policies[key] = value
-        mutations.append(
-            (
-                copy.deepcopy(repository),
-                copy.deepcopy(environment),
-                changed_policies,
-            )
-        )
-
-    for key, value in (
-        ("private", True),
-        ("visibility", "private"),
-        ("owner", {"type": "Bot"}),
-    ):
-        changed_repository = copy.deepcopy(repository)
-        changed_repository[key] = value
-        mutations.append(
-            (
-                changed_repository,
-                copy.deepcopy(environment),
-                copy.deepcopy(policies),
-            )
-        )
-
-    assert all(
-        not _public_environment_policy_is_valid(
-            tmp_path,
-            changed_repository,
-            changed_environment,
-            changed_policies,
-        )
-        for (
-            changed_repository,
-            changed_environment,
-            changed_policies,
-        ) in mutations
-    )
+    assert 'test "$GITHUB_ACTOR" = "$GITHUB_REPOSITORY_OWNER"' not in validate_job
+    assert 'test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_REPOSITORY_OWNER"' not in validate_job
+    assert "verify-public-release-environment" not in workflow
+    assert "single-maintainer" not in workflow
+    assert "confirmation:" not in workflow
+    assert "inputs.confirmation" not in workflow
+    assert "RELEASE_CONFIRMATION" not in workflow
+    assert "PUBLISH-v" not in workflow
+    assert "Independently approved" not in workflow
+    assert not (ROOT / ".github/actions/verify-public-release-environment").exists()
+    assert workflow.count("${{ secrets.DOCKERHUB_USERNAME }}") == 2
+    assert workflow.count("${{ secrets.DOCKERHUB_TOKEN }}") == 2
+    assert "${{ secrets.DOCKERHUB_USERNAME }}" not in validate_job
+    assert "${{ secrets.DOCKERHUB_TOKEN }}" not in validate_job
 
 
 def test_private_candidate_package_filter_rejects_public_or_unlinked_matches(

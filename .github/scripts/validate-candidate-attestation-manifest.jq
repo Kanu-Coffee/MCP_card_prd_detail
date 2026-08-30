@@ -9,7 +9,7 @@ and .mediaType == "application/vnd.oci.image.manifest.v1+json"
 and .artifactType == "application/vnd.docker.attestation.manifest.v1+json"
 and .config == {
   "data": "e30=",
-  "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fbf4fc21fe77e8310c060f61caaff8a",
+  "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
   "mediaType": "application/vnd.oci.empty.v1+json",
   "size": 2
 }

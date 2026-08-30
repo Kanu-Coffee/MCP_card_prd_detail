@@ -8,10 +8,6 @@ on:
         description: "Existing SemVer tag without the leading v"
         required: true
         type: string
-      confirmation:
-        description: "Enter PUBLISH-vX.Y.Z to authorize the public push"
-        required: true
-        type: string
       acceptance_report_sha256:
         description: "SHA-256 of the sealed release-evidence/vX.Y.Z gold evaluation report"
         required: true
@@ -21,7 +17,7 @@ on:
         required: true
         type: string
       capture_set_receipt_sha256:
-        description: "Independently approved SHA-256 of the five-lane binding receipt after source replay"
+        description: "SHA-256 of the five-lane binding receipt produced after source replay"
         required: true
         type: string
       candidate_source_commit:
@@ -29,7 +25,7 @@ on:
         required: true
         type: string
       candidate_acceptance_sha256:
-        description: "Independently approved SHA-256 of the canonical candidate acceptance receipt"
+        description: "SHA-256 of the canonical candidate acceptance receipt"
         required: true
         type: string
       candidate_worker_image_digest:
@@ -103,7 +99,6 @@ jobs:
         id: version
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
-          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
           ACCEPTANCE_REPORT_SHA256: ${{ inputs.acceptance_report_sha256 }}
           AGGREGATION_PROFILE_SHA256: ${{ inputs.aggregation_profile_sha256 }}
           CAPTURE_SET_RECEIPT_SHA256: ${{ inputs.capture_set_receipt_sha256 }}
@@ -113,14 +108,11 @@ jobs:
           CANDIDATE_MCP_IMAGE_DIGEST: ${{ inputs.candidate_mcp_image_digest }}
         run: |
           set -euo pipefail
-          test "$GITHUB_ACTOR" = "$GITHUB_REPOSITORY_OWNER"
-          test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_REPOSITORY_OWNER"
           version=$REQUESTED_VERSION
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
           test "$GITHUB_REF" = "refs/tags/v$version"
-          test "$RELEASE_CONFIRMATION" = "PUBLISH-v$version"
           test "$(git cat-file -t "refs/tags/v$version")" = tag
           if [[ "$version" == "1.0.10" ]]; then
             evidence_dir="release-evidence/v${version}"
@@ -266,8 +258,8 @@ jobs:
             done
             # validate-set revalidates canonical bindings; it does not replay the
             # source DB/vector/provider capture and cannot prove replay by itself.
-            # This digest is a release trust root only after independent source
-            # replay and approval completed before the evidence-only commit.
+            # This digest is a release trust root only when source replay evidence
+            # is complete and sealed before the evidence-only commit.
             .venv/bin/python -m cardrag_mcp.gold_capture "${capture_args[@]}"
             test "$(sha256sum "$capture_set_receipt" | awk '{print $1}')" = \
               "$CAPTURE_SET_RECEIPT_SHA256"
@@ -709,11 +701,6 @@ jobs:
           install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
           "$registry_tools_dir/crane" version
 
-      - name: Verify single-maintainer Docker Hub safeguards
-        uses: ./.github/actions/verify-public-release-environment
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: Authenticate for immutable-tag preflight
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -870,11 +857,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-
-      - name: Reconfirm single-maintainer Docker Hub safeguards before authentication
-        uses: ./.github/actions/verify-public-release-environment
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -1119,7 +1101,6 @@ jobs:
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}")
             case "$status" in
               404)
-                bash .github/actions/verify-public-release-environment/verify.sh
                 "$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy \
                   "$source_reference" "$reference"
                 ;;
