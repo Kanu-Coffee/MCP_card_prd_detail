@@ -28,6 +28,5 @@ gh api --method GET \
 jq -e \
   --slurpfile repository "$repository_json" \
   --slurpfile policies "$policies_json" \
-  --slurpfile approved_reviewers "$action_dir/approved-reviewers.json" \
   -f "$action_dir/validate-environment.jq" \
   "$environment_json" >/dev/null

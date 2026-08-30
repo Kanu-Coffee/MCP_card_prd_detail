@@ -12,18 +12,15 @@ def _public_environment_policy_is_valid(
     repository: dict[str, object],
     environment: dict[str, object],
     policies: dict[str, object],
-    approved_reviewers: dict[str, object],
 ) -> bool:
     jq = shutil.which("jq")
     assert jq is not None
     repository_path = tmp_path / "repository.json"
     environment_path = tmp_path / "environment.json"
     policies_path = tmp_path / "policies.json"
-    approved_reviewers_path = tmp_path / "approved-reviewers.json"
     repository_path.write_text(json.dumps(repository), encoding="utf-8")
     environment_path.write_text(json.dumps(environment), encoding="utf-8")
     policies_path.write_text(json.dumps(policies), encoding="utf-8")
-    approved_reviewers_path.write_text(json.dumps(approved_reviewers), encoding="utf-8")
     result = subprocess.run(  # noqa: S603 - executable and filter are repository-controlled
         (
             jq,
@@ -34,9 +31,6 @@ def _public_environment_policy_is_valid(
             "--slurpfile",
             "policies",
             str(policies_path),
-            "--slurpfile",
-            "approved_reviewers",
-            str(approved_reviewers_path),
             "-f",
             str(ROOT / ".github/actions/verify-public-release-environment/validate-environment.jq"),
             str(environment_path),
@@ -127,7 +121,7 @@ def test_release_legacy_validator_binds_the_contemporaneous_execution_record() -
     assert '--historical-source-artifact "$legacy_historical_source"' in workflow
 
 
-def test_public_registry_jobs_revalidate_independent_environment_approval() -> None:
+def test_public_registry_jobs_revalidate_single_maintainer_environment_safeguards() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     action = (ROOT / ".github/actions/verify-public-release-environment/action.yml").read_text(
         encoding="utf-8"
@@ -135,23 +129,24 @@ def test_public_registry_jobs_revalidate_independent_environment_approval() -> N
     verifier = (ROOT / ".github/actions/verify-public-release-environment/verify.sh").read_text(
         encoding="utf-8"
     )
-    approved_reviewers = json.loads(
-        (ROOT / ".github/actions/verify-public-release-environment/approved-reviewers.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
     preflight_job = workflow.split("  registry-preflight:\n", 1)[1].split("  publish:\n", 1)[0]
     publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
 
     assert "actions: read" in preflight_job
     assert "actions: read" in publish_job
+    assert 'test "$GITHUB_ACTOR" = "$GITHUB_REPOSITORY_OWNER"' in validate_job
+    assert 'test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_REPOSITORY_OWNER"' in validate_job
     assert preflight_job.count("uses: ./.github/actions/verify-public-release-environment") == 1
     assert publish_job.count("uses: ./.github/actions/verify-public-release-environment") == 1
     assert preflight_job.index("verify-public-release-environment") < preflight_job.index(
         "Authenticate for immutable-tag preflight"
     )
+    assert preflight_job.index("Verify single-maintainer Docker Hub safeguards") < (
+        preflight_job.index("password: ${{ secrets.DOCKERHUB_TOKEN }}")
+    )
     assert publish_job.index(
-        "Verify independent Docker Hub approval boundary before authentication"
+        "Reconfirm single-maintainer Docker Hub safeguards before authentication"
     ) < publish_job.index("password: ${{ secrets.DOCKERHUB_TOKEN }}")
     assert publish_job.index(
         "bash .github/actions/verify-public-release-environment/verify.sh"
@@ -166,11 +161,9 @@ def test_public_registry_jobs_revalidate_independent_environment_approval() -> N
     assert "repos/${GITHUB_REPOSITORY}/environments/dockerhub-public" in verifier
     assert "deployment-branch-policies?per_page=100" in verifier
     assert "X-GitHub-Api-Version: 2026-03-10" in verifier
-    assert "--slurpfile approved_reviewers" in verifier
-    assert approved_reviewers == {
-        "schema": "cardrag.public-release-reviewers.v1",
-        "reviewers": [],
-    }
+    assert "approved_reviewers" not in verifier
+    assert "single-maintainer safeguards" in action
+    assert not (ROOT / ".github/actions/verify-public-release-environment/approved-reviewers.json").exists()
 
 
 def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path: Path) -> None:
@@ -179,21 +172,15 @@ def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path:
         "visibility": "public",
         "owner": {"type": "User"},
     }
-    reviewer_rule: dict[str, object] = {
-        "id": 1,
-        "type": "required_reviewers",
-        "prevent_self_review": True,
-        "reviewers": [
-            {
-                "type": "User",
-                "reviewer": {"id": 1234, "login": "release-reviewer"},
-            }
-        ],
+    branch_policy_rule: dict[str, object] = {
+        "id": 64062336,
+        "node_id": "GA_kwDOT1xdyc4D0YOA",
+        "type": "branch_policy",
     }
     environment: dict[str, object] = {
         "name": "dockerhub-public",
         "can_admins_bypass": False,
-        "protection_rules": [reviewer_rule],
+        "protection_rules": [branch_policy_rule],
         "deployment_branch_policy": {
             "protected_branches": False,
             "custom_branch_policies": True,
@@ -203,20 +190,14 @@ def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path:
         "total_count": 1,
         "branch_policies": [{"id": 2, "name": "v*.*.*", "type": "tag"}],
     }
-    approved_reviewers: dict[str, object] = {
-        "schema": "cardrag.public-release-reviewers.v1",
-        "reviewers": [{"type": "User", "id": 1234}],
-    }
-
     assert _public_environment_policy_is_valid(
         tmp_path,
         repository,
         environment,
         policies,
-        approved_reviewers,
     )
 
-    mutations: list[tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]] = []
+    mutations: list[tuple[dict[str, object], dict[str, object], dict[str, object]]] = []
     for key, value in (
         ("name", "not-public"),
         ("can_admins_bypass", True),
@@ -230,77 +211,49 @@ def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path:
                 copy.deepcopy(repository),
                 changed_environment,
                 copy.deepcopy(policies),
-                copy.deepcopy(approved_reviewers),
             )
         )
 
-    self_review = copy.deepcopy(environment)
-    self_review["protection_rules"][0]["prevent_self_review"] = False  # type: ignore[index]
-    mutations.append(
-        (
-            copy.deepcopy(repository),
-            self_review,
-            copy.deepcopy(policies),
-            copy.deepcopy(approved_reviewers),
+    for key, value in (
+        ("id", 0),
+        ("node_id", ""),
+        ("type", "required_reviewers"),
+        ("unexpected", True),
+    ):
+        changed_environment = copy.deepcopy(environment)
+        changed_environment["protection_rules"][0][key] = value  # type: ignore[index]
+        mutations.append(
+            (
+                copy.deepcopy(repository),
+                changed_environment,
+                copy.deepcopy(policies),
+            )
         )
-    )
 
-    no_reviewers = copy.deepcopy(environment)
-    no_reviewers["protection_rules"][0]["reviewers"] = []  # type: ignore[index]
-    mutations.append(
-        (
-            copy.deepcopy(repository),
-            no_reviewers,
-            copy.deepcopy(policies),
-            copy.deepcopy(approved_reviewers),
+    for unexpected_rule in (
+        {
+            "id": 64062337,
+            "node_id": "GA_kwDOT1xdyc4D0YOB",
+            "type": "required_reviewers",
+            "prevent_self_review": False,
+            "reviewers": [],
+        },
+        {
+            "id": 64062338,
+            "node_id": "GA_kwDOT1xdyc4D0YOC",
+            "type": "wait_timer",
+            "wait_timer": 1,
+        },
+    ):
+        extra_rule = copy.deepcopy(environment)
+        extra_rule["protection_rules"].append(unexpected_rule)  # type: ignore[union-attr]
+        mutations.append(
+            (
+                copy.deepcopy(repository),
+                extra_rule,
+                copy.deepcopy(policies),
+            )
         )
-    )
-
-    duplicate_rule = copy.deepcopy(environment)
-    duplicate_rule["protection_rules"].append(copy.deepcopy(reviewer_rule))  # type: ignore[union-attr]
-    mutations.append(
-        (
-            copy.deepcopy(repository),
-            duplicate_rule,
-            copy.deepcopy(policies),
-            copy.deepcopy(approved_reviewers),
-        )
-    )
-
-    substituted_reviewer = copy.deepcopy(environment)
-    substituted_reviewer["protection_rules"][0]["reviewers"][0]["reviewer"]["id"] = 9999  # type: ignore[index]
-    mutations.append(
-        (
-            copy.deepcopy(repository),
-            substituted_reviewer,
-            copy.deepcopy(policies),
-            copy.deepcopy(approved_reviewers),
-        )
-    )
-
-    malformed_reviewer = copy.deepcopy(environment)
-    del malformed_reviewer["protection_rules"][0]["reviewers"][0]["reviewer"]["id"]  # type: ignore[index]
-    mutations.append(
-        (
-            copy.deepcopy(repository),
-            malformed_reviewer,
-            copy.deepcopy(policies),
-            copy.deepcopy(approved_reviewers),
-        )
-    )
-
-    extra_reviewer = copy.deepcopy(environment)
-    extra_reviewer["protection_rules"][0]["reviewers"].append(  # type: ignore[union-attr,index]
-        {"type": "Team", "reviewer": {"id": 5678, "name": "release-team"}}
-    )
-    mutations.append(
-        (
-            copy.deepcopy(repository),
-            extra_reviewer,
-            copy.deepcopy(policies),
-            copy.deepcopy(approved_reviewers),
-        )
-    )
 
     for key, value in (
         ("total_count", 0),
@@ -316,7 +269,6 @@ def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path:
                 copy.deepcopy(repository),
                 copy.deepcopy(environment),
                 changed_policies,
-                copy.deepcopy(approved_reviewers),
             )
         )
 
@@ -332,31 +284,6 @@ def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path:
                 changed_repository,
                 copy.deepcopy(environment),
                 copy.deepcopy(policies),
-                copy.deepcopy(approved_reviewers),
-            )
-        )
-
-    for changed_approved_reviewers in (
-        {"schema": "cardrag.public-release-reviewers.v1", "reviewers": []},
-        {"schema": "wrong", "reviewers": [{"type": "User", "id": 1234}]},
-        {
-            "schema": "cardrag.public-release-reviewers.v1",
-            "reviewers": [{"type": "User", "id": 9999}],
-        },
-        {
-            "schema": "cardrag.public-release-reviewers.v1",
-            "reviewers": [
-                {"type": "User", "id": 1234},
-                {"type": "User", "id": 1234},
-            ],
-        },
-    ):
-        mutations.append(
-            (
-                copy.deepcopy(repository),
-                copy.deepcopy(environment),
-                copy.deepcopy(policies),
-                changed_approved_reviewers,
             )
         )
 
@@ -366,13 +293,11 @@ def test_public_release_environment_policy_rejects_weakened_boundaries(tmp_path:
             changed_repository,
             changed_environment,
             changed_policies,
-            changed_approved_reviewers,
         )
         for (
             changed_repository,
             changed_environment,
             changed_policies,
-            changed_approved_reviewers,
         ) in mutations
     )
 

@@ -160,7 +160,7 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
                         "target": role,
                     },
                     "locals": [],
-                    "secrets": [{"id": "GIT_AUTH_TOKEN", "optional": True}],
+                    "secrets": [],
                     "ssh": [],
                 },
                 "environment": {"platform": "linux/amd64"},
@@ -368,9 +368,14 @@ def test_provenance_policy_rejects_unsealed_source_frontend_args_and_materials()
         _material("pkg:docker/attacker/base@latest", "sha256", "3" * 64)
     )
     mutations.append(extra_material)
-    missing_git_secret = _provenance()
-    missing_git_secret["predicate"]["invocation"]["parameters"]["secrets"] = []
-    mutations.append(missing_git_secret)
+    injected_git_secret = _provenance()
+    injected_git_secret["predicate"]["invocation"]["parameters"]["secrets"] = [
+        {"id": "GIT_AUTH_TOKEN", "optional": True}
+    ]
+    mutations.append(injected_git_secret)
+    missing_secrets = _provenance()
+    del missing_secrets["predicate"]["invocation"]["parameters"]["secrets"]
+    mutations.append(missing_secrets)
     incomplete_materials = _provenance()
     incomplete_materials["predicate"]["metadata"]["completeness"]["materials"] = False
     mutations.append(incomplete_materials)
@@ -378,7 +383,7 @@ def test_provenance_policy_rejects_unsealed_source_frontend_args_and_materials()
     assert all(not _provenance_passes(row) for row in mutations)
 
 
-def test_documented_private_candidate_producer_matches_the_provenance_policy() -> None:
+def test_documented_public_source_candidate_producer_matches_the_provenance_policy() -> None:
     document = (ROOT / "docs/V1_0_10_CANDIDATE_ACCEPTANCE.md").read_text(encoding="utf-8")
 
     assert (
@@ -387,8 +392,10 @@ def test_documented_private_candidate_producer_matches_the_provenance_policy() -
     assert "set -euo pipefail" in document
     assert "((${#buildkit_versions[@]} == 1))" in document
     assert 'test "${buildkit_versions[0]}" = "v0.32.2"' in document
-    assert "--secret id=GIT_AUTH_TOKEN,env=GIT_AUTH_TOKEN" in document
-    assert "contents-read token" in document
+    assert "GIT_AUTH_TOKEN" not in document
+    assert "    --secret " not in document
+    assert "공개된 source repository" in document
+    assert "provenance의 `secrets`는 빈 배열" in document
     for build_arg in (
         "APP_VERSION=1.0.10",
         '"VCS_REF=$CANDIDATE_SOURCE_COMMIT"',

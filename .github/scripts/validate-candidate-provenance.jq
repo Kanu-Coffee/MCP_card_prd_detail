@@ -15,7 +15,7 @@ def exact_frontend_request:
   | $parameters.args as $args
   | ($parameters.frontend == "gateway.v0")
   and (($parameters.locals // []) == [])
-  and (($parameters.secrets // []) == [{"id": "GIT_AUTH_TOKEN", "optional": true}])
+  and ($parameters.secrets == [])
   and (($parameters.ssh // []) == [])
   and (($args | keys | sort) == ([
     "build-arg:APP_VERSION",

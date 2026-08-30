@@ -117,15 +117,15 @@ owner와 연결 repository identity가 같은지 확인하며
 repository를 `Read`로 명시해야 하며 repository 연결만으로 read 권한을 추정하지 않습니다. release
 jobs의 `packages: read` GITHUB_TOKEN이 metadata 조회와 pull을 둘 다 통과해야 합니다.
 
-승인된 producer는 local checkout을 build context로 사용하지 않고 full 40-hex commit으로 고정한
-remote Git context를 사용합니다. 따라서 staged/unstaged/untracked byte를 같은 VCS label로
-위장할 수 없습니다. tag는 운반 수단일 뿐이며 acceptance authority는 build 결과의 exact
-digest입니다.
+승인된 producer는 local checkout을 build context로 사용하지 않고 공개된 source repository의
+full 40-hex commit으로 고정한 remote Git context를 사용합니다. 따라서
+staged/unstaged/untracked byte를 같은 VCS label로 위장할 수 없습니다. tag는 운반 수단일
+뿐이며 acceptance authority는 build 결과의 exact digest입니다. source fetch에는 credential을
+전달하지 않으며 raw provenance의 `secrets`는 빈 배열이어야 합니다.
 
 ```bash
 set -euo pipefail
 [[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-: "${GIT_AUTH_TOKEN:?contents-read token for the private Git context is required}"
 test "$(docker buildx version | awk '{print $2}')" = "v0.36.1"
 mapfile -t buildkit_versions < <(
   docker buildx inspect | sed -n 's/^[[:space:]]*BuildKit version: //p'
@@ -145,7 +145,6 @@ for role in worker mcp; do
     --build-arg UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 \
     --build-arg CODEX_VERSION=0.147.0 \
     --build-arg CODEX_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36 \
-    --secret id=GIT_AUTH_TOKEN,env=GIT_AUTH_TOKEN \
     --attest type=provenance,mode=max,version=v0.2 \
     --attest type=sbom,generator=docker.io/docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9 \
     --output "type=registry,name=$candidate_repository:candidate-v1.0.10-$role-$CANDIDATE_SOURCE_COMMIT,oci-mediatypes=true,oci-artifact=true" \
@@ -156,10 +155,9 @@ done
 허용된 explicit build arg는 위 일곱 개의 exact key/value뿐입니다. 이 값은 immutable Git
 context의 Dockerfile default와 같아야 하며 omission, 다른 값 또는 추가 `build-arg:*`는 모두
 실패합니다. `--build-context`/`context:*`, alternate `filename`, label, entitlement, local/SSH
-input도 금지합니다. private Git fetch에 쓰는 `GIT_AUTH_TOKEN`은 contents-read scope로 제한하고
-predefined BuildKit secret으로만 전달합니다. token byte는 로그, build arg, image 또는
-provenance에 넣지 않으며 provenance에는 secret identity와 `optional=true` metadata만 남습니다.
-token이 없거나 private commit을 읽을 수 없으면 build가 성공해서는 안 됩니다.
+input과 `--secret`도 금지합니다. 공개 Git source fetch에 token이나 다른 credential을 전달하지
+않으며 provenance의 `secrets`는 빈 배열과 정확히 일치해야 합니다. 지정한 공개 commit을 읽을 수
+없으면 build가 성공해서는 안 됩니다.
 
 이 수동 producer와 private GHCR write 권한은 명시적인 외부 trust boundary입니다. 위
 Buildx/BuildKit version 검사는 실행 계약일 뿐 binary issuer를 암호학적으로 인증하지 않으며,
@@ -168,9 +166,9 @@ candidate 안의 raw SLSA statement도 그 자체로 producer identity 서명이
 issuer를 소급 증명하지 않습니다. 따라서 승인자는 private push 권한, producer command/log,
 tool binary provenance와 exact output digest를 별도로 검토하고 승인해야 합니다. 현재는 이
 private candidate digest에 결속된 독립 producer signature/attestation과 실제 raw BuildKit
-fixture가 없으므로 `candidate_acceptance_sha256` 및 `dockerhub-public` 승인을 발급해서는 안
-되는 hard external release blocker입니다. 이 경계를 raw provenance의 문자열 검사나 release
-후 서명으로 완화하지 않습니다.
+fixture가 없으므로 `candidate_acceptance_sha256`을 승인하거나 `dockerhub-public` release
+dispatch를 시작해서는 안 되는 hard external release blocker입니다. 이 경계를 raw provenance의
+문자열 검사나 release 후 서명으로 완화하지 않습니다.
 
 producer는 각 role의 OCI index digest, 유일한 `linux/amd64` child digest, 그 manifest의 config
 digest와 child를 참조하는 BuildKit attestation-manifest digest를 기록합니다. 실제 candidate
@@ -235,25 +233,29 @@ ignore-unfixed=false
 `DownloadedAt`은 2시간 이내여야 합니다. synthetic pass 문장만으로는 다음 단계가 열리지
 않습니다.
 
-public `dockerhub-public` environment 승인 뒤에만 checksum-pinned `crane 0.22.0`이 private
-source index와 모든 child/attestation blob을 Docker Hub immutable alias로 재귀 복사합니다.
-이 environment는 required reviewer가 1명 이상이어야 하고 `prevent_self_review=true`,
-`can_admins_bypass=false`, custom deployment policy의 유일한 tag pattern이 `v*.*.*`여야 합니다.
-reviewer의 `{type,id}` 집합은 source-controlled `approved-reviewers.json`과 정확히 같아야 하며 추가,
-대체, 중복, malformed reviewer를 모두 거부합니다. 현재 allowlist는 비어 있으므로 독립 reviewer를
-정하고 새 candidate source에서 numeric ID를 봉인하기 전에는 의도적으로 통과할 수 없습니다.
-workflow는 repository `Actions: read` 권한으로 repository visibility와 이 상태를 Docker Hub 인증
-전과 실제 public copy 직전에 REST API로 다시 읽습니다. 조회 실패나 drift는 모두 public write
-전에 실패합니다.
+public `dockerhub-public` environment 경계를 통과한 뒤에만 checksum-pinned `crane 0.22.0`이
+private source index와 모든 child/attestation blob을 Docker Hub immutable alias로 재귀
+복사합니다. 이 저장소는 명시적인 single-maintainer publication 모델을 사용하므로 required
+reviewer나 wait timer는 두지 않습니다. environment에는 정확히 custom branch-policy rule 하나만
+두고 `can_admins_bypass=false`, custom deployment policy의 유일한 tag pattern은 type `tag`의
+`v*.*.*`로 고정합니다. 추가 reviewer, wait timer, branch pattern 또는 malformed rule은 모두
+거부합니다. Docker Hub credential은 이 environment secret에만 두어 publish job 밖에서는
+사용할 수 없게 합니다.
 
-2026-08-30 read-only audit에서 repository는 private personal-User 소유이고 environment는 protection
-rule이 없으며 admin bypass가 허용됩니다. GitHub Free/Pro personal private repository에서는 이
-required-reviewer/no-bypass 보호가 scheduler에 적용된다고 증명할 수 없으므로 verifier도 repository
-visibility가 `public`이 아니면 명시적으로 실패합니다. repository 공개 전환은 승인 범위를 크게
-넓히는 외부 변경이므로 이 문서는 이를 승인하지 않습니다. private 상태를 유지하려면
-Enterprise-backed organization 이전과 package ownership/verifier 재감사 또는 별도 독립 서명 승인
-설계가 필요합니다. 그 전에는 release를 dispatch하거나 승인해서는 안 됩니다.
-승인이 지연되면 image와 filesystem Trivy `UpdatedAt<=36h`, `DownloadedAt<=2h`를 현재 UTC로
+release workflow는 최초 실행자 `GITHUB_ACTOR`와 재실행자 `GITHUB_TRIGGERING_ACTOR`가 모두
+personal repository owner `GITHUB_REPOSITORY_OWNER`와 같아야 진행합니다. 따라서 collaborator가
+새 release를 dispatch하거나 owner의 기존 run을 재실행할 수 없습니다. 이 검사는 독립적인 두 번째
+사람의 승인을 제공하지 않습니다. 같은 owner가 source와 workflow를 바꾸고 release까지 실행할 수
+있다는 잔여 위험은 single-maintainer 모델의 명시적 trade-off이며, typed
+`PUBLISH-vX.Y.Z` 확인과 exact annotated tag/evidence/image digest 검사는 실수 방지와 무결성
+경계로 계속 유지합니다.
+
+workflow는 repository `Actions: read` 권한으로 public visibility, exact environment rule과 tag
+policy를 Docker Hub 인증 전과 실제 public copy 직전에 REST API로 다시 읽습니다. 조회 실패,
+private visibility 또는 drift는 모두 public write 전에 실패합니다. 2026-08-30 환경 설정은 위
+branch-policy-only 형태로 변경됐으며 repository 공개 전환이 끝나기 전에는 verifier가 의도대로
+실패합니다.
+release 준비가 지연되면 image와 filesystem Trivy `UpdatedAt<=36h`, `DownloadedAt<=2h`를 현재 UTC로
 다시 검사하고 오래된 run은 public write 전에 실패합니다. destination OCI index digest,
 linux/amd64 child, platform config, attestation subject/digest와 raw SPDX/provenance blob byte가 receipt/scan과 모두
 같은지 재확인한 뒤 exact digest에 Cosign 서명합니다. tag commit `GITHUB_SHA`에서 image를 다시 빌드하지

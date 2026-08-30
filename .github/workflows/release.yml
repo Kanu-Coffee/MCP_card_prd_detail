@@ -113,6 +113,8 @@ jobs:
           CANDIDATE_MCP_IMAGE_DIGEST: ${{ inputs.candidate_mcp_image_digest }}
         run: |
           set -euo pipefail
+          test "$GITHUB_ACTOR" = "$GITHUB_REPOSITORY_OWNER"
+          test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_REPOSITORY_OWNER"
           version=$REQUESTED_VERSION
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$GITHUB_REF_TYPE" = tag
@@ -707,7 +709,7 @@ jobs:
           install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
           "$registry_tools_dir/crane" version
 
-      - name: Verify independent Docker Hub approval boundary
+      - name: Verify single-maintainer Docker Hub safeguards
         uses: ./.github/actions/verify-public-release-environment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -869,7 +871,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Verify independent Docker Hub approval boundary before authentication
+      - name: Reconfirm single-maintainer Docker Hub safeguards before authentication
         uses: ./.github/actions/verify-public-release-environment
         env:
           GH_TOKEN: ${{ github.token }}
