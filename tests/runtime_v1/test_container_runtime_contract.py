@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+WORKER_PROVIDERS = (ROOT / "apps/cardrag-worker/src/cardrag_worker/providers.py").read_text(encoding="utf-8")
+WORKER_OCR = (ROOT / "apps/cardrag-worker/src/cardrag_worker/ocr.py").read_text(encoding="utf-8")
 FROM_STAGE = re.compile(r"^FROM \S+ AS (?P<name>[a-z0-9-]+)$", re.MULTILINE)
 
 
@@ -96,6 +98,30 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     assert 'ENTRYPOINT ["cardrag-worker"]' in worker
     assert 'CMD ["run"]' in worker
 
+    for disabled_feature in (
+        "shell_tool",
+        "unified_exec",
+        "shell_snapshot",
+        "view_image",
+        "apps",
+        "plugins",
+        "browser_use",
+        "computer_use",
+        "multi_agent",
+        "workspace_dependencies",
+    ):
+        assert f'"{disabled_feature}"' in WORKER_PROVIDERS
+    for fixed_argument in (
+        '"--strict-config"',
+        '"--ignore-user-config"',
+        '"--ignore-rules"',
+        'shell_environment_policy.inherit="none"',
+        "allow_login_shell=false",
+    ):
+        assert fixed_argument in WORKER_PROVIDERS
+    assert "reject_credential_bearing_ocr(stdout)" in WORKER_PROVIDERS
+    assert WORKER_OCR.count("reject_credential_bearing_ocr") >= 6
+
 
 def test_runtime_images_publish_apache_2_0_license_metadata() -> None:
     runtime = _stage("runtime")
@@ -109,6 +135,7 @@ def test_runtime_images_publish_apache_2_0_license_metadata() -> None:
 
 def test_runtime_docs_record_fail_closed_verification_gap() -> None:
     runtime_doc = (ROOT / "docs/V1_0_10_CONTAINER_RUNTIME.md").read_text(encoding="utf-8")
+    worker_compose = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
 
     for required in (
@@ -123,9 +150,21 @@ def test_runtime_docs_record_fail_closed_verification_gap() -> None:
         "service account를",
         "bubblewrap user-namespace smoke",
         "Codex read-only sandbox smoke",
+        "seccomp=unconfined",
+        "apparmor=unconfined",
+        "systempaths=unconfined",
+        'shell_environment_policy.inherit="none"',
+        "credential token form",
+        "native/adopted remote cache",
         "/health/ready",
     ):
         assert required in runtime_doc
+
+    assert "seccomp=unconfined" in worker_compose
+    assert "apparmor=unconfined" in worker_compose
+    assert "systempaths=unconfined" not in worker_compose
+    assert "privileged:" not in worker_compose
+    assert "cap_add:" not in worker_compose
 
     assert "docker pull" in runtime_doc
     assert "docker build" in runtime_doc

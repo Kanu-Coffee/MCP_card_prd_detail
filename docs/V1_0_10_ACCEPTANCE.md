@@ -294,11 +294,11 @@ tag까지의 변경이
 Receipt verifier는 source replay를 대신하지 않으며 실제 receipt가 없으면 release는
 의도대로 차단됩니다.
 
-수락 image는 public Docker Hub에 선게시하지 않고 repository-scoped private GHCR candidate
+수락 image는 public Docker Hub에 선게시하지 않고 exact-name public GHCR candidate
 package에서만 읽습니다. receipt는 Worker/MCP OCI index, 유일한 linux/amd64 child와
 platform config, SBOM/SLSA attestation manifest digest를 봉인하고, rendered Compose
 `repository@index`, 실제 container config ID/RepoDigest 및 dispatch의 두 image digest 입력과
-다시 대조합니다. candidate overlay는 exact private digest 없이 render하지 않고 local build
+다시 대조합니다. candidate overlay는 exact public digest 없이 render하지 않고 local build
 fallback을 제거합니다. release strict job은 바로 그 digest의 scanner JSON·fresh DB
 metadata·SBOM·provenance를 해시로 보존합니다. credential-scoped environment job에서
 checksum-pinned recursive OCI copy를 수행하고 destination index/child/config/attestation digest를

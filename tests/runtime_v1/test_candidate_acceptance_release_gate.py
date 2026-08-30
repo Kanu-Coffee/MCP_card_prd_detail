@@ -7,28 +7,53 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _private_package_list_is_valid(tmp_path: Path, pages: list[object]) -> bool:
+def _public_package_is_valid(tmp_path: Path, package: object) -> bool:
     jq = shutil.which("jq")
     assert jq is not None
-    packages_path = tmp_path / "packages.json"
-    packages_path.write_text(
-        "".join(f"{json.dumps(page)}\n" for page in pages),
-        encoding="utf-8",
-    )
+    package_path = tmp_path / "package.json"
+    package_path.write_text(json.dumps(package), encoding="utf-8")
     result = subprocess.run(  # noqa: S603 - executable and filter are repository-controlled
         (
             jq,
-            "-s",
             "-e",
             "--arg",
             "owner",
             "Kanu-Coffee",
-            "--arg",
-            "repository",
-            "Kanu-Coffee/MCP_card_prd_detail",
             "-f",
-            str(ROOT / ".github/actions/verify-private-candidate-package/validate-package-list.jq"),
-            str(packages_path),
+            str(ROOT / ".github/actions/verify-public-candidate-package/validate-package.jq"),
+            str(package_path),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _raw_evidence_is_gitleaks_clean(tmp_path: Path, payloads: dict[str, object]) -> bool:
+    gitleaks = shutil.which("gitleaks")
+    assert gitleaks is not None
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True)
+    for name, payload in payloads.items():
+        (evidence_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - installed scanner and repository config are controlled
+        (
+            gitleaks,
+            "detect",
+            "--source",
+            str(evidence_dir),
+            "--no-git",
+            "--config",
+            str(ROOT / ".gitleaks.toml"),
+            "--no-banner",
+            "--redact",
+            "--exit-code",
+            "1",
+            "--report-format",
+            "json",
+            "--report-path",
+            str(tmp_path / "gitleaks-report.json"),
         ),
         check=False,
         capture_output=True,
@@ -113,41 +138,39 @@ def test_public_registry_jobs_use_environment_only_to_scope_secrets() -> None:
     assert "${{ secrets.DOCKERHUB_TOKEN }}" not in validate_job
 
 
-def test_private_candidate_package_filter_rejects_public_or_unlinked_matches(
+def test_public_candidate_package_filter_requires_exact_public_metadata(
     tmp_path: Path,
 ) -> None:
     candidate: dict[str, object] = {
         "id": 1,
         "name": "mcp-card-prd-detail-candidate",
         "package_type": "container",
-        "visibility": "private",
+        "visibility": "public",
         "owner": {"login": "Kanu-Coffee", "type": "User"},
-        "repository": {"full_name": "Kanu-Coffee/MCP_card_prd_detail"},
     }
-    unrelated = {
-        "id": 2,
-        "name": "unrelated",
-        "package_type": "container",
-        "visibility": "private",
-    }
-    assert _private_package_list_is_valid(tmp_path, [[unrelated], [candidate]])
+    assert _public_package_is_valid(tmp_path, candidate)
 
-    mutations: list[list[object]] = [[], [[]], [candidate], [{"message": "not a page"}]]
+    linked_candidate = copy.deepcopy(candidate)
+    linked_candidate["repository"] = {"full_name": "Kanu-Coffee/another-repository"}
+    assert _public_package_is_valid(tmp_path, linked_candidate)
+
+    mutations: list[object] = [None, [], [candidate], {"message": "not a package"}]
     for path, value in (
-        (("visibility",), "public"),
+        (("id",), "1"),
+        (("name",), "another-package"),
+        (("visibility",), "private"),
         (("package_type",), "npm"),
         (("owner", "login"), "another-user"),
-        (("repository", "full_name"), "Kanu-Coffee/another-repository"),
+        (("owner", "type"), "Organization"),
     ):
         changed = copy.deepcopy(candidate)
         if len(path) == 1:
             changed[path[0]] = value
         else:
             changed[path[0]][path[1]] = value  # type: ignore[index]
-        mutations.append([[changed]])
-    mutations.append([[candidate, copy.deepcopy(candidate)]])
+        mutations.append(changed)
 
-    assert all(not _private_package_list_is_valid(tmp_path, pages) for pages in mutations)
+    assert all(not _public_package_is_valid(tmp_path, package) for package in mutations)
 
 
 def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> None:
@@ -162,8 +185,14 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert "matrix:\n        target: [worker, mcp]" in strict_job
     assert "CANDIDATE_IMAGE_REPOSITORY: ghcr.io/kanu-coffee/" in workflow
     assert "packages: read" in strict_job
-    assert strict_job.count("uses: ./.github/actions/verify-private-candidate-package") == 1
+    assert strict_job.count("uses: ./.github/actions/verify-public-candidate-package") == 1
     assert "/orgs/Kanu-Coffee/packages/" not in strict_job
+    assert "registry: ghcr.io" not in strict_job
+    assert "Authenticate read-only to the private candidate registry" not in strict_job
+    assert 'anonymous_docker_config="$RUNNER_TEMP/cardrag-anonymous-ghcr-docker-config"' in (strict_job)
+    assert "printf '{\"auths\":{}}\\n'" in strict_job
+    assert 'export DOCKER_CONFIG="$anonymous_docker_config"' in strict_job
+    assert "GH_TOKEN: ${{ github.token }}" in strict_job
     assert 'image="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"' in strict_job
     assert 'test "$observed_digest" = "$digest"' in strict_job
     assert "validate-candidate-oci-index.jq" in strict_job
@@ -209,8 +238,11 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert "go-containerregistry_Linux_x86_64.tar.gz" in publish_job
     assert "edb74d53fad9a596860f59d1c5d04a43dfb5f441dc71f57060dd0bf39483c833" in publish_job
     assert 'source_reference="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"' in publish_job
-    assert publish_job.count("uses: ./.github/actions/verify-private-candidate-package") == 1
+    assert "packages: read" in publish_job
+    assert publish_job.count("uses: ./.github/actions/verify-public-candidate-package") == 1
     assert "/orgs/Kanu-Coffee/packages/" not in publish_job
+    assert "registry: ghcr.io" not in publish_job
+    assert publish_job.count("uses: docker/login-action@") == 1
     assert '"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy' in publish_job
     assert 'test "$(resolve_digest "$reference")" = "$digest"' in publish_job
     assert '"${IMAGE_NAME}@${digest}" \\' in publish_job
@@ -252,21 +284,27 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert workflow.count("-f .github/scripts/validate-candidate-attestation-manifest.jq") == 2
     assert workflow.count("python3 .github/scripts/validate-strict-json.py") == 8
     assert workflow.count("-f .github/scripts/validate-candidate-platform-manifest.jq") == 3
-    package_action = (ROOT / ".github/actions/verify-private-candidate-package/action.yml").read_text(
+    package_action = (ROOT / ".github/actions/verify-public-candidate-package/action.yml").read_text(
         encoding="utf-8"
     )
-    package_filter = (
-        ROOT / ".github/actions/verify-private-candidate-package/validate-package-list.jq"
-    ).read_text(encoding="utf-8")
-    assert 'test "$(gh api "/users/${GITHUB_REPOSITORY_OWNER}" --jq .type)" = "User"' in (package_action)
-    assert '"/users/${GITHUB_REPOSITORY_OWNER}/packages?' in package_action
-    assert "package_type=container&visibility=private&per_page=100" in package_action
-    assert "gh api --method GET --paginate" in package_action
-    assert 'select(.name == "mcp-card-prd-detail-candidate")' in package_filter
-    assert "($matches | length == 1)" in package_filter
-    assert '$matches[0].visibility == "private"' in package_filter
-    assert "$matches[0].repository.full_name == $repository" in package_filter
-    assert "/packages/container/mcp-card-prd-detail-candidate" not in package_action
+    package_filter = (ROOT / ".github/actions/verify-public-candidate-package/validate-package.jq").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        '"https://api.github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/'
+        'mcp-card-prd-detail-candidate"' in package_action
+    )
+    assert "curl --proto '=https' --tlsv1.2" in package_action
+    assert 'test -n "${GH_TOKEN:-}"' in package_action
+    assert '-H "Authorization: Bearer ${GH_TOKEN}"' in package_action
+    assert "gh api" not in package_action
+    assert '.name == "mcp-card-prd-detail-candidate"' in package_filter
+    assert '.visibility == "public"' in package_filter
+    assert '.package_type == "container"' in package_filter
+    assert "((.owner.login | ascii_downcase) == ($owner | ascii_downcase))" in package_filter
+    assert '.owner.type == "User"' in package_filter
+    assert ".repository" not in package_filter
+    assert not (ROOT / ".github/actions/verify-private-candidate-package").exists()
 
 
 def test_release_strict_filesystem_scan_is_sealed_and_published_as_evidence() -> None:
@@ -297,6 +335,125 @@ def test_release_strict_filesystem_scan_is_sealed_and_published_as_evidence() ->
     ):
         assert asset in release_job
     assert "needs: [validate, publish, strict-filesystem-scan]" in workflow
+
+
+def test_raw_oci_evidence_secret_scans_are_fail_closed_and_release_bound() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    strict_job = workflow.split("  strict-image-scan:\n", 1)[1].split("  registry-preflight:\n", 1)[0]
+    publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
+    release_job = workflow.split("  release:\n", 1)[1]
+
+    for contract in (
+        "gitleaks_8.30.1_linux_x64.tar.gz",
+        "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+        'test "$("$audit_tools_dir/gitleaks" version)" = "8.30.1"',
+        '--source "$evidence_secret_scan_dir"',
+        "--no-git",
+        "--config .gitleaks.toml",
+        "--redact",
+        '--report-path "gitleaks-evidence-${TARGET}.json"',
+        '"$RUNNER_TEMP/cardrag-release-audit-tools/trivy" fs',
+        "--scanners secret",
+        '--output "trivy-evidence-${TARGET}.json"',
+        '"$(sha256sum "gitleaks-evidence-${TARGET}.json" | cut -d\' \' -f1)"',
+        '"$(sha256sum "trivy-evidence-${TARGET}.json" | cut -d\' \' -f1)"',
+        "--arg gitleaks_version 8.30.1",
+        "gitleaks_version: $gitleaks_version",
+        "gitleaks_evidence_report_sha256: $gitleaks_evidence_report_sha256",
+        "evidence_secret_report_sha256: $evidence_secret_report_sha256",
+        "gitleaks-evidence-${{ matrix.target }}.json",
+        "trivy-evidence-${{ matrix.target }}.json",
+    ):
+        assert contract in strict_job
+    assert strict_job.index('install -m 0600 "provenance-${TARGET}.json"') < strict_job.index(
+        'gitleaks" detect'
+    )
+    assert strict_job.index('install -m 0600 "sbom-${TARGET}.json"') < strict_job.index('gitleaks" detect')
+    assert strict_job.index('gitleaks" detect') < strict_job.index(
+        'docker pull --platform linux/amd64 "$image"'
+    )
+    assert strict_job.index('trivy" fs') < strict_job.index('docker pull --platform linux/amd64 "$image"')
+
+    for contract in (
+        'gitleaks_evidence_report="strict-scan/gitleaks-evidence-${TARGET}.json"',
+        'evidence_secret_report="strict-scan/trivy-evidence-${TARGET}.json"',
+        "gitleaks_evidence_report_sha256=$(sha256sum",
+        "evidence_secret_report_sha256=$(sha256sum",
+        'jq -e \'type == "array" and length == 0\' "$gitleaks_evidence_report"',
+        "([.Results[]?.Secrets[]?] | length == 0)",
+        ".gitleaks_evidence_report_sha256 == $gitleaks_evidence_report_sha256",
+        ".evidence_secret_report_sha256 == $evidence_secret_report_sha256",
+        '.gitleaks_version == "8.30.1"',
+        '"gitleaks_evidence_report_path": f"strict-scan/gitleaks-evidence-{role}.json"',
+        '"evidence_secret_report_path": f"strict-scan/trivy-evidence-{role}.json"',
+        '"gitleaks_version": scan_receipt["gitleaks_version"]',
+        "strict-scan/gitleaks-evidence-${{ matrix.target }}.json",
+        "strict-scan/trivy-evidence-${{ matrix.target }}.json",
+    ):
+        assert contract in publish_job
+
+    for contract in (
+        "gitleaks_evidence_report_path = source / strict_scan[",
+        '"gitleaks_evidence_report_path"',
+        'strict_scan["gitleaks_evidence_report_sha256"]',
+        "evidence_secret_report_path = source / strict_scan[",
+        '"evidence_secret_report_path"',
+        'strict_scan["evidence_secret_report_sha256"]',
+        "gitleaks-evidence-worker.json",
+        "gitleaks-evidence-mcp.json",
+        "trivy-evidence-worker.json",
+        "trivy-evidence-mcp.json",
+    ):
+        assert contract in release_job
+    sha256sums_step = release_job.split("            sha256sum \\\n", 1)[1].split(" > SHA256SUMS", 1)[0]
+    for report in (
+        "gitleaks-evidence-worker.json",
+        "gitleaks-evidence-mcp.json",
+        "trivy-evidence-worker.json",
+        "trivy-evidence-mcp.json",
+    ):
+        assert report in sha256sums_step
+
+
+def test_repository_gitleaks_policy_rejects_openrouter_and_github_tokens(tmp_path: Path) -> None:
+    config = (ROOT / ".gitleaks.toml").read_text(encoding="utf-8")
+    assert "useDefault = true" in config
+    assert 'targetRules = ["generic-api-key"]' in config
+    assert "Keep the allowlist value-specific" in config
+    assert 'id = "openrouter-api-key"' in config
+    assert "sk-or-v1-[0-9A-Fa-f]{64}" in config
+    assert 'id = "github-fine-grained-personal-access-token"' in config
+
+    safe_payloads = {
+        "provenance.json": {
+            "predicate": {
+                "invocation": {
+                    "parameters": {
+                        "secrets": [
+                            {"id": "GIT_AUTH_HEADER", "optional": True},
+                            {"id": "GIT_AUTH_TOKEN", "optional": True},
+                        ]
+                    }
+                }
+            }
+        },
+        "sbom.json": {
+            "subject": [{"digest": {"sha256": "a" * 64}}],
+            "predicateType": "https://spdx.dev/Document",
+        },
+    }
+    assert _raw_evidence_is_gitleaks_clean(tmp_path / "safe", safe_payloads)
+
+    injected_tokens = {
+        "github": ("reuse_key", "github_pat_" + "a" * 82),
+        "openrouter": ("tokenizer_sha256", "sk-or-v1-" + "0123456789abcdef" * 4),
+    }
+    for name, (field, token) in injected_tokens.items():
+        payloads = copy.deepcopy(safe_payloads)
+        payloads["provenance.json"]["predicate"]["metadata"] = {  # type: ignore[index]
+            field: token
+        }
+        assert not _raw_evidence_is_gitleaks_clean(tmp_path / name, payloads)
 
 
 def test_release_validator_tool_and_registry_readers_are_checksum_pinned() -> None:

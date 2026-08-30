@@ -654,6 +654,46 @@ async def test_native_cache_hit_skips_provider_and_records_exact_reference(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_native_cache_credential_token_fails_systemically_before_local_seal(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider()
+    webdav = FakeWebDAV()
+    resolver, state = make_resolver(tmp_path, provider, webdav, cache_mode="read-only")
+    credential = "sk-or-v1-" + "".join("a" for _ in range(64))
+    body = (
+        "## Page 1\n\n이 페이지에는 카드 혜택 조건과 제외 사항이 적혀 있습니다. " + credential + "\n"
+    ).encode()
+    try:
+        cache_native(resolver, webdav, body=body)
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        output_dir = tmp_path / "ocr-credential-cache"
+
+        with pytest.raises(ProviderSystemicError) as captured:
+            await resolver.resolve(
+                run_id="run",
+                document_id="doc_native_credential",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=output_dir,
+            )
+
+        error = captured.value
+        assert error.reason_code == "provider_output_credential_detected"
+        assert provider.calls == []
+        assert not (output_dir / "ocr.md").exists()
+        assert not (output_dir / "native-manifest.json").exists()
+        rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        assert credential not in str(error)
+        assert credential not in rendered
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_read_only_native_cache_hit_is_reused_without_any_remote_mutation(
     tmp_path: Path,
 ) -> None:

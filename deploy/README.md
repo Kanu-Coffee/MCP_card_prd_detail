@@ -55,7 +55,7 @@ deploy/
 ```dotenv
 CARDRAG_CANDIDATE_WEBDAV_BASE_URL=https://webdav.example/cardrag-v110-candidate
 CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://candidate-cardrag.example
-# 반드시 독립 승인된 candidate receipt의 private OCI index/config digest로 교체합니다.
+# 반드시 canonical candidate receipt에 봉인된 public OCI index/config digest로 교체합니다.
 CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
@@ -99,7 +99,7 @@ docker compose --env-file /etc/cardrag/candidate-mcp.env \
   up -d --wait
 ```
 
-candidate overlay는 private repository를 YAML에 고정하고 위 receipt-bound `sha256` index
+candidate overlay는 public repository를 YAML에 고정하고 위 receipt-bound `sha256` index
 digest 변수가 없으면 Compose render를 거부합니다. base의 local image와 `build:` fallback을
 제거하며 `pull_policy=always`를 강제합니다. 실행 전
 sanitized Compose JSON의 role image가 receipt reference와 같고 `build`가 없음을 검사하고,

@@ -419,31 +419,33 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Require the candidate package to remain private and repository-scoped
-        uses: ./.github/actions/verify-private-candidate-package
+      - name: Require the exact candidate package to remain public
+        uses: ./.github/actions/verify-public-candidate-package
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Authenticate read-only to the private candidate registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Install checksum-pinned Trivy
+      - name: Install checksum-pinned OCI evidence scanners
         shell: bash
         run: |
           set -euo pipefail
           audit_tools_dir="$RUNNER_TEMP/cardrag-release-audit-tools"
-          mkdir -p "$audit_tools_dir/trivy-unpack"
+          mkdir -p "$audit_tools_dir/gitleaks-unpack" "$audit_tools_dir/trivy-unpack"
+          curl --fail --location --silent --show-error \
+            --output "$audit_tools_dir/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
           curl --fail --location --silent --show-error \
             --output "$audit_tools_dir/trivy.tar.gz" \
             https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $audit_tools_dir/gitleaks.tar.gz" \
+            | sha256sum --check --strict
           echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  $audit_tools_dir/trivy.tar.gz" \
             | sha256sum --check --strict
+          tar -xzf "$audit_tools_dir/gitleaks.tar.gz" -C "$audit_tools_dir/gitleaks-unpack"
           tar -xzf "$audit_tools_dir/trivy.tar.gz" -C "$audit_tools_dir/trivy-unpack"
+          install -m 0755 "$audit_tools_dir/gitleaks-unpack/gitleaks" \
+            "$audit_tools_dir/gitleaks"
           install -m 0755 "$audit_tools_dir/trivy-unpack/trivy" "$audit_tools_dir/trivy"
+          test "$("$audit_tools_dir/gitleaks" version)" = "8.30.1"
           "$audit_tools_dir/trivy" --version
 
       - name: Install checksum-pinned OCI evidence reader
@@ -461,7 +463,7 @@ jobs:
           install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
           "$registry_tools_dir/crane" version
 
-      - name: Resolve and validate the exact receipt-bound OCI image
+      - name: Resolve and validate the exact receipt-bound OCI image anonymously
         id: accepted-image
         env:
           TARGET: ${{ matrix.target }}
@@ -478,6 +480,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          anonymous_docker_config="$RUNNER_TEMP/cardrag-anonymous-ghcr-docker-config"
+          test ! -e "$anonymous_docker_config/config.json"
+          install -d -m 0700 "$anonymous_docker_config"
+          printf '{"auths":{}}\n' > "$anonymous_docker_config/config.json"
+          chmod 0600 "$anonymous_docker_config/config.json"
+          export DOCKER_CONFIG="$anonymous_docker_config"
           case "$TARGET" in
             worker)
               digest=$WORKER_DIGEST
@@ -556,9 +564,31 @@ jobs:
             -f .github/scripts/validate-candidate-provenance.jq \
             "provenance-${TARGET}.json" >/dev/null
           jq -e \
+            --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
+            --arg role "$TARGET" \
             --arg platform_digest_hex "$platform_digest_hex" \
             -f .github/scripts/validate-candidate-sbom.jq \
             "sbom-${TARGET}.json" >/dev/null
+          evidence_secret_scan_dir=$(mktemp -d)
+          install -m 0600 "provenance-${TARGET}.json" \
+            "$evidence_secret_scan_dir/provenance.json"
+          install -m 0600 "sbom-${TARGET}.json" \
+            "$evidence_secret_scan_dir/sbom.json"
+          "$RUNNER_TEMP/cardrag-release-audit-tools/gitleaks" detect \
+            --source "$evidence_secret_scan_dir" \
+            --no-git \
+            --config .gitleaks.toml \
+            --no-banner \
+            --redact \
+            --exit-code 1 \
+            --report-format json \
+            --report-path "gitleaks-evidence-${TARGET}.json"
+          "$RUNNER_TEMP/cardrag-release-audit-tools/trivy" fs \
+            --scanners secret \
+            --exit-code 1 \
+            --format json \
+            --output "trivy-evidence-${TARGET}.json" \
+            "$evidence_secret_scan_dir"
           docker pull --platform linux/amd64 "$image" >/dev/null
           test "$(docker image inspect "$image" \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = \
@@ -640,6 +670,7 @@ jobs:
             --arg platform_config_digest "$CONFIG_DIGEST" \
             --arg attestation_manifest_digest "$ATTESTATION_DIGEST" \
             --arg trivy_version 0.74.0 \
+            --arg gitleaks_version 8.30.1 \
             --arg db_updated_at "$(jq -r '.VulnerabilityDB.UpdatedAt' \
               "trivy-version-${TARGET}.json")" \
             --arg db_downloaded_at "$(jq -r '.VulnerabilityDB.DownloadedAt' \
@@ -650,15 +681,21 @@ jobs:
             --arg sbom_sha256 "$(sha256sum "sbom-${TARGET}.json" | cut -d' ' -f1)" \
             --arg provenance_sha256 \
               "$(sha256sum "provenance-${TARGET}.json" | cut -d' ' -f1)" \
+            --arg evidence_secret_report_sha256 \
+              "$(sha256sum "trivy-evidence-${TARGET}.json" | cut -d' ' -f1)" \
+            --arg gitleaks_evidence_report_sha256 \
+              "$(sha256sum "gitleaks-evidence-${TARGET}.json" | cut -d' ' -f1)" \
             '{schema: $schema, role: $role, repository: $repository,
               digest: $digest, platform_manifest_digest: $platform_manifest_digest,
               platform_config_digest: $platform_config_digest,
               attestation_manifest_digest: $attestation_manifest_digest,
-              trivy_version: $trivy_version,
+              trivy_version: $trivy_version, gitleaks_version: $gitleaks_version,
               db_updated_at: $db_updated_at, db_downloaded_at: $db_downloaded_at,
               report_sha256: $report_sha256,
               version_metadata_sha256: $version_metadata_sha256,
               sbom_sha256: $sbom_sha256, provenance_sha256: $provenance_sha256,
+              evidence_secret_report_sha256: $evidence_secret_report_sha256,
+              gitleaks_evidence_report_sha256: $gitleaks_evidence_report_sha256,
               scanners: ["vuln", "secret"], severities: ["HIGH", "CRITICAL"],
               ignore_unfixed: false, result: "passed"}' \
             > "strict-scan-${TARGET}.json"
@@ -669,6 +706,8 @@ jobs:
           path: |
             strict-scan-${{ matrix.target }}.json
             trivy-${{ matrix.target }}.json
+            trivy-evidence-${{ matrix.target }}.json
+            gitleaks-evidence-${{ matrix.target }}.json
             trivy-version-${{ matrix.target }}.json
             sbom-${{ matrix.target }}.json
             provenance-${{ matrix.target }}.json
@@ -846,17 +885,10 @@ jobs:
           install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
           "$registry_tools_dir/crane" version
 
-      - name: Reconfirm the candidate package is still private and repository-scoped
-        uses: ./.github/actions/verify-private-candidate-package
+      - name: Reconfirm the exact candidate package is still public
+        uses: ./.github/actions/verify-public-candidate-package
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: Authenticate read-only to the private candidate registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -928,19 +960,28 @@ jobs:
           [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           scan_receipt="strict-scan/strict-scan-${TARGET}.json"
           scan_report="strict-scan/trivy-${TARGET}.json"
+          evidence_secret_report="strict-scan/trivy-evidence-${TARGET}.json"
+          gitleaks_evidence_report="strict-scan/gitleaks-evidence-${TARGET}.json"
           version_metadata="strict-scan/trivy-version-${TARGET}.json"
           sbom="strict-scan/sbom-${TARGET}.json"
           provenance="strict-scan/provenance-${TARGET}.json"
           scan_report_sha256=$(sha256sum "$scan_report" | cut -d' ' -f1)
+          evidence_secret_report_sha256=$(sha256sum "$evidence_secret_report" | cut -d' ' -f1)
+          gitleaks_evidence_report_sha256=$(sha256sum "$gitleaks_evidence_report" | cut -d' ' -f1)
           version_metadata_sha256=$(sha256sum "$version_metadata" | cut -d' ' -f1)
           sbom_sha256=$(sha256sum "$sbom" | cut -d' ' -f1)
           provenance_sha256=$(sha256sum "$provenance" | cut -d' ' -f1)
+          jq -e 'type == "array" and length == 0' "$gitleaks_evidence_report" >/dev/null
+          jq -e '([.Results[]?.Secrets[]?] | length == 0)' \
+            "$evidence_secret_report" >/dev/null
           jq -e --arg role "$TARGET" --arg repository "$CANDIDATE_IMAGE_REPOSITORY" \
             --arg digest "$digest" \
             --arg platform_manifest_digest "$platform_digest" \
             --arg platform_config_digest "$config_digest" \
             --arg attestation_manifest_digest "$attestation_digest" \
             --arg report_sha256 "$scan_report_sha256" \
+            --arg evidence_secret_report_sha256 "$evidence_secret_report_sha256" \
+            --arg gitleaks_evidence_report_sha256 "$gitleaks_evidence_report_sha256" \
             --arg version_metadata_sha256 "$version_metadata_sha256" \
             --arg sbom_sha256 "$sbom_sha256" \
             --arg provenance_sha256 "$provenance_sha256" \
@@ -949,7 +990,8 @@ jobs:
               "$(jq -r '.VulnerabilityDB.DownloadedAt' "$version_metadata")" '
             type == "object"
             and (keys == ["attestation_manifest_digest", "db_downloaded_at", "db_updated_at",
-              "digest", "ignore_unfixed", "platform_config_digest",
+              "digest", "evidence_secret_report_sha256", "gitleaks_evidence_report_sha256",
+              "gitleaks_version", "ignore_unfixed", "platform_config_digest",
               "platform_manifest_digest", "provenance_sha256", "report_sha256",
               "repository", "result", "role", "sbom_sha256", "scanners", "schema",
               "severities", "trivy_version", "version_metadata_sha256"])
@@ -961,9 +1003,12 @@ jobs:
             and .platform_config_digest == $platform_config_digest
             and .attestation_manifest_digest == $attestation_manifest_digest
             and .trivy_version == "0.74.0"
+            and .gitleaks_version == "8.30.1"
             and .db_updated_at == $db_updated_at
             and .db_downloaded_at == $db_downloaded_at
             and .report_sha256 == $report_sha256
+            and .evidence_secret_report_sha256 == $evidence_secret_report_sha256
+            and .gitleaks_evidence_report_sha256 == $gitleaks_evidence_report_sha256
             and .version_metadata_sha256 == $version_metadata_sha256
             and .sbom_sha256 == $sbom_sha256
             and .provenance_sha256 == $provenance_sha256
@@ -1268,6 +1313,15 @@ jobs:
                   "receipt_sha256": os.environ["SCAN_RECEIPT_SHA256"],
                   "report_path": f"strict-scan/trivy-{role}.json",
                   "report_sha256": scan_receipt["report_sha256"],
+                  "evidence_secret_report_path": f"strict-scan/trivy-evidence-{role}.json",
+                  "evidence_secret_report_sha256": scan_receipt[
+                      "evidence_secret_report_sha256"
+                  ],
+                  "gitleaks_evidence_report_path": f"strict-scan/gitleaks-evidence-{role}.json",
+                  "gitleaks_evidence_report_sha256": scan_receipt[
+                      "gitleaks_evidence_report_sha256"
+                  ],
+                  "gitleaks_version": scan_receipt["gitleaks_version"],
                   "version_metadata_path": f"strict-scan/trivy-version-{role}.json",
                   "version_metadata_sha256": scan_receipt["version_metadata_sha256"],
                   "sbom_path": f"strict-scan/sbom-{role}.json",
@@ -1301,6 +1355,8 @@ jobs:
             cosign-${{ matrix.target }}.json
             strict-scan/strict-scan-${{ matrix.target }}.json
             strict-scan/trivy-${{ matrix.target }}.json
+            strict-scan/trivy-evidence-${{ matrix.target }}.json
+            strict-scan/gitleaks-evidence-${{ matrix.target }}.json
             strict-scan/trivy-version-${{ matrix.target }}.json
             strict-scan/sbom-${{ matrix.target }}.json
             strict-scan/provenance-${{ matrix.target }}.json
@@ -1492,12 +1548,26 @@ jobs:
               strict_scan = part["strict_scan"]
               scan_receipt_path = source / strict_scan["receipt_path"]
               scan_report_path = source / strict_scan["report_path"]
+              evidence_secret_report_path = source / strict_scan[
+                  "evidence_secret_report_path"
+              ]
+              gitleaks_evidence_report_path = source / strict_scan[
+                  "gitleaks_evidence_report_path"
+              ]
               version_metadata_path = source / strict_scan["version_metadata_path"]
               sbom_path = source / strict_scan["sbom_path"]
               provenance_path = source / strict_scan["provenance_path"]
               for scan_path, expected_sha256 in (
                   (scan_receipt_path, strict_scan["receipt_sha256"]),
                   (scan_report_path, strict_scan["report_sha256"]),
+                  (
+                      evidence_secret_report_path,
+                      strict_scan["evidence_secret_report_sha256"],
+                  ),
+                  (
+                      gitleaks_evidence_report_path,
+                      strict_scan["gitleaks_evidence_report_sha256"],
+                  ),
                   (version_metadata_path, strict_scan["version_metadata_sha256"]),
                   (sbom_path, strict_scan["sbom_sha256"]),
                   (provenance_path, strict_scan["provenance_sha256"]),
@@ -1510,6 +1580,8 @@ jobs:
               assert scan_receipt["digest"] == part["digest"]
               assert scan_receipt["result"] == "passed"
               assert scan_receipt["ignore_unfixed"] is False
+              assert scan_receipt["gitleaks_version"] == strict_scan["gitleaks_version"]
+              assert scan_receipt["gitleaks_version"] == "8.30.1"
               assert scan_receipt["db_updated_at"] == strict_scan["db_updated_at"]
               assert scan_receipt["db_downloaded_at"] == strict_scan["db_downloaded_at"]
               (assets / f"release-{role}.json").write_bytes(
@@ -1519,6 +1591,8 @@ jobs:
               for scan_path in (
                   scan_receipt_path,
                   scan_report_path,
+                  evidence_secret_report_path,
+                  gitleaks_evidence_report_path,
                   version_metadata_path,
                   sbom_path,
                   provenance_path,
@@ -1555,7 +1629,7 @@ jobs:
                   f"Candidate source commit: `{os.environ['CANDIDATE_SOURCE_COMMIT']}`",
                   "",
                   "첨부된 `release-manifest.json`, 역할별 manifest, strict image/filesystem "
-                  "Trivy JSON/DB metadata, Cosign 검증 결과와 `SHA256SUMS`에서 게시 증거를 "
+                  "Trivy/Gitleaks JSON 및 DB metadata, Cosign 검증 결과와 `SHA256SUMS`에서 게시 증거를 "
                   "확인할 수 있습니다.",
               ]
           )
@@ -1572,6 +1646,8 @@ jobs:
               release-worker.json \
               provenance-mcp.json \
               provenance-worker.json \
+              gitleaks-evidence-mcp.json \
+              gitleaks-evidence-worker.json \
               sbom-mcp.json \
               sbom-worker.json \
               strict-scan-mcp.json \
@@ -1579,6 +1655,8 @@ jobs:
               strict-filesystem-scan.json \
               trivy-filesystem.json \
               trivy-filesystem-version.json \
+              trivy-evidence-mcp.json \
+              trivy-evidence-worker.json \
               trivy-mcp.json \
               trivy-version-mcp.json \
               trivy-version-worker.json \
@@ -1610,11 +1688,15 @@ jobs:
             release-assets/sbom-mcp.json
             release-assets/provenance-worker.json
             release-assets/provenance-mcp.json
+            release-assets/gitleaks-evidence-worker.json
+            release-assets/gitleaks-evidence-mcp.json
             release-assets/strict-scan-worker.json
             release-assets/strict-scan-mcp.json
             release-assets/strict-filesystem-scan.json
             release-assets/trivy-filesystem.json
             release-assets/trivy-filesystem-version.json
+            release-assets/trivy-evidence-worker.json
+            release-assets/trivy-evidence-mcp.json
             release-assets/trivy-worker.json
             release-assets/trivy-mcp.json
             release-assets/trivy-version-worker.json
@@ -1765,11 +1847,15 @@ jobs:
             release-assets/sbom-mcp.json
             release-assets/provenance-worker.json
             release-assets/provenance-mcp.json
+            release-assets/gitleaks-evidence-worker.json
+            release-assets/gitleaks-evidence-mcp.json
             release-assets/strict-scan-worker.json
             release-assets/strict-scan-mcp.json
             release-assets/strict-filesystem-scan.json
             release-assets/trivy-filesystem.json
             release-assets/trivy-filesystem-version.json
+            release-assets/trivy-evidence-worker.json
+            release-assets/trivy-evidence-mcp.json
             release-assets/trivy-worker.json
             release-assets/trivy-mcp.json
             release-assets/trivy-version-worker.json

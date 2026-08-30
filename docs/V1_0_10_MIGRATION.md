@@ -139,7 +139,7 @@ exact four-issuer set, port, `CARDRAG_OCR_CACHE_MODE=read-only`,
 legacy/resident/sidecar/DB/download/state/reserve 및 두 audit job/byte cap을 모두
 assert합니다. 이 assertion이 성공한 sanitized effective-config 결과만 candidate acceptance
 receipt의 config SHA 근거로 결속합니다. canonical effective-config evidence에는 위 image
-reference와 config digest도 함께 기록합니다. candidate overlay는 private repository를
+reference와 config digest도 함께 기록합니다. candidate overlay는 public repository를
 YAML에 고정하고 receipt-bound index digest 변수가 없으면 render를 거부하며 base의 local
 `image`/`build` fallback을 제거합니다. capacity와 issuer 값을
 ambient environment에서 상속하지 않고 release launch에 exact literal을 고정합니다.

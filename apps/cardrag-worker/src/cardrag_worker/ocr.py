@@ -49,6 +49,7 @@ from .providers import (
     OCR_SPARSE_PAGE_PREFIX,
     OCRProvider,
     ProviderDocumentError,
+    reject_credential_bearing_ocr,
 )
 from .state import WorkerState
 from .webdav import WebDAVClient
@@ -346,6 +347,7 @@ class OCRResult:
     provider_called: bool = False
 
     def __post_init__(self) -> None:
+        reject_credential_bearing_ocr(self.ocr_bytes)
         if type(self.cache_reused) is not bool or type(self.provider_called) is not bool:
             raise ValueError("OCR cache/provider metrics must be booleans")
         if (self.cache_kind is None) != (self.cache_reuse_key is None):
@@ -590,6 +592,7 @@ class OCRResolver:
         body = await self.webdav.get_bytes(artifact.path, max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
             raise OCRValidationError("OCR cache artifact is missing or corrupt")
+        reject_credential_bearing_ocr(body)
         try:
             verified = verify_ocr_bytes(
                 body,
@@ -647,6 +650,7 @@ class OCRResolver:
         body = await self.webdav.get_bytes(artifact.path, max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
             raise OCRValidationError("partial native OCR artifact is missing or corrupt")
+        reject_credential_bearing_ocr(body)
         try:
             verified = verify_ocr_bytes(
                 body,
@@ -1151,6 +1155,7 @@ class OCRResolver:
                 checkpoint_path = Path(checkpoint["artifact_path"])
                 if checkpoint_path.exists() and file_sha256(checkpoint_path) == checkpoint["output_sha256"]:
                     chunk = checkpoint_path.read_text(encoding="utf-8")
+                    reject_credential_bearing_ocr(chunk)
                     try:
                         pages = split_ocr_pages(
                             chunk,
@@ -1179,6 +1184,7 @@ class OCRResolver:
                 total_pages=page_count,
                 prompt=self.prompt,
             )
+            reject_credential_bearing_ocr(raw)
             # Context images may inform continuity but are never persisted as
             # output from this call. Exact target markers enforce that boundary.
             values = split_ocr_pages(
@@ -1212,6 +1218,7 @@ class OCRResolver:
         pages = tuple(page_text[index] for index in range(1, page_count + 1))
         combined = "\n\n".join(f"## Page {index}\n\n{value}" for index, value in enumerate(pages, 1)) + "\n"
         body = combined.encode()
+        reject_credential_bearing_ocr(body)
         ocr_path = output_dir / "ocr.md"
         atomic_write(ocr_path, body)
         # Verify exactly the bytes that will be cached and referenced by generations.

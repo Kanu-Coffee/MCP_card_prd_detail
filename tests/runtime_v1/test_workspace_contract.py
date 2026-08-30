@@ -209,7 +209,14 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert worker_service["user"] == "10001:10001"
     assert worker_service["read_only"] is True
     assert worker_service["cap_drop"] == ["ALL"]
-    assert worker_service["security_opt"] == ["no-new-privileges:true"]
+    assert worker_service["security_opt"] == [
+        "no-new-privileges:true",
+        "seccomp=unconfined",
+        "apparmor=unconfined",
+    ]
+    assert "systempaths=unconfined" not in worker_service["security_opt"]
+    assert "cap_add" not in worker_service
+    assert worker_service.get("privileged", False) is False
     assert worker_environment["CARDRAG_ENABLED_ISSUERS"] == "kb,samsung,shinhan,woori"
     assert worker_environment["CARDRAG_STABLE_PUBLICATION_APPROVED"] == "false"
     assert worker_environment["CARDRAG_OCR_CACHE_PUBLICATION_APPROVED"] == "false"

@@ -17,3 +17,15 @@ regexes = [
   '''reuse_key["']?\s*:\s*["']39836e8749c738227463ac730bc0bb15d3785ce836683aa0122dc5533ef18e17["']''',
   '''reuse_key["']?\s*:\s*["']cfcbc12d5f5a8c7121632f01ad5d75bdba601328839f6d5f4769ce153548d4de["']''',
 ]
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''\bsk-or-v1-[0-9A-Fa-f]{64}\b'''
+keywords = ["sk-or-v1-"]
+
+[[rules]]
+id = "github-fine-grained-personal-access-token"
+description = "GitHub fine-grained personal access token"
+regex = '''\bgithub_pat_[A-Za-z0-9_]{20,255}\b'''
+keywords = ["github_pat_"]

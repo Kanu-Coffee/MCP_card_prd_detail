@@ -1,0 +1,28 @@
+name: Verify public candidate package
+description: Fail closed unless the exact user-owned GHCR candidate package is publicly readable
+
+runs:
+  using: composite
+  steps:
+    - name: Verify exact public user-owned package metadata
+      shell: bash
+      run: |
+        set -euo pipefail
+        [[ "${GITHUB_REPOSITORY_OWNER:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+        test -n "${GH_TOKEN:-}"
+
+        package_json=$(mktemp)
+        trap 'rm -f "$package_json"' EXIT
+
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+          --retry 3 --retry-all-errors \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "X-GitHub-Api-Version: 2026-03-10" \
+          "https://api.github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/mcp-card-prd-detail-candidate" \
+          > "$package_json"
+
+        jq -e \
+          --arg owner "$GITHUB_REPOSITORY_OWNER" \
+          -f "$GITHUB_ACTION_PATH/validate-package.jq" \
+          "$package_json" >/dev/null

@@ -74,6 +74,13 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+      # Codex's read-only Linux sandbox creates a nested bubblewrap user/mount
+      # namespace. Docker's default seccomp and AppArmor profiles deny those
+      # setup syscalls before the inner sandbox can install its own seccomp
+      # filter. Keep this Worker-only; UID 10001, the read-only rootfs, all-cap
+      # drop, NNP, and Docker's protected system paths remain enforced.
+      - seccomp=unconfined
+      - apparmor=unconfined
     command: ["run"]
 
 volumes:

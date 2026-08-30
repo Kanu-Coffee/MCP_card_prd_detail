@@ -91,6 +91,33 @@ enabling collection without the stable publication and deletion approvals
 fails during settings validation. The Worker retains two local publication
 seals and prunes unreferenced local PDF CAS bytes. Up to two failed or
 interrupted run directories remain separately for diagnosis.
+
+The `codex-exec` OCR child is a text-only agent boundary even when a disclosure
+image contains prompt-injection instructions. Page images are attached directly
+with `codex exec --image`; the tool-side `view_image` capability is therefore
+disabled together with Codex 0.147.0's shell, unified exec, shell snapshot,
+browser/computer, app/plugin/skill, hook, and sub-agent surfaces. The invocation
+also uses `--strict-config`, `--ignore-user-config`, `--ignore-rules`,
+`--sandbox read-only`, `shell_environment_policy.inherit="none"`, and disables
+login shells, web search, plan, and user-input tools. A replaced Codex binary
+that no longer recognizes this pinned contract fails before OCR instead of
+silently restoring a tool.
+
+The child process receives only the allowlisted locale/TLS/PATH variables and,
+when configured, `CODEX_HOME` so the Codex parent can authenticate. It never
+inherits CardRAG OpenRouter or WebDAV secrets. The OAuth files necessarily
+remain readable to the Codex parent running as the Worker UID; the containment
+claim is that untrusted OCR content has no model-callable general file-read or
+command-execution route to `/run/secrets` or `CODEX_HOME`, not that a compromised
+Codex executable cannot read its own authentication store.
+
+As defense in depth, fresh provider stdout, resumable checkpoints, retained
+local OCR, and both native/adopted remote-cache bodies are rejected systemically
+before a local seal or downstream publication when they match a standard
+credential token form (OpenRouter, GitHub, JWT, or long `sk-` tokens). The
+typed error contains only a constant reason code; it never records the matched
+value, byte offset, pattern, or surrounding OCR text.
+
 `worker-state.sqlite3` and its revision metadata remain Worker-only recovery
 state; the MCP never reads them. Candidate runs use a separate channel, WebDAV
 root, and state volume and never perform remote GC. Unit tests use local

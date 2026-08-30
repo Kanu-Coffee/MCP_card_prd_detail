@@ -20,11 +20,11 @@ receipt schema는 `cardrag.candidate-acceptance-receipt.v1`이고 release versio
 
 | receipt binding | 증명해야 하는 계약 |
 |---|---|
-| `effective_config` | private candidate repository의 rendered `repository@OCI-index`, 정확히 2-descriptor OCI index/platform/config/attestation digest와 subject, revision/version/entrypoint/user, 별도 project/channel/volume/loopback port, read-only rootfs, all-cap drop, no-new-privileges, v1.0.9 RW mount 0, Worker/MCP state·reserve·DB·sidecar·download·audit exact capacity, Qwen 4,096D FP32 L2와 exact-all-active-rows 정책 |
+| `effective_config` | public candidate repository의 rendered `repository@OCI-index`, 정확히 2-descriptor OCI index/platform/config/attestation digest와 subject, revision/version/entrypoint/user, 별도 project/channel/volume/loopback port, read-only rootfs, all-cap drop, no-new-privileges, Worker에만 `seccomp=unconfined`/`apparmor=unconfined`, systempaths 완화·privileged·cap-add 0, v1.0.9 RW mount 0, Worker/MCP state·reserve·DB·sidecar·download·audit exact capacity, Qwen 4,096D FP32 L2와 exact-all-active-rows 정책 |
 | `generation_manifest` | canonical v5 manifest, sealed aggregation/retrieval profile, 구조 coverage 100%, cross-contract 0, vector sidecar |
 | `generation_ready` | manifest, SQLite와 sidecar SHA/size |
 | `candidate_pointer` | candidate generation의 manifest/READY |
-| `worker_metrics` | rendered image RepoDigest와 실제 container image ID가 sealed index/config digest와 같은 exact effective-config/image에서 UID 10001, read-only rootfs/cap-drop/NNP, Codex·bubblewrap version, bubblewrap user namespace와 Codex read-only sandbox smoke, 카드사별 acquired=succeeded·failed=0인 full 4-card-company run, 문서/chunk/row/sidecar/구조 count, PDF/OCR cache hit/miss, provider 및 publication count |
+| `worker_metrics` | rendered image RepoDigest와 실제 container image ID가 sealed index/config digest와 같은 exact effective-config/image에서 UID 10001, read-only rootfs/cap-drop/NNP, Worker-only seccomp/AppArmor unconfined와 systempaths 완화·privileged·cap-add 0, Codex·bubblewrap version, bubblewrap user namespace와 Codex read-only sandbox smoke, Codex OCR exact no-read/exec-tool argv·empty shell-env inheritance, 카드사별 acquired=succeeded·failed=0인 full 4-card-company run, 문서/chunk/row/sidecar/구조 count, PDF/OCR cache hit/miss, provider 및 publication count |
 | `mcp_smoke` | rendered image RepoDigest와 실제 container image ID가 sealed index/config digest와 같은 exact effective-config/image에서 UID 10001/read-only rootfs/all-cap drop/no-new-privileges/readiness, v5, 8개 tool discovery/call, active contract 및 embedding row 전수채점, exact block, cross-contract 0, bundle/revision/legacy adapter, PDF 206·`%PDF-`·Content-Range |
 | `native_cache_before`, `native_cache_after` | 동일 native namespace의 정렬된 exact-path 200/404 control inventory |
 | `native_cache_audit` | exact-path GET-only hit/miss, HEAD 0과 native create/modify/delete/write/publication 0 |
@@ -51,6 +51,7 @@ exact-path GET hit/miss와 Worker run의 OCR cache hit/miss도 서로 같은 관
 - `O_NOFOLLOW` descriptor walk, regular file/size/SHA와 read 전후 inode·mtime·ctime identity
 - manifest → READY → pointer와 SQLite/vector artifact binding
 - effective config → Worker/MCP, stable/OCR/GC approval false, experimental map-reduce false,
+  Worker-only seccomp/AppArmor unconfined, systempaths 완화·privileged·cap-add 0,
   sealed embedding provider/token profile 및 aggregation/retrieval policy binding
 - Compose rendered `repository@OCI-index` → platform manifest의 config digest → 실제 Worker/MCP
   container `.Image` ID와 local RepoDigest의 exact binding. local/tag/build fallback은 허용하지 않음
@@ -105,25 +106,26 @@ python -m cardrag_core.candidate_acceptance \
 
 ## Strict image gate
 
-### Private candidate image producer
+### Public candidate image producer
 
 수락 대상 image를 public Docker Hub에 먼저 올리지 않습니다. 허용된 source repository는
 `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate` 하나뿐입니다. 이 package는 사전에
-`private`로 만들고 이 GitHub repository에 연결해야 합니다. 현재 repository owner는 GitHub
-API상 `User`이므로 workflow는 private package도 반환하는 authenticated, paginated user-package
-list endpoint와 owner type을 함께 검증합니다. public package 전용 단건 endpoint는 사용하지
-않습니다. 그 뒤 exact-name 결과가 하나뿐인지, `package_type=container`, `visibility=private`,
-owner와 연결 repository identity가 같은지 확인하며
-하나라도 다르면 image를 읽기 전에 실패합니다. package 생성·visibility 설정과 candidate push는
-public release와 분리된 producer 단계입니다. package의 GitHub Actions access에도 이 repository를
-`Read`로 명시해야 하며 repository 연결만으로 read 권한을 추정하지 않습니다. release jobs의
-`packages: read` GITHUB_TOKEN이 metadata 조회와 pull을 둘 다 통과해야 합니다.
+`public`으로 만듭니다. workflow는 짧게 발급된 `packages: read` GITHUB_TOKEN으로
+exact user-package metadata endpoint와 owner type을 검증하되, 이 token을 GHCR login이나
+manifest/blob pull에 사용하지 않습니다. `package_type=container`, `visibility=public`, exact
+name와 owner identity가 다르면 image를 읽기 전에 실패합니다. 공개 package의 실제
+exact-digest manifest/blob/image는 빈 `DOCKER_CONFIG`로 익명 조회하므로 repository 연결이나
+Actions package access 설정을 필요로 하지 않습니다. candidate push만 별도 producer의 GHCR write
+credential을 사용합니다.
 
 candidate producer는 local checkout을 build context로 사용하지 않고 공개된 source repository의
 full 40-hex commit으로 고정한 remote Git context를 사용합니다. 따라서
 staged/unstaged/untracked byte를 같은 VCS label로 위장할 수 없습니다. tag는 운반 수단일
 뿐이며 acceptance authority는 build 결과의 exact digest입니다. source fetch에는 credential을
-전달하지 않으며 raw provenance의 `secrets`는 빈 배열이어야 합니다.
+전달하지 않고 producer command에도 `--secret`을 사용하지 않습니다. BuildKit 0.32.2의 raw
+provenance는 public remote Git source에도 `GIT_AUTH_HEADER`와 `GIT_AUTH_TOKEN`을
+`optional: true`인 내장 선언으로 기록합니다. 이는 secret 값이 전달되었다는 뜻이 아니며,
+validator는 이 두 선언만 정확히 허용하고 추가/필수 secret 선언과 exec secret mount를 거부합니다.
 
 ```bash
 set -euo pipefail
@@ -158,15 +160,17 @@ done
 context의 Dockerfile default와 같아야 하며 omission, 다른 값 또는 추가 `build-arg:*`는 모두
 실패합니다. `--build-context`/`context:*`, alternate `filename`, label, entitlement, local/SSH
 input과 `--secret`도 금지합니다. 공개 Git source fetch에 token이나 다른 credential을 전달하지
-않으며 provenance의 `secrets`는 빈 배열과 정확히 일치해야 합니다. 지정한 공개 commit을 읽을 수
-없으면 build가 성공해서는 안 됩니다.
+않습니다. provenance의 `secrets`는 위 두 Git auth ID의 optional 내장 선언과 정확히 일치해야
+하며, 이 선언 자체는 token 값의 미전달을 증명하지 않으므로 producer command의 credential 및
+`--secret` 금지를 함께 유지합니다. 지정한 공개 commit을 읽을 수 없으면 build가 성공해서는
+안 됩니다.
 
-이 수동 producer와 private GHCR write 권한은 명시적인 외부 trust boundary입니다. 위
+이 수동 producer와 GHCR write 권한은 명시적인 외부 trust boundary입니다. 위
 Buildx/BuildKit version 검사는 실행 계약일 뿐 binary issuer를 암호학적으로 인증하지 않으며,
 candidate 안의 raw SLSA statement도 그 자체로 producer identity 서명이 아닙니다. public copy
-뒤의 release Cosign 서명은 promotion workflow identity를 증명할 뿐 이전 private build의
+뒤의 release Cosign 서명은 promotion workflow identity를 증명할 뿐 이전 candidate build의
 issuer를 소급 증명하지 않습니다. 자동 release는 별도 reviewer나 추가 producer-signature
-gate를 두지 않습니다. 대신 private candidate index, producer command/version, raw
+gate를 두지 않습니다. 대신 public candidate index, producer command/version, raw
 BuildKit provenance/SBOM과 exact output digest를 receipt에 결속하고 workflow가 이를 구조적으로
 검증합니다. 실제 raw fixture나 receipt-bound runtime evidence가 없거나 불일치하면
 `dockerhub-public` dispatch가 실패하는 기술적 release blocker입니다. 이 경계를 raw
@@ -175,17 +179,26 @@ provenance의 임의 문자열 검사나 release 후 서명으로 완화하지 �
 producer는 각 role의 OCI index digest, 유일한 `linux/amd64` child digest, 그 manifest의 config
 digest와 child를 참조하는 BuildKit attestation-manifest digest를 기록합니다. 실제 candidate
 Compose와 Worker/MCP smoke는 tag가 아니라 이 index digest를 사용해야 하며 candidate overlay는
-private repository를 YAML에 고정하고 receipt-bound `sha256` digest 변수가 없으면 render
+public repository를 YAML에 고정하고 receipt-bound `sha256` digest 변수가 없으면 render
 단계에서 실패하며 inherited `build:`를 제거합니다.
 effective config와 receipt는 네 digest, rendered reference, revision, version, entrypoint, user를
 봉인합니다. runtime 증거는 container `.Image`가 config digest이고 image RepoDigests가 rendered
 index reference를 포함하는지도 봉인합니다. Worker receipt는 provider call이 0인 all-hit
 run이어도 별도로 Codex/bubblewrap version, bubblewrap user namespace와 Codex read-only sandbox를
 exact effective-config/image에서 통과했음을 요구합니다.
+같은 실행 증거는 `--strict-config`, `--ignore-user-config`, `--ignore-rules`,
+`shell_environment_policy.inherit="none"`, `allow_login_shell=false`와 pinned Codex 0.147.0
+OCR deny-feature set을 exact argv로 보존해야 합니다. 이 중 `shell_tool`,
+`unified_exec`, `shell_snapshot`, `view_image`, browser/computer, app/plugin/skill,
+hook, sub-agent 관련 항목이 하나라도 누락되거나 unknown config가 무시된 실행은
+candidate 증거가 아닙니다. 이미지는 `--image`로 직접 첨부되므로 tool-side
+`view_image` 비활성화를 OCR 기능 누락으로 처리하지 않습니다. 또한 신규 stdout,
+checkpoint, local seal, native/adopted remote cache 전체에 credential-token rejection을
+실행하고 match 값을 error/report에 기록하지 않았다는 검증을 포함해야 합니다.
 
 release dispatch의 `candidate_worker_image_digest`와 `candidate_mcp_image_digest`는 canonical
 receipt에 봉인된 role별 OCI index digest와 정확히 같아야 합니다. verifier는 두 image
-repository가 위 private allowlist인지도 검사합니다. 불일치하거나 private
+repository가 위 public allowlist인지도 검사합니다. 불일치하거나 public
 package/digest/blob이 없으면 publish 전에 실패합니다.
 
 ### Exact scan and promotion
@@ -201,7 +214,8 @@ Trivy가 언어 root package를 완전히 해석하지
 completion authority는 receipt-bound final-image 두 건의 scan입니다. 실제 filesystem JSON,
 Trivy/DB metadata와 receipt SHA를 public copy 직전에 다시 검증하고 release asset에 포함합니다.
 
-strict job은 read-only `packages:read` token으로 receipt-bound private digest를 가져옵니다. OCI
+strict job은 빈 `DOCKER_CONFIG`로 credential-free 익명 pull을 강제하여 receipt-bound public digest를
+가져옵니다. OCI
 index는 descriptor가 정확히 둘뿐이어야 하며, 하나는 sealed linux/amd64 child, 다른 하나는
 그 child를 subject로 하는 OCI artifact attestation manifest여야 합니다. arm64/다른 platform,
 unattested image, duplicate 또는 추가 attestation은 모두 거부합니다. attestation layer에도
@@ -209,17 +223,28 @@ SPDX와 SLSA provenance predicate가 정확히 하나씩 있어야 합니다. ra
 digest로 직접 읽고 두 statement의 subject가 sealed linux/amd64 child인지 확인합니다.
 source/destination OCI index와 attestation manifest, raw provenance/SBOM은 jq 평가 전에
 128 MiB bounded strict JSON parser로 duplicate key와 NaN/Infinity를 거부합니다.
-Provenance는 raw v0.2 statement의 subject, `buildType`, manual Buildx builder identity,
+Provenance는 raw in-toto Statement v1/v0.2 predicate의 exact subject, `buildType`, manual Buildx builder identity,
 exact Git `configSource` URI/SHA-1, `Dockerfile` entrypoint, linux/amd64 environment, role target,
-exact seven build args, exact Git secret identity, 빈 local/SSH input과 complete materials를
-구조적으로 검사합니다. material set도 role별로 정확히 Git source, digest-pinned Dockerfile
-frontend, UV/Python base, SBOM generator, Worker의 Codex HTTP object 또는 MCP minimal runtime만
-허용합니다. SBOM generator의 linux/amd64 child는
-`sha256:187e1892a7752c9384c59aba9517dd8e40610b748c72773e87b63720514463c2`로
-별도 결속합니다.
+exact seven build args, `compatibilityVersion=30`, outer/root request의 exact key/value,
+두 optional Git auth 내장 선언과 secret mount 부재, complete materials를 구조적으로 검사합니다.
+material multiset도 role별로 정확히 Git source, platform 유/무 두 Dockerfile frontend record,
+UV/Python base, SBOM generator, Worker의 Codex HTTP object 또는 MCP minimal runtime만 허용합니다.
+각 OCI material digest는 resolved child로 치환하지 않고 BuildKit 0.32.2가 실제 기록한 입력 pin과
+정확히 결속하며, SBOM generator record는 platform suffix 없이
+`sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9`를 사용합니다.
 임의 문자열 위치에 commit이 한 번 등장하거나 추가 immutable material을 넣는 것만으로는
-통과하지 않습니다. SBOM은
-SPDX 2.3과 nonempty package inventory를 요구하며 두 본문을 각각 SHA-256으로 봉인합니다.
+통과하지 않습니다. SBOM wrapper도 in-toto Statement v1과 exact role/commit/platform subject를
+요구합니다. 본문은 SPDX 2.3, CC0-1.0 document license, BuildKit 0.32.2/Syft 1.51.0 creator,
+UUIDv4 namespace, 유일한 SPDX package/file ID와 document-root `DESCRIBES` 관계를 검사합니다.
+또한 `cardrag-core`와 대상 role package의 1.0.10/Apache-2.0/PyPI purl을 결속하며 두 본문을 각각
+SHA-256으로 봉인합니다.
+
+구조 validator가 허용하는 SPDX/provenance 확장 필드에 credential 값을 숨기지
+못하도록, raw provenance와 SBOM 원문을 checksum-pinned Gitleaks `8.30.1`과
+Trivy secret scanner 두 개로 스캔합니다. 기본 provider 패턴과 별도 OpenRouter
+`sk-or-v1-<64 hex>`/GitHub PAT 규칙을 모두 적용하고, finding이 하나라도 있으면
+업로드·promotion 전에 중단합니다. 무탐지 보고서 두 건의 SHA-256은 role별
+strict receipt, publish manifest, 최종 release asset와 `SHA256SUMS`까지 결속합니다.
 
 그 뒤 SHA-256으로 고정한 Trivy `0.74.0`을 다음 정책으로 실행합니다.
 
@@ -236,7 +261,7 @@ ignore-unfixed=false
 `DownloadedAt`은 2시간 이내여야 합니다. synthetic pass 문장만으로는 다음 단계가 열리지
 않습니다.
 
-checksum-pinned `crane 0.22.0`은 private source index와 모든 child/attestation blob을 Docker Hub
+checksum-pinned `crane 0.22.0`은 public source index와 모든 child/attestation blob을 Docker Hub
 immutable alias로 재귀 복사합니다. `dockerhub-public` environment는 Docker Hub credential의
 scope로만 사용합니다. required reviewer, wait timer, owner-only actor 제한, environment 설정
 verifier는 두지 않으므로 권한 있는 maintainer의 workflow dispatch는 별도 승인 대기 없이
@@ -244,7 +269,7 @@ verifier는 두지 않으므로 권한 있는 maintainer의 workflow dispatch는
 metadata에 값을 기록하지 않습니다.
 
 workflow dispatch 자체가 release 실행 요청이며 typed confirmation이나 별도 사람 승인 단계는
-없습니다. exact annotated tag, sealed evidence와 accepted image digest, strict Trivy, private
+없습니다. exact annotated tag, sealed evidence와 accepted image digest, strict Trivy, public
 candidate package, Docker Hub immutable-tag와 destination digest 검증은 그대로 적용합니다.
 이는 OAuth/API key 노출과 잘못된 image 공개를 막는 기술적 경계이며, 실행자와 재실행자를
 repository owner로 제한하는 소유권 정책은 아닙니다.
@@ -267,9 +292,9 @@ linux/amd64 child, platform config, attestation subject/digest와 raw SPDX/prove
 
 Trivy `0.74.0`, DB `UpdatedAt=2026-08-29T18:58:09Z`, vuln+secret,
 HIGH/CRITICAL, unfixed 포함 조건에서 두 base와 Worker 추가 component SBOM은 모두 0/0입니다.
-이는 아직 최종 CardRAG image 0/0 증명이 아닙니다. 새 private candidate OCI index를 실제로
+이는 아직 최종 CardRAG image 0/0 증명이 아닙니다. 새 public candidate OCI index를 실제로
 build/push하고 pinned Buildx 0.36.1/BuildKit 0.32.2의 raw provenance가 synthetic adversarial
 policy fixture와 같은 exact frontend args/material URI/digest/secret shape인지 확인해야 합니다.
 exact final Worker/MCP strict scan과 receipt-bound runtime smoke 증거가 모두 봉인될 때까지는
-기술적 release blocker입니다. scanner 예외, severity 완화, public candidate 선게시 또는
+기술적 release blocker입니다. scanner 예외, severity 완화, candidate evidence 검증 생략 또는
 release 순서 변경으로 이 검증을 우회하지 않습니다.

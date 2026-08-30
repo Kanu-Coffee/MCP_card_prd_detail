@@ -50,7 +50,35 @@ Worker final은 bubblewrap과 기존 운영 wrapper 요구 때문에 pinned `lat
 사용합니다. numeric UID/GID `10001:10001`, mode 0700의
 `/var/lib/cardrag-worker`, 기존 labels와 `cardrag-worker run` entrypoint를 유지합니다.
 Compose의 read-only rootfs, tmpfs, `cap_drop: [ALL]`, `no-new-privileges` 조건은 별도
-runtime smoke에서 그대로 검증해야 합니다.
+runtime smoke에서 그대로 검증해야 합니다. OCR provider는 Codex를 항상
+`--sandbox read-only`로 실행하므로 nested Linux sandbox가 시작되지 않으면 단순한 검증
+누락이 아니라 실제 OCR 실행 실패입니다.
+
+악의적 PDF 프롬프트가 `/run/secrets`나 `CODEX_HOME`의 OAuth 파일을 읽으라고
+지시해도 도구로 수행할 수 없어야 합니다. 고정된 Codex 0.147.0 OCR 인자 계약은
+`--strict-config`, `--ignore-user-config`, `--ignore-rules`,
+`shell_environment_policy.inherit="none"`, `allow_login_shell=false`를 사용합니다.
+`shell_tool`, `unified_exec`, `shell_snapshot`, `view_image`와 browser/computer,
+app/plugin/skill, hook, sub-agent 관련 feature를 exact deny set으로 비활성화하고
+web search, plan, user-input tool도 끅니다. `--image`는 이미지를 모델 입력에 직접
+첨부하므로 tool-side `view_image`를 비활성화해도 OCR 입력은 유지됩니다.
+자식 process env는 PATH/locale/TLS allowlist와 부모 Codex가 인증에 쓰는
+`CODEX_HOME`만 받고 CardRAG OpenRouter/WebDAV secret은 상속하지 않습니다.
+인증 store를 읽을 수 있는 Codex 부모 binary 자체의 compromise는 이 경계의 주장이
+아니며, untrusted OCR 내용에 일반 파일-read/command 도구를 제공하지 않는 것이
+검증 대상입니다.
+추가로 신규 provider stdout, checkpoint, 이전 local seal, native/adopted remote cache의
+OCR 본문 모두에 대해 OpenRouter, GitHub, JWT, long `sk-` credential token form을
+검사합니다. match하면 local seal/cache/downstream 처리 전에 typed systemic error로
+중단하며 오류·report에 match 값, 위치, 주변 문자열을 넣지 않습니다.
+
+Docker의 기본 seccomp profile은 non-root Worker의 nested `CLONE_NEWUSER`를 막고, 그것만
+해제하면 기본 AppArmor profile이 bubblewrap의 mount propagation 설정을 막습니다. 따라서
+Worker Compose에만 `seccomp=unconfined`와 `apparmor=unconfined`를 명시합니다. 이는 바깥
+Docker 격리 두 층을 완화하는 trade-off이지만, Codex가 만드는 안쪽 sandbox는 별도 user,
+mount, network namespace와 자체 seccomp filter를 사용합니다. Worker의 숫자 UID,
+read-only rootfs, all-cap drop과 NNP는 그대로 유지하고 `privileged`, `cap_add`,
+`systempaths=unconfined`는 사용하지 않습니다. MCP에는 이 예외를 적용하지 않습니다.
 
 Worker는 official signed Wolfi index에서 다음 직접 dependency를 exact version으로
 설치합니다.
@@ -74,7 +102,8 @@ runtime으로 복사하지 않습니다. Codex `0.147.0` linux-musl archive는
 
 ## 보안 스캔 snapshot과 한계
 
-2026-08-30 조사에서는 Docker daemon이나 local image store를 사용하지 않았습니다.
+2026-08-30 초기 정적 조사에서는 Docker daemon이나 local image store를 사용하지 않았고
+`docker pull`, `docker build`, container 실행을 전혀 수행하지 않았습니다. 당시
 Trivy 0.74.0, DB `UpdatedAt=2026-08-29T18:58:09Z`, linux/amd64,
 `vuln,secret`, `HIGH,CRITICAL`, unfixed 포함 조건의 임시 remote scan 결과는 다음과
 같습니다.
@@ -93,9 +122,9 @@ final image의 0/0 증명이 아닙니다.
 
 ## Release 전에 반드시 통과할 gate
 
-이 변경 작업에서는 저장 공간과 운영 격리를 위해 `docker pull`, `docker build`,
-container 실행, prune, service/volume/WebDAV 변경을 전혀 수행하지 않았습니다. release는
-다음 항목을 모두 CI에서 fail-closed로 통과하기 전까지 차단합니다.
+초기 정적 조사 뒤 실제 후보 이미지를 별도 일회성 컨테이너에서 검사했습니다. 그
+검사는 service, 영구 volume, WebDAV를 변경하지 않았습니다. release는 다음 항목을 모두
+fail-closed로 통과하기 전까지 차단합니다.
 
 1. exact source commit에서 `worker`와 `mcp` target을 실제로 빌드하고 OCI version,
    revision, entrypoint label/metadata를 검사합니다.
@@ -104,8 +133,14 @@ container 실행, prune, service/volume/WebDAV 변경을 전혀 수행하지 않
    severity 완화는 금지합니다.
 3. Worker에서 `codex --version`, symlink 해석, `bwrap --version`, 동적 loader와
    `libcap.so.2` 해석을 검사합니다.
-4. 실제 Worker Compose 보안 옵션과 UID 10001로 bubblewrap user-namespace smoke와
-   Codex read-only sandbox smoke를 실행합니다.
+4. 실제 Worker Compose의 UID 10001, read-only rootfs, all-cap drop, NNP,
+   `seccomp=unconfined`, `apparmor=unconfined` 조건으로 Codex read-only sandbox smoke를
+   실행합니다. 이 한 실행이 실제 경로의 bubblewrap user-namespace smoke이기도 합니다.
+   바깥과 안쪽의 user/mount/network namespace ID가 모두 달라야 하고, 안쪽은 capability
+   0, NNP 1, seccomp filter 활성 상태이며 writable test path 쓰기를 거부해야 합니다.
+   Docker의 protected system paths는 유지하며 `systempaths=unconfined`를 추가하지
+   않습니다. 별도 raw `bwrap --uid/--gid` 호출은 Codex가 실제 사용하는 namespace 설정과
+   다르므로 이 증거를 대신하지 않습니다.
 5. MCP를 UID 10001, read-only rootfs로 기동하고 `/health/ready`가 200을 반환하는지
    healthcheck와 함께 검사합니다.
 
