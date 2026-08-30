@@ -147,7 +147,12 @@ def _read_regular(path: Path) -> bytes:
         raise AggregationProfileV5Error("profile_artifact_not_regular")
     if listed.st_size <= 0 or listed.st_size > MAX_PROFILE_ARTIFACT_BYTES:
         raise AggregationProfileV5Error("profile_artifact_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:

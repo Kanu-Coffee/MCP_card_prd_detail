@@ -709,7 +709,12 @@ def _read_regular_at(
         raise GoldAnswerProducerError(f"{code}_not_regular")
     if listed.st_size <= 0 or listed.st_size > maximum_bytes:
         raise GoldAnswerProducerError(f"{code}_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(name, flags, dir_fd=parent_descriptor)
     except OSError as exc:
@@ -790,7 +795,10 @@ def _hash_regular(path: Path, *, maximum_bytes: int, code: str) -> ArtifactBindi
             raise GoldAnswerProducerError(f"{code}_size_invalid")
         descriptor = os.open(
             absolute.name,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
             dir_fd=parent,
         )
         try:
@@ -1086,7 +1094,12 @@ def _sqlite_readonly(
     if listed.st_size <= 0 or listed.st_size > _MAX_DATABASE_BYTES:
         os.close(parent)
         raise GoldAnswerProducerError("serving_database_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute.name, flags, dir_fd=parent)
     except OSError as exc:

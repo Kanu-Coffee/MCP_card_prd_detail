@@ -173,6 +173,45 @@ def test_answer_readers_reject_same_inode_growth_between_lstat_and_open(
     assert read_calls == 0
 
 
+def test_answer_reader_rejects_fifo_substitution_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nonblocking = getattr(os, "O_NONBLOCK", 0)
+    if not nonblocking or not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO nonblocking-open semantics require POSIX")
+    target = tmp_path / "race.jsonl"
+    target.write_bytes(_canonical({}) + b"\n")
+    original_open = answer_producer.os.open
+    swapped = False
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and dir_fd is not None and os.fspath(path) == target.name:
+            assert flags & nonblocking
+            target.unlink()
+            os.mkfifo(target)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(answer_producer.os, "open", racing_open)
+    with pytest.raises(GoldAnswerProducerError, match="fixture_not_regular"):
+        answer_producer._read_regular(
+            target,
+            maximum_bytes=1024,
+            code="fixture",
+        )
+
+    assert swapped
+    assert target.is_fifo()
+
+
 @pytest.mark.parametrize("reader_kind", ("whole", "hash"))
 def test_answer_readers_reject_path_replacement_during_descriptor_read(
     tmp_path: Path,

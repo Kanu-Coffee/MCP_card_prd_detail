@@ -469,7 +469,12 @@ def _pinned_sqlite_database(
         raise GoldReviewError("input_not_regular")
     if listed.st_size <= 0 or listed.st_size > MAX_DATABASE_BYTES:
         raise GoldReviewError("input_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:
@@ -523,7 +528,12 @@ def _read_regular(path: Path, *, maximum: int = MAX_REVIEW_FILE_BYTES) -> bytes:
         raise GoldReviewError("input_not_regular")
     if listed.st_size <= 0 or listed.st_size > maximum:
         raise GoldReviewError("input_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:

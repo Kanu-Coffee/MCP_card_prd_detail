@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import cardrag_mcp.evaluation as evaluation_module
 from cardrag_mcp.evaluation import (
     LANES,
     EvaluationError,
@@ -46,6 +48,152 @@ def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> Path:
     )
     path.write_bytes(body)
     return path
+
+
+@pytest.mark.parametrize(
+    ("cap_multiplier", "expected_error"),
+    ((1, "jsonl_size_invalid"), (2, "jsonl_changed_during_read")),
+)
+def test_jsonl_reader_rejects_same_inode_growth_between_lstat_and_fstat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cap_multiplier: int,
+    expected_error: str,
+) -> None:
+    target = tmp_path / "race.jsonl"
+    payload = b"{}\n"
+    target.write_bytes(payload)
+    original_inode = target.stat().st_ino
+    original_open = evaluation_module.os.open
+    read_calls = 0
+    raced = False
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal raced
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if not raced and dir_fd is None and Path(os.fspath(path)) == target:
+            raced = True
+            with target.open("ab") as stream:
+                stream.write(payload)
+        return descriptor
+
+    def forbidden_read(_descriptor: int, _count: int) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        raise AssertionError("read must not run after opened-file preflight fails")
+
+    monkeypatch.setattr(evaluation_module, "MAX_JSONL_BYTES", len(payload) * cap_multiplier)
+    monkeypatch.setattr(evaluation_module.os, "open", racing_open)
+    monkeypatch.setattr(evaluation_module.os, "read", forbidden_read)
+
+    with pytest.raises(EvaluationError, match=expected_error):
+        evaluation_module._read_regular(target)
+
+    assert raced
+    assert target.stat().st_ino == original_inode
+    assert read_calls == 0
+
+
+def test_jsonl_reader_enforces_cumulative_byte_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "bounded.jsonl"
+    payload = b"{}\n"
+    target.write_bytes(payload)
+    monkeypatch.setattr(evaluation_module, "MAX_JSONL_BYTES", len(payload))
+    monkeypatch.setattr(
+        evaluation_module.os,
+        "read",
+        lambda _descriptor, _count: payload + b"x",
+    )
+
+    with pytest.raises(EvaluationError, match="jsonl_size_invalid"):
+        evaluation_module._read_regular(target)
+
+
+def test_jsonl_reader_checks_current_path_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "artifact.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    payload = b"{}\n"
+    target.write_bytes(payload)
+    replacement.write_bytes(payload)
+    original_inode = target.stat().st_ino
+    replacement_inode = replacement.stat().st_ino
+    original_fstat = evaluation_module.os.fstat
+    fstat_calls = 0
+
+    def swapping_fstat(descriptor: int) -> os.stat_result:
+        nonlocal fstat_calls
+        status = original_fstat(descriptor)
+        fstat_calls += 1
+        if fstat_calls == 2:
+            replacement.replace(target)
+        return status
+
+    monkeypatch.setattr(evaluation_module.os, "fstat", swapping_fstat)
+
+    with pytest.raises(EvaluationError, match="jsonl_changed_during_read"):
+        evaluation_module._read_regular(target)
+
+    assert fstat_calls == 2
+    assert original_inode != replacement_inode == target.stat().st_ino
+
+
+def test_jsonl_reader_accepts_stable_two_link_snapshot(tmp_path: Path) -> None:
+    target = tmp_path / "artifact.jsonl"
+    linked = tmp_path / "artifact-hardlink.jsonl"
+    payload = b"{}\n"
+    target.write_bytes(payload)
+    os.link(target, linked)
+
+    assert target.stat().st_nlink == linked.stat().st_nlink == 2
+    assert evaluation_module._read_regular(linked) == payload
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="requires POSIX nonblocking open")
+def test_jsonl_reader_nonblocking_open_rejects_fifo_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "artifact.jsonl"
+    target.write_bytes(b"{}\n")
+    original_open = evaluation_module.os.open
+    raced = False
+    observed_flags = 0
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_flags, raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == target:
+            raced = True
+            observed_flags = flags
+            target.unlink()
+            os.mkfifo(target)
+            assert flags & os.O_NONBLOCK
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(evaluation_module.os, "open", racing_open)
+
+    with pytest.raises(EvaluationError, match="jsonl_not_regular"):
+        evaluation_module._read_regular(target)
+
+    assert raced
+    assert observed_flags & os.O_NONBLOCK
 
 
 def _run_manifest(lane: str, gold_sha256: str, query_count: int) -> dict[str, Any]:

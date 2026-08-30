@@ -587,6 +587,20 @@ def _absolute_without_resolving(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 def _read_regular(path: Path) -> bytes:
     absolute = _absolute_without_resolving(path)
     try:
@@ -597,45 +611,55 @@ def _read_regular(path: Path) -> bytes:
         raise EvaluationError("jsonl_not_regular")
     if listed.st_size <= 0 or listed.st_size > MAX_JSONL_BYTES:
         raise EvaluationError("jsonl_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:
         raise EvaluationError("jsonl_open_failed") from exc
     try:
         before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise EvaluationError("jsonl_not_regular")
+        if before.st_size <= 0 or before.st_size > MAX_JSONL_BYTES:
+            raise EvaluationError("jsonl_size_invalid")
+        if _stat_identity(listed) != _stat_identity(before):
+            raise EvaluationError("jsonl_changed_during_read")
         chunks: list[bytes] = []
         remaining = before.st_size
+        size = 0
         while remaining:
             block = os.read(descriptor, min(1024 * 1024, remaining))
             if not block:
                 raise EvaluationError("jsonl_changed_during_read")
+            if len(block) > MAX_JSONL_BYTES - size:
+                raise EvaluationError("jsonl_size_invalid")
+            if len(block) > remaining:
+                raise EvaluationError("jsonl_changed_during_read")
             chunks.append(block)
+            size += len(block)
             remaining -= len(block)
         if os.read(descriptor, 1):
             raise EvaluationError("jsonl_changed_during_read")
         after = os.fstat(descriptor)
+        try:
+            current = absolute.lstat()
+        except OSError:
+            raise EvaluationError("jsonl_changed_during_read") from None
+        identity = _stat_identity(before)
+        if (
+            size != before.st_size
+            or identity != _stat_identity(listed)
+            or identity != _stat_identity(after)
+            or identity != _stat_identity(current)
+        ):
+            raise EvaluationError("jsonl_changed_during_read")
     finally:
         os.close(descriptor)
-    identity_before = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    )
-    identity_after = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    )
-    if identity_before != identity_after or (listed.st_dev, listed.st_ino) != (
-        before.st_dev,
-        before.st_ino,
-    ):
-        raise EvaluationError("jsonl_changed_during_read")
     return b"".join(chunks)
 
 

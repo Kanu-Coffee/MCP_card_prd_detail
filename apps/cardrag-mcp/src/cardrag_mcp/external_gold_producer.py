@@ -3649,7 +3649,12 @@ def _load_page_vectors(
         raise GoldCaptureError("page_vectors_not_regular")
     if listed.st_size != forecast.vector_size_bytes:
         raise GoldCaptureError("page_vector_binding_mismatch")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:

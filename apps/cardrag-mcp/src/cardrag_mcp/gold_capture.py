@@ -753,7 +753,12 @@ def _read_regular(path: Path, *, maximum_bytes: int, code: str) -> bytes:
         raise GoldCaptureError(f"{code}_not_regular")
     if listed.st_size <= 0 or listed.st_size > maximum_bytes:
         raise GoldCaptureError(f"{code}_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:
@@ -821,7 +826,12 @@ def _hash_regular_with_identity(
         raise GoldCaptureError(f"{code}_not_regular")
     if listed.st_size <= 0 or listed.st_size > maximum_bytes:
         raise GoldCaptureError(f"{code}_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:
@@ -961,7 +971,12 @@ class _CanonicalJsonlReader:
             raise GoldCaptureError(f"{self.code}_not_regular")
         if listed.st_size <= 0 or listed.st_size > self.maximum_bytes:
             raise GoldCaptureError(f"{self.code}_size_invalid")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             descriptor = os.open(self.path, flags)
         except OSError as exc:
@@ -1555,7 +1570,12 @@ def _sqlite_readonly(
         raise GoldCaptureError("serving_database_not_regular")
     if listed.st_size <= 0 or listed.st_size > _MAX_DATABASE_BYTES:
         raise GoldCaptureError("serving_database_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:
@@ -1933,7 +1953,12 @@ def _verified_corpus_vectors(
                 source_database_path=source_database_path,
                 release_gate=release_gate,
             )
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
             absolute_vector = _absolute(vector_path)
             try:
                 listed_vector = absolute_vector.lstat()
@@ -2034,7 +2059,12 @@ def _verified_sidecar(
         raise GoldCaptureError(f"{code}_not_regular")
     if listed.st_size != expected.size_bytes:
         raise GoldCaptureError(f"{code}_binding_mismatch")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:

@@ -311,7 +311,12 @@ def _read_regular(path: Path, *, maximum_bytes: int, error_prefix: str) -> bytes
         raise AggregationProfileError(f"{error_prefix}_not_regular")
     if listed.st_size <= 0 or listed.st_size > maximum_bytes:
         raise AggregationProfileError(f"{error_prefix}_size_invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:
@@ -407,7 +412,12 @@ class _ScoreLineReader:
             raise AggregationProfileError(f"{self._code}_not_regular")
         if listed.st_size <= 0 or listed.st_size > MAX_SCORE_ARTIFACT_BYTES:
             raise AggregationProfileError(f"{self._code}_size_invalid")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             descriptor = os.open(self._path, flags)
         except OSError as exc:
@@ -498,51 +508,64 @@ class _MappedArtifact:
             raise AggregationProfileError(f"{self.code}_not_regular")
         if listed.st_size != self.binding.size_bytes:
             raise AggregationProfileError(f"{self.code}_size_mismatch")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             descriptor = os.open(self.path, flags)
         except OSError as exc:
             raise AggregationProfileError(f"{self.code}_open_failed") from exc
+        mapping: mmap.mmap | None = None
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size != self.binding.size_bytes
+                or _identity(listed) != _identity(before)
+            ):
+                raise AggregationProfileError(f"{self.code}_changed_during_open")
+            digest = hashlib.sha256()
+            position = 0
+            while position < before.st_size:
+                block = os.pread(
+                    descriptor,
+                    min(1024 * 1024, before.st_size - position),
+                    position,
+                )
+                if not block:
+                    raise AggregationProfileError(f"{self.code}_changed_during_read")
+                digest.update(block)
+                position += len(block)
+            after_hash = os.fstat(descriptor)
+            try:
+                current_path = self.path.lstat()
+            except OSError:
+                raise AggregationProfileError(f"{self.code}_changed_during_read") from None
+            if _identity(before) != _identity(after_hash) or _identity(before) != _identity(
+                current_path
+            ):
+                raise AggregationProfileError(f"{self.code}_changed_during_read")
+            if digest.hexdigest() != self.binding.sha256:
+                raise AggregationProfileError(f"{self.code}_sha256_mismatch")
+            mapping = mmap.mmap(descriptor, before.st_size, access=mmap.ACCESS_READ)
+        except BaseException:
+            self._mapping = None
+            self._descriptor = None
+            self._listed = None
+            self._before = None
+            try:
+                if mapping is not None:
+                    mapping.close()
+            finally:
+                os.close(descriptor)
+            raise
         self._descriptor = descriptor
         self._listed = listed
-        before = os.fstat(descriptor)
         self._before = before
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_size != self.binding.size_bytes
-            or _identity(listed) != _identity(before)
-        ):
-            os.close(descriptor)
-            self._descriptor = None
-            raise AggregationProfileError(f"{self.code}_changed_during_open")
-        digest = hashlib.sha256()
-        position = 0
-        while position < before.st_size:
-            block = os.pread(descriptor, min(1024 * 1024, before.st_size - position), position)
-            if not block:
-                os.close(descriptor)
-                self._descriptor = None
-                raise AggregationProfileError(f"{self.code}_changed_during_read")
-            digest.update(block)
-            position += len(block)
-        after_hash = os.fstat(descriptor)
-        try:
-            current_path = self.path.lstat()
-        except OSError:
-            os.close(descriptor)
-            self._descriptor = None
-            raise AggregationProfileError(f"{self.code}_changed_during_read") from None
-        if _identity(before) != _identity(after_hash) or _identity(before) != _identity(
-            current_path
-        ):
-            os.close(descriptor)
-            self._descriptor = None
-            raise AggregationProfileError(f"{self.code}_changed_during_read")
-        if digest.hexdigest() != self.binding.sha256:
-            os.close(descriptor)
-            self._descriptor = None
-            raise AggregationProfileError(f"{self.code}_sha256_mismatch")
-        self._mapping = mmap.mmap(descriptor, before.st_size, access=mmap.ACCESS_READ)
+        self._mapping = mapping
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:

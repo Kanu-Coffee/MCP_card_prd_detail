@@ -132,6 +132,134 @@ def test_profile_readers_reject_same_inode_growth_between_lstat_and_open(
     assert fdopen_calls == 0
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="requires POSIX nonblocking open")
+@pytest.mark.parametrize(
+    ("reader_kind", "expected_error"),
+    (
+        ("whole", "fixture_not_regular"),
+        ("jsonl", "fixture_not_regular"),
+        ("mapped", "fixture_changed_during_open"),
+    ),
+)
+def test_profile_readers_nonblocking_open_rejects_fifo_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_kind: str,
+    expected_error: str,
+) -> None:
+    target = tmp_path / "artifact.bin"
+    payload = b"bounded artifact"
+    target.write_bytes(payload)
+    binding = ArtifactBinding(
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+    original_open = aggregation_module.os.open
+    raced = False
+    observed_flags = 0
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_flags, raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == target:
+            raced = True
+            observed_flags = flags
+            target.unlink()
+            os.mkfifo(target)
+            assert flags & os.O_NONBLOCK
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(aggregation_module.os, "open", racing_open)
+
+    with pytest.raises(AggregationProfileError, match=expected_error):
+        if reader_kind == "whole":
+            aggregation_module._read_regular(
+                target,
+                maximum_bytes=len(payload),
+                error_prefix="fixture",
+            )
+        elif reader_kind == "jsonl":
+            with aggregation_module._ScoreLineReader(target, code="fixture"):
+                raise AssertionError("FIFO must be rejected during context entry")
+        else:
+            with aggregation_module._MappedArtifact(target, binding, code="fixture"):
+                raise AssertionError("FIFO must be rejected during context entry")
+
+    assert raced
+    assert observed_flags & os.O_NONBLOCK
+
+
+@pytest.mark.parametrize("failure_point", ("first_fstat", "second_fstat", "pread", "mmap"))
+def test_mapped_artifact_closes_descriptor_when_enter_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    target = tmp_path / "mapped.bin"
+    payload = b"bounded mapped artifact"
+    target.write_bytes(payload)
+    binding = ArtifactBinding(
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+    artifact = aggregation_module._MappedArtifact(target, binding, code="fixture")
+    original_open = aggregation_module.os.open
+    original_fstat = aggregation_module.os.fstat
+    opened_descriptors: list[int] = []
+    fstat_calls = 0
+
+    def tracking_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    def failing_fstat(descriptor: int) -> os.stat_result:
+        nonlocal fstat_calls
+        fstat_calls += 1
+        expected_call = 1 if failure_point == "first_fstat" else 2
+        if fstat_calls == expected_call:
+            raise OSError(f"synthetic {failure_point} failure")
+        return original_fstat(descriptor)
+
+    with monkeypatch.context() as context:
+        context.setattr(aggregation_module.os, "open", tracking_open)
+        if failure_point in {"first_fstat", "second_fstat"}:
+            context.setattr(aggregation_module.os, "fstat", failing_fstat)
+        elif failure_point == "pread":
+            context.setattr(
+                aggregation_module.os,
+                "pread",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic pread failure")),
+            )
+        else:
+            context.setattr(
+                aggregation_module.mmap,
+                "mmap",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic mmap failure")),
+            )
+        with pytest.raises(OSError, match=f"synthetic {failure_point} failure"):
+            artifact.__enter__()
+
+    assert len(opened_descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened_descriptors[0])
+    assert artifact._descriptor is None
+    assert artifact._mapping is None
+    assert artifact._listed is None
+    assert artifact._before is None
+
+
 def test_score_line_reader_enforces_running_artifact_cap(tmp_path: Path) -> None:
     target = tmp_path / "bounded.jsonl"
     payload = _canonical({}) + b"\n"

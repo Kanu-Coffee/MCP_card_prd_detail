@@ -253,7 +253,12 @@ def _consume_regular_file(
         raise AggregationCaptureError("capture input is not a regular file")
     if listed.st_size > maximum_bytes:
         raise AggregationCaptureError("capture input exceeds its byte limit")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(absolute, flags)
     except OSError as exc:

@@ -140,6 +140,45 @@ def test_regular_reader_rejects_same_inode_growth_between_lstat_and_open(
     assert fdopen_calls == 0
 
 
+def test_regular_reader_rejects_fifo_substitution_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nonblocking = getattr(os, "O_NONBLOCK", 0)
+    if not nonblocking or not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO nonblocking-open semantics require POSIX")
+    target = tmp_path / "race.jsonl"
+    target.write_bytes(_canonical({}) + b"\n")
+    original_open = capture_module.os.open
+    swapped = False
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and dir_fd is None and Path(os.fspath(path)) == target:
+            assert flags & nonblocking
+            target.unlink()
+            os.mkfifo(target)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(capture_module.os, "open", racing_open)
+    with pytest.raises(GoldCaptureError, match="fixture_not_regular"):
+        capture_module._read_regular(
+            target,
+            maximum_bytes=1024,
+            code="fixture",
+        )
+
+    assert swapped
+    assert target.is_fifo()
+
+
 def test_canonical_reader_enforces_running_cap_before_parsing_extra_bytes(
     tmp_path: Path,
 ) -> None:

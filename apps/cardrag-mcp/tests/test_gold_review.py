@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import os
 import re
 import threading
 from collections import Counter
@@ -165,6 +166,61 @@ def test_inventory_rejects_symlink_and_nonregular_database(tmp_path: Path) -> No
     directory.mkdir()
     with pytest.raises(GoldReviewError, match="input_not_regular"):
         review._inventory_rows(directory)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="requires POSIX nonblocking open")
+@pytest.mark.parametrize(
+    ("reader_kind", "expected_error"),
+    (
+        ("database", "input_size_invalid"),
+        ("review", "input_not_regular"),
+    ),
+)
+def test_review_readers_nonblocking_open_rejects_fifo_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_kind: str,
+    expected_error: str,
+) -> None:
+    artifact = tmp_path / "review-input"
+    artifact.write_bytes(b"sealed-review-input")
+    real_open = review.os.open
+    opened_descriptors: list[int] = []
+    raced = False
+    observed_flags = 0
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_flags, raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == artifact:
+            raced = True
+            observed_flags = flags
+            artifact.unlink()
+            os.mkfifo(artifact)
+            assert flags & os.O_NONBLOCK
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(review.os, "open", racing_open)
+
+    with pytest.raises(GoldReviewError, match=expected_error):
+        if reader_kind == "database":
+            with review._pinned_sqlite_database(artifact):
+                raise AssertionError("FIFO must be rejected during context entry")
+        else:
+            review._read_regular(artifact)
+
+    assert raced
+    assert observed_flags & os.O_NONBLOCK
+    assert len(opened_descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened_descriptors[0])
 
 
 @pytest.mark.parametrize(

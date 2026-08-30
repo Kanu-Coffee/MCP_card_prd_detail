@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -145,6 +146,52 @@ def test_capture_hash_rejects_same_inode_metadata_change_before_open_without_rea
 
     assert mutated
     assert artifact.stat().st_ino == inode
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="requires POSIX nonblocking open")
+def test_capture_regular_reader_nonblocking_open_rejects_fifo_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "capture-input.json"
+    artifact.write_bytes(b"sealed-capture-input")
+    real_open = capture_module.os.open
+    opened_descriptors: list[int] = []
+    raced = False
+    observed_flags = 0
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_flags, raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == artifact:
+            raced = True
+            observed_flags = flags
+            artifact.unlink()
+            os.mkfifo(artifact)
+            assert flags & os.O_NONBLOCK
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(capture_module.os, "open", racing_open)
+
+    with pytest.raises(AggregationCaptureError, match="changed during open"):
+        capture_module._consume_regular_file(
+            artifact,
+            maximum_bytes=1024,
+            collect_payload=True,
+        )
+
+    assert raced
+    assert observed_flags & os.O_NONBLOCK
+    assert len(opened_descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened_descriptors[0])
 
 
 def test_capture_regular_reader_does_not_reopen_path_between_validation_and_read(

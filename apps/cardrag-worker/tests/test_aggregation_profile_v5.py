@@ -175,6 +175,50 @@ def test_profile_reader_rejects_same_inode_growth_before_read(
     assert read_calls == 0
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="requires POSIX nonblocking open")
+def test_profile_reader_nonblocking_open_rejects_fifo_swap_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "profile.json"
+    target.write_bytes(b"{}\n")
+    original_open = profile_module.os.open
+    raced = False
+    observed_flags = 0
+    read_calls = 0
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_flags, raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == target:
+            raced = True
+            observed_flags = flags
+            target.unlink()
+            os.mkfifo(target)
+            assert flags & os.O_NONBLOCK
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def forbidden_read(*_args: object, **_kwargs: object) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        raise AssertionError("FIFO must be rejected before any descriptor read")
+
+    monkeypatch.setattr(profile_module.os, "open", racing_open)
+    monkeypatch.setattr(profile_module.os, "read", forbidden_read)
+
+    with pytest.raises(AggregationProfileV5Error, match="profile_artifact_not_regular"):
+        profile_module._read_regular(target)
+
+    assert raced
+    assert observed_flags & os.O_NONBLOCK
+    assert read_calls == 0
+
+
 def test_profile_reader_rejects_path_replacement_during_descriptor_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

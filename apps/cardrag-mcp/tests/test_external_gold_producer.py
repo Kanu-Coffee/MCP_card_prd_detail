@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -745,6 +746,68 @@ def test_page_vector_load_forecast_supports_full_corpus_and_exact_boundary(
     )
     with pytest.raises(GoldCaptureError, match="page_vector_resource_limit_exceeded"):
         producer._forecast_page_vector_load(5_799)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="requires POSIX nonblocking open")
+def test_page_vector_reader_nonblocking_open_rejects_fifo_swap_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "page-vectors.f32"
+    payload = _unit_vector(4096).tobytes()
+    target.write_bytes(payload)
+    inventory = (
+        CorpusInventoryRow(
+            schema_version="cardrag.gold-corpus-row.v1",
+            row_index=0,
+            evidence_id="evidence-000000",
+            contract_revision_id="revision-000000",
+            span_id="evidence-000000",
+            input_sha256="a" * 64,
+            embedding_f32_sha256=hashlib.sha256(payload).hexdigest(),
+        ),
+    )
+    expected_binding = _binding(target)
+    original_open = producer.os.open
+    raced = False
+    observed_flags = 0
+    read_calls = 0
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal observed_flags, raced
+        if not raced and dir_fd is None and Path(os.fspath(path)) == target:
+            raced = True
+            observed_flags = flags
+            target.unlink()
+            os.mkfifo(target)
+            assert flags & os.O_NONBLOCK
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def forbidden_read(*_args: object, **_kwargs: object) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        raise AssertionError("FIFO must be rejected before any descriptor read")
+
+    monkeypatch.setattr(producer.os, "open", racing_open)
+    monkeypatch.setattr(producer.os, "read", forbidden_read)
+    monkeypatch.setattr(producer.os, "readv", forbidden_read)
+
+    with pytest.raises(GoldCaptureError, match="page_vectors_changed_during_read"):
+        producer._load_page_vectors(
+            target,
+            expected_binding=expected_binding,
+            inventory=inventory,
+        )
+
+    assert raced
+    assert observed_flags & os.O_NONBLOCK
+    assert read_calls == 0
 
 
 def test_inventory_stream_loads_full_page_count(tmp_path: Path) -> None:
