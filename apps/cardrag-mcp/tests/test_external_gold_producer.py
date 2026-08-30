@@ -618,20 +618,32 @@ async def test_v109_live_replay_uses_exact_historical_http_semantics_and_resumes
     assert resumed == captured
 
 
-def test_v109_normalization_matches_historical_one_pass_float32_bytes() -> None:
+def test_v109_normalization_matches_historical_one_pass_float32_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = np.random.default_rng(2).normal(size=1536).astype(np.float32)
     envelope = _raw_embedding_envelope({"data": [{"embedding": source.tolist(), "index": 0}]})
-    actual = producer._parse_v109_response(envelope)
     expected = np.asarray(source / np.linalg.norm(source), dtype=np.float32)
-    old_two_pass = np.asarray(expected / np.linalg.norm(expected), dtype=np.float32)
+    original_norm = producer.np.linalg.norm
+    norm_calls = 0
+
+    def counted_norm(*args: object, **kwargs: object) -> object:
+        nonlocal norm_calls
+        norm_calls += 1
+        return original_norm(*args, **kwargs)
+
+    monkeypatch.setattr(producer.np.linalg, "norm", counted_norm)
+    actual = producer._parse_v109_response(envelope)
 
     assert (
         actual.astype("<f4", copy=False).tobytes() == expected.astype("<f4", copy=False).tobytes()
     )
-    assert expected.tobytes() != old_two_pass.tobytes()
+    assert norm_calls == 1
 
 
-def test_qwen_role_normalization_matches_mcp_query_and_worker_document_bytes() -> None:
+def test_qwen_role_normalization_matches_mcp_query_and_worker_document_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from cardrag_worker.embedding_v5 import _normalize_vector as worker_normalize_vector
     from cardrag_worker.state import _encode_embedding_cache_v5
 
@@ -645,22 +657,27 @@ def test_qwen_role_normalization_matches_mcp_query_and_worker_document_bytes() -
         provider_header="DeepInfra",
     )
 
+    expected_query = np.asarray(source / np.linalg.norm(source), dtype=np.float32)
+    original_norm = producer.np.linalg.norm
+    norm_calls = 0
+
+    def counted_norm(*args: object, **kwargs: object) -> object:
+        nonlocal norm_calls
+        norm_calls += 1
+        return original_norm(*args, **kwargs)
+
+    monkeypatch.setattr(producer.np.linalg, "norm", counted_norm)
     query = producer._parse_qwen_response(
         envelope,
         provider_id="deepinfra",
         input_kind="query",
         expected_count=1,
     )[0]
-    expected_query = np.asarray(source / np.linalg.norm(source), dtype=np.float32)
-    old_two_pass = np.asarray(
-        expected_query / np.linalg.norm(expected_query),
-        dtype=np.float32,
-    )
     assert (
         query.astype("<f4", copy=False).tobytes()
         == expected_query.astype("<f4", copy=False).tobytes()
     )
-    assert expected_query.tobytes() != old_two_pass.tobytes()
+    assert norm_calls == 1
 
     document = producer._parse_qwen_response(
         envelope,
@@ -672,6 +689,7 @@ def test_qwen_role_normalization_matches_mcp_query_and_worker_document_bytes() -
     expected_document = _encode_embedding_cache_v5(worker_values, dimension=4096)
     assert document.astype("<f4", copy=False).tobytes() == expected_document
     assert document.tobytes() != query.tobytes()
+    assert norm_calls == 1
 
 
 def test_compact_git_cap_excludes_large_local_page_corpus_artifacts() -> None:
