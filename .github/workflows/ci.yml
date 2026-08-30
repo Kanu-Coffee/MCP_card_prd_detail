@@ -123,6 +123,10 @@ jobs:
           # runner versions, even when the stable URL above is already set.
           CARDRAG_CANDIDATE_WEBDAV_BASE_URL: https://webdav.example/cardrag
           CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL: https://cardrag.example
+          # Non-secret, receipt-shaped fixtures used only to render the
+          # digest-pinned candidate Compose overlays.
+          CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           CARDRAG_WEBDAV_USERNAME_SECRET_FILE: /etc/hostname
           CARDRAG_WEBDAV_PASSWORD_SECRET_FILE: /etc/hostname
           CARDRAG_WEBDAV_CA_SECRET_FILE: /etc/ssl/certs/ca-certificates.crt

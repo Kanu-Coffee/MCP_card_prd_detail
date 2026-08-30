@@ -44,6 +44,8 @@ def test_ci_runs_release_security_and_image_scans() -> None:
         "trivy image",
         "docker build --target worker",
         "docker build --target mcp",
+        "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST: sha256:" + "a" * 64,
+        "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST: sha256:" + "b" * 64,
     )
     for command in required_commands:
         assert command in workflow
