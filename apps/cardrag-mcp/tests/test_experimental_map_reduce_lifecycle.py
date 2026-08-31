@@ -6,12 +6,14 @@ import os
 import tempfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
 from cardrag_core import canonical_json_bytes
 from v5_fixtures import install_v5_fixture
 
+import cardrag_mcp.quota as quota_module
 from cardrag_mcp.experimental_map_reduce import (
     ExperimentalMapReduceError,
     ExperimentalMapReduceLane,
@@ -451,6 +453,16 @@ async def test_claim_fsync_precedes_rollover_and_same_query_resumes_one_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Keep shared-host /tmp pressure out of this lifecycle-ordering assertion.
+    monkeypatch.setattr(
+        quota_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(
+            total=8 * 1024**3,
+            used=4 * 1024**3,
+            free=4 * 1024**3,
+        ),
+    )
     store_a = _store(tmp_path, retention=2)
     store_b = GenerationStore(
         store_a.root,
