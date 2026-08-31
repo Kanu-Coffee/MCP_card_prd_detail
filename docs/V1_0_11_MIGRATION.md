@@ -137,6 +137,76 @@ docker compose --env-file /etc/cardrag/candidate-mcp-v111.env \
   up -d --wait
 ```
 
+Runtime image identity는 Docker image store에 따라 같은 필드가 다른 OCI object를
+가리킨다는 점을 명시적으로 봉인합니다. Registry에서 먼저 exact index digest가 유일한
+linux/amd64 platform manifest를 가리키고 그 manifest의 config가 receipt config digest인지
+검사합니다. 그 뒤 local image의 RepoDigests와 container `.Config.Image`가 모두 exact
+`repository@index-digest`인지 확인합니다. Local/container ID의 허용 집합은 sealed index와
+sealed config 두 개뿐이며 platform manifest, attestation manifest와 다른 digest는
+허용하지 않습니다. Release workflow의 unqualified local image inspect가 `Descriptor`를
+제공하면 media type과 digest가 exact OCI index여야 합니다. Container의 별도
+`.ImageManifestDescriptor`는 아래와 같이 platform manifest를 결속합니다.
+
+`cardrag.candidate-worker-metrics.v3`와 `cardrag.candidate-mcp-smoke.v2`는 다음 identity
+필드를 필수로 기록합니다.
+
+- `runtime_image_store_identity`: `classic-config-id` 또는 `containerd-index-id`
+- `runtime_container_config_image`: exact Compose `repository@index-digest`
+- `runtime_manifest_descriptor_digest`와 `runtime_manifest_descriptor_platform`: 둘 다 null이거나
+  둘 다 존재해야 하는 pair
+- `runtime_container_image_id`: 아래 store-specific exact ID
+
+Classic은 container ID가 sealed platform config digest여야 합니다. Classic의 manifest
+descriptor는 null을 허용하며, 제공되면 exact sealed platform manifest와
+`linux/amd64` pair만 허용합니다. Containerd는 container ID가 sealed index digest이고
+descriptor가 exact sealed platform manifest/`linux/amd64`여야 합니다. Store 이름만으로
+판정하지 않고 아래 관측값을 함께 검사합니다.
+
+```bash
+set -euo pipefail
+: "${candidate_reference:?exact repository@index reference is required}"
+: "${candidate_index_digest:?sealed index digest is required}"
+: "${candidate_platform_digest:?sealed linux/amd64 manifest digest is required}"
+: "${candidate_config_digest:?sealed platform config digest is required}"
+: "${candidate_container:?exact candidate container name is required}"
+test "${candidate_reference##*@}" = "$candidate_index_digest"
+
+repo_digests=$(docker image inspect "$candidate_reference" --format '{{json .RepoDigests}}')
+jq -e --arg reference "$candidate_reference" 'index($reference) != null' \
+  <<<"$repo_digests" >/dev/null
+container_inspect=$(docker container inspect "$candidate_container")
+jq -e 'type == "array" and length == 1 and (.[0] | type) == "object"' \
+  <<<"$container_inspect" >/dev/null
+container_config_image=$(jq -er '.[0].Config.Image | select(type == "string")' \
+  <<<"$container_inspect")
+test "$container_config_image" = "$candidate_reference"
+container_image_id=$(jq -er '.[0].Image | select(type == "string")' \
+  <<<"$container_inspect")
+# Classic stores may omit ImageManifestDescriptor entirely. Normalize only that
+# missing/null case; a present non-object value is rejected by the check below.
+manifest_descriptor=$(jq -c '.[0].ImageManifestDescriptor // null' \
+  <<<"$container_inspect")
+
+case "$container_image_id" in
+  "$candidate_config_digest") runtime_image_store_identity=classic-config-id ;;
+  "$candidate_index_digest") runtime_image_store_identity=containerd-index-id ;;
+  *) exit 1 ;;
+esac
+if test "$manifest_descriptor" != "null"; then
+  jq -e --arg digest "$candidate_platform_digest" '
+    .mediaType == "application/vnd.oci.image.manifest.v1+json"
+    and .digest == $digest
+    and .platform == {architecture:"amd64", os:"linux"}
+  ' <<<"$manifest_descriptor" >/dev/null
+elif test "$runtime_image_store_identity" != classic-config-id; then
+  exit 1
+fi
+```
+
+전체 `docker inspect` JSON은 env나 credential metadata를 포함할 수 있으므로 evidence에
+저장하지 않습니다. 위 allowlisted identity 필드와 store identity만 canonical evidence에
+기록합니다.
+
 Candidate failure는 stable cutover나 cleanup 근거가 아닙니다. 실패한 v111 container,
 state와 reports를 먼저 보존하고 v109 MCP, v110 incident state, stable WebDAV와
 `/opt/cardrag/current`의 before/after identity가 같은지 다시 검사합니다.

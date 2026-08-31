@@ -120,8 +120,12 @@ candidate overlay는 public repository를 YAML에 고정하고 위 receipt-bound
 digest 변수가 없으면 Compose render를 거부합니다. base의 local image와 `build:` fallback을
 제거하며 `pull_policy=always`를 강제합니다. 실행 전
 sanitized Compose JSON의 role image가 receipt reference와 같고 `build`가 없음을 검사하고,
-실행 뒤 container `.Image`가 receipt의 platform config digest인지, local RepoDigests가 exact
-index reference를 포함하는지 확인합니다. canonical 명령과 영수증 필드 기록은
+실행 뒤 local RepoDigests와 container `.Config.Image`가 exact index reference인지
+확인합니다. Unqualified local image inspect가 `Descriptor`를 제공하면 exact OCI index
+media type/digest여야 합니다. Docker classic store의 container `.Image`는 sealed platform config digest,
+containerd store에서는 sealed index digest여야 하며 이 두 값 외에는 거부합니다.
+Containerd는 `.ImageManifestDescriptor`도 exact linux/amd64 platform manifest여야 합니다.
+canonical 명령과 `worker-metrics.v3`/`mcp-smoke.v2` 영수증 필드 기록은
 [v1.0.11 migration](../docs/V1_0_11_MIGRATION.md)을 따릅니다.
 
 운영 stable channel이나 v1.0.9 volume을 후보의 RW base/overlay에 지정하지

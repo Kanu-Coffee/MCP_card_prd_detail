@@ -1253,6 +1253,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          validate_local_image_identity() {
+            local reference=$1 expected_repository=$2 expected_index=$3 expected_config=$4
+            local inspect_json local_id identity_kind
+            [[ "$expected_index" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$expected_config" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$expected_index" != "$expected_config"
+            [[ "$expected_repository" != *"@"* ]]
+            inspect_json=$(docker image inspect "$reference")
+            if ! jq -e \
+              --arg repository "$expected_repository" \
+              --arg index_digest "$expected_index" \
+              --arg config_digest "$expected_config" '
+                type == "array" and length == 1
+                and (.[0] as $image
+                  | (($image.Id == $index_digest) or ($image.Id == $config_digest))
+                  and (($image.RepoDigests | type) == "array")
+                  and (($image.RepoDigests
+                    | index($repository + "@" + $index_digest)) != null)
+                  and (
+                    (($image | has("Descriptor")) | not)
+                    or ($image.Descriptor == null)
+                    or (
+                      (($image.Descriptor | type) == "object")
+                      and ($image.Descriptor.mediaType
+                        == "application/vnd.oci.image.index.v1+json")
+                      and ($image.Descriptor.digest == $index_digest)
+                    )
+                  )
+                )
+              ' <<<"$inspect_json" >/dev/null; then
+              return 1
+            fi
+            local_id=$(jq -er '.[0].Id' <<<"$inspect_json")
+            case "$local_id" in
+              "$expected_index") identity_kind=sealed-index ;;
+              "$expected_config") identity_kind=platform-config ;;
+              *) return 1 ;;
+            esac
+            echo "validated local image identity kind=${identity_kind}" >&2
+          }
           anonymous_docker_config="$RUNNER_TEMP/cardrag-anonymous-ghcr-docker-config"
           test ! -e "$anonymous_docker_config/config.json"
           install -d -m 0700 "$anonymous_docker_config"
@@ -1375,7 +1415,8 @@ jobs:
             "10001:10001"
           test "$(docker image inspect "$image" --format '{{ .Os }}/{{ .Architecture }}')" = \
             "linux/amd64"
-          test "$(docker image inspect "$image" --format '{{ .Id }}')" = "$config_digest"
+          validate_local_image_identity \
+            "$image" "$CANDIDATE_IMAGE_REPOSITORY" "$digest" "$config_digest"
           {
             echo "image=$image"
             echo "digest=$digest"
@@ -1531,6 +1572,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          validate_local_image_identity() {
+            local reference=$1 expected_repository=$2 expected_index=$3 expected_config=$4
+            local inspect_json local_id identity_kind
+            [[ "$expected_index" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$expected_config" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$expected_index" != "$expected_config"
+            [[ "$expected_repository" != *"@"* ]]
+            inspect_json=$(docker image inspect "$reference")
+            if ! jq -e \
+              --arg repository "$expected_repository" \
+              --arg index_digest "$expected_index" \
+              --arg config_digest "$expected_config" '
+                type == "array" and length == 1
+                and (.[0] as $image
+                  | (($image.Id == $index_digest) or ($image.Id == $config_digest))
+                  and (($image.RepoDigests | type) == "array")
+                  and (($image.RepoDigests
+                    | index($repository + "@" + $index_digest)) != null)
+                  and (
+                    (($image | has("Descriptor")) | not)
+                    or ($image.Descriptor == null)
+                    or (
+                      (($image.Descriptor | type) == "object")
+                      and ($image.Descriptor.mediaType
+                        == "application/vnd.oci.image.index.v1+json")
+                      and ($image.Descriptor.digest == $index_digest)
+                    )
+                  )
+                )
+              ' <<<"$inspect_json" >/dev/null; then
+              return 1
+            fi
+            local_id=$(jq -er '.[0].Id' <<<"$inspect_json")
+            case "$local_id" in
+              "$expected_index") identity_kind=sealed-index ;;
+              "$expected_config") identity_kind=platform-config ;;
+              *) return 1 ;;
+            esac
+            echo "validated local image identity kind=${identity_kind}" >&2
+          }
           resolve_digest() {
             local reference=$1 observed="" _attempt
             for _attempt in $(seq 1 24); do
@@ -1559,7 +1640,8 @@ jobs:
             return 1
           }
           validate_image() {
-            local reference=$1 role=$2 expected_config=$3 revision version entrypoint user
+            local reference=$1 role=$2 expected_index=$3 expected_config=$4
+            local revision version entrypoint user
             local expected_entrypoint
             pull_linux_amd64 "$reference"
             revision=$(docker image inspect "$reference" \
@@ -1575,7 +1657,8 @@ jobs:
             test "$user" = "10001:10001"
             test "$(docker image inspect "$reference" --format '{{ .Os }}/{{ .Architecture }}')" = \
               "linux/amd64"
-            test "$(docker image inspect "$reference" --format '{{ .Id }}')" = "$expected_config"
+            validate_local_image_identity \
+              "$reference" "$IMAGE_NAME" "$expected_index" "$expected_config"
           }
 
           repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
@@ -1617,7 +1700,7 @@ jobs:
                 echo "immutable alias is not the accepted ${role} digest: ${observed}" >&2
                 exit 1
               fi
-              validate_image "$reference" "$role" "$expected_config"
+              validate_image "$reference" "$role" "$expected_digest" "$expected_config"
             done
           done
 
@@ -1901,6 +1984,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          validate_local_image_identity() {
+            local reference=$1 expected_repository=$2 expected_index=$3 expected_config=$4
+            local inspect_json local_id identity_kind
+            [[ "$expected_index" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$expected_config" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$expected_index" != "$expected_config"
+            [[ "$expected_repository" != *"@"* ]]
+            inspect_json=$(docker image inspect "$reference")
+            if ! jq -e \
+              --arg repository "$expected_repository" \
+              --arg index_digest "$expected_index" \
+              --arg config_digest "$expected_config" '
+                type == "array" and length == 1
+                and (.[0] as $image
+                  | (($image.Id == $index_digest) or ($image.Id == $config_digest))
+                  and (($image.RepoDigests | type) == "array")
+                  and (($image.RepoDigests
+                    | index($repository + "@" + $index_digest)) != null)
+                  and (
+                    (($image | has("Descriptor")) | not)
+                    or ($image.Descriptor == null)
+                    or (
+                      (($image.Descriptor | type) == "object")
+                      and ($image.Descriptor.mediaType
+                        == "application/vnd.oci.image.index.v1+json")
+                      and ($image.Descriptor.digest == $index_digest)
+                    )
+                  )
+                )
+              ' <<<"$inspect_json" >/dev/null; then
+              return 1
+            fi
+            local_id=$(jq -er '.[0].Id' <<<"$inspect_json")
+            case "$local_id" in
+              "$expected_index") identity_kind=sealed-index ;;
+              "$expected_config") identity_kind=platform-config ;;
+              *) return 1 ;;
+            esac
+            echo "validated local image identity kind=${identity_kind}" >&2
+          }
           resolve_digest() {
             local reference=$1 observed="" _attempt
             for _attempt in $(seq 1 24); do
@@ -2094,7 +2217,8 @@ jobs:
             --format '{{ json .Config.Entrypoint }}')" = "[\"cardrag-${TARGET}\"]"
           test "$(docker image inspect "$source_reference" --format '{{ .Config.User }}')" = \
             "10001:10001"
-          test "$(docker image inspect "$source_reference" --format '{{ .Id }}')" = "$config_digest"
+          validate_local_image_identity \
+            "$source_reference" "$CANDIDATE_IMAGE_REPOSITORY" "$digest" "$config_digest"
 
           test "$(git cat-file -t "refs/tags/v$VERSION")" = tag
           local_tag_object=$(git rev-parse "refs/tags/v${VERSION}")
@@ -2174,8 +2298,8 @@ jobs:
           cmp --silent "$provenance" /tmp/published-provenance.json
           cmp --silent "$sbom" /tmp/published-sbom.json
           docker pull --platform linux/amd64 "${IMAGE_NAME}@${digest}" >/dev/null
-          test "$(docker image inspect "${IMAGE_NAME}@${digest}" --format '{{ .Id }}')" = \
-            "$config_digest"
+          validate_local_image_identity \
+            "${IMAGE_NAME}@${digest}" "$IMAGE_NAME" "$digest" "$config_digest"
           {
             echo "digest=$digest"
             echo "platform_digest=$platform_digest"

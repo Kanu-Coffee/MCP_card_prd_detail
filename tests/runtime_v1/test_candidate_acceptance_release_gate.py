@@ -33,6 +33,45 @@ def _run_portable_verifier(
     )
 
 
+def _local_image_identity_helper(workflow: str) -> str:
+    strict_job = workflow.split("  strict-image-scan:\n", 1)[1].split("  registry-preflight:\n", 1)[0]
+    marker = "          validate_local_image_identity() {\n"
+    function_body = strict_job.split(marker, 1)[1].split("\n          }\n", 1)[0]
+    indented = marker + function_body + "\n          }\n"
+    return "\n".join(line[10:] for line in indented.splitlines()) + "\n"
+
+
+def _run_local_image_identity_helper(
+    workflow: str,
+    inspect_payload: object,
+    *,
+    repository: str,
+    index_digest: str,
+    config_digest: str,
+) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    assert bash is not None
+    script = (
+        _local_image_identity_helper(workflow)
+        + r"""
+docker() {
+  test "$1" = "image"
+  test "$2" = "inspect"
+  test "$3" = "fixture:tag"
+  cat
+}
+validate_local_image_identity "fixture:tag" "$1" "$2" "$3"
+"""
+    )
+    return subprocess.run(  # noqa: S603 - interpreter and embedded workflow code are controlled
+        (bash, "-c", script, "cardrag-local-identity-test", repository, index_digest, config_digest),
+        input=json.dumps(inspect_payload),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _public_package_is_valid(tmp_path: Path, package: object) -> bool:
     jq = shutil.which("jq")
     assert jq is not None
@@ -548,7 +587,7 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert "contains($source_commit)" not in strict_job
     assert 'docker pull --platform linux/amd64 "$image"' in strict_job
     assert 'crane" manifest' in strict_job
-    assert 'test "$(docker image inspect "$image" --format \'{{ .Id }}\')" = "$config_digest"' in strict_job
+    assert '"$image" "$CANDIDATE_IMAGE_REPOSITORY" "$digest" "$config_digest"' in strict_job
     assert '"$CANDIDATE_SOURCE_COMMIT"' in strict_job
     assert "{{ .Config.User }}" in strict_job
     assert '"10001:10001"' in strict_job
@@ -567,10 +606,8 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
 
     assert 'test "$revision" = "$CANDIDATE_SOURCE_COMMIT"' in preflight_job
     assert 'if [[ "$observed" != "$expected_digest" ]]' in preflight_job
-    assert (
-        'test "$(docker image inspect "$reference" --format \'{{ .Id }}\')" = "$expected_config"'
-        in preflight_job
-    )
+    assert "local reference=$1 role=$2 expected_index=$3 expected_config=$4" in preflight_job
+    assert 'validate_image "$reference" "$role" "$expected_digest" "$expected_config"' in preflight_job
     assert "setup-buildx-action@" not in preflight_job
 
     assert "actions/download-artifact@" in publish_job
@@ -645,6 +682,133 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert '.owner.type == "User"' in package_filter
     assert ".repository" not in package_filter
     assert not (ROOT / ".github/actions/verify-private-candidate-package").exists()
+
+
+def test_release_local_image_identity_is_portable_and_fail_closed() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    repository = "example/cardrag"
+    index_digest = "sha256:" + "1" * 64
+    config_digest = "sha256:" + "2" * 64
+    platform_digest = "sha256:" + "3" * 64
+    other_digest = "sha256:" + "4" * 64
+    repo_digest = f"{repository}@{index_digest}"
+    oci_index_descriptor = {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "digest": index_digest,
+        "size": 1234,
+    }
+
+    assert workflow.count("validate_local_image_identity() {") == 3
+    helper = _local_image_identity_helper(workflow)
+    indented_helper = "".join(f"          {line}\n" for line in helper.splitlines())
+    assert workflow.count(indented_helper) == 3
+    assert workflow.count("          validate_local_image_identity \\") == 4
+    assert "docker image inspect \"$image\" --format '{{ .Id }}'" not in workflow
+    assert "docker image inspect \"$reference\" --format '{{ .Id }}'" not in workflow
+    assert "docker image inspect \"$source_reference\" --format '{{ .Id }}'" not in workflow
+    assert "docker image inspect \"${IMAGE_NAME}@${digest}\" --format '{{ .Id }}'" not in workflow
+    assert workflow.count('index($repository + "@" + $index_digest)') == 3
+    assert workflow.count('== "application/vnd.oci.image.index.v1+json"') >= 3
+    assert workflow.count("$image.Descriptor.digest == $index_digest") == 3
+    assert workflow.count("validated local image identity kind=${identity_kind}") == 3
+
+    valid_cases = (
+        (
+            [{"Id": config_digest, "RepoDigests": [repo_digest]}],
+            "kind=platform-config",
+        ),
+        (
+            [
+                {
+                    "Id": index_digest,
+                    "RepoDigests": [repo_digest],
+                    "Descriptor": oci_index_descriptor,
+                }
+            ],
+            "kind=sealed-index",
+        ),
+    )
+    for payload, expected_log in valid_cases:
+        result = _run_local_image_identity_helper(
+            workflow,
+            payload,
+            repository=repository,
+            index_digest=index_digest,
+            config_digest=config_digest,
+        )
+        assert result.returncode == 0, result.stderr
+        assert expected_log in result.stderr
+        assert index_digest not in result.stderr
+        assert config_digest not in result.stderr
+
+    invalid_cases = (
+        # A platform-manifest or any unrelated/attestation digest is never a local image ID.
+        [
+            {
+                "Id": platform_digest,
+                "RepoDigests": [repo_digest],
+                "Descriptor": oci_index_descriptor,
+            }
+        ],
+        [{"Id": other_digest, "RepoDigests": [repo_digest]}],
+        # RepoDigests must contain the exact repository-to-index binding.
+        [{"Id": config_digest, "RepoDigests": [f"{repository}@{platform_digest}"]}],
+        # A provided descriptor must be the exact OCI index, not another digest or media type.
+        [
+            {
+                "Id": index_digest,
+                "RepoDigests": [repo_digest],
+                "Descriptor": {**oci_index_descriptor, "digest": platform_digest},
+            }
+        ],
+        [
+            {
+                "Id": index_digest,
+                "RepoDigests": [repo_digest],
+                "Descriptor": {
+                    **oci_index_descriptor,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                },
+            }
+        ],
+        [{"Id": config_digest, "RepoDigests": [repo_digest], "Descriptor": False}],
+    )
+    for payload in invalid_cases:
+        result = _run_local_image_identity_helper(
+            workflow,
+            payload,
+            repository=repository,
+            index_digest=index_digest,
+            config_digest=config_digest,
+        )
+        assert result.returncode != 0
+
+
+def test_migration_runtime_capture_accepts_classic_missing_descriptor() -> None:
+    migration = (ROOT / "docs/V1_0_11_MIGRATION.md").read_text(encoding="utf-8")
+    descriptor_filter = ".[0].ImageManifestDescriptor // null"
+
+    assert "--format '{{json .ImageManifestDescriptor}}'" not in migration
+    assert 'container_inspect=$(docker container inspect "$candidate_container")' in migration
+    assert descriptor_filter in migration
+
+    jq = shutil.which("jq")
+    assert jq is not None
+    classic_inspect = [
+        {
+            "Image": "sha256:" + "2" * 64,
+            "Config": {"Image": "example/cardrag@sha256:" + "1" * 64},
+        }
+    ]
+    result = subprocess.run(  # noqa: S603 - executable and filter are repository-controlled
+        (jq, "-c", descriptor_filter),
+        input=json.dumps(classic_inspect),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "null\n"
 
 
 def test_release_strict_filesystem_scan_is_sealed_and_published_as_evidence() -> None:
