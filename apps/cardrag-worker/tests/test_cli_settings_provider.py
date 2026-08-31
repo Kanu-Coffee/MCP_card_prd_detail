@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -406,7 +407,7 @@ def test_run_verifies_supplied_aggregation_profile_before_state_mutation(
     observed: dict[str, object] = {}
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = profile_path
         document_aggregation_profile_artifact_sha256 = "a" * 64
@@ -439,7 +440,7 @@ def test_run_rejects_startup_capacity_before_state_provider_or_webdav_mutation(
     events: list[str] = []
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         state_dir = state_root
         minimum_start_free_bytes = 32 * 1024**3
@@ -481,7 +482,7 @@ def test_run_rejects_nested_state_database_symlink_before_any_runtime_client(
     events: list[str] = []
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
         document_aggregation_profile_artifact_sha256 = None
@@ -513,7 +514,7 @@ def test_run_revalidation_failure_precedes_webdav_state_and_provider(
     events: list[str] = []
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
         document_aggregation_profile_artifact_sha256 = None
@@ -560,7 +561,7 @@ def test_run_rejects_aggregation_head_before_provider_or_state_creation(
     events: list[str] = []
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = profile_path
         document_aggregation_profile_artifact_sha256 = "a" * 64
@@ -618,7 +619,7 @@ def test_run_without_aggregation_profile_preserves_m0_state_then_webdav_order(
     state_root = tmp_path / "state"
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
         document_aggregation_profile_artifact_sha256 = None
@@ -646,7 +647,7 @@ def test_run_revalidates_a_new_m0_state_root_twice_before_state_open(
     original_revalidate = cli_module.revalidate_worker_start_capacity
 
     class Settings:
-        channel = "candidate-v1.0.10"
+        channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
         document_aggregation_profile_artifact_sha256 = None
@@ -1129,7 +1130,7 @@ def test_candidate_channel_and_two_generation_retention_are_validated(
 def test_remote_ocr_cache_writes_require_separate_approval_on_stable_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     monkeypatch.setenv("CARDRAG_OCR_CACHE_MODE", "read-write")
     monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
     monkeypatch.delenv("CARDRAG_OCR_CACHE_PUBLICATION_APPROVED", raising=False)
@@ -1140,7 +1141,7 @@ def test_remote_ocr_cache_writes_require_separate_approval_on_stable_channel(
     with pytest.raises(ValueError, match="OCR_CACHE_PUBLICATION_APPROVED=true"):
         WorkerSettings.from_env()
 
-    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     monkeypatch.setenv("CARDRAG_OCR_CACHE_PUBLICATION_APPROVED", "true")
     with pytest.raises(ValueError, match="OCR_CACHE_MODE=read-write requires stable"):
         WorkerSettings.from_env()
@@ -1178,7 +1179,7 @@ def test_remote_gc_requires_stable_channel_and_two_independent_approvals(
     assert approved.remote_gc_approved is True
     cli_module._guard_remote_gc(approved, apply=True)
 
-    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     with pytest.raises(ValueError, match="requires stable channel"):
         WorkerSettings.from_env()
 
@@ -1195,25 +1196,25 @@ def test_remote_gc_apply_guard_precedes_mutation(monkeypatch: pytest.MonkeyPatch
         cli_module._guard_remote_gc(settings, apply=True)
 
 
-def test_v110_publication_channel_requires_explicit_stable_approval(
+def test_v111_publication_channel_requires_explicit_stable_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.10")
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
-    cli_module._guard_v110_publication_channel(WorkerSettings.from_env())
+    cli_module._guard_v111_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
     with pytest.raises(ValueError, match="explicit.*APPROVED=true"):
-        cli_module._guard_v110_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v111_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "true")
     approved = WorkerSettings.from_env()
     assert approved.stable_publication_approved is True
-    cli_module._guard_v110_publication_channel(approved)
+    cli_module._guard_v111_publication_channel(approved)
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "development")
-    with pytest.raises(ValueError, match="candidate-v1.0.10 or stable"):
-        cli_module._guard_v110_publication_channel(WorkerSettings.from_env())
+    with pytest.raises(ValueError, match="candidate-v1.0.11 or stable"):
+        cli_module._guard_v111_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "yes")
     with pytest.raises(ValueError, match="CARDRAG_STABLE_PUBLICATION_APPROVED"):
@@ -1511,20 +1512,66 @@ async def test_codex_ocr_rejects_credential_bearing_stdout_before_return(
     assert credential not in rendered
 
 
+@pytest.mark.parametrize(
+    ("diagnostic", "reason_code", "error_kind", "retryable"),
+    [
+        (
+            "ERROR: not logged in; login required",
+            "provider_process_authentication_failed",
+            "authentication",
+            False,
+        ),
+        (
+            "ERROR: unknown feature in strict config",
+            "provider_process_configuration_failed",
+            "configuration",
+            False,
+        ),
+        (
+            "ERROR: You've hit your usage limit (status 429)",
+            "provider_process_rate_limited",
+            "rate_limit",
+            True,
+        ),
+        (
+            "ERROR: stream disconnected before completion",
+            "provider_process_network_error",
+            "network",
+            True,
+        ),
+        (
+            "ERROR: upstream service unavailable (status 503)",
+            "provider_process_provider_unavailable",
+            "provider",
+            True,
+        ),
+        (
+            "ERROR: operation failed without a recognized category",
+            "provider_process_exit_unknown",
+            "process_exit",
+            False,
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_codex_nonzero_exit_is_typed_systemic_and_discards_stderr(
+async def test_codex_nonzero_exit_is_classified_and_fingerprints_stderr_without_retaining_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    diagnostic: str,
+    reason_code: str,
+    error_kind: str,
+    retryable: bool,
 ) -> None:
     image = tmp_path / "page-1.png"
     image.write_bytes(b"png")
     raw_sentinel = "RAW_CODEX_STDERR_URL_TOKEN_SECRET"
+    stderr = f"{diagnostic}; {raw_sentinel}".encode()
 
     class Process:
         returncode = 17
 
         async def communicate(self, _body: bytes) -> tuple[bytes, bytes]:
-            return b"", raw_sentinel.encode()
+            return b"", stderr
 
         def kill(self) -> None:
             return None
@@ -1547,11 +1594,13 @@ async def test_codex_nonzero_exit_is_typed_systemic_and_discards_stderr(
         )
 
     error = captured.value
-    assert error.reason_code == "provider_process_exit"
-    assert error.error_kind == "process_exit"
+    assert error.reason_code == reason_code
+    assert error.error_kind == error_kind
     assert error.scope == "systemic"
-    assert error.retryable is False
+    assert error.retryable is retryable
     assert error.exit_code == 17
+    assert error.stderr_size_bytes == len(stderr)
+    assert error.stderr_sha256 == hashlib.sha256(stderr).hexdigest()
     rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
     assert raw_sentinel not in str(error)
     assert raw_sentinel not in rendered

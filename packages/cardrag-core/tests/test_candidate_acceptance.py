@@ -292,18 +292,18 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     config = EffectiveConfigEvidence(
         schema_version="cardrag.candidate-effective-config.v2",
         source_commit=SOURCE_COMMIT,
-        release_version="1.0.10",
-        compose_project="cardrag-v110-candidate",
-        channel="candidate-v1.0.10",
-        worker_volume="cardrag-worker-v110-state",
+        release_version="1.0.11",
+        compose_project="cardrag-v111-candidate",
+        channel="candidate-v1.0.11",
+        worker_volume="cardrag-worker-v111-candidate-state",
         worker_state_mount_path="/var/lib/cardrag-worker",
-        worker_codex_home_volume="cardrag-worker-v110-codex-home",
+        worker_codex_home_volume="cardrag-worker-v111-candidate-codex-home",
         worker_codex_home_mount_path="/var/lib/cardrag-codex-home",
         worker_codex_auth_root="/var/lib/cardrag-codex-home",
         worker_home="/var/lib/cardrag-codex-home/home",
-        mcp_volume="cardrag-mcp-v110-state",
+        mcp_volume="cardrag-mcp-v111-candidate-state",
         mcp_host="127.0.0.1",
-        mcp_port=18010,
+        mcp_port=18011,
         rootfs_read_only=True,
         cap_drop_all=True,
         no_new_privileges=True,
@@ -351,7 +351,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'c' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.10",
+            version="1.0.11",
             platform="linux/amd64",
             entrypoint="cardrag-worker",
             user="10001:10001",
@@ -375,7 +375,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'e' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.10",
+            version="1.0.11",
             platform="linux/amd64",
             entrypoint="cardrag-mcp",
             user="10001:10001",
@@ -573,7 +573,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     generation_cas = GenerationCASEvidence(
         schema_version="cardrag.candidate-generation-cas-audit.v1",
         source_commit=SOURCE_COMMIT,
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         generation_id=manifest.generation_id,
         manifest_sha256=manifest.manifest_sha256,
         ready_sha256=canonical_sha256(ready),
@@ -597,7 +597,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     rollback = RollbackLedgerEvidence(
         schema_version="cardrag.candidate-v4-v5-rollback-ledger.v1",
         source_commit=SOURCE_COMMIT,
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         steps=(
             RollbackStep(
                 ordinal=1,
@@ -712,10 +712,10 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         bindings[field] = _file_binding(names[field], raw)
     receipt = CandidateAcceptanceReceipt(
         schema_version=RECEIPT_SCHEMA,
-        release_version="1.0.10",
+        release_version="1.0.11",
         source_commit=SOURCE_COMMIT,
-        compose_project="cardrag-v110-candidate",
-        channel="candidate-v1.0.10",
+        compose_project="cardrag-v111-candidate",
+        channel="candidate-v1.0.11",
         generation_id=manifest.generation_id,
         issuers=CANDIDATE_ISSUERS,
         release_eligible=True,
@@ -896,7 +896,7 @@ def test_effective_config_rejects_a_cross_role_platform_manifest(tmp_path: Path)
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("worker_codex_home_volume", "cardrag-worker-v110-state"),
+        ("worker_codex_home_volume", "cardrag-worker-v111-candidate-state"),
         ("worker_codex_home_mount_path", "/var/lib/cardrag-worker/codex"),
         ("worker_codex_auth_root", "/var/lib/cardrag-worker/codex"),
         ("worker_home", "/var/lib/cardrag-worker/home"),
@@ -910,6 +910,27 @@ def test_effective_config_rejects_codex_home_state_overlap(
     bundle = _write_valid_bundle(tmp_path)
     payload = bundle.models["effective_config"].model_dump(mode="python")
     payload[field] = value
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "stable_volume"),
+    (
+        ("worker_volume", "cardrag-worker-v111-state"),
+        ("worker_codex_home_volume", "cardrag-worker-v111-codex-home"),
+        ("mcp_volume", "cardrag-mcp-v111-state"),
+    ),
+)
+def test_effective_config_rejects_stable_volume_reuse(
+    tmp_path: Path,
+    field: str,
+    stable_volume: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload[field] = stable_volume
 
     with pytest.raises(ValidationError):
         EffectiveConfigEvidence.model_validate(payload)

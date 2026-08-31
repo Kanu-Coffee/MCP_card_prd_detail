@@ -1050,7 +1050,7 @@ def test_settings_are_default_off_candidate_only_and_require_a_sealed_profile() 
     assert stable.experimental_map_reduce_provider_id is None
     assert stable.experimental_map_reduce_evaluation_sha256 is None
 
-    with pytest.raises(ValueError, match="candidate-v1.0.10"):
+    with pytest.raises(ValueError, match="candidate-v1.0.11"):
         Settings(
             environment="test",
             mcp_bearer_token=bearer,
@@ -1063,14 +1063,14 @@ def test_settings_are_default_off_candidate_only_and_require_a_sealed_profile() 
     with pytest.raises(ValueError, match="sealed model"):
         Settings(
             environment="test",
-            channel="candidate-v1.0.10",
+            channel="candidate-v1.0.11",
             mcp_bearer_token=bearer,
             openrouter_api_key="secret",
             experimental_map_reduce_enabled=True,
         )
     enabled = Settings(
         environment="test",
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         mcp_bearer_token=bearer,
         openrouter_api_key="secret",
         experimental_map_reduce_enabled=True,
@@ -1147,7 +1147,7 @@ async def test_default_runtime_constructs_no_reasoner_and_enabled_tool_is_separa
     lane = ExperimentalMapReduceLane(store, _FakeReasoner(), _profile())
     settings = Settings(
         environment="test",
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         mcp_bearer_token="test-static-bearer-token-000000000000",
         openrouter_api_key="secret",
         experimental_map_reduce_enabled=True,
@@ -1192,7 +1192,7 @@ async def test_enabled_main_wires_exactly_the_sealed_reasoning_profile(
     main_module.create_app(
         Settings(
             environment="test",
-            channel="candidate-v1.0.10",
+            channel="candidate-v1.0.11",
             mcp_bearer_token="test-static-bearer-token-000000000000",
             mcp_state_dir=tmp_path / "enabled-main-state",
             openrouter_api_key="provider-secret",

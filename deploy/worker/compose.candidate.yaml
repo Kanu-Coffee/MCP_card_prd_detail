@@ -1,4 +1,4 @@
-name: cardrag-v110-candidate
+name: cardrag-v111-candidate
 
 services:
   worker:
@@ -6,11 +6,13 @@ services:
     build: !reset null
     pull_policy: always
     environment:
-      CARDRAG_CHANNEL: candidate-v1.0.10
+      CARDRAG_CHANNEL: candidate-v1.0.11
       CARDRAG_STABLE_PUBLICATION_APPROVED: "false"
       CARDRAG_OCR_CACHE_PUBLICATION_APPROVED: "false"
       CARDRAG_REMOTE_GC_APPROVED: "false"
-      CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_CANDIDATE_WEBDAV_BASE_URL:?CARDRAG_CANDIDATE_WEBDAV_BASE_URL is required}
+      # Candidate resumes and verified native-cache HEAD/GETs use the same
+      # canonical WebDAV root as stable. Isolation is by channel, not base URL.
+      CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_WEBDAV_BASE_URL:?shared CARDRAG_WEBDAV_BASE_URL is required}
       CARDRAG_COLLECT_REMOTE_GARBAGE: "false"
       CARDRAG_WORKER_MAX_STATE_BYTES: "68719476736"
       CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES: "2147483648"
@@ -29,6 +31,6 @@ services:
 
 volumes:
   worker-state:
-    name: cardrag-worker-v110-state
+    name: cardrag-worker-v111-candidate-state
   codex-home:
-    name: cardrag-worker-v110-codex-home
+    name: cardrag-worker-v111-candidate-codex-home

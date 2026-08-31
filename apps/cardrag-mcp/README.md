@@ -15,7 +15,7 @@ dual-read and rollback.
 
 The local generation/PDF CAS retention default is two. `CARDRAG_CHANNEL`
 selects an isolated, traversal-safe WebDAV pointer; production uses `stable`
-and the v1.0.10 candidate uses `candidate-v1.0.10`.
+and the v1.0.11 candidate uses `candidate-v1.0.11`.
 
 Vector capacity has three fail-closed bounds. The backward-compatible
 `CARDRAG_MCP_MAX_VECTOR_BYTES` limits v1-v4 inline matrices and remains the
@@ -87,7 +87,7 @@ MCP surface remains the five legacy tools plus `search_contracts`,
 `get_contract_bundle`, and `list_product_revisions`.
 
 The Qwen reranker lane is disabled by default and settings validation permits it
-only on `candidate-v1.0.10`. When enabled, it sends only already exact-scored
+only on `candidate-v1.0.11`. When enabled, it sends only already exact-scored
 dense evidence to OpenRouter `POST /api/v1/rerank`, pins
 `qwen/qwen3-reranker-8b` to Fireworks with `order` and `only`, and disables
 fallbacks. Its scores never reorder or remove primary evidence. A canonical

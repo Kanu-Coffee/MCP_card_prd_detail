@@ -15,11 +15,11 @@ from cardrag_worker.webdav import WebDAVBundlePublisher, WebDAVError, _guard_v5_
 
 def test_v5_stable_publisher_primitive_requires_explicit_capability() -> None:
     denied = type("Client", (), {"channel": "stable", "stable_publication_approved": False})()
-    with pytest.raises(ValueError, match="stable v1.0.10 publication requires explicit approval"):
+    with pytest.raises(ValueError, match="stable v1.0.11 publication requires explicit approval"):
         _guard_v5_stable_publication(denied, schema_version="cardrag.generation.v5")
 
     approved = type("Client", (), {"channel": "stable", "stable_publication_approved": True})()
-    candidate = type("Client", (), {"channel": "candidate-v1.0.10"})()
+    candidate = type("Client", (), {"channel": "candidate-v1.0.11"})()
     _guard_v5_stable_publication(approved, schema_version="cardrag.generation.v5")
     _guard_v5_stable_publication(candidate, schema_version="cardrag.generation.v5")
     _guard_v5_stable_publication(denied, schema_version="cardrag.generation.v4")

@@ -4033,7 +4033,7 @@ def produce_external_observation(
         )
         vectors_binding = None
         profile_id = "cardrag.embedding.v109-small.v1"
-        source_version: Literal["v1.0.9", "v1.0.10-candidate"] = "v1.0.9"
+        source_version: Literal["v1.0.9", "v1.0.11-candidate"] = "v1.0.9"
         serving_schema: Literal["cardrag.serving-db.v4", "cardrag.evaluation-page.v1"] = (
             "cardrag.serving-db.v4"
         )
@@ -4061,7 +4061,7 @@ def produce_external_observation(
         serving_database = page_manifest.serving_database
         vectors_binding = page_manifest.vector_artifact
         profile_id = page_manifest.embedding_profile_id
-        source_version = "v1.0.10-candidate"
+        source_version = "v1.0.11-candidate"
         serving_schema = "cardrag.evaluation-page.v1"
         model = QWEN3_EMBEDDING_MODEL
         dimension = 4096

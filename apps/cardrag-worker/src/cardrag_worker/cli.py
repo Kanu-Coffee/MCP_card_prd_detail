@@ -146,6 +146,9 @@ def _echo_ocr_systemic_failure(exc: OCRSystemicFailureError) -> None:
         payload["publication_attempts"] = failure.publication_attempts
     if failure.exit_code is not None:
         payload["exit_code"] = failure.exit_code
+    if failure.stderr_size_bytes is not None:
+        payload["stderr_size_bytes"] = failure.stderr_size_bytes
+        payload["stderr_sha256"] = failure.stderr_sha256
     _echo(payload)
 
 
@@ -260,22 +263,22 @@ async def _qwen_embedding_provider(
     )
 
 
-def _guard_v110_publication_channel(settings: WorkerSettings) -> None:
-    if settings.channel == "candidate-v1.0.10":
+def _guard_v111_publication_channel(settings: WorkerSettings) -> None:
+    if settings.channel == "candidate-v1.0.11":
         return
     if settings.channel == "stable":
         if settings.stable_publication_approved:
             return
         raise ValueError(
-            "stable v1.0.10 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
+            "stable v1.0.11 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
         )
-    raise ValueError("v1.0.10 Worker publication channel must be candidate-v1.0.10 or stable")
+    raise ValueError("v1.0.11 Worker publication channel must be candidate-v1.0.11 or stable")
 
 
 async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
-    _guard_v110_publication_channel(settings)
+    _guard_v111_publication_channel(settings)
     startup_capacity = preflight_worker_start_capacity(
         settings.state_dir,
         minimum_free_bytes=settings.minimum_start_free_bytes,
@@ -593,8 +596,8 @@ def _seed_v109_pdf_cache(source_state_root: Path, *, apply: bool) -> dict[str, A
     if not apply:
         return plan.report(applied=False)
     settings = WorkerSettings.from_env()
-    if settings.channel != "candidate-v1.0.10":
-        raise V109CacheSeedError("candidate_v110_destination_required")
+    if settings.channel != "candidate-v1.0.11":
+        raise V109CacheSeedError("candidate_v111_destination_required")
     if v109_paths_overlap(plan.source_root, settings.state_dir):
         raise V109CacheSeedError("source_destination_overlap")
     settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -621,9 +624,9 @@ def seed_cache_v109_command(
         ...,
         help="Absolute read-only v1.0.9 Worker state root.",
     ),
-    apply: bool = typer.Option(False, "--apply", help="Seed v1.0.10; default is dry-run."),
+    apply: bool = typer.Option(False, "--apply", help="Seed v1.0.11; default is dry-run."),
 ) -> None:
-    """Audit and idempotently import only v1.0.9 PDF cache/history into v1.0.10."""
+    """Audit and idempotently import only v1.0.9 PDF cache/history into v1.0.11."""
 
     try:
         _echo(_seed_v109_pdf_cache(source_state_root, apply=apply))

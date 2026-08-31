@@ -297,7 +297,7 @@ def test_database_prediction_explicitly_charges_fts_and_secondary_index_text() -
     assert indexed >= base + 4096
 
 
-def test_database_prediction_is_calibrated_to_observed_partial_v110_corpus() -> None:
+def test_database_prediction_is_calibrated_to_observed_partial_candidate_corpus() -> None:
     # Read-only audit of 1,026 partially processed documents. The lower-bound
     # payload excludes additional exact bindings now charged by the ledger.
     observed_rows = 1_954_142

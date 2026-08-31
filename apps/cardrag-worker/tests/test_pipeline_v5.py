@@ -329,7 +329,7 @@ class _StableStore:
 
 
 class _FakeCandidateWebDAV:
-    channel = "candidate-v1.0.10"
+    channel = "candidate-v1.0.11"
 
     def __init__(self) -> None:
         self.pointer_path = channel_pointer_path(self.channel)

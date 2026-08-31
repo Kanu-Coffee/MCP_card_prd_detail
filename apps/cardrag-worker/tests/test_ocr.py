@@ -37,6 +37,7 @@ import cardrag_worker.ocr as ocr_module
 from cardrag_worker.ocr import (
     OCR_CACHE_PUBLICATION_DIAGNOSTIC,
     OCR_OUTPUT_POLICY,
+    OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
     FailoverOCRResolver,
     OCRCachePublicationError,
     OCRResolver,
@@ -320,6 +321,194 @@ async def test_sparse_page_wrapper_rejects_more_than_twelve_visible_characters(
                 output_dir=tmp_path / "ocr",
             )
         assert state.checkpoint(run_id, "doc_dense_wrapper", "ocr", 0) is None
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_sparse_wrapper_gets_one_chunk_local_correction_without_raw_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    raw_sentinel = "RAW_REJECTED_SPARSE_PROVIDER_BODY_SECRET"
+
+    class CorrectingProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            self.calls.append(target_page_numbers[0])
+            self.requests.append(
+                {
+                    "image_names": tuple(path.name for path in images),
+                    "page_numbers": page_numbers,
+                    "target_page_numbers": target_page_numbers,
+                    "total_pages": total_pages,
+                    "prompt": prompt,
+                }
+            )
+            if len(self.calls) == 1:
+                return (
+                    "## Page 1\n\n첫 페이지의 충분히 긴 일반 카드 안내 본문입니다.\n\n"
+                    f"## Page 2\n\n{OCR_SPARSE_PAGE_PREFIX}\n{raw_sentinel}\n"
+                )
+            return (
+                "## Page 1\n\n첫 페이지의 충분히 긴 일반 카드 안내 본문입니다.\n\n"
+                "## Page 2\n\n두 번째 페이지의 일반 카드 안내 본문으로 정확히 교정했습니다.\n"
+            )
+
+    provider = CorrectingProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=provider, state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("2", encoding="utf-8")
+        result = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_sparse_correction",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=2,
+            output_dir=tmp_path / "ocr",
+        )
+
+        assert provider.calls == [1, 1]
+        assert provider.requests[0]["prompt"] == DEFAULT_OCR_PROMPT
+        assert provider.requests[1]["prompt"] == (
+            DEFAULT_OCR_PROMPT + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION
+        )
+        assert provider.requests[0]["image_names"] == provider.requests[1]["image_names"]
+        assert provider.requests[0]["page_numbers"] == provider.requests[1]["page_numbers"]
+        assert provider.requests[0]["target_page_numbers"] == provider.requests[1]["target_page_numbers"]
+        assert result.pages == (
+            "첫 페이지의 충분히 긴 일반 카드 안내 본문입니다.",
+            "두 번째 페이지의 일반 카드 안내 본문으로 정확히 교정했습니다.",
+        )
+        checkpoint = state.checkpoint(run_id, "doc_sparse_correction", "ocr", 0)
+        assert checkpoint is not None
+        assert raw_sentinel not in Path(checkpoint["artifact_path"]).read_text(encoding="utf-8")
+        for path in tmp_path.rglob("*"):
+            if path.is_file():
+                assert raw_sentinel.encode() not in path.read_bytes()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_sparse_wrapper_correction_is_bounded_to_one_extra_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class StillInvalidProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, total_pages
+            self.calls.append(target_page_numbers[0])
+            self.requests.append({"prompt": prompt})
+            return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n1234567890123\n"
+
+    provider = StillInvalidProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=provider, state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid"):
+            await resolver.resolve(
+                run_id=run_id,
+                document_id="doc_sparse_correction_exhausted",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+
+        assert provider.calls == [1, 1]
+        assert [request["prompt"] for request in provider.requests] == [
+            DEFAULT_OCR_PROMPT,
+            DEFAULT_OCR_PROMPT + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
+        ]
+        assert state.checkpoint(run_id, "doc_sparse_correction_exhausted", "ocr", 0) is None
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("corrective timeout"), asyncio.CancelledError()],
+    ids=["timeout", "cancellation"],
+)
+@pytest.mark.asyncio
+async def test_sparse_wrapper_correction_preserves_provider_failure_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    class FailingCorrectionProvider(FakeProvider):
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            del images, page_numbers, total_pages, prompt
+            self.calls.append(target_page_numbers[0])
+            if len(self.calls) == 1:
+                return f"## Page 1\n\n{OCR_SPARSE_PAGE_PREFIX}\n1234567890123\n"
+            raise failure
+
+    provider = FailingCorrectionProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=provider, state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        with pytest.raises(type(failure)):
+            await resolver.resolve(
+                run_id=run_id,
+                document_id="doc_sparse_correction_provider_failure",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "ocr",
+            )
+
+        assert provider.calls == [1, 1]
+        assert (
+            state.checkpoint(
+                run_id,
+                "doc_sparse_correction_provider_failure",
+                "ocr",
+                0,
+            )
+            is None
+        )
     finally:
         state.close()
 
@@ -2821,8 +3010,9 @@ async def test_provider_preamble_before_first_page_marker_is_rejected(
             )
             return prefix + body
 
+    provider = PrefixedProvider()
     state = WorkerState(tmp_path / "state.sqlite3")
-    resolver = OCRResolver(provider=PrefixedProvider(), state=state, webdav=None)  # type: ignore[arg-type]
+    resolver = OCRResolver(provider=provider, state=state, webdav=None)  # type: ignore[arg-type]
     try:
         run_id = state.start_run(run_id="run")
         pdf = tmp_path / "pdf-pages.txt"
@@ -2839,6 +3029,7 @@ async def test_provider_preamble_before_first_page_marker_is_rejected(
             )
         assert state.checkpoint(run_id, "doc_prefixed_output", "ocr", 0) is None
         assert not (tmp_path / "ocr" / "ocr.md").exists()
+        assert provider.calls == [1]
     finally:
         state.close()
 
@@ -2970,7 +3161,7 @@ async def test_twenty_four_page_logo_only_chunk_reuses_first_ten_checkpoints_on_
         with pytest.raises(OCRValidationError, match="sparse-page wrapper is invalid") as captured:
             await resolver.resolve(**arguments)
         assert state.stage_failed(run_id, document_id, "ocr", captured.value, delay_seconds=0) == "failed"
-        assert provider.calls == [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21]
+        assert provider.calls == [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 21]
         assert provider.requests[-1]["page_numbers"] == (20, 21, 22, 23)
         assert provider.requests[-1]["target_page_numbers"] == (21, 22)
         checkpoint_rows = [state.checkpoint(run_id, document_id, "ocr", index) for index in range(12)]
@@ -3000,7 +3191,7 @@ async def test_twenty_four_page_logo_only_chunk_reuses_first_ten_checkpoints_on_
         result = await resolver.resolve(**arguments)
         state.stage_succeeded(run_id, document_id, "ocr")
 
-        assert provider.calls == [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 21, 23]
+        assert provider.calls == [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 21, 21, 23]
         assert result.pages[21] == OCR_SPARSE_PAGE_PREFIX
         assert len(result.pages) == 24
         assert result.cache_reused is True

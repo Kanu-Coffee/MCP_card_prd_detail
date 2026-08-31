@@ -214,7 +214,7 @@ def _run_manifest(lane: str, gold_sha256: str, query_count: int) -> dict[str, An
         "shadow_model": None,
         "shadow_only": False,
         "source_commit": "1" * 40,
-        "source_version": "v1.0.10-candidate",
+        "source_version": "v1.0.11-candidate",
     }
     if lane == "v109_baseline":
         manifest.update(

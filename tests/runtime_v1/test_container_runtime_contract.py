@@ -86,8 +86,8 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     assert "libcap=2.78-r0" in worker_runtime
     assert "apk upgrade" not in worker_runtime
     assert "--ignore-unfixed" not in DOCKERFILE
-    assert "ARG CODEX_VERSION=0.147.0" in DOCKERFILE
-    assert ("ARG CODEX_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36") in DOCKERFILE
+    assert "ARG CODEX_VERSION=0.151.0" in DOCKERFILE
+    assert ("ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6") in DOCKERFILE
     # The pinned Wolfi runtime provides BusyBox sha256sum, which implements the
     # POSIX-style short check flag but not GNU's --check/--strict long options.
     assert "sha256sum -c /tmp/codex.sha256" in worker_runtime

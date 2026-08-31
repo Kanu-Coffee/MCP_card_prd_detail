@@ -1,4 +1,4 @@
-"""Seal the statistically selected v1.0.10 document aggregation policy.
+"""Seal the statistically selected v1.0.11 document aggregation policy.
 
 The online exact-search implementation is deliberately not imported here.  This
 offline evaluator consumes every row score from hash-bound compact v2 artifacts,

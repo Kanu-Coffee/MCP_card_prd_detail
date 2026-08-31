@@ -792,7 +792,7 @@ def _bind_retrieval_capture(
         profile_id="cardrag.eval.qwen-structure-exact.v1",
         gold_sha256=fixture.gold_binding.sha256,
         query_count=len(results),
-        source_version="v1.0.10-candidate",
+        source_version="v1.0.11-candidate",
         source_commit=SOURCE_COMMIT,
         generation_id=fixture.v5.generation_id,
         generation_manifest_sha256=hashlib.sha256(fixture.manifest.canonical_bytes()).hexdigest(),

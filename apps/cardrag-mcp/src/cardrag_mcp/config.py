@@ -267,14 +267,14 @@ class Settings(BaseSettings):
         if self.openrouter_api_key is not None and self.openrouter_api_key_file is not None:
             raise ValueError("configure only one OpenRouter API key source")
         if self.reranker_shadow_enabled:
-            if self.channel != "candidate-v1.0.10":
-                raise ValueError("reranker shadow is restricted to the candidate-v1.0.10 channel")
+            if self.channel != "candidate-v1.0.11":
+                raise ValueError("reranker shadow is restricted to the candidate-v1.0.11 channel")
             if not self.openrouter_api_key_value():
                 raise ValueError("reranker shadow requires an OpenRouter API key")
         if self.experimental_map_reduce_enabled:
-            if self.channel != "candidate-v1.0.10":
+            if self.channel != "candidate-v1.0.11":
                 raise ValueError(
-                    "experimental map-reduce is restricted to the candidate-v1.0.10 channel"
+                    "experimental map-reduce is restricted to the candidate-v1.0.11 channel"
                 )
             if not self.openrouter_api_key_value():
                 raise ValueError("experimental map-reduce requires an OpenRouter API key")

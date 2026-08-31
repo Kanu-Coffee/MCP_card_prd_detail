@@ -417,6 +417,8 @@ class OCRSystemicFailureRecord:
     retryable: bool | None = None
     publication_attempts: int | None = None
     exit_code: int | None = None
+    stderr_size_bytes: int | None = None
+    stderr_sha256: str | None = None
 
     def __post_init__(self) -> None:
         bounded_identity = {
@@ -465,6 +467,16 @@ class OCRSystemicFailureRecord:
             isinstance(self.exit_code, bool) or not -255 <= self.exit_code <= 255 or self.exit_code == 0
         ):
             raise ValueError("OCR systemic failure exit_code is invalid")
+        if (self.stderr_size_bytes is None) != (self.stderr_sha256 is None):
+            raise ValueError("OCR systemic failure stderr diagnostics must be complete")
+        if self.stderr_size_bytes is not None and (
+            isinstance(self.stderr_size_bytes, bool)
+            or not isinstance(self.stderr_size_bytes, int)
+            or not 0 <= self.stderr_size_bytes <= 2**63 - 1
+            or self.stderr_sha256 is None
+            or re.fullmatch(r"[0-9a-f]{64}", self.stderr_sha256) is None
+        ):
+            raise ValueError("OCR systemic failure stderr diagnostics are invalid")
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -493,6 +505,9 @@ class OCRSystemicFailureRecord:
             payload["publication_attempts"] = self.publication_attempts
         if self.exit_code is not None:
             payload["exit_code"] = self.exit_code
+        if self.stderr_size_bytes is not None:
+            payload["stderr_size_bytes"] = self.stderr_size_bytes
+            payload["stderr_sha256"] = self.stderr_sha256
         return payload
 
 
@@ -1103,6 +1118,8 @@ class _OCRSystemicFailureReason:
     retryable: bool | None = None
     publication_attempts: int | None = None
     exit_code: int | None = None
+    stderr_size_bytes: int | None = None
+    stderr_sha256: str | None = None
 
 
 def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
@@ -1122,6 +1139,8 @@ def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
             canonical_provider_error = ProviderSystemicError(
                 exc.reason_code,
                 exit_code=exc.exit_code,
+                stderr_size_bytes=exc.stderr_size_bytes,
+                stderr_sha256=exc.stderr_sha256,
             )
         except (KeyError, TypeError, ValueError):
             canonical_provider_error = ProviderSystemicError()
@@ -1132,6 +1151,8 @@ def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
             error_kind=canonical_provider_error.error_kind,
             retryable=canonical_provider_error.retryable,
             exit_code=canonical_provider_error.exit_code,
+            stderr_size_bytes=canonical_provider_error.stderr_size_bytes,
+            stderr_sha256=canonical_provider_error.stderr_sha256,
         )
     if isinstance(exc, ProviderError):
         return _OCRSystemicFailureReason(
@@ -1712,11 +1733,11 @@ class WorkerPipeline:
         if v5_profile is None and ocr_cache_mode != "read-write":
             raise ValueError("legacy v4 Worker requires its original read-write OCR cache contract")
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
-            raise ValueError("stable v1.0.10 publication requires explicit approval")
-        if v5_profile is not None and webdav.channel == "candidate-v1.0.10" and ocr_cache_mode != "read-only":
-            raise ValueError("v1.0.10 candidate requires read-only remote OCR cache access")
+            raise ValueError("stable v1.0.11 publication requires explicit approval")
+        if v5_profile is not None and webdav.channel == "candidate-v1.0.11" and ocr_cache_mode != "read-only":
+            raise ValueError("v1.0.11 candidate requires read-only remote OCR cache access")
         if v5_profile is not None and ocr_cache_mode == "read-write" and not ocr_cache_publication_approved:
-            raise ValueError("v1.0.10 remote OCR cache publication requires separate approval")
+            raise ValueError("v1.0.11 remote OCR cache publication requires separate approval")
         if document_aggregation is not None:
             if v5_profile is None:
                 raise ValueError("sealed document aggregation requires the Qwen v5 pipeline")
@@ -3035,6 +3056,8 @@ class WorkerPipeline:
                     retryable=classified.retryable,
                     publication_attempts=classified.publication_attempts,
                     exit_code=classified.exit_code,
+                    stderr_size_bytes=classified.stderr_size_bytes,
+                    stderr_sha256=classified.stderr_sha256,
                 )
                 error = OCRSystemicFailureError(
                     run_id=run_id,
@@ -3049,13 +3072,27 @@ class WorkerPipeline:
                 systemic_error = error
                 return error.stored_error
 
+            def stop_ocr_stage_retry(
+                exc: Exception,
+                current_document_id: str = document_id,
+            ) -> bool:
+                if is_isolatable_document_ocr_failure(exc):
+                    return False
+                if not isinstance(exc, ProviderSystemicError):
+                    return True
+                classified = _classify_ocr_systemic_failure(exc)
+                if classified.retryable is not True:
+                    return True
+                stage = self.state.get_stage(run_id, current_document_id, "ocr")
+                return stage is None or stage.status != "running" or stage.attempt_count >= stage.max_attempts
+
             try:
                 ocr_result = await self._finite_stage(
                     run_id=run_id,
                     document_id=document_id,
                     name="ocr",
                     operation=recognize,
-                    non_retryable_predicate=lambda exc: not is_isolatable_document_ocr_failure(exc),
+                    non_retryable_predicate=stop_ocr_stage_retry,
                     non_retryable_error_formatter=record_systemic_failure,
                     error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
                 )

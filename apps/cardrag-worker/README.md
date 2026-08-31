@@ -76,8 +76,8 @@ date, and source version back to the stable desktop discovery record before it
 downloads any bytes.
 
 Live discovery, OCR, embeddings, and WebDAV publishing require real issuer and
-provider credentials/endpoints. The v1.0.10 worker accepts
-`candidate-v1.0.10` by default; `stable` remains blocked unless the separately
+provider credentials/endpoints. The v1.0.11 worker accepts
+`candidate-v1.0.11` by default; `stable` remains blocked unless the separately
 approved cutover explicitly sets `CARDRAG_STABLE_PUBLICATION_APPROVED=true`.
 No provided environment or Compose file enables that flag. Shared native or
 adopted OCR cache writes independently require stable channel,
@@ -95,7 +95,7 @@ interrupted run directories remain separately for diagnosis.
 The `codex-exec` OCR child is a text-only agent boundary even when a disclosure
 image contains prompt-injection instructions. Page images are attached directly
 with `codex exec --image`; the tool-side `view_image` capability is therefore
-disabled together with Codex 0.147.0's shell, unified exec, shell snapshot,
+disabled together with Codex 0.151.0's shell, unified exec, shell snapshot,
 browser/computer, app/plugin/skill, hook, and sub-agent surfaces. The invocation
 also uses `--strict-config`, `--ignore-user-config`, `--ignore-rules`,
 `--sandbox read-only`, `shell_environment_policy.inherit="none"`, and disables
@@ -111,8 +111,9 @@ claim is that untrusted OCR content has no model-callable general file-read or
 command-execution route to `/run/secrets` or `CODEX_HOME`, not that a compromised
 Codex executable cannot read its own authentication store.
 
-Container deployments persist Codex data in the dedicated
-`cardrag-worker-v110-codex-home` volume at `/var/lib/cardrag-codex-home`.
+Stable container deployments persist Codex data in the dedicated
+`cardrag-worker-v111-codex-home` volume at `/var/lib/cardrag-codex-home`; the
+candidate overlay instead uses `cardrag-worker-v111-candidate-codex-home`.
 `CARDRAG_CODEX_AUTH_ROOT` and `CODEX_HOME` equal that mount root, while `HOME`
 is its owned mode-0700 `home/` child. The Worker recovery volume remains mounted
 only at `/var/lib/cardrag-worker`; settings reject an auth root that is equal to,
@@ -195,7 +196,7 @@ body limit when absent. Configure them with
 `CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES`; invalid or oversized values
 fail closed without including provider bodies or credentials in errors.
 
-The supported v1.0.10 publication path is the Worker CLI/container. The v5
+The supported v1.0.11 publication path is the Worker CLI/container. The v5
 bundle publisher also denies a stable pointer move unless the caller carries
 the explicit stable-publication capability; calling the primitive directly is
 not an approval bypass. Legacy v1-v4 publisher behavior is unchanged.

@@ -1,4 +1,4 @@
-"""Fail-closed loading for a release-validated v1.0.10 aggregation profile.
+"""Fail-closed loading for a release-validated v1.0.11 aggregation profile.
 
 The statistical evaluator lives in ``cardrag-mcp``.  The finite Worker does
 not repeat that expensive evaluation, but it only accepts the evaluator's

@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-  + "@candidate-v1.0.10-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.11-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -19,10 +19,10 @@ def exact_subject:
 
 def expected_build_args:
   {
-    "build-arg:APP_VERSION": "1.0.10",
+    "build-arg:APP_VERSION": "1.0.11",
     "build-arg:CODEX_SHA256":
-      "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36",
-    "build-arg:CODEX_VERSION": "0.147.0",
+      "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
+    "build-arg:CODEX_VERSION": "0.151.0",
     "build-arg:PYTHON_DEV_IMAGE":
       "cgr.dev/chainguard/python:latest-dev@sha256:4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2",
     "build-arg:PYTHON_RUNTIME_IMAGE":
@@ -129,8 +129,8 @@ def expected_materials:
     }
   ] + if $role == "worker" then [
     {
-      "uri": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz",
-      "digest": {"sha256": "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36"}
+      "uri": "https://github.com/openai/codex/releases/download/rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "digest": {"sha256": "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"}
     }
   ] elif $role == "mcp" then [
     {

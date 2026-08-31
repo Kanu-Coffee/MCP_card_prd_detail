@@ -69,15 +69,15 @@ def _material(uri: str, algorithm: str, digest: str) -> dict[str, Any]:
 def _subject_name(role: str) -> str:
     return (
         "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-        f"@candidate-v1.0.10-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
+        f"@candidate-v1.0.11-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
     )
 
 
 def _build_args() -> dict[str, str]:
     return {
-        "build-arg:APP_VERSION": "1.0.10",
-        "build-arg:CODEX_SHA256": ("0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36"),
-        "build-arg:CODEX_VERSION": "0.147.0",
+        "build-arg:APP_VERSION": "1.0.11",
+        "build-arg:CODEX_SHA256": ("605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"),
+        "build-arg:CODEX_VERSION": "0.151.0",
         "build-arg:PYTHON_DEV_IMAGE": (
             "cgr.dev/chainguard/python:latest-dev@sha256:"
             "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2"
@@ -135,9 +135,9 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
         materials.append(
             _material(
                 "https://github.com/openai/codex/releases/download/"
-                "rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz",
+                "rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
                 "sha256",
-                "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36",
+                "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
             )
         )
     else:
@@ -233,13 +233,13 @@ def _cardrag_spdx_package(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "SPDXID": f"SPDXRef-Package-python-{name}",
-        "versionInfo": "1.0.10",
+        "versionInfo": "1.0.11",
         "licenseDeclared": "Apache-2.0",
         "externalRefs": [
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": f"pkg:pypi/{name}@1.0.10",
+                "referenceLocator": f"pkg:pypi/{name}@1.0.11",
             }
         ],
     }
@@ -594,7 +594,7 @@ def test_sbom_policy_matches_buildkit_032_shape_and_rejects_unbound_inventory() 
 
 
 def test_documented_public_source_candidate_producer_matches_the_provenance_policy() -> None:
-    document = (ROOT / "docs/V1_0_10_CANDIDATE_ACCEPTANCE.md").read_text(encoding="utf-8")
+    document = (ROOT / "docs/V1_0_11_MIGRATION.md").read_text(encoding="utf-8")
     producer = document.split("```bash", maxsplit=1)[1].split("```", maxsplit=1)[0]
 
     assert (
@@ -610,13 +610,13 @@ def test_documented_public_source_candidate_producer_matches_the_provenance_poli
     assert "두 Git auth ID의 optional 내장 선언" in document
     assert "이 선언 자체는 token 값의 미전달을 증명하지 않으므로" in document
     for build_arg in (
-        "APP_VERSION=1.0.10",
+        "APP_VERSION=1.0.11",
         '"VCS_REF=$CANDIDATE_SOURCE_COMMIT"',
         "PYTHON_DEV_IMAGE=cgr.dev/chainguard/python:latest-dev@sha256:",
         "PYTHON_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest@sha256:",
         "UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:",
-        "CODEX_VERSION=0.147.0",
-        "CODEX_SHA256=0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36",
+        "CODEX_VERSION=0.151.0",
+        "CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
     ):
         assert f"--build-arg {build_arg}" in document
     assert "--build-context" in document and "금지" in document

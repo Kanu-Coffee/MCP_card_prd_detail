@@ -1,4 +1,4 @@
-"""Deterministic offline evaluation for the CardRAG v1.0.10 gold set.
+"""Deterministic offline evaluation for the CardRAG v1.0.11 gold set.
 
 This module deliberately has no dependency on the production repository or
 search path.  It consumes sealed JSONL labels, already-captured lane results,
@@ -341,7 +341,7 @@ class RunArtifactManifest(_StrictModel):
     profile_id: EvaluationProfile
     gold_sha256: Sha256Hex
     query_count: int = Field(ge=1, le=MAX_RELEASE_QUERIES)
-    source_version: Literal["v1.0.9", "v1.0.10-candidate"]
+    source_version: Literal["v1.0.9", "v1.0.11-candidate"]
     source_commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}([0-9a-f]{24})?$")]
     generation_id: Identifier
     generation_manifest_sha256: Sha256Hex
@@ -361,7 +361,7 @@ class RunArtifactManifest(_StrictModel):
     @model_validator(mode="after")
     def validate_profile(self) -> RunArtifactManifest:
         common_qwen = (
-            self.source_version == "v1.0.10-candidate"
+            self.source_version == "v1.0.11-candidate"
             and self.embedding_model == "qwen/qwen3-embedding-8b"
             and self.embedding_dimension == 4096
             and self.rrf_k is None

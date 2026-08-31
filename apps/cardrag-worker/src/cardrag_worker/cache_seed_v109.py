@@ -1,4 +1,4 @@
-"""Fail-closed v1.0.9 PDF CAS inventory and v1.0.10 seed import.
+"""Fail-closed v1.0.9 PDF CAS inventory and v1.0.11 seed import.
 
 The source is an immutable, read-only v1.0.9 worker state directory.  This
 module never opens the source database for writing and never creates files
@@ -1183,7 +1183,7 @@ def _verify_destination_history(
 
 
 def apply_v109_cache_seed(plan: V109CacheSeedPlan, cache: PDFCache) -> dict[str, Any]:
-    """Import a verified plan into a distinct v1.0.10 :class:`PDFCache`."""
+    """Import a verified plan into a distinct v1.0.11 :class:`PDFCache`."""
 
     destination = _absolute_without_resolving(cache.state_dir)
     if paths_overlap(plan.source_root, destination):

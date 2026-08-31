@@ -863,7 +863,7 @@ def _qwen_page_fixture(tmp_path: Path) -> dict[str, object]:
         synthetic=False,
         gold_sha256=gold_binding.sha256,
         query_count=1,
-        source_version="v1.0.10-candidate",
+        source_version="v1.0.11-candidate",
         source_commit="1" * 40,
         generation_id="qwen-page-generation",
         generation_manifest=page_manifest_binding,
@@ -2232,7 +2232,7 @@ def test_capture_set_revalidates_all_attestations_and_complete_query_coverage(
             synthetic=False,
             gold_sha256=gold_binding.sha256,
             query_count=1,
-            source_version="v1.0.9" if lane == "v109_baseline" else "v1.0.10-candidate",
+            source_version="v1.0.9" if lane == "v109_baseline" else "v1.0.11-candidate",
             source_commit=(
                 "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113" if lane == "v109_baseline" else "a" * 40
             ),
@@ -2433,7 +2433,7 @@ def test_capture_set_revalidates_all_attestations_and_complete_query_coverage(
             profile_id=profile[lane][0],  # type: ignore[arg-type]
             gold_sha256=gold_binding.sha256,
             query_count=1,
-            source_version="v1.0.10-candidate" if lane != "v109_baseline" else "v1.0.9",
+            source_version="v1.0.11-candidate" if lane != "v109_baseline" else "v1.0.9",
             source_commit=(
                 "fee8f65a9fda7ae0c286ac92cf4c3f55c1a6f113" if lane == "v109_baseline" else "a" * 40
             ),

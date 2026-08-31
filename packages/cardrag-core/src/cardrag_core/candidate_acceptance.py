@@ -1,4 +1,4 @@
-"""Fail-closed verifier for the v1.0.10 real-candidate acceptance receipt.
+"""Fail-closed verifier for the v1.0.11 real-candidate acceptance receipt.
 
 The receipt is a canonical technical trust root.  It does not manufacture
 runtime evidence or imply a separate human approval: it binds exact canonical
@@ -113,7 +113,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.10"]
+    version: Literal["1.0.11"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -146,18 +146,18 @@ class CandidateImageIdentity(_CanonicalModel):
 class EffectiveConfigEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-effective-config.v2"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.10"]
-    compose_project: Literal["cardrag-v110-candidate"]
-    channel: Literal["candidate-v1.0.10"]
-    worker_volume: Literal["cardrag-worker-v110-state"]
+    release_version: Literal["1.0.11"]
+    compose_project: Literal["cardrag-v111-candidate"]
+    channel: Literal["candidate-v1.0.11"]
+    worker_volume: Literal["cardrag-worker-v111-candidate-state"]
     worker_state_mount_path: Literal["/var/lib/cardrag-worker"]
-    worker_codex_home_volume: Literal["cardrag-worker-v110-codex-home"]
+    worker_codex_home_volume: Literal["cardrag-worker-v111-candidate-codex-home"]
     worker_codex_home_mount_path: Literal["/var/lib/cardrag-codex-home"]
     worker_codex_auth_root: Literal["/var/lib/cardrag-codex-home"]
     worker_home: Literal["/var/lib/cardrag-codex-home/home"]
-    mcp_volume: Literal["cardrag-mcp-v110-state"]
+    mcp_volume: Literal["cardrag-mcp-v111-candidate-state"]
     mcp_host: Literal["127.0.0.1"]
-    mcp_port: Literal[18010]
+    mcp_port: Literal[18011]
     rootfs_read_only: Literal[True]
     cap_drop_all: Literal[True]
     no_new_privileges: Literal[True]
@@ -498,7 +498,7 @@ class NativeCacheAuditEvidence(_CanonicalModel):
 class GenerationCASEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-generation-cas-audit.v1"]
     source_commit: SourceCommit
-    channel: Literal["candidate-v1.0.10"]
+    channel: Literal["candidate-v1.0.11"]
     generation_id: str
     manifest_sha256: Sha256Hex
     ready_sha256: Sha256Hex
@@ -589,7 +589,7 @@ class RollbackStep(_CanonicalModel):
 class RollbackLedgerEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-v4-v5-rollback-ledger.v1"]
     source_commit: SourceCommit
-    channel: Literal["candidate-v1.0.10"]
+    channel: Literal["candidate-v1.0.11"]
     steps: tuple[RollbackStep, ...]
     rollback_verified: Literal[True]
     stable_channel_write_requests: Literal[0]
@@ -691,10 +691,10 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v1"]
-    release_version: Literal["1.0.10"]
+    release_version: Literal["1.0.11"]
     source_commit: SourceCommit
-    compose_project: Literal["cardrag-v110-candidate"]
-    channel: Literal["candidate-v1.0.10"]
+    compose_project: Literal["cardrag-v111-candidate"]
+    channel: Literal["candidate-v1.0.11"]
     generation_id: str
     issuers: tuple[str, ...]
     release_eligible: Literal[True]

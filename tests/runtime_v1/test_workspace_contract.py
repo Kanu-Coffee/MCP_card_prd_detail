@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.10"}
+    assert versions == {"1.0.11"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -80,7 +80,7 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
     assert "from runtime as admin" not in lowered
 
 
-def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
+def test_v111_candidate_deployment_isolated_from_stable_runtime() -> None:
     root_env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     worker_base = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     mcp_base = (ROOT / "deploy/mcp/compose.yaml").read_text(encoding="utf-8")
@@ -89,17 +89,18 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     cache_seed = (ROOT / "deploy/worker/compose.cache-seed.yaml").read_text(encoding="utf-8")
 
     for manifest in (worker, mcp):
-        assert "candidate-v1.0.10" in manifest
-        assert "CARDRAG_CANDIDATE_WEBDAV_BASE_URL" in manifest
+        assert "candidate-v1.0.11" in manifest
+        assert "shared CARDRAG_WEBDAV_BASE_URL is required" in manifest
+        assert "CARDRAG_CANDIDATE_WEBDAV_BASE_URL" not in manifest
         assert "candidate-v1.0.9" not in manifest
     assert 'CARDRAG_COLLECT_REMOTE_GARBAGE: "false"' in worker
     assert 'CARDRAG_OCR_CACHE_PUBLICATION_APPROVED: "false"' in worker
     assert 'CARDRAG_REMOTE_GC_APPROVED: "false"' in worker
     assert 'CARDRAG_OCR_CACHE_MODE: "read-only"' in worker
-    assert "cardrag-worker-v110-state" in worker
-    assert "cardrag-worker-v110-codex-home" in worker
-    assert "cardrag-mcp-v110-state" in mcp
-    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18010" in mcp
+    assert "cardrag-worker-v111-candidate-state" in worker
+    assert "cardrag-worker-v111-candidate-codex-home" in worker
+    assert "cardrag-mcp-v111-candidate-state" in mcp
+    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18011" in mcp
     assert "target: /mnt/cardrag-v109-state" in cache_seed
     assert "read_only: true" in cache_seed
     assert "external: true" in cache_seed
@@ -139,9 +140,12 @@ def test_v110_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert 'CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED: "false"' in mcp
     assert "cardrag-worker_worker-state" not in worker_base
     assert "cardrag-mcp_mcp-state" not in mcp_base
-    assert "cardrag-worker-v110-state" in worker_base
-    assert "cardrag-worker-v110-codex-home" in worker_base
-    assert "cardrag-mcp-v110-state" in mcp_base
+    assert "cardrag-worker-v111-state" in worker_base
+    assert "cardrag-worker-v111-codex-home" in worker_base
+    assert "cardrag-mcp-v111-state" in mcp_base
+    assert "cardrag-worker-v111-candidate-state" not in worker_base
+    assert "cardrag-worker-v111-candidate-codex-home" not in worker_base
+    assert "cardrag-mcp-v111-candidate-state" not in mcp_base
 
 
 def test_codex_auth_migration_procedure_is_fail_closed_and_redacted() -> None:
@@ -208,8 +212,9 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     environment = os.environ.copy()
     environment.update(
         {
-            "CARDRAG_CANDIDATE_WEBDAV_BASE_URL": "https://candidate.invalid/webdav",
-            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18010",
+            "CARDRAG_WEBDAV_BASE_URL": "https://shared.invalid/cardrag",
+            "CARDRAG_CANDIDATE_WEBDAV_BASE_URL": "https://attacker.invalid/isolated-base",
+            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18011",
             "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST": "sha256:" + "a" * 64,
             "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST": "sha256:" + "b" * 64,
             "CARDRAG_WORKER_IMAGE": "attacker.invalid/worker:local",
@@ -292,18 +297,20 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert worker_environment["CARDRAG_OCR_CACHE_PUBLICATION_APPROVED"] == "false"
     assert worker_environment["CARDRAG_REMOTE_GC_APPROVED"] == "false"
     assert worker_environment["CARDRAG_COLLECT_REMOTE_GARBAGE"] == "false"
+    assert worker_environment["CARDRAG_WEBDAV_BASE_URL"] == "https://shared.invalid/cardrag"
     assert worker_environment["CARDRAG_CODEX_AUTH_ROOT"] == "/var/lib/cardrag-codex-home"
     assert worker_environment["CODEX_HOME"] == "/var/lib/cardrag-codex-home"
     assert worker_environment["HOME"] == "/var/lib/cardrag-codex-home/home"
     assert worker_volumes["/var/lib/cardrag-worker"]["source"] == "worker-state"
     assert worker_volumes["/var/lib/cardrag-codex-home"]["source"] == "codex-home"
-    assert worker_config["volumes"]["worker-state"]["name"] == "cardrag-worker-v110-state"
-    assert worker_config["volumes"]["codex-home"]["name"] == "cardrag-worker-v110-codex-home"
+    assert worker_config["volumes"]["worker-state"]["name"] == ("cardrag-worker-v111-candidate-state")
+    assert worker_config["volumes"]["codex-home"]["name"] == ("cardrag-worker-v111-candidate-codex-home")
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_WORKER_"):
             assert worker_environment[name] == expected
 
-    mcp_service = render("mcp")["services"]["mcp"]
+    mcp_config = render("mcp")
+    mcp_service = mcp_config["services"]["mcp"]
     mcp_environment = mcp_service["environment"]
     assert mcp_service["image"] == (
         "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@"
@@ -316,6 +323,8 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert mcp_service["cap_drop"] == ["ALL"]
     assert mcp_service["security_opt"] == ["no-new-privileges:true"]
     assert mcp_environment["CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED"] == "false"
+    assert mcp_environment["CARDRAG_WEBDAV_BASE_URL"] == "https://shared.invalid/cardrag"
+    assert mcp_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v111-candidate-state")
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_MCP_"):
             assert mcp_environment[name] == expected
