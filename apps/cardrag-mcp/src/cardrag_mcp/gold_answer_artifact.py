@@ -59,6 +59,7 @@ from cardrag_mcp.gold_capture import (
     LaneCaptureReceipt,
     PageGenerationManifest,
 )
+from cardrag_mcp.quota import DEFAULT_MAX_SERVING_DATABASE_BYTES
 from cardrag_mcp.schema import validate_schema
 from cardrag_mcp.schema_v5 import validate_schema_v5
 
@@ -126,7 +127,7 @@ NO_ANSWER_TEXT = "제공된 검색 근거에서 답을 확인할 수 없습니�
 
 _MAX_LINE_BYTES = 2 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
-_MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_DATABASE_BYTES = DEFAULT_MAX_SERVING_DATABASE_BYTES
 _MAX_SOURCE_TEXT_CHARACTERS = 131_072
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_PROVIDER_EVIDENCE = 64

@@ -61,10 +61,20 @@ content-addressed 단일 object와 manifest reference로 표현하고 hardlink�
 
 ## v1.0.11 state clone gate
 
-현재 host 여유 공간은 89,489,960,960 B(83.34 GiB)다. v1.0.10 Worker와 Codex volume을
-모두 독립 복사해도 85,824,912,187 B(79.93 GiB)가 남아 32 GiB startup floor보다
-51,465,173,819 B(47.93 GiB) 많다. 따라서 용량상 clone은 가능하지만 다음 순서를
-원자적으로 지켜야 한다.
+이 절차를 작성할 당시 host 여유 공간은 89,489,960,960 B(83.34 GiB)였다. v1.0.10
+Worker와 Codex volume을 모두 독립 복사해도 85,824,912,187 B(79.93 GiB)가 남아
+32 GiB startup floor보다 51,465,173,819 B(47.93 GiB) 많았으므로 clone 자체는
+용량상 가능했다. 이 측정은 8개 카드사 build 용량을 증명하지 않는다. 추가 카드사도
+현재와 같은 규모·중복률이라고 가정한 2배 projection의 peak와 2 GiB reserve에는
+106,736,369,664 B(99.406 GiB)가 필요하며,
+2026-09-02 capacity 조사 시 Docker backing filesystem free-space
+82,115,493,888 B(76.48 GiB)는 약 22.93 GiB 부족했다. 실제 신규 corpus에 따라 요구량은
+더 커질 수 있다. Worker/MCP named volume을 같은
+backing filesystem에 두면 8개 카드사 Worker state와 MCP retention/staging의 순간 합계가
+약 150.84 GiB까지 예상된다. 현재 host의 다른 사용량과 두 서비스 reserve까지 합치면
+256 GiB도 부족하므로 최소 320 GiB급 shared backing filesystem 또는 별도 filesystem을
+준비해야 한다. clone 전에는 최신 `df`와 corpus preflight를 다시 확인하고
+다음 순서를 원자적으로 지켜야 한다.
 
 1. v1.0.10 Worker가 terminal이고 source volume을 RW mount한 running container가 0인지
    다시 확인한다.

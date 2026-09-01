@@ -77,6 +77,7 @@ from cardrag_mcp.evaluation import (
 )
 from cardrag_mcp.exact import VECTOR_BLOCK_ROWS, ExactCapturedRow, V5ExactRepository
 from cardrag_mcp.models import ContractSearchRequest, DocumentAggregationPolicy, ViewType
+from cardrag_mcp.quota import DEFAULT_MAX_SERVING_DATABASE_BYTES
 from cardrag_mcp.reranker import (
     RERANKER_MODEL,
     OpenRouterReranker,
@@ -147,7 +148,7 @@ PAGE_COLUMN_CONTRACT: Literal["cardrag.evaluation-page-columns.v1"] = (
 
 _MAX_CAPTURE_LINE_BYTES = 256 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
-_MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_DATABASE_BYTES = DEFAULT_MAX_SERVING_DATABASE_BYTES
 _MAX_SIDECAR_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_EXTERNAL_ROWS_PER_QUERY = 2_000_000
 _MAX_EXTERNAL_SIDECAR_BYTES = 95_000_000

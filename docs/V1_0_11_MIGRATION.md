@@ -4,8 +4,10 @@
 격리 검증하고, 합격한 경우에만 stable로 전환하는 절차입니다. 구조·임베딩·gold
 평가의 상세 계약은 v1.0.10 문서를 historical baseline으로 유지합니다.
 
-**현재 gate 상태: candidate acceptance 미통과.** v1.0.11 source image, full four-issuer
-run, 12개 runtime evidence와 canonical receipt가 아직 봉인되지 않은 상태에서는
+**현재 gate 상태: candidate acceptance 미통과.** source revision `6b28b5a`의
+four-issuer run은 3,085개 OCR/structure/view를 완결한 뒤 기존 4 GiB serving DB
+capacity gate에서 fail-closed했습니다. 수정 source의 exact image, 성공한 explicit resume,
+12개 runtime evidence와 canonical receipt가 아직 봉인되지 않은 상태에서는
 Docker Hub release, stable WebDAV pointer, `/opt/cardrag/current`, systemd unit/timer와
 LibreChat 소비 경로를 변경하지 않습니다. 이 상태는 TODO가 아니라 기술적 release
 blocker입니다.
@@ -72,6 +74,25 @@ provenance validator는 이 값과 release URL을 함께 고정합니다.
 | MCP bind | `127.0.0.1:18011` |
 | native OCR cache | verified GET only (`read-only`) |
 | remote GC | disabled |
+
+v1.0.10 historical baseline의 4 GiB serving DB 한도는 actual v1.0.11 corpus의 exact
+8,148,455,424 B prediction을 수용하지 못했습니다. 추가 카드사 4곳이 현재와 같은
+규모·중복률이라고 가정해 exact input을 두 배로 재계산하면 DB 15.177 GiB, sidecar
+9.615 GiB, generation download 29.973 GiB와 peak 97.406 GiB입니다.
+v1.0.11의 Worker/MCP DB cap은 모두 32 GiB(`34359738368`), Worker/MCP state는 128 GiB
+(`137438953472`), MCP generation download는 64 GiB(`68719476736`)이며 candidate
+overlay와 acceptance receipt에서 ambient override가 불가능한 literal입니다. Sidecar
+16 GiB, current four-issuer candidate startup floor 32 GiB와 reserved free space 2 GiB는
+유지합니다. 이 8개 카드사 2배 projection에는 reserve 포함 99.406 GiB free-space가
+필요합니다. 실제 신규 corpus에 따라 요구량은 더 커질 수 있습니다.
+2026-09-02 capacity 조사 시 Docker backing filesystem은 76.48 GiB만 비어 있어 약
+22.93 GiB 부족했습니다. 실제 실행 직전에 최신 free-space를 다시 측정하고 corpus
+preflight를 통과해야 합니다. Worker/MCP volume이 같은 backing filesystem을 공유하면
+8개 카드사 Worker state와 MCP retention/staging의 순간 합계가 약 150.84 GiB까지
+예상됩니다. 현재 host의 다른 사용량과 두 서비스의 reserve까지 합치면 256 GiB도
+부족하므로 최소 320 GiB급 shared backing filesystem을 사용하거나, Worker와 MCP를
+분리해 각 filesystem의 quota와 physical free-space를 독립 검증합니다. 실행 전에는
+당시 host baseline으로 다시 산정합니다.
 
 `cardrag-worker-v109-state`, `cardrag-worker-v110-state`와 각 Codex/MCP volume은 v1.0.11의
 RW destination으로 사용하지 않습니다. v1.0.10 실패 state를 회복에 활용하려면 먼저

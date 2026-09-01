@@ -65,9 +65,9 @@ def test_v5_sidecar_and_resident_vector_caps_have_independent_env_names(
 def test_storage_audit_and_response_cap_defaults_are_independent() -> None:
     settings = Settings(environment="test", mcp_bearer_token=AUTH_VALUE)
 
-    assert settings.mcp_max_serving_database_bytes == 4 * 1024**3
-    assert settings.mcp_max_generation_download_bytes == 32 * 1024**3
-    assert settings.mcp_max_state_bytes == 64 * 1024**3
+    assert settings.mcp_max_serving_database_bytes == 32 * 1024**3
+    assert settings.mcp_max_generation_download_bytes == 64 * 1024**3
+    assert settings.mcp_max_state_bytes == 128 * 1024**3
     assert settings.mcp_reserved_free_space_bytes == 2 * 1024**3
     assert settings.mcp_exhaustive_audit_max_jobs == 32
     assert settings.mcp_exhaustive_audit_max_total_bytes == 2 * 1024**3

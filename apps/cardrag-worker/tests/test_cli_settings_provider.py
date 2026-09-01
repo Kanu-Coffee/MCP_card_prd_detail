@@ -1031,10 +1031,10 @@ def test_worker_capacity_defaults_and_zero_allowed_floors(
         monkeypatch.delenv(name, raising=False)
 
     settings = WorkerSettings.from_env()
-    assert settings.maximum_state_bytes == 64 * 1024**3
+    assert settings.maximum_state_bytes == 128 * 1024**3
     assert settings.reserved_free_space_bytes == 2 * 1024**3
     assert settings.maximum_vector_sidecar_bytes == 16 * 1024**3
-    assert settings.maximum_serving_database_bytes == 4 * 1024**3
+    assert settings.maximum_serving_database_bytes == 32 * 1024**3
     assert settings.minimum_start_free_bytes == 2 * 1024**3
 
     monkeypatch.setenv("CARDRAG_WORKER_MAX_STATE_BYTES", "100")

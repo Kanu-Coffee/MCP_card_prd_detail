@@ -14,10 +14,10 @@ services:
       # canonical WebDAV root as stable. Isolation is by channel, not base URL.
       CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_WEBDAV_BASE_URL:?shared CARDRAG_WEBDAV_BASE_URL is required}
       CARDRAG_COLLECT_REMOTE_GARBAGE: "false"
-      CARDRAG_WORKER_MAX_STATE_BYTES: "68719476736"
+      CARDRAG_WORKER_MAX_STATE_BYTES: "137438953472"
       CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES: "2147483648"
       CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES: "17179869184"
-      CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES: "4294967296"
+      CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES: "34359738368"
       # Release candidate launch is intentionally non-overridable: same-host
       # Worker/MCP duplication requires an audited 32 GiB startup floor.
       CARDRAG_WORKER_MINIMUM_START_FREE_BYTES: "34359738368"

@@ -146,9 +146,9 @@ hard-limits the working database, checks the vacuumed database and vector
 sidecar before either final target is installed, and removes only its own temp
 artifacts on failure. A forecast above a configured cap therefore rejects the
 attempt until an operator explicitly resumes with a fitting corpus or policy.
-The defaults are 64 GiB for `CARDRAG_WORKER_MAX_STATE_BYTES`, 2 GiB for
+The defaults are 128 GiB for `CARDRAG_WORKER_MAX_STATE_BYTES`, 2 GiB for
 `CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES`, 16 GiB for
-`CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES`, and 4 GiB for
+`CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES`, and 32 GiB for
 `CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES`. Values must be canonical decimal
 integers in the supported signed-64-bit byte range. The state, sidecar, and DB
 limits must be positive; the two free-space settings may be zero.

@@ -72,10 +72,10 @@ CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung
 CARDRAG_EMBEDDING_PROVIDER_ID=deepinfra
-CARDRAG_WORKER_MAX_STATE_BYTES=68719476736
+CARDRAG_WORKER_MAX_STATE_BYTES=137438953472
 CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES=2147483648
 CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES=17179869184
-CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES=4294967296
+CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES=34359738368
 # Candidate startup floor: 32 GiB. Set it explicitly when copying the shared env example.
 CARDRAG_WORKER_MINIMUM_START_FREE_BYTES=34359738368
 # Off by default. Enable only in the candidate MCP env after provider preflight.
@@ -162,8 +162,8 @@ validator가 없는 원본의 전체 재다운로드를 수행합니다.
 v5 Worker는 provider나 WebDAV 접근 전에 state 경로가 속할 filesystem의 free bytes를
 read-only로 확인합니다. 기본 Compose floor는 2 GiB이고 candidate overlay 기본값은
 32 GiB입니다. 모든 derived view와 embedding cache hit가 확정된 뒤에는 embedding miss를
-받기 전에 state 64 GiB, peak 뒤 reserved free space 2 GiB, 단일 vector sidecar 16 GiB,
-단일 serving DB 4 GiB의 기본 한도를 각각 검사합니다. 이 설정은 부호나 단위 suffix가
+받기 전에 state 128 GiB, peak 뒤 reserved free space 2 GiB, 단일 vector sidecar 16 GiB,
+단일 serving DB 32 GiB의 기본 한도를 각각 검사합니다. 이 설정은 부호나 단위 suffix가
 없는 canonical decimal bytes이며 state/sidecar/DB는 양수, 두 free-space 값은 0 이상이어야
 합니다. 이 gate는 v5에만 적용되고 v1-v4 rollback 경로는 그대로 유지됩니다.
 

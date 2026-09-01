@@ -110,7 +110,9 @@ PAGE_CHUNK_SOURCE_PATH = "apps/cardrag-worker/src/cardrag_worker/pipeline.py::ch
 PAGE_CHUNK_SOURCE_COMMIT = V109_BASELINE_COMMIT
 
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
-_MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
+# This bounds the compact page-lane evaluation DB produced locally; it is not
+# the v5 serving DB contract shared by Worker, MCP, and release evidence.
+_MAX_PAGE_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_EMBEDDING_REPLAY_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_VECTOR_BYTES = 64 * 1024 * 1024 * 1024
 _NORM_TOLERANCE = 2e-5
@@ -3008,7 +3010,7 @@ def _build_page_database(
     return _publish_built_file(
         working,
         destination,
-        maximum_bytes=_MAX_DATABASE_BYTES,
+        maximum_bytes=_MAX_PAGE_DATABASE_BYTES,
         code="page_database",
     )
 
