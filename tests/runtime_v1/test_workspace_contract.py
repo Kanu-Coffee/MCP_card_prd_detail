@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.12"}
+    assert versions == {"1.0.13"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -80,7 +80,7 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
     assert "from runtime as admin" not in lowered
 
 
-def test_v112_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
+def test_v113_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     root_env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     worker_base = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     mcp_base = (ROOT / "deploy/mcp/compose.yaml").read_text(encoding="utf-8")
@@ -97,10 +97,10 @@ def test_v112_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert 'CARDRAG_OCR_CACHE_PUBLICATION_APPROVED: "false"' in worker
     assert 'CARDRAG_REMOTE_GC_APPROVED: "false"' in worker
     assert 'CARDRAG_OCR_CACHE_MODE: "read-only"' in worker
-    assert "cardrag-worker-v112-candidate-state" in worker
-    assert "cardrag-worker-v112-candidate-codex-home" in worker
-    assert "cardrag-mcp-v112-candidate-state" in mcp
-    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18012" in mcp
+    assert "cardrag-worker-v113-candidate-state" in worker
+    assert "cardrag-worker-v113-candidate-codex-home" in worker
+    assert "cardrag-mcp-v113-candidate-state" in mcp
+    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18013" in mcp
     assert "target: /mnt/cardrag-v109-state" in cache_seed
     assert "read_only: true" in cache_seed
     assert "external: true" in cache_seed
@@ -143,9 +143,9 @@ def test_v112_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "cardrag-worker-v111-state" in worker_base
     assert "cardrag-worker-v111-codex-home" in worker_base
     assert "cardrag-mcp-v111-state" in mcp_base
-    assert "cardrag-worker-v112-candidate-state" not in worker_base
-    assert "cardrag-worker-v112-candidate-codex-home" not in worker_base
-    assert "cardrag-mcp-v112-candidate-state" not in mcp_base
+    assert "cardrag-worker-v113-candidate-state" not in worker_base
+    assert "cardrag-worker-v113-candidate-codex-home" not in worker_base
+    assert "cardrag-mcp-v113-candidate-state" not in mcp_base
 
 
 def test_v112_offline_snapshot_copies_during_each_destination_first_mount() -> None:
@@ -202,6 +202,40 @@ def test_v112_offline_snapshot_copies_during_each_destination_first_mount() -> N
     assert "or any(home.iterdir())" in codex_helper
     assert 'getattr(os, "O_NOFOLLOW", 0)' in codex_helper
     assert "source_stat.st_nlink != 1" in codex_helper
+
+
+def test_v113_incident_copy_uses_exact_tool_and_image_skeleton_mounts() -> None:
+    migration = (ROOT / "docs/V1_0_13_MIGRATION.md").read_text(encoding="utf-8")
+    recovery_tool = ROOT / "tools/cardrag_v113_recovery_copy.py"
+    section = migration.split("### 3.2 State와 Codex auth 복사", 1)[1].split(
+        "### 3.3 Destination-only SQLite recovery",
+        1,
+    )[0]
+    copy_block = next(
+        block
+        for block in re.findall(r"```bash\n(.*?)```", section, flags=re.DOTALL)
+        if "cardrag_v113_recovery_copy.py" in block
+    )
+
+    assert copy_block.count('--volume "$recovery_copy:/opt/cardrag-v113-recovery-copy.py:ro"') == 2
+    assert '--volume "$source_state:/source:ro"' in copy_block
+    assert '--volume "$destination_state:/var/lib/cardrag-worker"' in copy_block
+    assert "--source /source --destination /var/lib/cardrag-worker" in copy_block
+    assert '--volume "$source_codex:/source:ro"' in copy_block
+    assert '--volume "$destination_codex:/var/lib/cardrag-codex-home"' in copy_block
+    assert "--source /source --destination /var/lib/cardrag-codex-home" in copy_block
+    assert '--volume "$repository_root/tools' not in copy_block
+    assert recovery_tool.stat().st_mode & 0o777 == 0o644
+    assert "stat --format='%a %h' \"$recovery_copy\"" in copy_block
+    for contract in (
+        "--pull never",
+        "--network none",
+        "--read-only",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges=true",
+        "--user 10001:10001",
+    ):
+        assert copy_block.count(contract) == 2
 
 
 def test_codex_auth_migration_procedure_is_fail_closed_and_redacted() -> None:
@@ -270,7 +304,7 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
         {
             "CARDRAG_WEBDAV_BASE_URL": "https://shared.invalid/cardrag",
             "CARDRAG_CANDIDATE_WEBDAV_BASE_URL": "https://attacker.invalid/isolated-base",
-            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18012",
+            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18013",
             "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST": "sha256:" + "a" * 64,
             "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST": "sha256:" + "b" * 64,
             "CARDRAG_WORKER_IMAGE": "attacker.invalid/worker:local",
@@ -365,8 +399,8 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert worker_environment["HOME"] == "/var/lib/cardrag-codex-home/home"
     assert worker_volumes["/var/lib/cardrag-worker"]["source"] == "worker-state"
     assert worker_volumes["/var/lib/cardrag-codex-home"]["source"] == "codex-home"
-    assert worker_config["volumes"]["worker-state"]["name"] == ("cardrag-worker-v112-candidate-state")
-    assert worker_config["volumes"]["codex-home"]["name"] == ("cardrag-worker-v112-candidate-codex-home")
+    assert worker_config["volumes"]["worker-state"]["name"] == ("cardrag-worker-v113-candidate-state")
+    assert worker_config["volumes"]["codex-home"]["name"] == ("cardrag-worker-v113-candidate-codex-home")
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_WORKER_"):
             assert worker_environment[name] == expected
@@ -386,7 +420,7 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert mcp_service["security_opt"] == ["no-new-privileges:true"]
     assert mcp_environment["CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED"] == "false"
     assert mcp_environment["CARDRAG_WEBDAV_BASE_URL"] == "https://shared.invalid/cardrag"
-    assert mcp_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v112-candidate-state")
+    assert mcp_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v113-candidate-state")
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_MCP_"):
             assert mcp_environment[name] == expected

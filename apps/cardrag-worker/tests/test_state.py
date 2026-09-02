@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +29,150 @@ def _state_tree_bytes(path: Path) -> int:
         for candidate in (path, path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm"))
         if candidate.exists()
     )
+
+
+def _subprocess_read_only_query(path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed interpreter and inline probe
+        [
+            sys.executable,
+            "-c",
+            """
+import sqlite3
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+connection = sqlite3.connect(
+    f"{path.resolve().as_uri()}?mode=ro",
+    uri=True,
+    timeout=0,
+)
+try:
+    print(connection.execute("SELECT count(*) FROM run").fetchone()[0])
+finally:
+    connection.close()
+""",
+            os.fspath(path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _subprocess_observes_posix_record_lock(path: Path, offset: int) -> bool:
+    probe = subprocess.run(  # noqa: S603 - fixed interpreter and inline probe
+        [
+            sys.executable,
+            "-c",
+            """
+import errno
+import fcntl
+import os
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDWR)
+offset = int(sys.argv[2])
+try:
+    try:
+        fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, offset, os.SEEK_SET)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            raise SystemExit(0)
+        raise
+    else:
+        fcntl.lockf(descriptor, fcntl.LOCK_UN, 1, offset, os.SEEK_SET)
+        raise SystemExit(1)
+finally:
+    os.close(descriptor)
+""",
+            os.fspath(path),
+            str(offset),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode not in (0, 1):
+        raise AssertionError(f"record-lock probe failed: {probe.stderr}")
+    return probe.returncode == 0
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="regression exercises Linux POSIX locks")
+def test_identity_verification_fds_do_not_release_stock_vfs_locks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    monkeypatch.setattr(state_module, "WORKER_STATE_USE_UNIX_EXCL", False)
+
+    with WorkerState(path):
+        # SQLite's shared database byte and WAL-index dead-man-switch byte must
+        # remain locked after every post-connect identity check has completed.
+        assert _subprocess_observes_posix_record_lock(path, 0x40000002)
+        assert _subprocess_observes_posix_record_lock(
+            path.with_name(f"{path.name}-shm"),
+            128,
+        )
+
+
+def test_same_process_second_state_fails_before_opening_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+
+    with WorkerState(path) as state:
+        attempted_open = False
+
+        def reject_open(*_args: object, **_kwargs: object) -> tuple[int, os.stat_result]:
+            nonlocal attempted_open
+            attempted_open = True
+            raise AssertionError("second WorkerState must fail before opening an active inode")
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(state_module, "_open_nofollow_regular", reject_open)
+            with pytest.raises(RuntimeError, match="already open in this process"):
+                WorkerState(path)
+        assert not attempted_open
+        state.connection.execute("CREATE TABLE registry_probe(value INTEGER NOT NULL)")
+        state.connection.execute("INSERT INTO registry_probe(value) VALUES(1)")
+
+    with WorkerState(path) as reopened:
+        assert reopened.connection.execute("SELECT value FROM registry_probe").fetchone()[0] == 1
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="regression exercises the Linux unix-excl VFS")
+def test_linux_unix_excl_crosses_wal_index_boundary_without_mapping_shm(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    wal_path = path.with_name(f"{path.name}-wal")
+    shm_path = path.with_name(f"{path.name}-shm")
+    row_count = 4064
+
+    with WorkerState(path) as state:
+        state.connection.execute("PRAGMA wal_autocheckpoint=0")
+        state.connection.execute("CREATE TABLE unix_excl_probe(payload BLOB NOT NULL)")
+        with state.transaction() as connection:
+            connection.executemany(
+                "INSERT INTO unix_excl_probe(payload) VALUES(zeroblob(?))",
+                ((WORKER_STATE_SQLITE_PAGE_BYTES,) for _ in range(row_count)),
+            )
+
+        wal_frame_count = (wal_path.stat().st_size - 32) // (WORKER_STATE_SQLITE_PAGE_BYTES + 24)
+        assert wal_frame_count > 4063
+        assert not shm_path.exists()
+        assert os.fspath(shm_path.resolve()) not in Path("/proc/self/maps").read_text()
+
+        read_only = _subprocess_read_only_query(path)
+        assert read_only.returncode != 0
+        assert "database is locked" in read_only.stderr
+
+        state.connection.execute("INSERT INTO unix_excl_probe(payload) VALUES(zeroblob(1))")
+        assert state.connection.execute("SELECT count(*) FROM unix_excl_probe").fetchone()[0] == (
+            row_count + 1
+        )
 
 
 def test_state_rejects_existing_non_4096_page_database(tmp_path: Path) -> None:
@@ -72,14 +219,32 @@ def test_state_rejects_existing_sqlite_sidecar_symlink_without_mutating_target(
     assert victim.read_bytes() == b"preserve-sidecar-victim"
 
 
-def test_state_revalidates_sqlite_created_wal_and_shm_as_regular_files(tmp_path: Path) -> None:
+def test_state_revalidates_sqlite_created_sidecars_as_regular_files(tmp_path: Path) -> None:
     path = tmp_path / "state.sqlite3"
 
     with WorkerState(path):
-        for suffix in ("-wal", "-shm"):
-            sidecar = path.with_name(f"{path.name}{suffix}")
-            observed = sidecar.stat(follow_symlinks=False)
-            assert stat.S_ISREG(observed.st_mode)
+        wal_path = path.with_name(f"{path.name}-wal")
+        assert stat.S_ISREG(wal_path.stat(follow_symlinks=False).st_mode)
+        shm_path = path.with_name(f"{path.name}-shm")
+        if sys.platform == "linux":
+            assert not shm_path.exists()
+        else:
+            assert stat.S_ISREG(shm_path.stat(follow_symlinks=False).st_mode)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="regression exercises the Linux unix-excl VFS")
+def test_linux_unix_excl_tolerates_but_does_not_map_stale_regular_shm(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    shm_path = path.with_name(f"{path.name}-shm")
+    stale_payload = b"stale-stock-unix-vfs-shm" * 2048
+    shm_path.write_bytes(stale_payload)
+
+    with WorkerState(path) as state:
+        state.start_run(run_id="stale-shm-compatible")
+        assert shm_path.read_bytes() == stale_payload
+        assert os.fspath(shm_path.resolve()) not in Path("/proc/self/maps").read_text()
 
 
 @pytest.mark.parametrize("suffix", ("-wal", "-shm"))
@@ -91,16 +256,37 @@ def test_state_fails_closed_when_sqlite_sidecar_is_swapped_before_postcheck(
     path = tmp_path / "state.sqlite3"
     victim = tmp_path / "victim"
     victim.write_bytes(b"preserve-postcheck-victim")
+    if suffix == "-shm":
+        path.with_name(f"{path.name}-shm").write_bytes(b"stale-stock-unix-vfs-shm")
     original_open = state_module._open_nofollow_regular
     injected = False
+    verification_descriptors: list[int] = []
 
-    def swap_then_open(candidate: Path, *, create: bool) -> tuple[int, os.stat_result]:
+    def swap_then_open(
+        candidate: Path,
+        *,
+        create: bool,
+        retain_descriptor_in: list[int] | None = None,
+    ) -> tuple[int, os.stat_result]:
         nonlocal injected
-        if not create and candidate.name.endswith(suffix) and candidate.exists() and not injected:
+        if (
+            not create
+            and retain_descriptor_in is not None
+            and candidate.name.endswith(suffix)
+            and candidate.exists()
+            and not injected
+        ):
             candidate.unlink()
             candidate.symlink_to(victim)
             injected = True
-        return original_open(candidate, create=create)
+        result = original_open(
+            candidate,
+            create=create,
+            retain_descriptor_in=retain_descriptor_in,
+        )
+        if retain_descriptor_in is not None:
+            verification_descriptors.append(result[0])
+        return result
 
     monkeypatch.setattr(state_module, "_open_nofollow_regular", swap_then_open)
 
@@ -108,6 +294,11 @@ def test_state_fails_closed_when_sqlite_sidecar_is_swapped_before_postcheck(
         WorkerState(path)
 
     assert injected
+    assert verification_descriptors
+    for descriptor in verification_descriptors:
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
     assert victim.read_bytes() == b"preserve-postcheck-victim"
 
 

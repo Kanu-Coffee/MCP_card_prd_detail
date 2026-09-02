@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       aggregation_profile_sha256:
-        description: "SHA-256 of the sealed v1.0.12 document aggregation profile artifact"
+        description: "SHA-256 of the sealed v1.0.13 document aggregation profile artifact"
         required: true
         type: string
       capture_set_receipt_sha256:
@@ -115,12 +115,12 @@ jobs:
           # evidence validators are release-specific. Refuse every other
           # version before the conditional evidence block so a future version
           # can never bypass the strong gate by falling through it.
-          test "$version" = "1.0.12"
+          test "$version" = "1.0.13"
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
           test "$GITHUB_REF" = "refs/tags/v$version"
           test "$(git cat-file -t "refs/tags/v$version")" = tag
-          if [[ "$version" == "1.0.12" ]]; then
+          if [[ "$version" == "1.0.13" ]]; then
             evidence_dir="release-evidence/v${version}"
             evidence_dir=$(realpath --canonicalize-existing "$evidence_dir")
             acceptance_report="$evidence_dir/gold-evaluation-report.json"
@@ -793,10 +793,10 @@ jobs:
             )
             ((${#candidate_evidence_paths[@]} > 0))
             git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" -- \
-              . ':(exclude)release-evidence/v1.0.12/**'
+              . ':(exclude)release-evidence/v1.0.13/**'
             for evidence_path in "${candidate_evidence_paths[@]}"; do
               case "$evidence_path" in
-                release-evidence/v1.0.12/*) ;;
+                release-evidence/v1.0.13/*) ;;
                 *)
                   echo "non-evidence change after candidate source: $evidence_path" >&2
                   exit 1
@@ -1066,7 +1066,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Upload the exact portable evaluation evidence
-        if: ${{ inputs.version == '1.0.12' }}
+        if: ${{ inputs.version == '1.0.13' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: portable-evidence-${{ steps.version.outputs.version }}

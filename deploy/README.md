@@ -1,6 +1,6 @@
 # CardRAG 배포 파일
 
-현재 보호 대상 운영은 v1.0.9이며, v1.0.12 reliability patch는 v1.0.11의 데이터·채널
+현재 보호 대상 운영은 v1.0.9이며, v1.0.13 SQLite lock-safety patch는 v1.0.11의 데이터·채널
 계약을 유지한 별도 후보 overlay로 검증합니다. 두
 버전은 Compose project·Worker 상태 volume·Codex 인증 volume·채널 포인터·호스트
 포트를 공유하지 않습니다. 단, resume와 검증된 native OCR cache HEAD/GET을 유지하기
@@ -40,11 +40,11 @@ deploy/
   `cardrag-worker-v111-codex-home`입니다.
 - `compose.candidate.yaml`은 `candidate-v1.0.11` 포인터, 후보 전용 volume 및
   stable과 같은 canonical WebDAV base를 강제합니다. Worker 후보는 state와 Codex 인증 volume을 각각
-  `cardrag-worker-v112-candidate-state`와
-  `cardrag-worker-v112-candidate-codex-home`으로 고정하고, MCP 후보는
-  `cardrag-mcp-v112-candidate-state`만 사용합니다. 이 이름은 위 stable base
+  `cardrag-worker-v113-candidate-state`와
+  `cardrag-worker-v113-candidate-codex-home`으로 고정하고, MCP 후보는
+  `cardrag-mcp-v113-candidate-state`만 사용합니다. 이 이름은 위 stable base
   기본값과 의도적으로 다르며 env로 재결합할 수 없습니다. Worker 후보는 원격 GC를
-  하지 않고 MCP 후보는 기본 `127.0.0.1:18012`만 사용합니다. MCP overlay의 안전한
+  하지 않고 MCP 후보는 기본 `127.0.0.1:18013`만 사용합니다. MCP overlay의 안전한
   port 교체에는 Docker Compose v2.24.4 이상이 필요합니다.
 - Worker `compose.cache-seed.yaml`은 terminal 상태가 확인된 v1.0.9 Worker volume을
   `/mnt/cardrag-v109-state`에 read-only로 연결합니다. 평상시 Worker에는
@@ -56,7 +56,7 @@ deploy/
 - `compose.adoption.yaml`은 sealed legacy OCR export를 read-only로 연결할
   때만 사용합니다.
 
-## v1.0.12 patch 후보 실행
+## v1.0.13 patch 후보 실행
 
 후보 Worker와 MCP에는 stable과 같은 canonical WebDAV base URL을 설정합니다. 격리는
 URL path를 갈라서가 아니라 `candidate-v1.0.11` channel로 수행합니다. Candidate Worker는
@@ -110,19 +110,17 @@ docker compose --env-file /etc/cardrag/worker.env \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
   -f deploy/worker/compose.secrets.yaml \
-  run --name cardrag-v112-candidate-worker-acceptance \
+  run --detach --no-deps --pull never \
+  --name cardrag-v113-candidate-worker-acceptance \
   worker resume "$CARDRAG_PRESERVED_RUN_ID"
-
-docker compose --env-file /etc/cardrag/mcp.env \
-  -f deploy/mcp/compose.yaml \
-  -f deploy/mcp/compose.candidate.yaml \
-  -f deploy/mcp/compose.secrets.yaml \
-  up -d --wait
 ```
 
-위 run ID의 read-only 상태·checkpoint gate는
-[v1.0.11 migration](../docs/V1_0_11_MIGRATION.md)의 canonical 명령으로 먼저 통과해야
-합니다. 새 run을 만드는 인자 없는 `worker run`으로 대체하지 않습니다.
+위 요약 명령만 단독 실행하지 않습니다. Exact image build/검증, offline copy, destination
+checkpoint와 Compose render gate는
+[v1.0.13 migration](../docs/V1_0_13_MIGRATION.md)의 canonical 명령으로 먼저 통과해야
+합니다. 새 run을 만드는 인자 없는 `worker run`으로 대체하지 않습니다. Candidate MCP는
+Worker가 exit 0으로 끝나고 동일 run의 `succeeded`와 ready publication, immutable SQLite
+integrity가 모두 확인된 뒤 migration 4절의 명령으로만 시작합니다.
 
 candidate overlay는 public repository를 YAML에 고정하고 위 receipt-bound `sha256` index
 digest 변수가 없으면 Compose render를 거부합니다. base의 local image와 `build:` fallback을
@@ -133,8 +131,11 @@ sanitized Compose JSON의 role image가 receipt reference와 같고 `build`가 �
 media type/digest여야 합니다. Docker classic store의 container `.Image`는 sealed platform config digest,
 containerd store에서는 sealed index digest여야 하며 이 두 값 외에는 거부합니다.
 Containerd는 `.ImageManifestDescriptor`도 exact linux/amd64 platform manifest여야 합니다.
-canonical 명령과 `worker-metrics.v3`/`mcp-smoke.v2` 영수증 필드 기록은
-[v1.0.11 migration](../docs/V1_0_11_MIGRATION.md)을 따릅니다.
+OCI/runtime identity와 `worker-metrics.v3`/`mcp-smoke.v2` 영수증의 canonical baseline은
+[v1.0.11 migration 3.2절의 acceptance 절차](../docs/V1_0_11_MIGRATION.md)를
+사용하되 version/project/volume/port를 각각 `1.0.13`, `cardrag-v113-candidate`, v113 세
+candidate volume, `18013`으로 치환합니다. SIGBUS destination 복구와 same-run 시작은
+[v1.0.13 migration](../docs/V1_0_13_MIGRATION.md)을 먼저 통과해야 합니다.
 
 운영 stable channel이나 v1.0.9 volume을 후보의 RW base/overlay에 지정하지
 마십시오. seed overlay도 운영 Worker가 terminal인 것을 확인한 뒤에만 사용합니다.
@@ -161,8 +162,9 @@ Stable env에 candidate volume 이름을 넣어 직접 승격하지 않습니다
 MCP가 모두 stopped인 상태에서 Worker/MCP state를 새 stable 기본 volume으로 각각 독립
 offline copy하고, no-hardlink tree digest와 모든 SQLite integrity를 검증해야 합니다.
 Stable Codex home은 새로 만들고 candidate에서 `auth.json`만 옮깁니다. Exact mapping,
-검증 명령과 실패 시 중단선은 [v1.0.11 migration](../docs/V1_0_11_MIGRATION.md#4-release와-stable-cutover)을
-따릅니다.
+검증 명령과 실패 시 중단선은
+[v1.0.11 stable-cutover baseline](../docs/V1_0_11_MIGRATION.md#4-release와-stable-cutover)을
+따르며, 이번 v1.0.13 candidate에는 별도 cutover 승인이 아직 없습니다.
 `CARDRAG_PDF_CACHE_REFRESH_HOURS`는 양의 유한 시간만 허용하며 기본값 168시간입니다.
 그 주기 전에는 검증된 로컬 CAS를 재사용하고, 만료 뒤에는 validator 조건부 확인 또는
 validator가 없는 원본의 전체 재다운로드를 수행합니다.
@@ -207,7 +209,7 @@ WebDAV timeout은 요청별 inactivity 상한이고 한 검증 thread에는 여�
 `interrupted`, `no_change` 또는 이미 검증된 `succeeded`를 함께 확인합니다. 장애 판단에 따른
 수동 강제종료는 먼저 증거를 보존하고 project/service label로 exact container ID가
 하나임을 확인한 뒤 컨테이너 전체에만 수행하며, 상세 절차는
-[v1.0.11 migration](../docs/V1_0_11_MIGRATION.md)을 따릅니다.
+[v1.0.13 migration](../docs/V1_0_13_MIGRATION.md)을 따릅니다.
 
 일반 Worker 명령은 `docker compose run --rm`이므로 종료한 임시 컨테이너는 증거로
 남지 않습니다. 단, 위 candidate acceptance 절차는 실제 container config ID를 봉인하기 위해
@@ -218,7 +220,7 @@ WebDAV timeout은 요청별 inactivity 상한이고 한 검증 thread에는 여�
 
 ## stable 운영 원칙
 
-v1.0.12 runtime patch candidate가 v1.0.11 데이터 계약으로 합격하고 전환이 승인될 때까지
+v1.0.13 runtime patch candidate가 v1.0.11 데이터 계약으로 합격하고 전환이 승인될 때까지
 v1.0.9 운영 image, container, volume, 설치 pointer와 channel을 그대로 유지합니다.
 
 ```dotenv
@@ -226,10 +228,10 @@ CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.9-worker
 CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.9-mcp
 ```
 
-v1.0.12 후보가 합격하고 전환이 승인되면 v1.0.12 v4/v5 dual-reader MCP를 먼저 배치해
-기존 v4를 제공하는지 확인하고, 이후에만 v1.0.12 Worker와 stable channel을 전환합니다.
+v1.0.13 후보가 합격하고 전환이 승인되면 v1.0.13 v4/v5 dual-reader MCP를 먼저 배치해
+기존 v4를 제공하는지 확인하고, 이후에만 v1.0.13 Worker와 stable channel을 전환합니다.
 PDF/OCR seed, 합격 기준, rollback 및 승인 경계는
-[v1.0.11 migration](../docs/V1_0_11_MIGRATION.md)을 따릅니다.
+[v1.0.13 migration](../docs/V1_0_13_MIGRATION.md)을 따릅니다.
 
 MCP host port는 loopback으로만 bind하고 외부 접근은 TLS reverse proxy와 Bearer
 token을 사용합니다. 실제 credential은 env 파일이나 저장소에 넣지 않고

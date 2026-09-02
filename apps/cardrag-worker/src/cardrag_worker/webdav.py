@@ -359,7 +359,7 @@ def _guard_v5_stable_publication(client: object, *, schema_version: str) -> None
         and getattr(client, "channel", "stable") == "stable"
         and not getattr(client, "stable_publication_approved", False)
     ):
-        raise ValueError("stable v1.0.12 publication requires explicit approval")
+        raise ValueError("stable v1.0.13 publication requires explicit approval")
 
 
 def _require_exact_artifact(
