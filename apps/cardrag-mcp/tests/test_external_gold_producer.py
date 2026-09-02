@@ -720,7 +720,7 @@ def test_compact_git_cap_excludes_large_local_page_corpus_artifacts() -> None:
     page_vector_size = producer._predicted_page_vector_size(5_799)
     assert page_vector_size == 95_010_816
     assert page_vector_size > producer.MAX_GIT_EVIDENCE_FILE_BYTES
-    assert producer._MAX_DATABASE_BYTES > producer.MAX_GIT_EVIDENCE_FILE_BYTES
+    assert producer._MAX_PAGE_DATABASE_BYTES > producer.MAX_GIT_EVIDENCE_FILE_BYTES
     with pytest.raises(GoldCaptureError) as local_limit:
         producer._predicted_page_vector_size(producer._MAX_VECTOR_BYTES // (4096 * 4) + 1)
     assert local_limit.value.code == "page_vectors_size_invalid"

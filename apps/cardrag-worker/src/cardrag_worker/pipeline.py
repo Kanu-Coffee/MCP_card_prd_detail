@@ -94,6 +94,10 @@ from .downloader import (
     SecurePDFDownloader,
 )
 from .embedding_v5 import (
+    EmbeddingV5Error,
+    EmbeddingV5PermanentRequestError,
+    EmbeddingV5RequestError,
+    EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
     QwenEmbeddingProfileV5,
     embedding_cache_key,
@@ -417,6 +421,8 @@ class OCRSystemicFailureRecord:
     retryable: bool | None = None
     publication_attempts: int | None = None
     exit_code: int | None = None
+    stderr_size_bytes: int | None = None
+    stderr_sha256: str | None = None
 
     def __post_init__(self) -> None:
         bounded_identity = {
@@ -465,6 +471,16 @@ class OCRSystemicFailureRecord:
             isinstance(self.exit_code, bool) or not -255 <= self.exit_code <= 255 or self.exit_code == 0
         ):
             raise ValueError("OCR systemic failure exit_code is invalid")
+        if (self.stderr_size_bytes is None) != (self.stderr_sha256 is None):
+            raise ValueError("OCR systemic failure stderr diagnostics must be complete")
+        if self.stderr_size_bytes is not None and (
+            isinstance(self.stderr_size_bytes, bool)
+            or not isinstance(self.stderr_size_bytes, int)
+            or not 0 <= self.stderr_size_bytes <= 2**63 - 1
+            or self.stderr_sha256 is None
+            or re.fullmatch(r"[0-9a-f]{64}", self.stderr_sha256) is None
+        ):
+            raise ValueError("OCR systemic failure stderr diagnostics are invalid")
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -493,6 +509,9 @@ class OCRSystemicFailureRecord:
             payload["publication_attempts"] = self.publication_attempts
         if self.exit_code is not None:
             payload["exit_code"] = self.exit_code
+        if self.stderr_size_bytes is not None:
+            payload["stderr_size_bytes"] = self.stderr_size_bytes
+            payload["stderr_sha256"] = self.stderr_sha256
         return payload
 
 
@@ -775,7 +794,7 @@ def _validated_v5_metrics(
         "ocr_cache_reused_count",
         "ocr_provider_called_count",
     }
-    if set(raw) != required_keys or raw.get("schema_version") != "cardrag.worker-v5-metrics.v2":
+    if set(raw) != required_keys or raw.get("schema_version") != "cardrag.worker-v5-metrics.v3":
         raise RuntimeError("sealed v5 Worker metrics have an unknown contract")
 
     def count(name: str) -> int:
@@ -1103,6 +1122,8 @@ class _OCRSystemicFailureReason:
     retryable: bool | None = None
     publication_attempts: int | None = None
     exit_code: int | None = None
+    stderr_size_bytes: int | None = None
+    stderr_sha256: str | None = None
 
 
 def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
@@ -1122,6 +1143,8 @@ def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
             canonical_provider_error = ProviderSystemicError(
                 exc.reason_code,
                 exit_code=exc.exit_code,
+                stderr_size_bytes=exc.stderr_size_bytes,
+                stderr_sha256=exc.stderr_sha256,
             )
         except (KeyError, TypeError, ValueError):
             canonical_provider_error = ProviderSystemicError()
@@ -1132,6 +1155,8 @@ def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
             error_kind=canonical_provider_error.error_kind,
             retryable=canonical_provider_error.retryable,
             exit_code=canonical_provider_error.exit_code,
+            stderr_size_bytes=canonical_provider_error.stderr_size_bytes,
+            stderr_sha256=canonical_provider_error.stderr_sha256,
         )
     if isinstance(exc, ProviderError):
         return _OCRSystemicFailureReason(
@@ -1299,6 +1324,8 @@ def _classify_worker_failure(exc: Exception) -> tuple[str, int | None, int | Non
         return "remote_integrity", None, None
     if isinstance(exc, WebDAVError):
         return "remote", None, None
+    if isinstance(exc, EmbeddingV5RequestError):
+        return "openrouter_request", exc.status_code, None
     if isinstance(exc, sqlite3.Error):
         return "database", None, None
     if isinstance(exc, httpx.HTTPStatusError):
@@ -1331,6 +1358,20 @@ def _safe_stage_error(exc: Exception) -> str:
     if error_number is not None:
         fields.append(f"errno={error_number}")
     return f"worker_stage_failure: Worker pipeline stage failed ({', '.join(fields)})."
+
+
+def _safe_v5_embedding_terminal_error(exc: Exception) -> str:
+    if isinstance(exc, V5CapacityError):
+        return "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+    if isinstance(exc, EmbeddingV5PermanentRequestError):
+        fields = [f"kind={exc.kind}"]
+        if exc.status_code is not None:
+            fields.append(f"status_code={exc.status_code}")
+        return (
+            "v5_embedding_request_rejected: OpenRouter permanently rejected the embedding request "
+            f"({', '.join(fields)})"
+        )
+    return "v5_embedding_contract_failed: OpenRouter embedding response violated its contract"
 
 
 def _write_worker_failure_report(
@@ -1712,11 +1753,11 @@ class WorkerPipeline:
         if v5_profile is None and ocr_cache_mode != "read-write":
             raise ValueError("legacy v4 Worker requires its original read-write OCR cache contract")
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
-            raise ValueError("stable v1.0.10 publication requires explicit approval")
-        if v5_profile is not None and webdav.channel == "candidate-v1.0.10" and ocr_cache_mode != "read-only":
-            raise ValueError("v1.0.10 candidate requires read-only remote OCR cache access")
+            raise ValueError("stable v1.0.12 publication requires explicit approval")
+        if v5_profile is not None and webdav.channel == "candidate-v1.0.11" and ocr_cache_mode != "read-only":
+            raise ValueError("v1.0.11 candidate requires read-only remote OCR cache access")
         if v5_profile is not None and ocr_cache_mode == "read-write" and not ocr_cache_publication_approved:
-            raise ValueError("v1.0.10 remote OCR cache publication requires separate approval")
+            raise ValueError("v1.0.11 remote OCR cache publication requires separate approval")
         if document_aggregation is not None:
             if v5_profile is None:
                 raise ValueError("sealed document aggregation requires the Qwen v5 pipeline")
@@ -3035,6 +3076,8 @@ class WorkerPipeline:
                     retryable=classified.retryable,
                     publication_attempts=classified.publication_attempts,
                     exit_code=classified.exit_code,
+                    stderr_size_bytes=classified.stderr_size_bytes,
+                    stderr_sha256=classified.stderr_sha256,
                 )
                 error = OCRSystemicFailureError(
                     run_id=run_id,
@@ -3049,13 +3092,27 @@ class WorkerPipeline:
                 systemic_error = error
                 return error.stored_error
 
+            def stop_ocr_stage_retry(
+                exc: Exception,
+                current_document_id: str = document_id,
+            ) -> bool:
+                if is_isolatable_document_ocr_failure(exc):
+                    return False
+                if not isinstance(exc, ProviderSystemicError):
+                    return True
+                classified = _classify_ocr_systemic_failure(exc)
+                if classified.retryable is not True:
+                    return True
+                stage = self.state.get_stage(run_id, current_document_id, "ocr")
+                return stage is None or stage.status != "running" or stage.attempt_count >= stage.max_attempts
+
             try:
                 ocr_result = await self._finite_stage(
                     run_id=run_id,
                     document_id=document_id,
                     name="ocr",
                     operation=recognize,
-                    non_retryable_predicate=lambda exc: not is_isolatable_document_ocr_failure(exc),
+                    non_retryable_predicate=stop_ocr_stage_retry,
                     non_retryable_error_formatter=record_systemic_failure,
                     error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
                 )
@@ -4180,15 +4237,15 @@ class WorkerPipeline:
         embedding_cache_hit_counts: Counter[str] = Counter()
         embedding_cache_miss_counts: Counter[str] = Counter()
         embedding_download_counts: Counter[str] = Counter()
+        embedding_provider_wire_attempt_baseline = provider.wire_attempt_count
         embedding_provider_call_count = 0
         sealed_cache_bindings: tuple[tuple[str, str, str], ...] | None = None
 
         async def embed_views() -> None:
-            nonlocal embedding_provider_call_count, sealed_cache_bindings
+            nonlocal sealed_cache_bindings
             embedding_cache_hit_counts.clear()
             embedding_cache_miss_counts.clear()
             embedding_download_counts.clear()
-            embedding_provider_call_count = 0
             sealed_cache_bindings = None
             cache_bindings: list[tuple[str, str]] = []
             vector_sha256_by_cache_key: dict[str, str] = {}
@@ -4340,7 +4397,6 @@ class WorkerPipeline:
                         remaining_unique_misses,
                     )
                     raise
-                embedding_provider_call_count += 1
                 generated = await provider.embed_documents(
                     [ordered_view_pairs[index][1].embedding_input for index in batch_indices]
                 )
@@ -4378,11 +4434,15 @@ class WorkerPipeline:
             document_id="corpus-v5",
             name="embedding-v5",
             operation=embed_views,
-            non_retryable_predicate=lambda exc: isinstance(exc, V5CapacityError),
-            non_retryable_error_formatter=lambda _exc: (
-                "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+            non_retryable_predicate=lambda exc: (
+                isinstance(exc, V5CapacityError)
+                or (isinstance(exc, EmbeddingV5Error) and not isinstance(exc, EmbeddingV5TransientError))
             ),
+            non_retryable_error_formatter=_safe_v5_embedding_terminal_error,
         )
+        embedding_provider_call_count = provider.wire_attempt_count - embedding_provider_wire_attempt_baseline
+        if embedding_provider_call_count < 0:
+            raise RuntimeError("Qwen provider wire-attempt counter moved backwards")
         if sealed_cache_bindings is None or len(sealed_cache_bindings) != len(ordered_view_pairs):
             raise RuntimeError("v5 embedding cache/provider left incomplete view bindings")
         try:
@@ -4753,7 +4813,7 @@ class WorkerPipeline:
             else 100.0 * export.covered_non_whitespace_count / export.source_non_whitespace_count
         )
         v5_metrics = {
-            "schema_version": "cardrag.worker-v5-metrics.v2",
+            "schema_version": "cardrag.worker-v5-metrics.v3",
             "parser_profile_document_counts": {
                 profile_id: parser_profile_document_counts[profile_id]
                 for profile_id in sorted(parser_profile_document_counts)

@@ -110,7 +110,9 @@ PAGE_CHUNK_SOURCE_PATH = "apps/cardrag-worker/src/cardrag_worker/pipeline.py::ch
 PAGE_CHUNK_SOURCE_COMMIT = V109_BASELINE_COMMIT
 
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
-_MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
+# This bounds the compact page-lane evaluation DB produced locally; it is not
+# the v5 serving DB contract shared by Worker, MCP, and release evidence.
+_MAX_PAGE_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_EMBEDDING_REPLAY_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_VECTOR_BYTES = 64 * 1024 * 1024 * 1024
 _NORM_TOLERANCE = 2e-5
@@ -3008,7 +3010,7 @@ def _build_page_database(
     return _publish_built_file(
         working,
         destination,
-        maximum_bytes=_MAX_DATABASE_BYTES,
+        maximum_bytes=_MAX_PAGE_DATABASE_BYTES,
         code="page_database",
     )
 
@@ -4033,7 +4035,7 @@ def produce_external_observation(
         )
         vectors_binding = None
         profile_id = "cardrag.embedding.v109-small.v1"
-        source_version: Literal["v1.0.9", "v1.0.10-candidate"] = "v1.0.9"
+        source_version: Literal["v1.0.9", "v1.0.11-candidate"] = "v1.0.9"
         serving_schema: Literal["cardrag.serving-db.v4", "cardrag.evaluation-page.v1"] = (
             "cardrag.serving-db.v4"
         )
@@ -4061,7 +4063,7 @@ def produce_external_observation(
         serving_database = page_manifest.serving_database
         vectors_binding = page_manifest.vector_artifact
         profile_id = page_manifest.embedding_profile_id
-        source_version = "v1.0.10-candidate"
+        source_version = "v1.0.11-candidate"
         serving_schema = "cardrag.evaluation-page.v1"
         model = QWEN3_EMBEDDING_MODEL
         dimension = 4096

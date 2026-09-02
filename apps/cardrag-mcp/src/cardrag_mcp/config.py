@@ -15,6 +15,8 @@ from cardrag_mcp.quota import (
     DEFAULT_EXHAUSTIVE_AUDIT_MAX_ARTIFACT_BYTES,
     DEFAULT_EXHAUSTIVE_AUDIT_MAX_JOBS,
     DEFAULT_EXHAUSTIVE_AUDIT_MAX_TOTAL_BYTES,
+    DEFAULT_MAX_GENERATION_DOWNLOAD_BYTES,
+    DEFAULT_MAX_SERVING_DATABASE_BYTES,
     DEFAULT_MAX_STATE_BYTES,
     DEFAULT_RERANKER_AUDIT_MAX_ARTIFACT_BYTES,
     DEFAULT_RERANKER_AUDIT_MAX_JOBS,
@@ -26,8 +28,6 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 DEFAULT_MAX_VECTOR_SIDECAR_BYTES = 16 * GIB
 MAX_VECTOR_SIDECAR_BYTES = 64 * GIB
-DEFAULT_MAX_SERVING_DATABASE_BYTES = 4 * GIB
-DEFAULT_MAX_GENERATION_DOWNLOAD_BYTES = 32 * GIB
 MAX_GENERATION_DOWNLOAD_BYTES = 256 * GIB
 MAX_STATE_BYTES = 512 * GIB
 MAX_RESERVED_FREE_SPACE_BYTES = 128 * GIB
@@ -267,14 +267,14 @@ class Settings(BaseSettings):
         if self.openrouter_api_key is not None and self.openrouter_api_key_file is not None:
             raise ValueError("configure only one OpenRouter API key source")
         if self.reranker_shadow_enabled:
-            if self.channel != "candidate-v1.0.10":
-                raise ValueError("reranker shadow is restricted to the candidate-v1.0.10 channel")
+            if self.channel != "candidate-v1.0.11":
+                raise ValueError("reranker shadow is restricted to the candidate-v1.0.11 channel")
             if not self.openrouter_api_key_value():
                 raise ValueError("reranker shadow requires an OpenRouter API key")
         if self.experimental_map_reduce_enabled:
-            if self.channel != "candidate-v1.0.10":
+            if self.channel != "candidate-v1.0.11":
                 raise ValueError(
-                    "experimental map-reduce is restricted to the candidate-v1.0.10 channel"
+                    "experimental map-reduce is restricted to the candidate-v1.0.11 channel"
                 )
             if not self.openrouter_api_key_value():
                 raise ValueError("experimental map-reduce requires an OpenRouter API key")

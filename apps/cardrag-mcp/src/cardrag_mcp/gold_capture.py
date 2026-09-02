@@ -1,9 +1,9 @@
-"""Fail-closed producers for the five CardRAG v1.0.10 gold lanes.
+"""Fail-closed producers for the five CardRAG v1.0.11 gold lanes.
 
 The offline evaluator intentionally does not call serving code.  This module is
 the other half of that boundary: it captures native v5 exact, lexical, and
 reranker observations, or seals a reproducible external observation for the two
-historical/page lanes which have no producer in the v1.0.10 runtime.
+historical/page lanes which have no producer in the v1.0.11 runtime.
 
 Nothing in this module is imported by the MCP server.  It never follows a
 generation pointer and it publishes only immutable, canonical evidence files.
@@ -77,6 +77,7 @@ from cardrag_mcp.evaluation import (
 )
 from cardrag_mcp.exact import VECTOR_BLOCK_ROWS, ExactCapturedRow, V5ExactRepository
 from cardrag_mcp.models import ContractSearchRequest, DocumentAggregationPolicy, ViewType
+from cardrag_mcp.quota import DEFAULT_MAX_SERVING_DATABASE_BYTES
 from cardrag_mcp.reranker import (
     RERANKER_MODEL,
     OpenRouterReranker,
@@ -147,7 +148,7 @@ PAGE_COLUMN_CONTRACT: Literal["cardrag.evaluation-page-columns.v1"] = (
 
 _MAX_CAPTURE_LINE_BYTES = 256 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
-_MAX_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_DATABASE_BYTES = DEFAULT_MAX_SERVING_DATABASE_BYTES
 _MAX_SIDECAR_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_EXTERNAL_ROWS_PER_QUERY = 2_000_000
 _MAX_EXTERNAL_SIDECAR_BYTES = 95_000_000
@@ -245,7 +246,7 @@ class ExternalObservationManifest(_StrictModel):
     synthetic: Literal[False]
     gold_sha256: Sha256Hex
     query_count: int = Field(ge=1, le=MAX_RELEASE_QUERIES)
-    source_version: Literal["v1.0.9", "v1.0.10-candidate"]
+    source_version: Literal["v1.0.9", "v1.0.11-candidate"]
     source_commit: SourceCommit
     generation_id: Identifier
     generation_manifest: ArtifactBinding
@@ -295,7 +296,7 @@ class ExternalObservationManifest(_StrictModel):
             )
         else:
             valid = (
-                self.source_version == "v1.0.10-candidate"
+                self.source_version == "v1.0.11-candidate"
                 and self.serving_schema == "cardrag.evaluation-page.v1"
                 and self.embedding_model == "qwen/qwen3-embedding-8b"
                 and self.embedding_dimension == 4096
@@ -3337,7 +3338,7 @@ def _native_run_manifests(
         "schema_version": "cardrag.gold-run-artifact.v1",
         "gold_sha256": attestation.gold_sha256,
         "query_count": attestation.query_count,
-        "source_version": "v1.0.10-candidate",
+        "source_version": "v1.0.11-candidate",
         "source_commit": attestation.source_commit,
         "generation_id": attestation.generation_id,
         "generation_manifest_sha256": attestation.generation_manifest.sha256,
@@ -4626,7 +4627,7 @@ def _validate_native_release_attestation(
                 or receipt.source_vector_sha256 != exact_receipt.source_vector_sha256
                 or receipt.lane != lane
                 or run_manifest.source_commit != manifest.source_commit
-                or run_manifest.source_version != "v1.0.10-candidate"
+                or run_manifest.source_version != "v1.0.11-candidate"
                 or run_manifest.generation_id != manifest.generation_id
                 or run_manifest.generation_manifest_sha256 != manifest.generation_manifest.sha256
                 or run_manifest.serving_schema != "cardrag.serving-db.v5"

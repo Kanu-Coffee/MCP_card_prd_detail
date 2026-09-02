@@ -123,7 +123,7 @@ def test_plan_and_apply_are_source_read_only_deterministic_and_idempotent(tmp_pa
     assert b"https://" not in first_plan.ledger_bytes
     assert _tree_fingerprint(fixture.root) == before
 
-    destination = tmp_path / "v110-state"
+    destination = tmp_path / "v111-state"
     with WorkerState(destination / "worker-state.sqlite3") as destination_state:
         destination_cache = PDFCache(destination, destination_state)
         first = apply_v109_cache_seed(first_plan, destination_cache)
@@ -182,7 +182,7 @@ def test_source_identity_supersession_is_replayed_in_lineage_order(tmp_path: Pat
     _checkpoint_and_close(state)
 
     plan = build_v109_cache_seed_plan(root)
-    destination = tmp_path / "v110-state"
+    destination = tmp_path / "v111-state"
     with WorkerState(destination / "worker-state.sqlite3") as destination_state:
         apply_v109_cache_seed(plan, PDFCache(destination, destination_state))
         older = destination_state.pdf_cache_source_history(first_identity.source_id)
@@ -255,7 +255,7 @@ def test_database_symlink_and_source_destination_overlap_fail_closed(tmp_path: P
 def test_pin_loader_rejects_tampered_or_symlinked_ledger(tmp_path: Path, attack: str) -> None:
     fixture = _terminal_fixture(tmp_path)
     plan = build_v109_cache_seed_plan(fixture.root)
-    destination = tmp_path / "v110-state"
+    destination = tmp_path / "v111-state"
     with WorkerState(destination / "worker-state.sqlite3") as destination_state:
         report = apply_v109_cache_seed(plan, PDFCache(destination, destination_state))
     relative = report["ledger_path"]

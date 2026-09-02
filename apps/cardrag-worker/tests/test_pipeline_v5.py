@@ -329,7 +329,7 @@ class _StableStore:
 
 
 class _FakeCandidateWebDAV:
-    channel = "candidate-v1.0.10"
+    channel = "candidate-v1.0.11"
 
     def __init__(self) -> None:
         self.pointer_path = channel_pointer_path(self.channel)
@@ -689,6 +689,51 @@ async def test_v5_capacity_rejection_is_non_retryable_and_explicit_resume_restar
 
 
 @pytest.mark.asyncio
+async def test_v5_permanent_embedding_http_status_is_non_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_pdf_http(monkeypatch, [pdf_bytes()], [])
+    wire_calls = 0
+
+    def reject(request: httpx.Request) -> httpx.Response:
+        nonlocal wire_calls
+        wire_calls += 1
+        return httpx.Response(401, request=request)
+
+    embeddings = _test_qwen_embeddings([])
+    embeddings.transport = httpx.MockTransport(reject)
+    webdav = _FakeCandidateWebDAV()
+    webdav.fail_pointer_once = False
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(_test_source("permanent-embedding"))],
+            ocr=_OCR(),  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=3,
+            retry_cap_seconds=0,
+        )
+
+        with pytest.raises(WorkerUnexpectedFailureError):
+            await pipeline.run()
+
+        run_id = str(state.connection.execute("SELECT run_id FROM run").fetchone()[0])
+        stage = state.get_stage(run_id, "corpus-v5", "embedding-v5")
+        assert stage is not None
+        assert (stage.status, stage.attempt_count, stage.max_attempts) == ("failed", 1, 3)
+        assert stage.last_error is not None
+        assert "v5_embedding_request_rejected" in stage.last_error
+        assert "kind=authentication" in stage.last_error
+        assert "status_code=401" in stage.last_error
+        assert wire_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_v5_pipeline_resume_overwrites_run_owned_partial_export_targets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -913,6 +958,8 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         inputs = body["input"]
         assert isinstance(inputs, list)
         assert len(inputs) == 1
+        if len(embedding_requests) == 1:
+            return httpx.Response(529, request=request)
         vector = [1.0] + [0.0] * 4095
         return httpx.Response(
             200,
@@ -940,6 +987,8 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         api_key="test-only-key",
         profile=profile,
         token_counter=_PinnedFakeTokenCounter(),
+        retry_base_seconds=0,
+        retry_cap_seconds=0,
         transport=httpx.MockTransport(embedding_handler),
     )
     source = SourceRecord(
@@ -1041,7 +1090,7 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
             await pipeline.run()
         run_id = failed.value.run_id
         api_calls_after_seal = len(embedding_requests)
-        assert api_calls_after_seal == 1
+        assert api_calls_after_seal == 2
         assert vector_representations and all(
             vector_type is LazyEmbeddingVector
             for invocation in vector_representations
@@ -1069,7 +1118,7 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert resumed.evidence_count == 2
         assert resumed.v5_metrics is not None
         metrics = resumed.v5_metrics
-        assert metrics["schema_version"] == "cardrag.worker-v5-metrics.v2"
+        assert metrics["schema_version"] == "cardrag.worker-v5-metrics.v3"
         assert metrics["source_coverage_percent"] == 100.0
         assert metrics["contract_revision_count"] == 2
         assert metrics["current_revision_count"] == 2
@@ -1078,7 +1127,7 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert metrics["historical_revision_unresolved_identities"] == []
         assert metrics["revision_history_policy_version"] == REVISION_HISTORY_POLICY_VERSION
         assert metrics["historical_revision_unresolved_sha256"] == (unresolved_revision_ledger_sha256_v5(()))
-        assert metrics["embedding_provider_call_count"] == 1
+        assert metrics["embedding_provider_call_count"] == 2
         assert metrics["embedding_dimension"] == 4096
         assert sum(row["downloads"] for row in metrics["embedding_view_counts"].values()) == 1
         assert len(embedding_requests) == api_calls_after_seal

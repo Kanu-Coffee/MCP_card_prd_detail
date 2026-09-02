@@ -290,20 +290,20 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         generation_objects_by_path[path] for path in sorted(generation_objects_by_path)
     )
     config = EffectiveConfigEvidence(
-        schema_version="cardrag.candidate-effective-config.v2",
+        schema_version="cardrag.candidate-effective-config.v3",
         source_commit=SOURCE_COMMIT,
-        release_version="1.0.10",
-        compose_project="cardrag-v110-candidate",
-        channel="candidate-v1.0.10",
-        worker_volume="cardrag-worker-v110-state",
+        release_version="1.0.12",
+        compose_project="cardrag-v112-candidate",
+        channel="candidate-v1.0.11",
+        worker_volume="cardrag-worker-v112-candidate-state",
         worker_state_mount_path="/var/lib/cardrag-worker",
-        worker_codex_home_volume="cardrag-worker-v110-codex-home",
+        worker_codex_home_volume="cardrag-worker-v112-candidate-codex-home",
         worker_codex_home_mount_path="/var/lib/cardrag-codex-home",
         worker_codex_auth_root="/var/lib/cardrag-codex-home",
         worker_home="/var/lib/cardrag-codex-home/home",
-        mcp_volume="cardrag-mcp-v110-state",
+        mcp_volume="cardrag-mcp-v112-candidate-state",
         mcp_host="127.0.0.1",
-        mcp_port=18010,
+        mcp_port=18012,
         rootfs_read_only=True,
         cap_drop_all=True,
         no_new_privileges=True,
@@ -313,17 +313,17 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         worker_privileged=False,
         worker_cap_add_count=0,
         v109_volume_rw_mounts=0,
-        worker_max_state_bytes=68719476736,
+        worker_max_state_bytes=137438953472,
         worker_reserved_free_space_bytes=2147483648,
         worker_max_vector_sidecar_bytes=17179869184,
-        worker_max_serving_database_bytes=4294967296,
+        worker_max_serving_database_bytes=34359738368,
         worker_minimum_start_free_bytes=34359738368,
         mcp_max_vector_bytes=1073741824,
         mcp_max_resident_vector_bytes=1073741824,
         mcp_max_vector_sidecar_bytes=17179869184,
-        mcp_max_serving_database_bytes=4294967296,
-        mcp_max_generation_download_bytes=34359738368,
-        mcp_max_state_bytes=68719476736,
+        mcp_max_serving_database_bytes=34359738368,
+        mcp_max_generation_download_bytes=68719476736,
+        mcp_max_state_bytes=137438953472,
         mcp_reserved_free_space_bytes=2147483648,
         mcp_exhaustive_audit_max_jobs=32,
         mcp_exhaustive_audit_max_total_bytes=2147483648,
@@ -351,7 +351,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'c' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.10",
+            version="1.0.12",
             platform="linux/amd64",
             entrypoint="cardrag-worker",
             user="10001:10001",
@@ -375,7 +375,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'e' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.10",
+            version="1.0.12",
             platform="linux/amd64",
             entrypoint="cardrag-mcp",
             user="10001:10001",
@@ -395,6 +395,9 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         embedding_normalization="l2",
         embedding_provider_id=embedding_profile.provider_id,
         embedding_maximum_tokens=embedding_profile.maximum_tokens,
+        embedding_request_max_attempts=12,
+        embedding_retry_base_seconds=1,
+        embedding_retry_cap_seconds=60,
         retrieval_mode="exact-all-active-rows.v1",
         candidate_prefilter="none",
         approximate=False,
@@ -413,13 +416,17 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     )
     generation_write_requests = 13
     worker = WorkerMetricsEvidence(
-        schema_version="cardrag.candidate-worker-metrics.v2",
+        schema_version="cardrag.candidate-worker-metrics.v3",
         source_commit=SOURCE_COMMIT,
         generation_id=manifest.generation_id,
         generation_manifest_sha256=manifest.manifest_sha256,
         effective_config_sha256=canonical_sha256(config),
         runtime_image_repo_digest=config.worker_image.compose_image_reference,
         runtime_container_image_id=config.worker_image.platform_config_digest,
+        runtime_image_store_identity="classic-config-id",
+        runtime_container_config_image=config.worker_image.compose_image_reference,
+        runtime_manifest_descriptor_digest=None,
+        runtime_manifest_descriptor_platform=None,
         runtime_uid_gid="10001:10001",
         rootfs_read_only_verified=True,
         cap_drop_all_verified=True,
@@ -467,13 +474,17 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         generation_publication_calls=generation_write_requests,
     )
     mcp = MCPSmokeEvidence(
-        schema_version="cardrag.candidate-mcp-smoke.v1",
+        schema_version="cardrag.candidate-mcp-smoke.v2",
         source_commit=SOURCE_COMMIT,
         generation_id=manifest.generation_id,
         generation_manifest_sha256=manifest.manifest_sha256,
         effective_config_sha256=canonical_sha256(config),
         runtime_image_repo_digest=config.mcp_image.compose_image_reference,
         runtime_container_image_id=config.mcp_image.platform_config_digest,
+        runtime_image_store_identity="classic-config-id",
+        runtime_container_config_image=config.mcp_image.compose_image_reference,
+        runtime_manifest_descriptor_digest=None,
+        runtime_manifest_descriptor_platform=None,
         runtime_uid_gid="10001:10001",
         rootfs_read_only_verified=True,
         cap_drop_all_verified=True,
@@ -573,7 +584,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     generation_cas = GenerationCASEvidence(
         schema_version="cardrag.candidate-generation-cas-audit.v1",
         source_commit=SOURCE_COMMIT,
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         generation_id=manifest.generation_id,
         manifest_sha256=manifest.manifest_sha256,
         ready_sha256=canonical_sha256(ready),
@@ -597,7 +608,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     rollback = RollbackLedgerEvidence(
         schema_version="cardrag.candidate-v4-v5-rollback-ledger.v1",
         source_commit=SOURCE_COMMIT,
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         steps=(
             RollbackStep(
                 ordinal=1,
@@ -712,10 +723,10 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         bindings[field] = _file_binding(names[field], raw)
     receipt = CandidateAcceptanceReceipt(
         schema_version=RECEIPT_SCHEMA,
-        release_version="1.0.10",
+        release_version="1.0.12",
         source_commit=SOURCE_COMMIT,
-        compose_project="cardrag-v110-candidate",
-        channel="candidate-v1.0.10",
+        compose_project="cardrag-v112-candidate",
+        channel="candidate-v1.0.11",
         generation_id=manifest.generation_id,
         issuers=CANDIDATE_ISSUERS,
         release_eligible=True,
@@ -896,7 +907,7 @@ def test_effective_config_rejects_a_cross_role_platform_manifest(tmp_path: Path)
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("worker_codex_home_volume", "cardrag-worker-v110-state"),
+        ("worker_codex_home_volume", "cardrag-worker-v112-candidate-state"),
         ("worker_codex_home_mount_path", "/var/lib/cardrag-worker/codex"),
         ("worker_codex_auth_root", "/var/lib/cardrag-worker/codex"),
         ("worker_home", "/var/lib/cardrag-worker/home"),
@@ -910,6 +921,27 @@ def test_effective_config_rejects_codex_home_state_overlap(
     bundle = _write_valid_bundle(tmp_path)
     payload = bundle.models["effective_config"].model_dump(mode="python")
     payload[field] = value
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "stable_volume"),
+    (
+        ("worker_volume", "cardrag-worker-v111-state"),
+        ("worker_codex_home_volume", "cardrag-worker-v111-codex-home"),
+        ("mcp_volume", "cardrag-mcp-v111-state"),
+    ),
+)
+def test_effective_config_rejects_stable_volume_reuse(
+    tmp_path: Path,
+    field: str,
+    stable_volume: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload[field] = stable_volume
 
     with pytest.raises(ValidationError):
         EffectiveConfigEvidence.model_validate(payload)
@@ -948,6 +980,56 @@ def test_effective_config_rejects_every_capacity_override(tmp_path: Path, field:
         EffectiveConfigEvidence.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("embedding_request_max_attempts", 11),
+        ("embedding_retry_base_seconds", 2),
+        ("embedding_retry_cap_seconds", 61),
+    ),
+)
+def test_effective_config_rejects_every_retry_override(
+    tmp_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "embedding_request_max_attempts",
+        "embedding_retry_base_seconds",
+        "embedding_retry_cap_seconds",
+    ),
+)
+def test_effective_config_requires_every_retry_evidence_field(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    del payload[field]
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+def test_effective_config_rejects_pre_retry_schema(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload["schema_version"] = "cardrag.candidate-effective-config.v2"
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
 def test_acceptance_requires_worker_sandbox_runtime_smoke(tmp_path: Path) -> None:
     bundle = _write_valid_bundle(tmp_path)
     worker = bundle.models["worker_metrics"]
@@ -977,6 +1059,18 @@ def test_acceptance_requires_worker_sandbox_runtime_smoke(tmp_path: Path) -> Non
             "worker_metrics_binding_mismatch",
         ),
         (
+            "worker_metrics",
+            "runtime_container_config_image",
+            f"{IMAGE_REPOSITORY}@sha256:{'9' * 64}",
+            "worker_metrics_binding_mismatch",
+        ),
+        (
+            "worker_metrics",
+            "runtime_image_store_identity",
+            "containerd-index-id",
+            "worker_metrics_binding_mismatch",
+        ),
+        (
             "mcp_smoke",
             "runtime_image_repo_digest",
             f"{IMAGE_REPOSITORY}@sha256:{'9' * 64}",
@@ -986,6 +1080,18 @@ def test_acceptance_requires_worker_sandbox_runtime_smoke(tmp_path: Path) -> Non
             "mcp_smoke",
             "runtime_container_image_id",
             f"sha256:{'9' * 64}",
+            "mcp_smoke_binding_mismatch",
+        ),
+        (
+            "mcp_smoke",
+            "runtime_container_config_image",
+            f"{IMAGE_REPOSITORY}@sha256:{'9' * 64}",
+            "mcp_smoke_binding_mismatch",
+        ),
+        (
+            "mcp_smoke",
+            "runtime_image_store_identity",
+            "containerd-index-id",
             "mcp_smoke_binding_mismatch",
         ),
     ),
@@ -1004,6 +1110,193 @@ def test_acceptance_binds_runtime_containers_to_the_rendered_sealed_images(
     mismatched = type(evidence).model_validate(payload)
     _rewrite_bound_file(bundle, evidence_name, mismatched.canonical_bytes())
 
+    with pytest.raises(CandidateAcceptanceError, match=f"^{code}$"):
+        _verify(bundle)
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "image_field"),
+    (("worker_metrics", "worker_image"), ("mcp_smoke", "mcp_image")),
+)
+def test_acceptance_allows_containerd_index_identity_with_exact_platform_descriptor(
+    tmp_path: Path,
+    evidence_name: str,
+    image_field: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    evidence = bundle.models[evidence_name]
+    image = getattr(bundle.models["effective_config"], image_field)
+    payload = evidence.model_dump(mode="python")
+    payload.update(
+        runtime_image_store_identity="containerd-index-id",
+        runtime_container_image_id=image.digest,
+        runtime_manifest_descriptor_digest=image.platform_manifest_digest,
+        runtime_manifest_descriptor_platform="linux/amd64",
+    )
+    containerd = type(evidence).model_validate(payload)
+    _rewrite_bound_file(bundle, evidence_name, containerd.canonical_bytes())
+
+    _verify(bundle)
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "image_field"),
+    (("worker_metrics", "worker_image"), ("mcp_smoke", "mcp_image")),
+)
+def test_acceptance_allows_classic_config_identity_with_exact_optional_descriptor(
+    tmp_path: Path,
+    evidence_name: str,
+    image_field: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    evidence = bundle.models[evidence_name]
+    image = getattr(bundle.models["effective_config"], image_field)
+    payload = evidence.model_dump(mode="python")
+    payload.update(
+        runtime_manifest_descriptor_digest=image.platform_manifest_digest,
+        runtime_manifest_descriptor_platform="linux/amd64",
+    )
+    classic = type(evidence).model_validate(payload)
+    _rewrite_bound_file(bundle, evidence_name, classic.canonical_bytes())
+
+    _verify(bundle)
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "image_field"),
+    (("worker_metrics", "worker_image"), ("mcp_smoke", "mcp_image")),
+)
+def test_runtime_manifest_descriptor_pair_must_be_complete(
+    tmp_path: Path,
+    evidence_name: str,
+    image_field: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    evidence = bundle.models[evidence_name]
+    image = getattr(bundle.models["effective_config"], image_field)
+    payload = evidence.model_dump(mode="python")
+    payload["runtime_manifest_descriptor_digest"] = image.platform_manifest_digest
+
+    with pytest.raises(ValidationError, match="descriptor digest and platform must be paired"):
+        type(evidence).model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "image_field", "invalid_identity"),
+    (
+        ("worker_metrics", "worker_image", "platform"),
+        ("worker_metrics", "worker_image", "attestation"),
+        ("worker_metrics", "worker_image", "config"),
+        ("worker_metrics", "worker_image", "other"),
+        ("mcp_smoke", "mcp_image", "platform"),
+        ("mcp_smoke", "mcp_image", "attestation"),
+        ("mcp_smoke", "mcp_image", "config"),
+        ("mcp_smoke", "mcp_image", "other"),
+    ),
+)
+def test_containerd_runtime_id_rejects_platform_attestation_and_other_digests(
+    tmp_path: Path,
+    evidence_name: str,
+    image_field: str,
+    invalid_identity: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    evidence = bundle.models[evidence_name]
+    image = getattr(bundle.models["effective_config"], image_field)
+    invalid_digest = {
+        "platform": image.platform_manifest_digest,
+        "attestation": image.attestation_manifest_digest,
+        "config": image.platform_config_digest,
+        "other": f"sha256:{'9' * 64}",
+    }[invalid_identity]
+    payload = evidence.model_dump(mode="python")
+    payload.update(
+        runtime_image_store_identity="containerd-index-id",
+        runtime_container_image_id=invalid_digest,
+        runtime_manifest_descriptor_digest=image.platform_manifest_digest,
+        runtime_manifest_descriptor_platform="linux/amd64",
+    )
+    mismatched = type(evidence).model_validate(payload)
+    _rewrite_bound_file(bundle, evidence_name, mismatched.canonical_bytes())
+
+    code = (
+        "worker_metrics_binding_mismatch"
+        if evidence_name == "worker_metrics"
+        else "mcp_smoke_binding_mismatch"
+    )
+    with pytest.raises(CandidateAcceptanceError, match=f"^{code}$"):
+        _verify(bundle)
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "image_field", "invalid_identity"),
+    (
+        ("worker_metrics", "worker_image", "index"),
+        ("worker_metrics", "worker_image", "platform"),
+        ("worker_metrics", "worker_image", "attestation"),
+        ("worker_metrics", "worker_image", "other"),
+        ("mcp_smoke", "mcp_image", "index"),
+        ("mcp_smoke", "mcp_image", "platform"),
+        ("mcp_smoke", "mcp_image", "attestation"),
+        ("mcp_smoke", "mcp_image", "other"),
+    ),
+)
+def test_classic_runtime_id_rejects_index_platform_attestation_and_other_digests(
+    tmp_path: Path,
+    evidence_name: str,
+    image_field: str,
+    invalid_identity: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    evidence = bundle.models[evidence_name]
+    image = getattr(bundle.models["effective_config"], image_field)
+    invalid_digest = {
+        "index": image.digest,
+        "platform": image.platform_manifest_digest,
+        "attestation": image.attestation_manifest_digest,
+        "other": f"sha256:{'9' * 64}",
+    }[invalid_identity]
+    payload = evidence.model_dump(mode="python")
+    payload["runtime_container_image_id"] = invalid_digest
+    mismatched = type(evidence).model_validate(payload)
+    _rewrite_bound_file(bundle, evidence_name, mismatched.canonical_bytes())
+
+    code = (
+        "worker_metrics_binding_mismatch"
+        if evidence_name == "worker_metrics"
+        else "mcp_smoke_binding_mismatch"
+    )
+    with pytest.raises(CandidateAcceptanceError, match=f"^{code}$"):
+        _verify(bundle)
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "image_field"),
+    (("worker_metrics", "worker_image"), ("mcp_smoke", "mcp_image")),
+)
+def test_containerd_runtime_rejects_wrong_platform_manifest_descriptor(
+    tmp_path: Path,
+    evidence_name: str,
+    image_field: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    evidence = bundle.models[evidence_name]
+    image = getattr(bundle.models["effective_config"], image_field)
+    payload = evidence.model_dump(mode="python")
+    payload.update(
+        runtime_image_store_identity="containerd-index-id",
+        runtime_container_image_id=image.digest,
+        runtime_manifest_descriptor_digest=image.attestation_manifest_digest,
+        runtime_manifest_descriptor_platform="linux/amd64",
+    )
+    mismatched = type(evidence).model_validate(payload)
+    _rewrite_bound_file(bundle, evidence_name, mismatched.canonical_bytes())
+
+    code = (
+        "worker_metrics_binding_mismatch"
+        if evidence_name == "worker_metrics"
+        else "mcp_smoke_binding_mismatch"
+    )
     with pytest.raises(CandidateAcceptanceError, match=f"^{code}$"):
         _verify(bundle)
 

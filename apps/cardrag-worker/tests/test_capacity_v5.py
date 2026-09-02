@@ -297,7 +297,7 @@ def test_database_prediction_explicitly_charges_fts_and_secondary_index_text() -
     assert indexed >= base + 4096
 
 
-def test_database_prediction_is_calibrated_to_observed_partial_v110_corpus() -> None:
+def test_database_prediction_is_calibrated_to_observed_partial_candidate_corpus() -> None:
     # Read-only audit of 1,026 partially processed documents. The lower-bound
     # payload excludes additional exact bindings now charged by the ledger.
     observed_rows = 1_954_142
@@ -314,11 +314,59 @@ def test_database_prediction_is_calibrated_to_observed_partial_v110_corpus() -> 
     assert partial < representative_exact_bindings < DEFAULT_MAX_SERVING_DATABASE_BYTES
     assert (
         predict_serving_database_bytes(
-            payload_bytes=450_000_000 * 5,
-            row_count=observed_rows * 5,
+            payload_bytes=450_000_000 * 20,
+            row_count=observed_rows * 20,
         )
         > DEFAULT_MAX_SERVING_DATABASE_BYTES
     )
+
+
+def test_database_prediction_fits_observed_full_v111_candidate_corpus() -> None:
+    # Read-only reconstruction of the failed v1.0.11 four-issuer preflight.
+    # The former 4 GiB contract rejected this exact corpus before any paid
+    # embedding request or publication. The 32 GiB contract admits this sealed
+    # prediction and the planned eight-issuer expansion with operating margin.
+    observed = predict_serving_database_bytes(
+        payload_bytes=1_876_077_491,
+        row_count=6_692_163,
+        fts_indexed_text_bytes=171_794_956,
+        secondary_index_text_bytes=444_565_586,
+    )
+    planned_eight_issuer = predict_serving_database_bytes(
+        payload_bytes=3_752_154_982,
+        row_count=13_384_326,
+        fts_indexed_text_bytes=343_589_912,
+        secondary_index_text_bytes=889_131_172,
+    )
+
+    assert observed == 8_148_455_424
+    assert planned_eight_issuer == 16_295_858_176
+    assert 4 * 1024**3 < observed < planned_eight_issuer < DEFAULT_MAX_SERVING_DATABASE_BYTES == 32 * 1024**3
+
+
+def test_planned_eight_issuer_projection_fits_linked_capacity_contracts() -> None:
+    projection = predict_v5_local_artifacts(
+        derived_view_count=630_134,
+        database_payload_bytes=3_752_154_982,
+        database_row_count=13_384_326,
+        database_fts_indexed_text_bytes=343_589_912,
+        database_secondary_index_text_bytes=889_131_172,
+        embedding_cache_miss_count=443_618,
+        embedding_cache_wal_baseline_bytes=0,
+    )
+    projected_state_bytes = 2 * 4_855_486_381 + projection.logical_growth_bytes
+    projected_unique_pdf_bytes = 2 * 2_781_598_165
+    projected_generation_download_bytes = (
+        projection.serving_database_bytes + projection.vector_sidecar_bytes + projected_unique_pdf_bytes
+    )
+
+    assert projection.serving_database_bytes == 16_295_858_176
+    assert projection.vector_sidecar_bytes == 10_324_115_456
+    assert projection.logical_growth_bytes == 55_701_311_488
+    assert projection.peak_growth_bytes == 104_588_886_016
+    assert projection.vector_sidecar_bytes < 16 * 1024**3
+    assert projected_generation_download_bytes == 32_183_169_962 < 64 * 1024**3
+    assert projected_state_bytes == 65_412_284_250 < DEFAULT_MAX_STATE_BYTES == 128 * 1024**3
 
 
 def test_database_ledger_counts_every_export_table_and_fixed_metadata_allowance() -> None:
@@ -465,7 +513,7 @@ def test_policy_rejects_boolean_and_out_of_range_values(field: str, value: int) 
 def test_defaults_align_with_mcp_state_and_two_gib_reserved_free_policy() -> None:
     policy = V5CapacityPolicy()
 
-    assert policy.maximum_state_bytes == DEFAULT_MAX_STATE_BYTES == 64 * 1024**3
+    assert policy.maximum_state_bytes == DEFAULT_MAX_STATE_BYTES == 128 * 1024**3
     assert policy.reserved_free_space_bytes == DEFAULT_RESERVED_FREE_SPACE_BYTES == 2 * 1024**3
 
 

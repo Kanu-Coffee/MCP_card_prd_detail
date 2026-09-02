@@ -76,8 +76,8 @@ date, and source version back to the stable desktop discovery record before it
 downloads any bytes.
 
 Live discovery, OCR, embeddings, and WebDAV publishing require real issuer and
-provider credentials/endpoints. The v1.0.10 worker accepts
-`candidate-v1.0.10` by default; `stable` remains blocked unless the separately
+provider credentials/endpoints. The v1.0.12 reliability-patch worker accepts
+`candidate-v1.0.11` by default; `stable` remains blocked unless the separately
 approved cutover explicitly sets `CARDRAG_STABLE_PUBLICATION_APPROVED=true`.
 No provided environment or Compose file enables that flag. Shared native or
 adopted OCR cache writes independently require stable channel,
@@ -92,10 +92,21 @@ fails during settings validation. The Worker retains two local publication
 seals and prunes unreferenced local PDF CAS bytes. Up to two failed or
 interrupted run directories remain separately for diagnosis.
 
+OpenRouter endpoint metadata and embedding batches retry transient HTTP `408`,
+`425`, `429`, `5xx` (including `524` and `529`), timeout, network, proxy, remote
+protocol, and response-decoding failures locally before the finite corpus stage
+is restarted. The defaults are 12 attempts with exponential backoff from one
+to 60 seconds; `Retry-After` is honored within that bound. Authentication,
+billing, authorization, request-shape, local/unsupported protocol, and
+model/provider/vector contract failures are never retried. Configure the bounded
+policy with `CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS`,
+`CARDRAG_EMBEDDING_RETRY_BASE_SECONDS`, and
+`CARDRAG_EMBEDDING_RETRY_CAP_SECONDS`.
+
 The `codex-exec` OCR child is a text-only agent boundary even when a disclosure
 image contains prompt-injection instructions. Page images are attached directly
 with `codex exec --image`; the tool-side `view_image` capability is therefore
-disabled together with Codex 0.147.0's shell, unified exec, shell snapshot,
+disabled together with Codex 0.151.0's shell, unified exec, shell snapshot,
 browser/computer, app/plugin/skill, hook, and sub-agent surfaces. The invocation
 also uses `--strict-config`, `--ignore-user-config`, `--ignore-rules`,
 `--sandbox read-only`, `shell_environment_policy.inherit="none"`, and disables
@@ -111,8 +122,9 @@ claim is that untrusted OCR content has no model-callable general file-read or
 command-execution route to `/run/secrets` or `CODEX_HOME`, not that a compromised
 Codex executable cannot read its own authentication store.
 
-Container deployments persist Codex data in the dedicated
-`cardrag-worker-v110-codex-home` volume at `/var/lib/cardrag-codex-home`.
+Stable container deployments persist Codex data in the dedicated
+`cardrag-worker-v111-codex-home` volume at `/var/lib/cardrag-codex-home`; the
+v1.0.12 candidate overlay instead uses `cardrag-worker-v112-candidate-codex-home`.
 `CARDRAG_CODEX_AUTH_ROOT` and `CODEX_HOME` equal that mount root, while `HOME`
 is its owned mode-0700 `home/` child. The Worker recovery volume remains mounted
 only at `/var/lib/cardrag-worker`; settings reject an auth root that is equal to,
@@ -127,8 +139,9 @@ typed error contains only a constant reason code; it never records the matched
 value, byte offset, pattern, or surrounding OCR text.
 
 `worker-state.sqlite3` and its revision metadata remain Worker-only recovery
-state; the MCP never reads them. Candidate runs use a separate channel, WebDAV
-root, and state volume and never perform remote GC. Unit tests use local
+state; the MCP never reads them. Candidate runs use the shared canonical WebDAV
+root but a separate `candidate-v1.0.11` channel and v112 state volume, and never
+perform remote GC. Unit tests use local
 deterministic fakes.
 
 The v5 path has fail-closed local capacity gates; legacy v1-v4 behavior is
@@ -145,9 +158,9 @@ hard-limits the working database, checks the vacuumed database and vector
 sidecar before either final target is installed, and removes only its own temp
 artifacts on failure. A forecast above a configured cap therefore rejects the
 attempt until an operator explicitly resumes with a fitting corpus or policy.
-The defaults are 64 GiB for `CARDRAG_WORKER_MAX_STATE_BYTES`, 2 GiB for
+The defaults are 128 GiB for `CARDRAG_WORKER_MAX_STATE_BYTES`, 2 GiB for
 `CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES`, 16 GiB for
-`CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES`, and 4 GiB for
+`CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES`, and 32 GiB for
 `CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES`. Values must be canonical decimal
 integers in the supported signed-64-bit byte range. The state, sidecar, and DB
 limits must be positive; the two free-space settings may be zero.
@@ -168,8 +181,10 @@ V5 cache hit/miss metrics count derived sidecar rows. Equal exact embedding
 inputs share one cache key, so the provider is called once per unique miss and
 `downloads` counts unique keys (attributed to the first canonical view type),
 while export still writes one 4,096D row for every derived view. Counters are
-attempt-local: retry or explicit-resume metrics describe only the last
-completed attempt.
+attempt-local except `embedding_provider_call_count`, which counts every actual
+OpenRouter wire attempt made during the generation, including request-local and
+whole-stage retries. A later explicit resume starts a new provider baseline;
+already cached vectors do not add calls.
 
 The cache forecast includes per-unique-miss persistent/WAL growth and one copy
 of the sealed existing WAL allocation in case SQLite's automatic checkpoint
@@ -195,7 +210,8 @@ body limit when absent. Configure them with
 `CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES`; invalid or oversized values
 fail closed without including provider bodies or credentials in errors.
 
-The supported v1.0.10 publication path is the Worker CLI/container. The v5
+The supported v1.0.11 data-publication path uses the v1.0.12 Worker
+CLI/container. The v5
 bundle publisher also denies a stable pointer move unless the caller carries
 the explicit stable-publication capability; calling the primitive directly is
 not an approval bypass. Legacy v1-v4 publisher behavior is unchanged.

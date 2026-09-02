@@ -433,6 +433,23 @@ class FakeReader:
         self.closed = True
 
 
+def test_store_defaults_share_serving_database_and_generation_download_contracts(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=1024 * 1024)
+
+    assert (
+        store.maximum_database_bytes
+        == quota_module.DEFAULT_MAX_SERVING_DATABASE_BYTES
+        == 32 * 1024**3
+    )
+    assert (
+        store.maximum_generation_download_bytes
+        == quota_module.DEFAULT_MAX_GENERATION_DOWNLOAD_BYTES
+        == 64 * 1024**3
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("database_schema", "manifest_schema"),
@@ -829,7 +846,7 @@ async def test_v4_v5_v4_transition_stages_sidecar_durably_and_restarts(
         object_root: Path,
         *,
         maximum_vector_bytes: int,
-        maximum_database_bytes: int = 4 * 1024 * 1024 * 1024,
+        maximum_database_bytes: int = quota_module.DEFAULT_MAX_SERVING_DATABASE_BYTES,
         maximum_vector_sidecar_bytes: int | None = None,
         maximum_resident_vector_bytes: int | None = None,
         expected_generation_id: str | None = None,

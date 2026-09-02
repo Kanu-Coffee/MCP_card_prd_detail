@@ -37,6 +37,7 @@ from cardrag_mcp.embeddings import OpenRouterEmbedder
 from cardrag_mcp.evaluation import GoldDataset, load_gold_jsonl
 from cardrag_mcp.exact import VECTOR_BLOCK_ROWS, ExactCapturedRow, V5ExactRepository
 from cardrag_mcp.models import ContractSearchRequest, ServingMetadata, ViewType
+from cardrag_mcp.quota import DEFAULT_MAX_SERVING_DATABASE_BYTES
 from cardrag_mcp.store import GenerationHandle, GenerationStore, load_generation_handle
 
 _SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
@@ -581,7 +582,7 @@ def _verify_generation_files(
     vector_path = generation_directory / "vectors.f32"
     database = _checkpoint_file(
         database_path,
-        maximum_bytes=4 * 1024 * 1024 * 1024,
+        maximum_bytes=DEFAULT_MAX_SERVING_DATABASE_BYTES,
     )
     vector = _checkpoint_file(
         vector_path,
@@ -929,7 +930,7 @@ async def capture_score_artifact(
         maximum_vector_bytes=1024 * 1024 * 1024,
         maximum_vector_sidecar_bytes=64 * 1024 * 1024 * 1024,
         maximum_resident_vector_bytes=1024 * 1024 * 1024,
-        maximum_database_bytes=4 * 1024 * 1024 * 1024,
+        maximum_database_bytes=DEFAULT_MAX_SERVING_DATABASE_BYTES,
         expected_generation_id=generation_manifest.generation_id,
         expected_embedding_model=generation_manifest.embedding_contract.model,
         expected_embedding_count=generation_manifest.embedding_contract.count,
@@ -1176,7 +1177,7 @@ async def capture_score_artifact(
         await asyncio.to_thread(
             _verify_checkpoint,
             database_checkpoint,
-            maximum_bytes=4 * 1024 * 1024 * 1024,
+            maximum_bytes=DEFAULT_MAX_SERVING_DATABASE_BYTES,
         )
         await asyncio.to_thread(
             _verify_checkpoint,

@@ -1579,6 +1579,82 @@ async def test_provider_process_exit_is_systemic_safe_and_stops_later_ocr(
 
 
 @pytest.mark.asyncio
+async def test_transient_provider_process_failure_retries_within_stage_budget_then_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = pdf_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    records = (
+        source(product_code="p1", source_url="https://cards.example/current-1.pdf"),
+        source(product_code="p2", source_url="https://cards.example/current-2.pdf"),
+    )
+    raw_sentinel = "RAW_TRANSIENT_CODEX_STDERR_SECRET"
+    stderr = f"stream disconnected; {raw_sentinel}".encode()
+    stderr_sha256 = hashlib.sha256(stderr).hexdigest()
+
+    def provider_failure() -> ProviderSystemicError:
+        error = ProviderSystemicError(
+            "provider_process_network_error",
+            exit_code=1,
+            stderr_size_bytes=len(stderr),
+            stderr_sha256=stderr_sha256,
+        )
+        error.__cause__ = ProviderError(raw_sentinel)
+        error.add_note(raw_sentinel)
+        return error
+
+    failing_document_id = records[0].document_id(digest)
+    ocr = SingleFailureOCR(failing_document_id, provider_failure)
+    requests: list[str] = []
+    install_http(monkeypatch, payload, requests)
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[Adapter(records)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=3,
+            retry_cap_seconds=0,
+        )
+        with pytest.raises(OCRSystemicFailureError) as captured:
+            await pipeline.run()
+
+        error = captured.value
+        report = json.loads(error.report_path.read_bytes())
+        assert report["reason_code"] == "provider_process_network_error"
+        assert report["error_kind"] == "network"
+        assert report["retryable"] is True
+        assert report["attempt"] == 3
+        assert report["exit_code"] == 1
+        assert report["stderr_size_bytes"] == len(stderr)
+        assert report["stderr_sha256"] == stderr_sha256
+        assert ocr.calls == [failing_document_id] * 3
+        stage = state.get_stage(error.run_id, failing_document_id, "ocr")
+        assert stage is not None
+        assert (stage.status, stage.attempt_count) == ("failed", 3)
+        assert state.get_stage(error.run_id, records[1].document_id(digest), "ocr") is None
+        run_error = state.connection.execute(
+            "SELECT error FROM run WHERE run_id=?", (error.run_id,)
+        ).fetchone()[0]
+        persisted = "".join(
+            (
+                error.report_path.read_text(),
+                str(stage.last_error),
+                str(run_error),
+                "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+            )
+        )
+        assert raw_sentinel not in persisted
+
+    assert requests == [record.source_url for record in records]
+
+
+@pytest.mark.asyncio
 async def test_generic_stage_and_run_failures_persist_only_safe_diagnostics(
     tmp_path: Path,
 ) -> None:

@@ -596,7 +596,7 @@ def _run_manifest(lane: str, gold_sha256: str, query_count: int) -> dict[str, An
         "profile_id": "cardrag.eval.qwen-structure-exact.v1",
         "gold_sha256": gold_sha256,
         "query_count": query_count,
-        "source_version": "v1.0.10-candidate",
+        "source_version": "v1.0.11-candidate",
         "source_commit": SOURCE_COMMIT,
         "generation_id": "generation-v110",
         "generation_manifest_sha256": "f" * 64,

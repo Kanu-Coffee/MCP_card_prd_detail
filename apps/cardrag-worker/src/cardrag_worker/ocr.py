@@ -62,6 +62,12 @@ OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS = 12
 OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
 OCR_SEGMENTATION_STRATEGY_ID = "cardrag.ocr.windowed-continuity.v1"
 OCR_OUTPUT_POLICY: Literal["target-pages-only"] = "target-pages-only"
+OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION = (
+    "Correction: use the sparse-page marker only as the first body line of a TARGET page "
+    "that has at most 12 visible source characters. For every other TARGET page, omit the "
+    "sparse-page marker and return an ordinary faithful transcription. Return the same requested "
+    "TARGET page markers in the same order and no other pages."
+)
 OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS = (0.25, 1.0)
 OCR_CACHE_PUBLICATION_DIAGNOSTIC = "native-cache-publication-diagnostic.json"
 OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES = 4096
@@ -471,6 +477,24 @@ def _validate_and_normalize_target_page_values(
             raise OCRValidationError("OCR provider returned an implausibly short page")
         normalized.append(value)
     return tuple(normalized)
+
+
+def _validated_provider_target_values(
+    raw: str,
+    *,
+    target_page_numbers: tuple[int, ...],
+) -> tuple[str, ...]:
+    """Validate one provider response without retaining or rendering its source text."""
+
+    reject_credential_bearing_ocr(raw)
+    values = split_ocr_pages(
+        raw,
+        expected_count=len(target_page_numbers),
+        first_page=target_page_numbers[0],
+    )
+    if any(not value for value in values):
+        raise OCRValidationError("OCR provider returned an empty page")
+    return _validate_and_normalize_target_page_values(target_page_numbers, values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1589,17 +1613,35 @@ class OCRResolver:
                 total_pages=page_count,
                 prompt=self.prompt,
             )
-            reject_credential_bearing_ocr(raw)
             # Context images may inform continuity but are never persisted as
             # output from this call. Exact target markers enforce that boundary.
-            values = split_ocr_pages(
-                raw,
-                expected_count=len(call.target_page_numbers),
-                first_page=call.target_page_numbers[0],
-            )
-            if any(not value for value in values):
-                raise OCRValidationError("OCR provider returned an empty page")
-            values = _validate_and_normalize_target_page_values(call.target_page_numbers, values)
+            sparse_wrapper_correction_required = False
+            try:
+                values = _validated_provider_target_values(
+                    raw,
+                    target_page_numbers=call.target_page_numbers,
+                )
+            except OCRValidationError as exc:
+                if str(exc) != "OCR sparse-page wrapper is invalid":
+                    raise
+                sparse_wrapper_correction_required = True
+            if sparse_wrapper_correction_required:
+                # The rejected body is neither logged nor echoed into the
+                # correction prompt. One fresh call for this exact chunk is
+                # the complete corrective budget; its result passes through
+                # the unchanged validator below or propagates immediately.
+                raw = ""
+                corrected_raw = await self.provider.recognize(
+                    selected,
+                    page_numbers=call.input_page_numbers,
+                    target_page_numbers=call.target_page_numbers,
+                    total_pages=page_count,
+                    prompt=self.prompt + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
+                )
+                values = _validated_provider_target_values(
+                    corrected_raw,
+                    target_page_numbers=call.target_page_numbers,
+                )
             normalized = (
                 "\n\n".join(
                     f"## Page {page_number}\n\n{value}"

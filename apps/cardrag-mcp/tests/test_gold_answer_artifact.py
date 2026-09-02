@@ -792,7 +792,7 @@ def _bind_retrieval_capture(
         profile_id="cardrag.eval.qwen-structure-exact.v1",
         gold_sha256=fixture.gold_binding.sha256,
         query_count=len(results),
-        source_version="v1.0.10-candidate",
+        source_version="v1.0.11-candidate",
         source_commit=SOURCE_COMMIT,
         generation_id=fixture.v5.generation_id,
         generation_manifest_sha256=hashlib.sha256(fixture.manifest.canonical_bytes()).hexdigest(),
@@ -2359,6 +2359,7 @@ def test_resume_recomputes_deterministic_and_sealed_decision_provenance(
     tmp_path: Path,
 ) -> None:
     deterministic_root = tmp_path / "deterministic"
+    deterministic_root.mkdir(mode=0o700)
     fixture = _producer_fixture(deterministic_root)
     _produce(fixture, deterministic_root)
     deterministic_shard = deterministic_root / "answer-state" / "shards" / "query-000.json"
@@ -2370,6 +2371,7 @@ def test_resume_recomputes_deterministic_and_sealed_decision_provenance(
         _produce(fixture, deterministic_root)
 
     sealed_root = tmp_path / "sealed"
+    sealed_root.mkdir(mode=0o700)
     sealed_fixture = _producer_fixture(sealed_root)
     decision_path, decision_binding = _sealed_decisions(
         sealed_fixture,
@@ -2575,7 +2577,7 @@ def test_outputs_are_create_only_and_symlinks_are_rejected(tmp_path: Path) -> No
         _produce(fixture, tmp_path)
 
     other = tmp_path / "symlink-case"
-    other.mkdir()
+    other.mkdir(mode=0o700)
     target = other / "target.jsonl"
     target.write_bytes(b"{}\n")
     output = other / "answers.jsonl"

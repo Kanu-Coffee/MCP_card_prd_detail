@@ -1,4 +1,4 @@
-"""Fail-closed verifier for the v1.0.10 real-candidate acceptance receipt.
+"""Fail-closed verifier for the v1.0.12 real-candidate acceptance receipt.
 
 The receipt is a canonical technical trust root.  It does not manufacture
 runtime evidence or imply a separate human approval: it binds exact canonical
@@ -113,7 +113,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.10"]
+    version: Literal["1.0.12"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -144,20 +144,20 @@ class CandidateImageIdentity(_CanonicalModel):
 
 
 class EffectiveConfigEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-effective-config.v2"]
+    schema_version: Literal["cardrag.candidate-effective-config.v3"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.10"]
-    compose_project: Literal["cardrag-v110-candidate"]
-    channel: Literal["candidate-v1.0.10"]
-    worker_volume: Literal["cardrag-worker-v110-state"]
+    release_version: Literal["1.0.12"]
+    compose_project: Literal["cardrag-v112-candidate"]
+    channel: Literal["candidate-v1.0.11"]
+    worker_volume: Literal["cardrag-worker-v112-candidate-state"]
     worker_state_mount_path: Literal["/var/lib/cardrag-worker"]
-    worker_codex_home_volume: Literal["cardrag-worker-v110-codex-home"]
+    worker_codex_home_volume: Literal["cardrag-worker-v112-candidate-codex-home"]
     worker_codex_home_mount_path: Literal["/var/lib/cardrag-codex-home"]
     worker_codex_auth_root: Literal["/var/lib/cardrag-codex-home"]
     worker_home: Literal["/var/lib/cardrag-codex-home/home"]
-    mcp_volume: Literal["cardrag-mcp-v110-state"]
+    mcp_volume: Literal["cardrag-mcp-v112-candidate-state"]
     mcp_host: Literal["127.0.0.1"]
-    mcp_port: Literal[18010]
+    mcp_port: Literal[18012]
     rootfs_read_only: Literal[True]
     cap_drop_all: Literal[True]
     no_new_privileges: Literal[True]
@@ -167,17 +167,17 @@ class EffectiveConfigEvidence(_CanonicalModel):
     worker_privileged: Literal[False]
     worker_cap_add_count: Literal[0]
     v109_volume_rw_mounts: Literal[0]
-    worker_max_state_bytes: Literal[68719476736]
+    worker_max_state_bytes: Literal[137438953472]
     worker_reserved_free_space_bytes: Literal[2147483648]
     worker_max_vector_sidecar_bytes: Literal[17179869184]
-    worker_max_serving_database_bytes: Literal[4294967296]
+    worker_max_serving_database_bytes: Literal[34359738368]
     worker_minimum_start_free_bytes: Literal[34359738368]
     mcp_max_vector_bytes: Literal[1073741824]
     mcp_max_resident_vector_bytes: Literal[1073741824]
     mcp_max_vector_sidecar_bytes: Literal[17179869184]
-    mcp_max_serving_database_bytes: Literal[4294967296]
-    mcp_max_generation_download_bytes: Literal[34359738368]
-    mcp_max_state_bytes: Literal[68719476736]
+    mcp_max_serving_database_bytes: Literal[34359738368]
+    mcp_max_generation_download_bytes: Literal[68719476736]
+    mcp_max_state_bytes: Literal[137438953472]
     mcp_reserved_free_space_bytes: Literal[2147483648]
     mcp_exhaustive_audit_max_jobs: Literal[32]
     mcp_exhaustive_audit_max_total_bytes: Literal[2147483648]
@@ -203,6 +203,9 @@ class EffectiveConfigEvidence(_CanonicalModel):
     embedding_normalization: Literal["l2"]
     embedding_provider_id: Qwen3EmbeddingProviderId
     embedding_maximum_tokens: EmbeddingMaximumTokens
+    embedding_request_max_attempts: Literal[12]
+    embedding_retry_base_seconds: Literal[1]
+    embedding_retry_cap_seconds: Literal[60]
     retrieval_mode: Literal["exact-all-active-rows.v1"]
     candidate_prefilter: Literal["none"]
     approximate: Literal[False]
@@ -259,13 +262,17 @@ class IssuerRunMetrics(_CanonicalModel):
 
 
 class WorkerMetricsEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-worker-metrics.v2"]
+    schema_version: Literal["cardrag.candidate-worker-metrics.v3"]
     source_commit: SourceCommit
     generation_id: str
     generation_manifest_sha256: Sha256Hex
     effective_config_sha256: Sha256Hex
     runtime_image_repo_digest: ImageReference
     runtime_container_image_id: ImageDigest
+    runtime_image_store_identity: Literal["classic-config-id", "containerd-index-id"]
+    runtime_container_config_image: ImageReference
+    runtime_manifest_descriptor_digest: ImageDigest | None
+    runtime_manifest_descriptor_platform: Literal["linux/amd64"] | None
     runtime_uid_gid: Literal["10001:10001"]
     rootfs_read_only_verified: Literal[True]
     cap_drop_all_verified: Literal[True]
@@ -318,6 +325,14 @@ class WorkerMetricsEvidence(_CanonicalModel):
         return validate_identifier(value, label="generation_id")
 
     @model_validator(mode="after")
+    def runtime_manifest_descriptor_is_complete(self) -> Self:
+        if (self.runtime_manifest_descriptor_digest is None) != (
+            self.runtime_manifest_descriptor_platform is None
+        ):
+            raise ValueError("runtime manifest descriptor digest and platform must be paired")
+        return self
+
+    @model_validator(mode="after")
     def metrics_cover_the_full_run(self) -> Self:
         if tuple(row.issuer for row in self.issuer_metrics) != CANDIDATE_ISSUERS:
             raise ValueError("Worker metrics must cover exactly four issuers")
@@ -340,13 +355,17 @@ class ToolSmokeResult(_CanonicalModel):
 
 
 class MCPSmokeEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-mcp-smoke.v1"]
+    schema_version: Literal["cardrag.candidate-mcp-smoke.v2"]
     source_commit: SourceCommit
     generation_id: str
     generation_manifest_sha256: Sha256Hex
     effective_config_sha256: Sha256Hex
     runtime_image_repo_digest: ImageReference
     runtime_container_image_id: ImageDigest
+    runtime_image_store_identity: Literal["classic-config-id", "containerd-index-id"]
+    runtime_container_config_image: ImageReference
+    runtime_manifest_descriptor_digest: ImageDigest | None
+    runtime_manifest_descriptor_platform: Literal["linux/amd64"] | None
     runtime_uid_gid: Literal["10001:10001"]
     rootfs_read_only_verified: Literal[True]
     cap_drop_all_verified: Literal[True]
@@ -375,6 +394,14 @@ class MCPSmokeEvidence(_CanonicalModel):
     @classmethod
     def generation_id_is_safe(cls, value: str) -> str:
         return validate_identifier(value, label="generation_id")
+
+    @model_validator(mode="after")
+    def runtime_manifest_descriptor_is_complete(self) -> Self:
+        if (self.runtime_manifest_descriptor_digest is None) != (
+            self.runtime_manifest_descriptor_platform is None
+        ):
+            raise ValueError("runtime manifest descriptor digest and platform must be paired")
+        return self
 
     @model_validator(mode="after")
     def all_tools_and_rows_are_exact(self) -> Self:
@@ -498,7 +525,7 @@ class NativeCacheAuditEvidence(_CanonicalModel):
 class GenerationCASEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-generation-cas-audit.v1"]
     source_commit: SourceCommit
-    channel: Literal["candidate-v1.0.10"]
+    channel: Literal["candidate-v1.0.11"]
     generation_id: str
     manifest_sha256: Sha256Hex
     ready_sha256: Sha256Hex
@@ -589,7 +616,7 @@ class RollbackStep(_CanonicalModel):
 class RollbackLedgerEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-v4-v5-rollback-ledger.v1"]
     source_commit: SourceCommit
-    channel: Literal["candidate-v1.0.10"]
+    channel: Literal["candidate-v1.0.11"]
     steps: tuple[RollbackStep, ...]
     rollback_verified: Literal[True]
     stable_channel_write_requests: Literal[0]
@@ -691,10 +718,10 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v1"]
-    release_version: Literal["1.0.10"]
+    release_version: Literal["1.0.12"]
     source_commit: SourceCommit
-    compose_project: Literal["cardrag-v110-candidate"]
-    channel: Literal["candidate-v1.0.10"]
+    compose_project: Literal["cardrag-v112-candidate"]
+    channel: Literal["candidate-v1.0.11"]
     generation_id: str
     issuers: tuple[str, ...]
     release_eligible: Literal[True]
@@ -875,6 +902,38 @@ def _load_bound_model[ModelT: BaseModel](
     )
 
 
+def _runtime_image_identity_matches(
+    evidence: WorkerMetricsEvidence | MCPSmokeEvidence,
+    image: CandidateImageIdentity,
+) -> bool:
+    """Bind Docker classic and containerd stores to one sealed OCI identity.
+
+    Classic stores expose the platform config digest as the container image ID;
+    their manifest descriptor may be absent or, when present, must be the sealed
+    linux/amd64 platform manifest. Containerd stores expose the sealed OCI index
+    as the container image ID and must also expose that exact platform manifest.
+    """
+
+    if (
+        evidence.runtime_image_repo_digest != image.compose_image_reference
+        or evidence.runtime_container_config_image != image.compose_image_reference
+    ):
+        return False
+    descriptor_is_platform = (
+        evidence.runtime_manifest_descriptor_digest == image.platform_manifest_digest
+        and evidence.runtime_manifest_descriptor_platform == image.platform
+    )
+    if evidence.runtime_image_store_identity == "classic-config-id":
+        return evidence.runtime_container_image_id == image.platform_config_digest and (
+            (
+                evidence.runtime_manifest_descriptor_digest is None
+                and evidence.runtime_manifest_descriptor_platform is None
+            )
+            or descriptor_is_platform
+        )
+    return evidence.runtime_container_image_id == image.digest and descriptor_is_platform
+
+
 def verify_candidate_acceptance(
     receipt_path: Path,
     evidence_root: Path,
@@ -1045,8 +1104,7 @@ def verify_candidate_acceptance(
         worker.generation_id != manifest.generation_id
         or worker.generation_manifest_sha256 != manifest.manifest_sha256
         or worker.effective_config_sha256 != effective_config_sha256
-        or worker.runtime_image_repo_digest != config.worker_image.compose_image_reference
-        or worker.runtime_container_image_id != config.worker_image.platform_config_digest
+        or not _runtime_image_identity_matches(worker, config.worker_image)
         or worker.worker_state_mount_path != config.worker_state_mount_path
         or worker.codex_home_mount_path != config.worker_codex_home_mount_path
         or worker.codex_auth_root != config.worker_codex_auth_root
@@ -1067,8 +1125,7 @@ def verify_candidate_acceptance(
         mcp.generation_id != manifest.generation_id
         or mcp.generation_manifest_sha256 != manifest.manifest_sha256
         or mcp.effective_config_sha256 != effective_config_sha256
-        or mcp.runtime_image_repo_digest != config.mcp_image.compose_image_reference
-        or mcp.runtime_container_image_id != config.mcp_image.platform_config_digest
+        or not _runtime_image_identity_matches(mcp, config.mcp_image)
         or mcp.expected_active_contracts
         != (
             manifest.structure_contract.revision_counts.current

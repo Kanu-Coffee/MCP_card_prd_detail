@@ -65,9 +65,9 @@ def test_v5_sidecar_and_resident_vector_caps_have_independent_env_names(
 def test_storage_audit_and_response_cap_defaults_are_independent() -> None:
     settings = Settings(environment="test", mcp_bearer_token=AUTH_VALUE)
 
-    assert settings.mcp_max_serving_database_bytes == 4 * 1024**3
-    assert settings.mcp_max_generation_download_bytes == 32 * 1024**3
-    assert settings.mcp_max_state_bytes == 64 * 1024**3
+    assert settings.mcp_max_serving_database_bytes == 32 * 1024**3
+    assert settings.mcp_max_generation_download_bytes == 64 * 1024**3
+    assert settings.mcp_max_state_bytes == 128 * 1024**3
     assert settings.mcp_reserved_free_space_bytes == 2 * 1024**3
     assert settings.mcp_exhaustive_audit_max_jobs == 32
     assert settings.mcp_exhaustive_audit_max_total_bytes == 2 * 1024**3
@@ -129,7 +129,7 @@ def test_reranker_shadow_is_disabled_and_candidate_only() -> None:
     assert stable.reranker_shadow_provider_id == "fireworks"
     assert stable.reranker_shadow_max_candidates == 64
 
-    with pytest.raises(ValueError, match="candidate-v1.0.10"):
+    with pytest.raises(ValueError, match="candidate-v1.0.11"):
         Settings(
             environment="test",
             mcp_bearer_token=AUTH_VALUE,
@@ -139,14 +139,14 @@ def test_reranker_shadow_is_disabled_and_candidate_only() -> None:
     with pytest.raises(ValueError, match="OpenRouter API key"):
         Settings(
             environment="test",
-            channel="candidate-v1.0.10",
+            channel="candidate-v1.0.11",
             mcp_bearer_token=AUTH_VALUE,
             reranker_shadow_enabled=True,
         )
 
     candidate = Settings(
         environment="test",
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         mcp_bearer_token=AUTH_VALUE,
         openrouter_api_key="secret",
         reranker_shadow_enabled=True,
@@ -174,7 +174,7 @@ async def test_main_wires_candidate_reranker_shadow_and_owned_clients(
     monkeypatch.setattr(main_module, "build_app", capture_app)
     settings = Settings(
         environment="test",
-        channel="candidate-v1.0.10",
+        channel="candidate-v1.0.11",
         mcp_bearer_token=AUTH_VALUE,
         mcp_state_dir=tmp_path / "state",
         openrouter_api_key="secret",

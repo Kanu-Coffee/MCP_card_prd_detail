@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import math
 import os
 import re
@@ -25,37 +26,101 @@ class ProviderError(RuntimeError):
 ProviderSystemicReasonCode = Literal[
     "provider_contract_invalid",
     "provider_output_credential_detected",
+    "provider_process_authentication_failed",
+    "provider_process_configuration_failed",
     "provider_process_exit",
+    "provider_process_exit_unknown",
+    "provider_process_network_error",
+    "provider_process_provider_unavailable",
+    "provider_process_rate_limited",
     "provider_process_spawn_failed",
     "provider_systemic_failure",
 ]
-ProviderFailureKind = Literal["contract", "credential", "process_exit", "process_spawn", "systemic"]
+ProviderFailureKind = Literal[
+    "authentication",
+    "configuration",
+    "contract",
+    "credential",
+    "network",
+    "process_exit",
+    "process_spawn",
+    "provider",
+    "rate_limit",
+    "systemic",
+]
 
 _PROVIDER_SYSTEMIC_REASONS: dict[
     ProviderSystemicReasonCode,
-    tuple[str, ProviderFailureKind],
+    tuple[str, ProviderFailureKind, bool],
 ] = {
     "provider_contract_invalid": (
         "The provider returned an invalid response.",
         "contract",
+        False,
     ),
     "provider_output_credential_detected": (
         "OCR content matched a credential token form.",
         "credential",
+        False,
+    ),
+    "provider_process_authentication_failed": (
+        "The OCR provider process could not authenticate.",
+        "authentication",
+        False,
+    ),
+    "provider_process_configuration_failed": (
+        "The OCR provider process rejected its configuration.",
+        "configuration",
+        False,
     ),
     "provider_process_exit": (
         "The OCR provider process exited unsuccessfully.",
         "process_exit",
+        False,
+    ),
+    "provider_process_exit_unknown": (
+        "The OCR provider process exited for an unclassified reason.",
+        "process_exit",
+        False,
+    ),
+    "provider_process_network_error": (
+        "The OCR provider process encountered a transient network failure.",
+        "network",
+        True,
+    ),
+    "provider_process_provider_unavailable": (
+        "The OCR provider process reported a transient upstream failure.",
+        "provider",
+        True,
+    ),
+    "provider_process_rate_limited": (
+        "The OCR provider process was temporarily rate limited.",
+        "rate_limit",
+        True,
     ),
     "provider_process_spawn_failed": (
         "The OCR provider process could not be started.",
         "process_spawn",
+        False,
     ),
     "provider_systemic_failure": (
         "The OCR provider failed outside a document boundary.",
         "systemic",
+        False,
     ),
 }
+
+_PROVIDER_PROCESS_EXIT_REASONS = frozenset(
+    {
+        "provider_process_authentication_failed",
+        "provider_process_configuration_failed",
+        "provider_process_exit",
+        "provider_process_exit_unknown",
+        "provider_process_network_error",
+        "provider_process_provider_unavailable",
+        "provider_process_rate_limited",
+    }
+)
 
 
 class ProviderDocumentError(ProviderError):
@@ -75,15 +140,16 @@ class ProviderSystemicError(ProviderError):
     """A typed provider failure that must not be repeated across documents."""
 
     scope: Literal["systemic"] = "systemic"
-    retryable = False
 
     def __init__(
         self,
         reason_code: ProviderSystemicReasonCode = "provider_systemic_failure",
         *,
         exit_code: int | None = None,
+        stderr_size_bytes: int | None = None,
+        stderr_sha256: str | None = None,
     ) -> None:
-        if reason_code == "provider_process_exit":
+        if reason_code in _PROVIDER_PROCESS_EXIT_REASONS:
             if (
                 exit_code is None
                 or isinstance(exit_code, bool)
@@ -92,12 +158,119 @@ class ProviderSystemicError(ProviderError):
             ):
                 raise ValueError("provider process exit_code must be a bounded nonzero integer")
         elif exit_code is not None:
-            raise ValueError("provider exit_code is allowed only for provider_process_exit")
+            raise ValueError("provider exit_code is allowed only for a provider process exit")
+        if (stderr_size_bytes is None) != (stderr_sha256 is None):
+            raise ValueError("provider stderr diagnostics must be complete")
+        if stderr_size_bytes is not None and (
+            reason_code not in _PROVIDER_PROCESS_EXIT_REASONS
+            or isinstance(stderr_size_bytes, bool)
+            or not isinstance(stderr_size_bytes, int)
+            or not 0 <= stderr_size_bytes <= 2**63 - 1
+            or stderr_sha256 is None
+            or re.fullmatch(r"[0-9a-f]{64}", stderr_sha256) is None
+        ):
+            raise ValueError("provider stderr diagnostics are invalid")
         self.reason_code = reason_code
-        self.reason, self.error_kind = _PROVIDER_SYSTEMIC_REASONS[reason_code]
+        self.reason, self.error_kind, self.retryable = _PROVIDER_SYSTEMIC_REASONS[reason_code]
         self.exit_code = exit_code
+        self.stderr_size_bytes = stderr_size_bytes
+        self.stderr_sha256 = stderr_sha256
         suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
         super().__init__(f"{self.reason_code}: {self.reason}{suffix}")
+
+
+_CODEX_AUTH_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bnot logged in\b",
+        r"\bnot signed in\b",
+        r"\blogin (?:is )?required\b",
+        r"\bauthentication (?:failed|required)\b",
+        r"\bmissing bearer authentication\b",
+        r"\bunauthori[sz]ed\b",
+        r"\bforbidden\b",
+        r"\binvalid (?:api[ _-]?key|access token|refresh token)\b",
+        r"\b(?:access|refresh) token (?:has )?expired\b",
+        r"\brefresh token\b.{0,80}\b(?:rejected|revoked|already used|could not be refreshed)\b",
+        r"\bfailed to refresh token\b",
+        r"\b(?:http|status(?: code)?)\s*401\b",
+        r"\b401\s+unauthori[sz]ed\b",
+        r"\b(?:http|status(?: code)?)\s*403\b",
+        r"\b403\s+forbidden\b",
+    )
+)
+_CODEX_CONFIG_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bstrict config\b",
+        r"\b(?:invalid|unknown|unsupported) (?:config|configuration|feature|model)\b",
+        r"\bmodel\b.{0,80}\b(?:not supported|does not exist|not found)\b",
+        r"\bfailed to (?:load|parse|read) (?:the )?(?:config|configuration)\b",
+        r"\bconfig\.toml\b",
+        r"\bunrecognized (?:option|argument)\b",
+        r"\bunexpected argument\b",
+        r"\binvalid value\b",
+    )
+)
+_CODEX_RATE_LIMIT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\brate[ _-]?limit(?:ed|ing)?\b",
+        r"\btoo many requests\b",
+        r"\b(?:usage|request) limit\b",
+        r"\b(?:workspace )?credit limit\b",
+        r"\bout of credits\b",
+        r"\bquota (?:has been )?exceeded\b",
+        r"\bweighted tokens? (?:left|remaining)\b",
+        r"\b(?:http|status(?: code)?)\s*429\b",
+        r"\b429\s+too many requests\b",
+    )
+)
+_CODEX_NETWORK_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bnetwork (?:error|failure|unreachable)\b",
+        r"\bconnection (?:reset|refused|closed|aborted)\b",
+        r"\bfailed to connect\b",
+        r"\berror sending request\b",
+        r"\bstream disconnected\b",
+        r"\b(?:request |connection )?timed out\b",
+        r"\btimeout\b",
+        r"\bdns (?:error|failure|resolution)\b",
+        r"\btls (?:error|failure|handshake)\b",
+        r"\btemporarily unavailable due to a network\b",
+    )
+)
+_CODEX_PROVIDER_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bservice (?:is )?unavailable\b",
+        r"\btemporarily unavailable\b",
+        r"\b(?:server|provider|upstream) (?:is )?overloaded\b",
+        r"\bexperiencing high load\b",
+        r"\binternal server error\b",
+        r"\b(?:provider|upstream) error\b",
+        r"\b(?:http|status(?: code)?)\s*(?:500|502|503|504)\b",
+        r"\b(?:500|502|503|504)\s+(?:bad gateway|service unavailable|gateway timeout)\b",
+    )
+)
+
+
+def _classify_codex_process_exit(stderr: bytes) -> ProviderSystemicReasonCode:
+    """Return an allowlisted category without retaining provider diagnostics."""
+
+    diagnostic = stderr.decode("utf-8", errors="replace")
+    classifications: tuple[tuple[tuple[re.Pattern[str], ...], ProviderSystemicReasonCode], ...] = (
+        (_CODEX_AUTH_FAILURE_PATTERNS, "provider_process_authentication_failed"),
+        (_CODEX_CONFIG_FAILURE_PATTERNS, "provider_process_configuration_failed"),
+        (_CODEX_RATE_LIMIT_PATTERNS, "provider_process_rate_limited"),
+        (_CODEX_NETWORK_FAILURE_PATTERNS, "provider_process_network_error"),
+        (_CODEX_PROVIDER_FAILURE_PATTERNS, "provider_process_provider_unavailable"),
+    )
+    for patterns, reason_code in classifications:
+        if any(pattern.search(diagnostic) is not None for pattern in patterns):
+            return reason_code
+    return "provider_process_exit_unknown"
 
 
 # These patterns intentionally identify token *forms* without ever retaining
@@ -212,7 +385,7 @@ OCR_BLANK_PAGE_SENTINEL = "[원본 이미지에 판독 가능한 텍스트·표�
 OCR_SPARSE_PAGE_PREFIX = "[희소 페이지에 보이는 원문]"
 
 
-# Codex 0.147.0 still enables several agent/tool surfaces by default. OCR only
+# Codex 0.151.0 still enables several agent/tool surfaces by default. OCR only
 # needs the images attached by `codex exec --image` and a final text response;
 # it never needs a tool-side image reader, shell, browser, plugin, sub-agent, or
 # hook. Keep this an explicit, version-audited deny contract. `--strict-config`
@@ -478,7 +651,7 @@ class CodexOCRProvider:
         except OSError:
             raise ProviderSystemicError("provider_process_spawn_failed") from None
         try:
-            stdout, _stderr = await asyncio.wait_for(
+            stdout, stderr = await asyncio.wait_for(
                 process.communicate((prompt + "\n\n" + instructions).encode()),
                 timeout=self.timeout_seconds,
             )
@@ -488,9 +661,11 @@ class CodexOCRProvider:
             raise
         if process.returncode:
             raise ProviderSystemicError(
-                "provider_process_exit",
+                _classify_codex_process_exit(stderr),
                 exit_code=process.returncode,
-            )
+                stderr_size_bytes=len(stderr),
+                stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+            ) from None
         reject_credential_bearing_ocr(stdout)
         try:
             return stdout.decode("utf-8")
