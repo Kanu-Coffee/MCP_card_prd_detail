@@ -200,6 +200,65 @@ for volume in "$destination_state" "$destination_codex"; do
   docker volume create "$volume" >/dev/null
   test -z "$(docker ps --quiet --filter "volume=$volume")"
 done
+
+# Docker keeps a freshly created named-volume mount root at 0755 on some
+# engines even when the image directory is 0700.  Initialize only the two
+# exact, still-empty destinations after image copy-up and fsync the new mode.
+docker run --rm --interactive --pull never --network none --read-only \
+  --cap-drop ALL --security-opt no-new-privileges=true --user 10001:10001 \
+  --entrypoint python \
+  --volume "$destination_state:/var/lib/cardrag-worker" \
+  "$candidate_worker_image" - <<'PY'
+import os
+import stat
+from pathlib import Path
+
+root = Path("/var/lib/cardrag-worker")
+value = root.lstat()
+if (not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
+        or (value.st_uid, value.st_gid) != (10001, 10001)
+        or stat.S_IMODE(value.st_mode) not in {0o700, 0o755}
+        or any(root.iterdir())):
+    raise SystemExit("state_destination_initialization_invalid")
+os.chmod(root, 0o700, follow_symlinks=False)
+descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+print("v112-worker-state-root-initialized")
+PY
+
+docker run --rm --interactive --pull never --network none --read-only \
+  --cap-drop ALL --security-opt no-new-privileges=true --user 10001:10001 \
+  --entrypoint python \
+  --volume "$destination_codex:/var/lib/cardrag-codex-home" \
+  "$candidate_worker_image" - <<'PY'
+import os
+import stat
+from pathlib import Path
+
+root = Path("/var/lib/cardrag-codex-home")
+home = root / "home"
+root_stat = root.lstat()
+home_stat = home.lstat()
+if (not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode)
+        or (root_stat.st_uid, root_stat.st_gid) != (10001, 10001)
+        or stat.S_IMODE(root_stat.st_mode) not in {0o700, 0o755}
+        or {entry.name for entry in root.iterdir()} != {"home"}
+        or not stat.S_ISDIR(home_stat.st_mode) or stat.S_ISLNK(home_stat.st_mode)
+        or (home_stat.st_uid, home_stat.st_gid) != (10001, 10001)
+        or stat.S_IMODE(home_stat.st_mode) != 0o700
+        or any(home.iterdir())):
+    raise SystemExit("codex_destination_initialization_invalid")
+os.chmod(root, 0o700, follow_symlinks=False)
+descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+print("v112-codex-home-root-initialized")
+PY
 ```
 
 State copy helper는 source의 root·모든 entry가 UID/GID 10001:10001인지 확인하고,
@@ -273,7 +332,7 @@ print("v112-worker-state-offline-copy-complete")
 PY
 ```
 
-Codex destination은 image의 copy-up으로 생성된 mode-0700 root와 빈 `home/`만 허용합니다.
+Codex destination은 위 canonical initializer로 봉인한 mode-0700 root와 빈 `home/`만 허용합니다.
 Source 전체를 복사하지 않고 bounded regular `auth.json` 한 파일만 mode 0600으로 atomic
 copy합니다. Token 내용과 digest는 출력하지 않습니다.
 
