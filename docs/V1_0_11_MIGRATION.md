@@ -201,70 +201,19 @@ for volume in "$destination_state" "$destination_codex"; do
   test -z "$(docker ps --quiet --filter "volume=$volume")"
 done
 
-# Docker keeps a freshly created named-volume mount root at 0755 on some
-# engines even when the image directory is 0700.  Initialize only the two
-# exact, still-empty destinations after image copy-up and fsync the new mode.
-docker run --rm --interactive --pull never --network none --read-only \
-  --cap-drop ALL --security-opt no-new-privileges=true --user 10001:10001 \
-  --entrypoint python \
-  --volume "$destination_state:/var/lib/cardrag-worker" \
-  "$candidate_worker_image" - <<'PY'
-import os
-import stat
-from pathlib import Path
-
-root = Path("/var/lib/cardrag-worker")
-value = root.lstat()
-if (not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
-        or (value.st_uid, value.st_gid) != (10001, 10001)
-        or stat.S_IMODE(value.st_mode) not in {0o700, 0o755}
-        or any(root.iterdir())):
-    raise SystemExit("state_destination_initialization_invalid")
-os.chmod(root, 0o700, follow_symlinks=False)
-descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-try:
-    os.fsync(descriptor)
-finally:
-    os.close(descriptor)
-print("v112-worker-state-root-initialized")
-PY
-
-docker run --rm --interactive --pull never --network none --read-only \
-  --cap-drop ALL --security-opt no-new-privileges=true --user 10001:10001 \
-  --entrypoint python \
-  --volume "$destination_codex:/var/lib/cardrag-codex-home" \
-  "$candidate_worker_image" - <<'PY'
-import os
-import stat
-from pathlib import Path
-
-root = Path("/var/lib/cardrag-codex-home")
-home = root / "home"
-root_stat = root.lstat()
-home_stat = home.lstat()
-if (not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode)
-        or (root_stat.st_uid, root_stat.st_gid) != (10001, 10001)
-        or stat.S_IMODE(root_stat.st_mode) not in {0o700, 0o755}
-        or {entry.name for entry in root.iterdir()} != {"home"}
-        or not stat.S_ISDIR(home_stat.st_mode) or stat.S_ISLNK(home_stat.st_mode)
-        or (home_stat.st_uid, home_stat.st_gid) != (10001, 10001)
-        or stat.S_IMODE(home_stat.st_mode) != 0o700
-        or any(home.iterdir())):
-    raise SystemExit("codex_destination_initialization_invalid")
-os.chmod(root, 0o700, follow_symlinks=False)
-descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-try:
-    os.fsync(descriptor)
-finally:
-    os.close(descriptor)
-print("v112-codex-home-root-initialized")
-PY
+# Destination-only initializer를 따로 실행하지 않습니다. 비어 있는 local volume은
+# initializer 종료 뒤 다음 mount에서 root mode가 0755로 다시 설정될 수 있습니다.
+# 아래 두 copy helper가 각 destination의 최초 mount, 초기 root 검증, chmod/fsync와
+# 실제 copy를 한 container lifetime 안에서 연속 수행해야 합니다.
 ```
 
-State copy helper는 source의 root·모든 entry가 UID/GID 10001:10001인지 확인하고,
-symlink, special node, hardlink와 cross-filesystem entry를 거부합니다. 새 destination이
-비어 있을 때만 mode와 bytes를 독립 복사합니다. 중간 실패에서는 destination을 다시
-사용하지 않으며 source를 수정하지 않습니다.
+State snapshot helper는 destination의 최초 mount container입니다. Docker가 만든 initial
+root가 UID/GID 10001:10001, mode 0700 또는 0755이고 정확히 비어 있는지 먼저 확인한 뒤,
+같은 process에서 mode 0700으로 고정하고 fsync한 다음 source 전체를 복사합니다. Source의
+root·모든 entry는 UID/GID 10001:10001이어야 하며 symlink, special node, hardlink와
+cross-filesystem entry를 거부합니다. 성공 sentinel이 출력될 때 destination은 이미
+nonempty입니다. 중간 실패에서는 destination을 다시 사용하지 않으며 source를 수정하지
+않습니다.
 
 ```bash
 docker run --rm --interactive --pull never --network none --read-only \
@@ -282,25 +231,42 @@ source = Path("/source")
 destination = Path("/var/lib/cardrag-worker")
 expected_owner = (10001, 10001)
 
-def metadata(path: Path) -> os.stat_result:
+def source_metadata(path: Path) -> os.stat_result:
     value = path.lstat()
     if stat.S_ISLNK(value.st_mode) or (value.st_uid, value.st_gid) != expected_owner:
         raise SystemExit("state_source_metadata_invalid")
     return value
 
-source_root = metadata(source)
-destination_root = metadata(destination)
-if not stat.S_ISDIR(source_root.st_mode) or not stat.S_ISDIR(destination_root.st_mode):
+source_root = source_metadata(source)
+destination_root = destination.lstat()
+if not stat.S_ISDIR(source_root.st_mode):
     raise SystemExit("state_root_invalid")
-if stat.S_IMODE(source_root.st_mode) != 0o700 or stat.S_IMODE(destination_root.st_mode) != 0o700:
+if stat.S_IMODE(source_root.st_mode) != 0o700:
     raise SystemExit("state_root_mode_invalid")
-if any(destination.iterdir()):
-    raise SystemExit("state_destination_not_empty")
+if (not stat.S_ISDIR(destination_root.st_mode)
+        or stat.S_ISLNK(destination_root.st_mode)
+        or (destination_root.st_uid, destination_root.st_gid) != expected_owner
+        or stat.S_IMODE(destination_root.st_mode) not in {0o700, 0o755}
+        or any(destination.iterdir())):
+    raise SystemExit("state_destination_initialization_invalid")
+if not any(source.iterdir()):
+    raise SystemExit("state_source_empty")
+
+os.chmod(destination, 0o700, follow_symlinks=False)
+root_descriptor = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    os.fsync(root_descriptor)
+finally:
+    os.close(root_descriptor)
+destination_root = destination.lstat()
+if (destination_root.st_uid, destination_root.st_gid) != expected_owner \
+        or stat.S_IMODE(destination_root.st_mode) != 0o700:
+    raise SystemExit("state_destination_root_seal_failed")
 source_device = source_root.st_dev
 
 def sync_directory(source_directory: Path, destination_directory: Path) -> None:
     for child in sorted(source_directory.iterdir(), key=lambda item: item.name):
-        value = metadata(child)
+        value = source_metadata(child)
         if value.st_dev != source_device:
             raise SystemExit("state_cross_filesystem_entry")
         target = destination_directory / child.name
@@ -328,13 +294,18 @@ def sync_directory(source_directory: Path, destination_directory: Path) -> None:
         os.close(directory_descriptor)
 
 sync_directory(source, destination)
-print("v112-worker-state-offline-copy-complete")
+if not any(destination.iterdir()):
+    raise SystemExit("state_destination_copy_empty")
+print("v112-worker-state-offline-snapshot-complete")
 PY
 ```
 
-Codex destination은 위 canonical initializer로 봉인한 mode-0700 root와 빈 `home/`만 허용합니다.
-Source 전체를 복사하지 않고 bounded regular `auth.json` 한 파일만 mode 0600으로 atomic
-copy합니다. Token 내용과 digest는 출력하지 않습니다.
+Codex snapshot helper도 destination의 최초 mount container입니다. Image copy-up 직후
+initial root가 UID/GID 10001:10001, mode 0700 또는 0755이고 inventory가 정확히 빈
+mode-0700 `home/` 하나뿐인지 검증합니다. 같은 process에서 root를 mode 0700으로
+고정하고 fsync한 뒤, source 전체가 아니라 bounded regular `auth.json` 한 파일만 mode
+0600으로 atomic copy합니다. 성공 sentinel 전에 `auth.json`을 durable하게 만들므로 첫
+정상 종료 시 destination은 이미 nonempty입니다. Token 내용과 digest는 출력하지 않습니다.
 
 ```bash
 docker run --rm --interactive --pull never --network none --read-only \
@@ -355,24 +326,47 @@ destination = destination_root / "auth.json"
 temporary = destination_root / ".auth.json.snapshot"
 expected_owner = (10001, 10001)
 
-def require_directory(path: Path) -> None:
+def require_source_directory(path: Path) -> None:
     value = path.lstat()
     if (not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
             or stat.S_IMODE(value.st_mode) != 0o700
             or (value.st_uid, value.st_gid) != expected_owner):
         raise SystemExit("codex_directory_metadata_invalid")
 
-require_directory(source_root)
-require_directory(destination_root)
-require_directory(home)
-if any(home.iterdir()) or set(item.name for item in destination_root.iterdir()) != {"home"}:
-    raise SystemExit("codex_destination_not_fresh")
+require_source_directory(source_root)
+try:
+    destination_root_stat = destination_root.lstat()
+    home_stat = home.lstat()
+except FileNotFoundError as error:
+    raise SystemExit("codex_destination_initialization_invalid") from error
+if (not stat.S_ISDIR(destination_root_stat.st_mode)
+        or stat.S_ISLNK(destination_root_stat.st_mode)
+        or (destination_root_stat.st_uid, destination_root_stat.st_gid) != expected_owner
+        or stat.S_IMODE(destination_root_stat.st_mode) not in {0o700, 0o755}
+        or {item.name for item in destination_root.iterdir()} != {"home"}
+        or not stat.S_ISDIR(home_stat.st_mode)
+        or stat.S_ISLNK(home_stat.st_mode)
+        or (home_stat.st_uid, home_stat.st_gid) != expected_owner
+        or stat.S_IMODE(home_stat.st_mode) != 0o700
+        or any(home.iterdir())):
+    raise SystemExit("codex_destination_initialization_invalid")
 source_stat = source.lstat()
 if (not stat.S_ISREG(source_stat.st_mode) or stat.S_ISLNK(source_stat.st_mode)
         or stat.S_IMODE(source_stat.st_mode) != 0o600
         or (source_stat.st_uid, source_stat.st_gid) != expected_owner
         or source_stat.st_nlink != 1 or not 1 <= source_stat.st_size <= 2 * 1024 * 1024):
     raise SystemExit("codex_source_auth_invalid")
+
+os.chmod(destination_root, 0o700, follow_symlinks=False)
+root_fd = os.open(destination_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    os.fsync(root_fd)
+finally:
+    os.close(root_fd)
+destination_root_stat = destination_root.lstat()
+if (destination_root_stat.st_uid, destination_root_stat.st_gid) != expected_owner \
+        or stat.S_IMODE(destination_root_stat.st_mode) != 0o700:
+    raise SystemExit("codex_destination_root_seal_failed")
 
 read_flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
 source_fd = os.open(source, read_flags)
@@ -410,7 +404,14 @@ try:
     os.fsync(root_fd)
 finally:
     os.close(root_fd)
-print("v112-codex-auth-offline-copy-complete")
+destination_stat = destination.lstat()
+if (not stat.S_ISREG(destination_stat.st_mode) or stat.S_ISLNK(destination_stat.st_mode)
+        or (destination_stat.st_uid, destination_stat.st_gid) != expected_owner
+        or stat.S_IMODE(destination_stat.st_mode) != 0o600
+        or destination_stat.st_nlink != 1
+        or {item.name for item in destination_root.iterdir()} != {"auth.json", "home"}):
+    raise SystemExit("codex_destination_auth_seal_failed")
+print("v112-codex-auth-offline-snapshot-complete")
 PY
 ```
 
