@@ -59,7 +59,9 @@ digest, raw provenance/SBOM, exact source와 runtime identity가 서로 일치�
 다음 gate는 registry raw JSON, Buildx metadata와 local pull을 교차검증합니다. Index에는
 정확히 linux/amd64 application manifest 하나와 그 manifest를 subject로 하는 attestation
 manifest 하나가 있어야 합니다. 출력한 네 digest 값과 metadata directory는 배포 기록에
-보존합니다.
+보존합니다. `containerimage.digest` metadata는 필수입니다. Docker driver에 따라
+`containerimage.config.digest` metadata가 생략될 수 있으므로, 이 필드는 존재하면 raw
+platform manifest의 config digest와 일치해야 하고 raw manifest 검증 자체는 항상 필수입니다.
 
 ```bash
 set -euo pipefail
@@ -126,7 +128,11 @@ for role in worker mcp; do
     --raw >"$platform_json"
   python3 "$repository_root/.github/scripts/validate-strict-json.py" "$platform_json"
   config_digest=$(jq -er '.config.digest' "$platform_json")
-  test "$(jq -er '."containerimage.config.digest"' "$metadata_json")" = "$config_digest"
+  if metadata_config_digest=$(jq -er '
+    ."containerimage.config.digest" | select(type == "string")
+  ' "$metadata_json"); then
+    test "$metadata_config_digest" = "$config_digest"
+  fi
   jq -e --arg config_digest "$config_digest" \
     -f "$repository_root/.github/scripts/validate-candidate-platform-manifest.jq" \
     "$platform_json" >/dev/null
