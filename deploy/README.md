@@ -1,6 +1,7 @@
 # CardRAG 배포 파일
 
-현재 보호 대상 운영은 v1.0.9이며, v1.0.11은 별도 후보 overlay로 검증합니다. 두
+현재 보호 대상 운영은 v1.0.9이며, v1.0.12 reliability patch는 v1.0.11의 데이터·채널
+계약을 유지한 별도 후보 overlay로 검증합니다. 두
 버전은 Compose project·Worker 상태 volume·Codex 인증 volume·채널 포인터·호스트
 포트를 공유하지 않습니다. 단, resume와 검증된 native OCR cache HEAD/GET을 유지하기
 위해 canonical WebDAV base `/home/cardrag`는 의도적으로 공유하고 channel만 격리합니다.
@@ -39,11 +40,11 @@ deploy/
   `cardrag-worker-v111-codex-home`입니다.
 - `compose.candidate.yaml`은 `candidate-v1.0.11` 포인터, 후보 전용 volume 및
   stable과 같은 canonical WebDAV base를 강제합니다. Worker 후보는 state와 Codex 인증 volume을 각각
-  `cardrag-worker-v111-candidate-state`와
-  `cardrag-worker-v111-candidate-codex-home`으로 고정하고, MCP 후보는
-  `cardrag-mcp-v111-candidate-state`만 사용합니다. 이 이름은 위 stable base
+  `cardrag-worker-v112-candidate-state`와
+  `cardrag-worker-v112-candidate-codex-home`으로 고정하고, MCP 후보는
+  `cardrag-mcp-v112-candidate-state`만 사용합니다. 이 이름은 위 stable base
   기본값과 의도적으로 다르며 env로 재결합할 수 없습니다. Worker 후보는 원격 GC를
-  하지 않고 MCP 후보는 기본 `127.0.0.1:18011`만 사용합니다. MCP overlay의 안전한
+  하지 않고 MCP 후보는 기본 `127.0.0.1:18012`만 사용합니다. MCP overlay의 안전한
   port 교체에는 Docker Compose v2.24.4 이상이 필요합니다.
 - Worker `compose.cache-seed.yaml`은 terminal 상태가 확인된 v1.0.9 Worker volume을
   `/mnt/cardrag-v109-state`에 read-only로 연결합니다. 평상시 Worker에는
@@ -55,7 +56,7 @@ deploy/
 - `compose.adoption.yaml`은 sealed legacy OCR export를 read-only로 연결할
   때만 사용합니다.
 
-## v1.0.11 후보 실행
+## v1.0.12 patch 후보 실행
 
 후보 Worker와 MCP에는 stable과 같은 canonical WebDAV base URL을 설정합니다. 격리는
 URL path를 갈라서가 아니라 `candidate-v1.0.11` channel로 수행합니다. Candidate Worker는
@@ -72,6 +73,9 @@ CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung
 CARDRAG_EMBEDDING_PROVIDER_ID=deepinfra
+CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS=12
+CARDRAG_EMBEDDING_RETRY_BASE_SECONDS=1
+CARDRAG_EMBEDDING_RETRY_CAP_SECONDS=60
 CARDRAG_WORKER_MAX_STATE_BYTES=137438953472
 CARDRAG_WORKER_RESERVED_FREE_SPACE_BYTES=2147483648
 CARDRAG_WORKER_MAX_VECTOR_SIDECAR_BYTES=17179869184
@@ -84,6 +88,10 @@ CARDRAG_RERANKER_SHADOW_ENABLED=false
 # overlay may enable it only after a winning gold-bound profile is sealed.
 CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED=false
 ```
+
+실제 host env 경로는 Worker `/etc/cardrag/worker.env`, MCP
+`/etc/cardrag/mcp.env`입니다. 별도 `candidate-worker.env`, `candidate-mcp.env` 이름을
+만들어 unit과 수동 실행이 서로 다른 설정을 읽게 하지 않습니다.
 
 위 네 image digest 값은 env 파일에만 두지 말고 아래 사전검사와 runtime identity capture를
 실행하는 caller shell에도 동일한 receipt 값으로 export합니다. 출력하거나 로그로 남기지
@@ -98,14 +106,14 @@ set -euo pipefail
 : "${CARDRAG_PRESERVED_RUN_ID:?the audited interrupted run ID is required}"
 [[ "$CARDRAG_PRESERVED_RUN_ID" =~ ^[0-9a-f]{32}$ ]]
 
-docker compose --env-file /etc/cardrag/candidate-worker.env \
+docker compose --env-file /etc/cardrag/worker.env \
   -f deploy/worker/compose.yaml \
   -f deploy/worker/compose.candidate.yaml \
   -f deploy/worker/compose.secrets.yaml \
-  run --name cardrag-v111-candidate-worker-acceptance \
+  run --name cardrag-v112-candidate-worker-acceptance \
   worker resume "$CARDRAG_PRESERVED_RUN_ID"
 
-docker compose --env-file /etc/cardrag/candidate-mcp.env \
+docker compose --env-file /etc/cardrag/mcp.env \
   -f deploy/mcp/compose.yaml \
   -f deploy/mcp/compose.candidate.yaml \
   -f deploy/mcp/compose.secrets.yaml \
@@ -210,16 +218,16 @@ WebDAV timeout은 요청별 inactivity 상한이고 한 검증 thread에는 여�
 
 ## stable 운영 원칙
 
-v1.0.11 candidate가 합격하고 전환이 승인될 때까지 v1.0.9 운영 image, container,
-volume, 설치 pointer와 channel을 그대로 유지합니다.
+v1.0.12 runtime patch candidate가 v1.0.11 데이터 계약으로 합격하고 전환이 승인될 때까지
+v1.0.9 운영 image, container, volume, 설치 pointer와 channel을 그대로 유지합니다.
 
 ```dotenv
 CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.9-worker
 CARDRAG_MCP_IMAGE=ymtop59/mcp-card-prd-detail:1.0.9-mcp
 ```
 
-v1.0.11 후보가 합격하고 전환이 승인되면 v4/v5 dual-reader MCP를 먼저 배치해 기존
-v4를 제공하는지 확인하고, 이후에만 v1.0.11 Worker와 stable channel을 전환합니다.
+v1.0.12 후보가 합격하고 전환이 승인되면 v1.0.12 v4/v5 dual-reader MCP를 먼저 배치해
+기존 v4를 제공하는지 확인하고, 이후에만 v1.0.12 Worker와 stable channel을 전환합니다.
 PDF/OCR seed, 합격 기준, rollback 및 승인 경계는
 [v1.0.11 migration](../docs/V1_0_11_MIGRATION.md)을 따릅니다.
 

@@ -371,7 +371,7 @@ def test_gc_runner_close_failure_does_not_replace_partial_count(
 
 
 def test_pipeline_result_payload_exposes_pdf_cache_activity() -> None:
-    v5_metrics = {"schema_version": "cardrag.worker-v5-metrics.v2"}
+    v5_metrics = {"schema_version": "cardrag.worker-v5-metrics.v3"}
     payload = cli_module._pipeline_result_payload(
         PipelineResult(
             run_id="run-cache-metrics",
@@ -1017,6 +1017,32 @@ def test_embedding_response_caps_are_bounded_canonical_integers(
         monkeypatch.delenv(name, raising=False)
 
 
+def test_embedding_request_retry_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS",
+        "CARDRAG_EMBEDDING_RETRY_BASE_SECONDS",
+        "CARDRAG_EMBEDDING_RETRY_CAP_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    defaults = WorkerSettings.from_env()
+    assert defaults.embedding_request_max_attempts == 12
+    assert defaults.embedding_retry_base_seconds == 1
+    assert defaults.embedding_retry_cap_seconds == 60
+
+    monkeypatch.setenv("CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS", "40")
+    monkeypatch.setenv("CARDRAG_EMBEDDING_RETRY_BASE_SECONDS", "2")
+    monkeypatch.setenv("CARDRAG_EMBEDDING_RETRY_CAP_SECONDS", "60")
+    configured = WorkerSettings.from_env()
+    assert configured.embedding_request_max_attempts == 40
+    assert configured.embedding_retry_base_seconds == 2
+    assert configured.embedding_retry_cap_seconds == 60
+
+    monkeypatch.setenv("CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS", "101")
+    with pytest.raises(ValueError, match="CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS"):
+        WorkerSettings.from_env()
+
+
 def test_worker_capacity_defaults_and_zero_allowed_floors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1201,20 +1227,20 @@ def test_v111_publication_channel_requires_explicit_stable_approval(
 ) -> None:
     monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
-    cli_module._guard_v111_publication_channel(WorkerSettings.from_env())
+    cli_module._guard_v112_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
     with pytest.raises(ValueError, match="explicit.*APPROVED=true"):
-        cli_module._guard_v111_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v112_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "true")
     approved = WorkerSettings.from_env()
     assert approved.stable_publication_approved is True
-    cli_module._guard_v111_publication_channel(approved)
+    cli_module._guard_v112_publication_channel(approved)
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "development")
     with pytest.raises(ValueError, match="candidate-v1.0.11 or stable"):
-        cli_module._guard_v111_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v112_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "yes")
     with pytest.raises(ValueError, match="CARDRAG_STABLE_PUBLICATION_APPROVED"):

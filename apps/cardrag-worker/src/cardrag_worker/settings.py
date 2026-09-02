@@ -27,6 +27,11 @@ from .capacity_v5 import (
     DEFAULT_RESERVED_FREE_SPACE_BYTES,
     MAX_SAFE_BYTES,
 )
+from .embedding_v5 import (
+    DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
+    DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
+    DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
+)
 from .tokenizer_v5 import QWEN_TOKENIZER_SHA256
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -125,6 +130,9 @@ class WorkerSettings:
     embedding_timeout_seconds: float
     embedding_max_response_bytes: int
     embedding_metadata_max_response_bytes: int
+    embedding_request_max_attempts: int
+    embedding_retry_base_seconds: float
+    embedding_retry_cap_seconds: float
     document_aggregation_profile_path: Path | None
     document_aggregation_profile_artifact_sha256: str | None
     ocr_provider: str
@@ -307,6 +315,20 @@ class WorkerSettings:
                 2 * MIB,
                 minimum=1024,
                 maximum=16 * MIB,
+            ),
+            embedding_request_max_attempts=_bounded_int(
+                "CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS",
+                DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
+                minimum=1,
+                maximum=100,
+            ),
+            embedding_retry_base_seconds=_positive_float(
+                "CARDRAG_EMBEDDING_RETRY_BASE_SECONDS",
+                DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
+            ),
+            embedding_retry_cap_seconds=_positive_float(
+                "CARDRAG_EMBEDDING_RETRY_CAP_SECONDS",
+                DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
             ),
             document_aggregation_profile_path=aggregation_path,
             document_aggregation_profile_artifact_sha256=aggregation_sha256,

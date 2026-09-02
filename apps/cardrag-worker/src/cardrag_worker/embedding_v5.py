@@ -6,11 +6,13 @@ the immutable v4 1,536-dimensional provider contract remains untouched.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 from urllib.parse import quote
@@ -49,10 +51,163 @@ MAX_EMBEDDING_RESPONSE_BYTES = 64 * MIB
 MAX_METADATA_RESPONSE_BYTES = 16 * MIB
 DEFAULT_EMBEDDING_RESPONSE_BYTES = 32 * MIB
 DEFAULT_METADATA_RESPONSE_BYTES = 2 * MIB
+DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS = 12
+DEFAULT_EMBEDDING_RETRY_BASE_SECONDS = 1.0
+DEFAULT_EMBEDDING_RETRY_CAP_SECONDS = 60.0
+_RETRYABLE_EMBEDDING_HTTP_STATUSES = frozenset({408, 425, 429})
+LOGGER = logging.getLogger(__name__)
 
 
 class EmbeddingV5Error(RuntimeError):
     """A fail-closed Qwen profile, routing, or response contract error."""
+
+
+class EmbeddingV5RequestError(EmbeddingV5Error):
+    """A secret-free OpenRouter request failure classification."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        status_code: int | None = None,
+        attempts: int = 1,
+    ) -> None:
+        self.kind = kind if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", kind) else "unknown"
+        self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+        self.attempts = attempts if type(attempts) is int and attempts >= 1 else 1
+        super().__init__(message)
+
+
+class EmbeddingV5TransientError(EmbeddingV5RequestError):
+    """A transient OpenRouter failure that exhausted request-local retries."""
+
+
+class EmbeddingV5PermanentRequestError(EmbeddingV5RequestError):
+    """A permanent OpenRouter rejection or local request configuration error."""
+
+
+_TRANSIENT_TRANSPORT_ERRORS = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.ProxyError,
+    httpx.RemoteProtocolError,
+    httpx.DecodingError,
+)
+_PERMANENT_TRANSPORT_ERRORS = (httpx.LocalProtocolError, httpx.UnsupportedProtocol)
+_TRANSIENT_ENVELOPE_MARKERS = (
+    "rate_limit",
+    "too_many_requests",
+    "timeout",
+    "timed_out",
+    "overload",
+    "temporar",
+    "unavailable",
+    "server_error",
+    "upstream_error",
+    "provider_error",
+    "network_error",
+)
+
+
+def _request_failure_kind(status_code: int) -> str:
+    return {
+        400: "invalid_request",
+        401: "authentication",
+        402: "billing",
+        403: "authorization",
+        404: "not_found",
+        408: "timeout",
+        413: "payload_too_large",
+        422: "unprocessable_request",
+        425: "too_early",
+        429: "rate_limit",
+        502: "upstream_error",
+        503: "unavailable",
+        504: "timeout",
+        524: "timeout",
+        529: "overloaded",
+    }.get(status_code, "server_error" if status_code >= 500 else "client_error")
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in _RETRYABLE_EMBEDDING_HTTP_STATUSES or 500 <= status_code <= 599
+
+
+def _response_error_envelope(response_body: bytes) -> tuple[bool, str, int | None] | None:
+    """Return ``(transient, safe_kind, status)`` for a 2xx error envelope."""
+
+    try:
+        payload = json.loads(response_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, Mapping) or payload.get("error") is None:
+        return None
+    error = payload["error"]
+    candidates: list[object] = []
+    if isinstance(error, Mapping):
+        candidates.extend((error.get("code"), error.get("status"), error.get("type")))
+    else:
+        candidates.append(error)
+    for candidate in candidates:
+        status_code: int | None = None
+        if type(candidate) is int:
+            status_code = candidate
+        elif isinstance(candidate, str) and candidate.isdecimal():
+            status_code = int(candidate)
+        if status_code is not None and 100 <= status_code <= 599:
+            return (
+                _is_retryable_status(status_code),
+                _request_failure_kind(status_code),
+                status_code,
+            )
+    normalized = "_".join(
+        re.sub(r"[^a-z0-9]+", "_", candidate.casefold()).strip("_")
+        for candidate in candidates
+        if isinstance(candidate, str)
+    )
+    transient = any(marker in normalized for marker in _TRANSIENT_ENVELOPE_MARKERS)
+    return transient, "provider_transient" if transient else "provider_rejected", None
+
+
+def _validate_retry_policy(
+    request_max_attempts: int,
+    retry_base_seconds: float,
+    retry_cap_seconds: float,
+) -> tuple[int, float, float]:
+    if type(request_max_attempts) is not int or not 1 <= request_max_attempts <= 100:
+        raise ValueError("embedding request max attempts must be between 1 and 100")
+    if (
+        isinstance(retry_base_seconds, bool)
+        or not math.isfinite(retry_base_seconds)
+        or retry_base_seconds < 0
+    ):
+        raise ValueError("embedding retry base seconds must be finite and non-negative")
+    if isinstance(retry_cap_seconds, bool) or not math.isfinite(retry_cap_seconds) or retry_cap_seconds < 0:
+        raise ValueError("embedding retry cap seconds must be finite and non-negative")
+    return request_max_attempts, float(retry_base_seconds), float(retry_cap_seconds)
+
+
+def _retry_seconds(
+    attempt: int,
+    response: httpx.Response | None,
+    *,
+    base_seconds: float,
+    cap_seconds: float,
+) -> float:
+    delay = float(min(cap_seconds, base_seconds * (2 ** (attempt - 1))))
+    if response is None:
+        return delay
+    raw_retry_after = response.headers.get("retry-after")
+    if raw_retry_after is None:
+        return delay
+    try:
+        retry_after = float(raw_retry_after)
+    except ValueError:
+        return delay
+    if not math.isfinite(retry_after) or retry_after < 0:
+        return delay
+    return min(cap_seconds, max(delay, retry_after))
 
 
 def _validate_response_limit(value: int, *, maximum: int, label: str) -> int:
@@ -372,7 +527,7 @@ def _normalize_vector(values: object, *, index: int) -> list[float]:
     return normalized
 
 
-def _response_provider(payload: Mapping[str, Any], response: httpx.Response) -> str | None:
+def _response_provider(payload: Mapping[str, Any], response_provider: str | None) -> str | None:
     for candidate in (payload.get("provider_id"), payload.get("provider")):
         if isinstance(candidate, str) and candidate:
             return candidate
@@ -382,8 +537,7 @@ def _response_provider(payload: Mapping[str, Any], response: httpx.Response) -> 
             candidate = metadata.get(key)
             if isinstance(candidate, str) and candidate:
                 return candidate
-    header = response.headers.get("x-openrouter-provider")
-    return None if header is None else str(header)
+    return response_provider
 
 
 def _provider_matches(actual: str, expected: Qwen3EmbeddingProviderId) -> bool:
@@ -403,6 +557,10 @@ class OpenRouterQwenEmbeddingProviderV5:
         base_url: str = "https://openrouter.ai/api/v1",
         timeout_seconds: float = 120,
         maximum_response_bytes: int = DEFAULT_EMBEDDING_RESPONSE_BYTES,
+        request_max_attempts: int = DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
+        retry_base_seconds: float = DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
+        retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not api_key:
@@ -418,13 +576,26 @@ class OpenRouterQwenEmbeddingProviderV5:
             maximum=MAX_EMBEDDING_RESPONSE_BYTES,
             label="maximum embedding response bytes",
         )
+        request_max_attempts, retry_base_seconds, retry_cap_seconds = _validate_retry_policy(
+            request_max_attempts,
+            retry_base_seconds,
+            retry_cap_seconds,
+        )
+        if not callable(sleep):
+            raise TypeError("embedding retry sleep must be callable")
         self.api_key = api_key
         self.profile = profile
         self.token_counter = token_counter
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.maximum_response_bytes = maximum_response_bytes
+        self.request_max_attempts = request_max_attempts
+        self.retry_base_seconds: float = float(retry_base_seconds)
+        self.retry_cap_seconds: float = float(retry_cap_seconds)
+        self.sleep = sleep
         self.transport = transport
+        self.logical_batch_count = 0
+        self.wire_attempt_count = 0
 
     @property
     def provider(self) -> str:
@@ -448,6 +619,106 @@ class OpenRouterQwenEmbeddingProviderV5:
                     f"embedding input {index} exceeds sealed maximum_tokens; truncation is forbidden"
                 )
 
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        return _is_retryable_status(status_code)
+
+    def _retry_seconds(self, attempt: int, response: httpx.Response | None) -> float:
+        return _retry_seconds(
+            attempt,
+            response,
+            base_seconds=self.retry_base_seconds,
+            cap_seconds=self.retry_cap_seconds,
+        )
+
+    async def _request_embedding(self, body: Mapping[str, object]) -> tuple[bytes, str | None]:
+        self.logical_batch_count += 1
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            transport=self.transport,
+        ) as client:
+            for attempt in range(1, self.request_max_attempts + 1):
+                response: httpx.Response | None = None
+                response_body = b""
+                retry_reason: str
+                retry_status: int | None = None
+                permanent_failure: tuple[str, int | None] | None = None
+                try:
+                    self.wire_attempt_count += 1
+                    async with client.stream(
+                        "POST",
+                        self.base_url + "/embeddings",
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        json=body,
+                    ) as response:
+                        response.raise_for_status()
+                        response_body = await _bounded_response_bytes(
+                            response,
+                            self.maximum_response_bytes,
+                        )
+                    response_failure = _response_error_envelope(response_body)
+                    if response_failure is None:
+                        return response_body, response.headers.get("x-openrouter-provider")
+                    transient, retry_reason, retry_status = response_failure
+                    if not transient:
+                        permanent_failure = (retry_reason, retry_status)
+                except httpx.HTTPStatusError as exc:
+                    response = exc.response
+                    retry_status = response.status_code
+                    retry_reason = _request_failure_kind(retry_status)
+                    if not self._is_retryable_status(retry_status):
+                        permanent_failure = (retry_reason, retry_status)
+                except _PERMANENT_TRANSPORT_ERRORS:
+                    permanent_failure = ("client_protocol", None)
+                    retry_reason = "client_protocol"
+                except _TRANSIENT_TRANSPORT_ERRORS:
+                    retry_reason = "transport"
+                except httpx.RequestError:
+                    permanent_failure = ("client_request", None)
+                    retry_reason = "client_request"
+
+                if permanent_failure is not None:
+                    kind, status_code = permanent_failure
+                    response = None
+                    response_body = b""
+                    raise EmbeddingV5PermanentRequestError(
+                        "OpenRouter embedding request was permanently rejected",
+                        kind=kind,
+                        status_code=status_code,
+                        attempts=attempt,
+                    ) from None
+
+                if attempt >= self.request_max_attempts:
+                    LOGGER.error(
+                        "OpenRouter embedding request retries exhausted reason=%s status=%s attempts=%d",
+                        retry_reason,
+                        retry_status if retry_status is not None else "none",
+                        attempt,
+                    )
+                    response = None
+                    response_body = b""
+                    raise EmbeddingV5TransientError(
+                        "OpenRouter embedding request failed after transient retries",
+                        kind=retry_reason,
+                        status_code=retry_status,
+                        attempts=attempt,
+                    ) from None
+                delay = self._retry_seconds(attempt, response)
+                LOGGER.warning(
+                    "OpenRouter embedding request transient failure reason=%s status=%s "
+                    "attempt=%d/%d retry_seconds=%.3f",
+                    retry_reason,
+                    retry_status if retry_status is not None else "none",
+                    attempt,
+                    self.request_max_attempts,
+                    delay,
+                )
+                response = None
+                response_body = b""
+                await self.sleep(delay)
+
+        raise RuntimeError("embedding request retry loop terminated unexpectedly")  # pragma: no cover
+
     async def _embed_formatted(self, values: Sequence[str]) -> list[list[float]]:
         if not values:
             return []
@@ -469,26 +740,7 @@ class OpenRouterQwenEmbeddingProviderV5:
                 "require_parameters": False,
             },
         }
-        try:
-            async with (
-                httpx.AsyncClient(
-                    timeout=self.timeout_seconds,
-                    transport=self.transport,
-                ) as client,
-                client.stream(
-                    "POST",
-                    self.base_url + "/embeddings",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=body,
-                ) as response,
-            ):
-                response.raise_for_status()
-                response_body = await _bounded_response_bytes(
-                    response,
-                    self.maximum_response_bytes,
-                )
-        except httpx.HTTPError:
-            raise EmbeddingV5Error("OpenRouter embedding request failed") from None
+        response_body, response_provider = await self._request_embedding(body)
         try:
             payload = json.loads(response_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -501,7 +753,7 @@ class OpenRouterQwenEmbeddingProviderV5:
         actual_model = root.get("model")
         if not isinstance(actual_model, str) or actual_model.casefold() != self.profile.model.casefold():
             raise EmbeddingV5Error("OpenRouter response model does not match the sealed profile")
-        actual_provider = _response_provider(root, response)
+        actual_provider = _response_provider(root, response_provider)
         if actual_provider is None or not _provider_matches(actual_provider, self.profile.provider_id):
             raise EmbeddingV5Error("OpenRouter response provider does not match the pinned route")
         data = _required_sequence(root.get("data"), field="embedding response.data")
@@ -531,33 +783,116 @@ async def fetch_openrouter_qwen_endpoints(
     base_url: str = "https://openrouter.ai/api/v1",
     timeout_seconds: float = 30,
     maximum_response_bytes: int = DEFAULT_METADATA_RESPONSE_BYTES,
+    request_max_attempts: int = DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
+    retry_base_seconds: float = DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
+    retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> tuple[OpenRouterEndpointMetadata, ...]:
     if not api_key:
         raise ValueError("OpenRouter API key is empty")
+    if not base_url.startswith("https://") and transport is None:
+        raise ValueError("OpenRouter base URL must use HTTPS")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive and finite")
     _validate_response_limit(
         maximum_response_bytes,
         maximum=MAX_METADATA_RESPONSE_BYTES,
         label="maximum endpoint metadata response bytes",
     )
+    request_max_attempts, retry_base_seconds, retry_cap_seconds = _validate_retry_policy(
+        request_max_attempts,
+        retry_base_seconds,
+        retry_cap_seconds,
+    )
+    if not callable(sleep):
+        raise TypeError("embedding retry sleep must be callable")
     author, slug = QWEN3_EMBEDDING_MODEL.split("/", 1)
     url = f"{base_url.rstrip('/')}/models/{quote(author, safe='')}/{quote(slug, safe='')}/endpoints"
-    try:
-        async with (
-            httpx.AsyncClient(
-                timeout=timeout_seconds,
-                transport=transport,
-            ) as client,
-            client.stream(
-                "GET",
-                url,
-                headers={"Authorization": f"Bearer {api_key}"},
-            ) as response,
-        ):
-            response.raise_for_status()
-            response_body = await _bounded_response_bytes(response, maximum_response_bytes)
-    except httpx.HTTPError:
-        raise EmbeddingV5Error("OpenRouter endpoint metadata request failed") from None
+    response_body = b""
+    async with httpx.AsyncClient(timeout=timeout_seconds, transport=transport) as client:
+        for attempt in range(1, request_max_attempts + 1):
+            response: httpx.Response | None = None
+            retry_reason: str
+            retry_status: int | None = None
+            permanent_failure: tuple[str, int | None] | None = None
+            try:
+                async with client.stream(
+                    "GET",
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                ) as response:
+                    response.raise_for_status()
+                    response_body = await _bounded_response_bytes(
+                        response,
+                        maximum_response_bytes,
+                    )
+                response_failure = _response_error_envelope(response_body)
+                if response_failure is None:
+                    break
+                transient, retry_reason, retry_status = response_failure
+                if not transient:
+                    permanent_failure = (retry_reason, retry_status)
+            except httpx.HTTPStatusError as exc:
+                response = exc.response
+                retry_status = response.status_code
+                retry_reason = _request_failure_kind(retry_status)
+                if not _is_retryable_status(retry_status):
+                    permanent_failure = (retry_reason, retry_status)
+            except _PERMANENT_TRANSPORT_ERRORS:
+                permanent_failure = ("client_protocol", None)
+                retry_reason = "client_protocol"
+            except _TRANSIENT_TRANSPORT_ERRORS:
+                retry_reason = "transport"
+            except httpx.RequestError:
+                permanent_failure = ("client_request", None)
+                retry_reason = "client_request"
+
+            if permanent_failure is not None:
+                kind, status_code = permanent_failure
+                response = None
+                response_body = b""
+                raise EmbeddingV5PermanentRequestError(
+                    "OpenRouter endpoint metadata request was permanently rejected",
+                    kind=kind,
+                    status_code=status_code,
+                    attempts=attempt,
+                ) from None
+            if attempt >= request_max_attempts:
+                LOGGER.error(
+                    "OpenRouter endpoint metadata retries exhausted reason=%s status=%s attempts=%d",
+                    retry_reason,
+                    retry_status if retry_status is not None else "none",
+                    attempt,
+                )
+                response = None
+                response_body = b""
+                raise EmbeddingV5TransientError(
+                    "OpenRouter endpoint metadata request failed after transient retries",
+                    kind=retry_reason,
+                    status_code=retry_status,
+                    attempts=attempt,
+                ) from None
+            delay = _retry_seconds(
+                attempt,
+                response,
+                base_seconds=retry_base_seconds,
+                cap_seconds=retry_cap_seconds,
+            )
+            LOGGER.warning(
+                "OpenRouter endpoint metadata transient failure reason=%s status=%s "
+                "attempt=%d/%d retry_seconds=%.3f",
+                retry_reason,
+                retry_status if retry_status is not None else "none",
+                attempt,
+                request_max_attempts,
+                delay,
+            )
+            response = None
+            response_body = b""
+            await sleep(delay)
+        else:  # pragma: no cover - every exhausted path raises above.
+            raise RuntimeError("endpoint metadata retry loop terminated unexpectedly")
     try:
         payload = json.loads(response_body)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -585,6 +920,9 @@ async def preflight_openrouter_qwen_providers(
     minimum_repeat_cosine: float = 0.999,
     embedding_maximum_response_bytes: int = DEFAULT_EMBEDDING_RESPONSE_BYTES,
     metadata_maximum_response_bytes: int = DEFAULT_METADATA_RESPONSE_BYTES,
+    request_max_attempts: int = DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
+    retry_base_seconds: float = DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
+    retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
 ) -> ProviderComparisonReport:
     """Evaluate DeepInfra then Nebius with two identical 20+ sample calls each."""
 
@@ -597,6 +935,9 @@ async def preflight_openrouter_qwen_providers(
         base_url=base_url,
         timeout_seconds=timeout_seconds,
         maximum_response_bytes=metadata_maximum_response_bytes,
+        request_max_attempts=request_max_attempts,
+        retry_base_seconds=retry_base_seconds,
+        retry_cap_seconds=retry_cap_seconds,
         transport=transport,
     )
     reports: list[ProviderPreflightReport] = []
@@ -611,6 +952,9 @@ async def preflight_openrouter_qwen_providers(
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             maximum_response_bytes=embedding_maximum_response_bytes,
+            request_max_attempts=request_max_attempts,
+            retry_base_seconds=retry_base_seconds,
+            retry_cap_seconds=retry_cap_seconds,
             transport=transport,
         )
         first = await provider.embed_documents(samples)
@@ -646,7 +990,13 @@ async def preflight_openrouter_qwen_providers(
 
 
 __all__ = [
+    "DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS",
+    "DEFAULT_EMBEDDING_RETRY_BASE_SECONDS",
+    "DEFAULT_EMBEDDING_RETRY_CAP_SECONDS",
     "EmbeddingV5Error",
+    "EmbeddingV5PermanentRequestError",
+    "EmbeddingV5RequestError",
+    "EmbeddingV5TransientError",
     "InputKind",
     "KOREAN_PREFLIGHT_SAMPLES",
     "OpenRouterEndpointMetadata",

@@ -1,4 +1,4 @@
-name: cardrag-v111-candidate
+name: cardrag-v112-candidate
 
 services:
   mcp:
@@ -26,8 +26,8 @@ services:
       CARDRAG_MCP_RERANKER_AUDIT_MAX_TOTAL_BYTES: "536870912"
       CARDRAG_MCP_RERANKER_AUDIT_MAX_ARTIFACT_BYTES: "8388608"
     ports: !override
-      - "${CARDRAG_CANDIDATE_MCP_BIND_ADDRESS:-127.0.0.1}:${CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18011}:8000"
+      - "${CARDRAG_CANDIDATE_MCP_BIND_ADDRESS:-127.0.0.1}:${CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18012}:8000"
 
 volumes:
   mcp-state:
-    name: cardrag-mcp-v111-candidate-state
+    name: cardrag-mcp-v112-candidate-state

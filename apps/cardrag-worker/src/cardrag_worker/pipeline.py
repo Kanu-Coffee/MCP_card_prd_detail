@@ -94,6 +94,10 @@ from .downloader import (
     SecurePDFDownloader,
 )
 from .embedding_v5 import (
+    EmbeddingV5Error,
+    EmbeddingV5PermanentRequestError,
+    EmbeddingV5RequestError,
+    EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
     QwenEmbeddingProfileV5,
     embedding_cache_key,
@@ -790,7 +794,7 @@ def _validated_v5_metrics(
         "ocr_cache_reused_count",
         "ocr_provider_called_count",
     }
-    if set(raw) != required_keys or raw.get("schema_version") != "cardrag.worker-v5-metrics.v2":
+    if set(raw) != required_keys or raw.get("schema_version") != "cardrag.worker-v5-metrics.v3":
         raise RuntimeError("sealed v5 Worker metrics have an unknown contract")
 
     def count(name: str) -> int:
@@ -1320,6 +1324,8 @@ def _classify_worker_failure(exc: Exception) -> tuple[str, int | None, int | Non
         return "remote_integrity", None, None
     if isinstance(exc, WebDAVError):
         return "remote", None, None
+    if isinstance(exc, EmbeddingV5RequestError):
+        return "openrouter_request", exc.status_code, None
     if isinstance(exc, sqlite3.Error):
         return "database", None, None
     if isinstance(exc, httpx.HTTPStatusError):
@@ -1352,6 +1358,20 @@ def _safe_stage_error(exc: Exception) -> str:
     if error_number is not None:
         fields.append(f"errno={error_number}")
     return f"worker_stage_failure: Worker pipeline stage failed ({', '.join(fields)})."
+
+
+def _safe_v5_embedding_terminal_error(exc: Exception) -> str:
+    if isinstance(exc, V5CapacityError):
+        return "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+    if isinstance(exc, EmbeddingV5PermanentRequestError):
+        fields = [f"kind={exc.kind}"]
+        if exc.status_code is not None:
+            fields.append(f"status_code={exc.status_code}")
+        return (
+            "v5_embedding_request_rejected: OpenRouter permanently rejected the embedding request "
+            f"({', '.join(fields)})"
+        )
+    return "v5_embedding_contract_failed: OpenRouter embedding response violated its contract"
 
 
 def _write_worker_failure_report(
@@ -1733,7 +1753,7 @@ class WorkerPipeline:
         if v5_profile is None and ocr_cache_mode != "read-write":
             raise ValueError("legacy v4 Worker requires its original read-write OCR cache contract")
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
-            raise ValueError("stable v1.0.11 publication requires explicit approval")
+            raise ValueError("stable v1.0.12 publication requires explicit approval")
         if v5_profile is not None and webdav.channel == "candidate-v1.0.11" and ocr_cache_mode != "read-only":
             raise ValueError("v1.0.11 candidate requires read-only remote OCR cache access")
         if v5_profile is not None and ocr_cache_mode == "read-write" and not ocr_cache_publication_approved:
@@ -4217,15 +4237,15 @@ class WorkerPipeline:
         embedding_cache_hit_counts: Counter[str] = Counter()
         embedding_cache_miss_counts: Counter[str] = Counter()
         embedding_download_counts: Counter[str] = Counter()
+        embedding_provider_wire_attempt_baseline = provider.wire_attempt_count
         embedding_provider_call_count = 0
         sealed_cache_bindings: tuple[tuple[str, str, str], ...] | None = None
 
         async def embed_views() -> None:
-            nonlocal embedding_provider_call_count, sealed_cache_bindings
+            nonlocal sealed_cache_bindings
             embedding_cache_hit_counts.clear()
             embedding_cache_miss_counts.clear()
             embedding_download_counts.clear()
-            embedding_provider_call_count = 0
             sealed_cache_bindings = None
             cache_bindings: list[tuple[str, str]] = []
             vector_sha256_by_cache_key: dict[str, str] = {}
@@ -4377,7 +4397,6 @@ class WorkerPipeline:
                         remaining_unique_misses,
                     )
                     raise
-                embedding_provider_call_count += 1
                 generated = await provider.embed_documents(
                     [ordered_view_pairs[index][1].embedding_input for index in batch_indices]
                 )
@@ -4415,11 +4434,15 @@ class WorkerPipeline:
             document_id="corpus-v5",
             name="embedding-v5",
             operation=embed_views,
-            non_retryable_predicate=lambda exc: isinstance(exc, V5CapacityError),
-            non_retryable_error_formatter=lambda _exc: (
-                "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+            non_retryable_predicate=lambda exc: (
+                isinstance(exc, V5CapacityError)
+                or (isinstance(exc, EmbeddingV5Error) and not isinstance(exc, EmbeddingV5TransientError))
             ),
+            non_retryable_error_formatter=_safe_v5_embedding_terminal_error,
         )
+        embedding_provider_call_count = provider.wire_attempt_count - embedding_provider_wire_attempt_baseline
+        if embedding_provider_call_count < 0:
+            raise RuntimeError("Qwen provider wire-attempt counter moved backwards")
         if sealed_cache_bindings is None or len(sealed_cache_bindings) != len(ordered_view_pairs):
             raise RuntimeError("v5 embedding cache/provider left incomplete view bindings")
         try:
@@ -4790,7 +4813,7 @@ class WorkerPipeline:
             else 100.0 * export.covered_non_whitespace_count / export.source_non_whitespace_count
         )
         v5_metrics = {
-            "schema_version": "cardrag.worker-v5-metrics.v2",
+            "schema_version": "cardrag.worker-v5-metrics.v3",
             "parser_profile_document_counts": {
                 profile_id: parser_profile_document_counts[profile_id]
                 for profile_id in sorted(parser_profile_document_counts)

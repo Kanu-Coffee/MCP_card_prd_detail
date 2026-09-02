@@ -69,13 +69,13 @@ def _material(uri: str, algorithm: str, digest: str) -> dict[str, Any]:
 def _subject_name(role: str) -> str:
     return (
         "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-        f"@candidate-v1.0.11-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
+        f"@candidate-v1.0.12-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
     )
 
 
 def _build_args() -> dict[str, str]:
     return {
-        "build-arg:APP_VERSION": "1.0.11",
+        "build-arg:APP_VERSION": "1.0.12",
         "build-arg:CODEX_SHA256": ("605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"),
         "build-arg:CODEX_VERSION": "0.151.0",
         "build-arg:PYTHON_DEV_IMAGE": (
@@ -233,13 +233,13 @@ def _cardrag_spdx_package(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "SPDXID": f"SPDXRef-Package-python-{name}",
-        "versionInfo": "1.0.11",
+        "versionInfo": "1.0.12",
         "licenseDeclared": "Apache-2.0",
         "externalRefs": [
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": f"pkg:pypi/{name}@1.0.11",
+                "referenceLocator": f"pkg:pypi/{name}@1.0.12",
             }
         ],
     }
@@ -610,7 +610,7 @@ def test_documented_public_source_candidate_producer_matches_the_provenance_poli
     assert "두 Git auth ID의 optional 내장 선언" in document
     assert "이 선언 자체는 token 값의 미전달을 증명하지 않으므로" in document
     for build_arg in (
-        "APP_VERSION=1.0.11",
+        "APP_VERSION=1.0.12",
         '"VCS_REF=$CANDIDATE_SOURCE_COMMIT"',
         "PYTHON_DEV_IMAGE=cgr.dev/chainguard/python:latest-dev@sha256:",
         "PYTHON_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest@sha256:",

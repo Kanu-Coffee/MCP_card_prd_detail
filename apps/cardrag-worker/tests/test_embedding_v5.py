@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -14,6 +15,8 @@ from cardrag_core.embedding import (
 from cardrag_worker.embedding_v5 import (
     KOREAN_PREFLIGHT_SAMPLES,
     EmbeddingV5Error,
+    EmbeddingV5PermanentRequestError,
+    EmbeddingV5TransientError,
     OpenRouterEndpointMetadata,
     OpenRouterQwenEmbeddingProviderV5,
     QwenEmbeddingProfileV5,
@@ -188,6 +191,329 @@ async def test_provider_sends_raw_documents_exact_queries_and_pinned_route() -> 
 
 
 @pytest.mark.asyncio
+async def test_provider_retries_transient_statuses_with_bounded_backoff() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, request=request)
+        if calls == 2:
+            return httpx.Response(429, headers={"retry-after": "5"}, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": "deepinfra",
+                "data": [{"index": 0, "embedding": _unit_vector()}],
+            },
+            request=request,
+        )
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=5,
+        retry_base_seconds=0.25,
+        retry_cap_seconds=2,
+        sleep=record_sleep,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert len(await provider.embed_documents(["원문"])) == 1
+    assert calls == 3
+    assert sleeps == [0.25, 2.0]
+    assert provider.logical_batch_count == 1
+    assert provider.wire_attempt_count == 3
+
+
+@pytest.mark.asyncio
+async def test_provider_retries_transport_failure() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("injected timeout", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": "deepinfra",
+                "data": [{"index": 0, "embedding": _unit_vector()}],
+            },
+            request=request,
+        )
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=3,
+        retry_base_seconds=0.5,
+        retry_cap_seconds=2,
+        sleep=record_sleep,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert len(await provider.embed_documents(["원문"])) == 1
+    assert calls == 2
+    assert sleeps == [0.5]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_kind"),
+    (
+        (400, "invalid_request"),
+        (401, "authentication"),
+        (402, "billing"),
+        (403, "authorization"),
+        (404, "not_found"),
+        (413, "payload_too_large"),
+        (422, "unprocessable_request"),
+    ),
+)
+async def test_provider_does_not_retry_permanent_status(
+    status_code: int,
+    expected_kind: str,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status_code, request=request)
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=20,
+        sleep=record_sleep,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(EmbeddingV5PermanentRequestError, match="permanently rejected") as captured:
+        await provider.embed_documents(["원문"])
+    assert captured.value.kind == expected_kind
+    assert captured.value.status_code == status_code
+    assert captured.value.attempts == 1
+    assert calls == 1
+    assert sleeps == []
+    assert provider.wire_attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_bounds_transient_retry_attempts() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, request=request)
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=4,
+        retry_base_seconds=0,
+        retry_cap_seconds=0,
+        sleep=record_sleep,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(EmbeddingV5TransientError, match="transient retries") as captured:
+        await provider.embed_documents(["원문"])
+    assert captured.value.kind == "unavailable"
+    assert captured.value.status_code == 503
+    assert captured.value.attempts == 4
+    assert calls == 4
+    assert sleeps == [0.0, 0.0, 0.0]
+    assert provider.logical_batch_count == 1
+    assert provider.wire_attempt_count == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", (408, 425, 429, 500, 502, 503, 504, 524, 529))
+async def test_provider_retries_all_sealed_transient_status_classes(status_code: int) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(status_code, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": "deepinfra",
+                "data": [{"index": 0, "embedding": _unit_vector()}],
+            },
+            request=request,
+        )
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=2,
+        retry_base_seconds=0,
+        retry_cap_seconds=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert len(await provider.embed_documents(["원문"])) == 1
+    assert calls == provider.wire_attempt_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", (529, "rate_limit_exceeded"))
+async def test_provider_retries_transient_2xx_error_envelope(error_code: int | str) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"error": {"code": error_code, "message": "provider_secret"}},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": "deepinfra",
+                "data": [{"index": 0, "embedding": _unit_vector()}],
+            },
+            request=request,
+        )
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=2,
+        retry_base_seconds=0,
+        retry_cap_seconds=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert len(await provider.embed_documents(["원문"])) == 1
+    assert calls == provider.wire_attempt_count == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_permanent_2xx_error_envelope_without_body_leak() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"error": {"code": 402, "message": "provider_secret"}},
+            request=request,
+        )
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(EmbeddingV5PermanentRequestError) as captured:
+        await provider.embed_documents(["원문"])
+    assert captured.value.kind == "billing"
+    assert captured.value.status_code == 402
+    assert "provider_secret" not in str(captured.value)
+    assert provider.wire_attempt_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", (httpx.LocalProtocolError, httpx.UnsupportedProtocol))
+async def test_provider_does_not_retry_permanent_client_protocol_errors(
+    error_type: type[httpx.RequestError],
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise error_type("injected client protocol failure", request=request)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        request_max_attempts=12,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(EmbeddingV5PermanentRequestError) as captured:
+        await provider.embed_documents(["원문"])
+    assert captured.value.kind == "client_protocol"
+    assert calls == provider.wire_attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_cancellation_during_backoff_is_secret_safe(caplog: pytest.LogCaptureFixture) -> None:
+    api_key = "injected-test-credential"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"provider_secret", request=request)
+
+    async def cancel_sleep(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key=api_key,
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        retry_base_seconds=0,
+        retry_cap_seconds=0,
+        sleep=cancel_sleep,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await provider.embed_documents(["원문"])
+    assert api_key not in str(captured.value)
+    assert "provider_secret" not in str(captured.value)
+    assert api_key not in caplog.text
+    assert "provider_secret" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_provider_rejects_oversize_before_http_and_never_truncates() -> None:
     def unexpected(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("oversize input must fail before network I/O")
@@ -288,6 +614,40 @@ async def test_worker_metadata_response_cap_is_incremental_and_secret_safe(
         )
 
     assert "provider_secret" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_metadata_request_retries_transient_openrouter_failure() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(529, headers={"retry-after": "3"}, request=request)
+        return httpx.Response(
+            200,
+            json=_metadata_payload(_endpoint("deepinfra"), _endpoint("nebius")),
+            request=request,
+        )
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    endpoints = await fetch_openrouter_qwen_endpoints(
+        api_key="injected-test-credential",
+        base_url=BASE_URL,
+        request_max_attempts=3,
+        retry_base_seconds=0.25,
+        retry_cap_seconds=2,
+        sleep=record_sleep,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert calls == 2
+    assert sleeps == [2.0]
+    assert [endpoint.provider_id for endpoint in endpoints] == ["deepinfra", "nebius"]
 
 
 @pytest.mark.asyncio

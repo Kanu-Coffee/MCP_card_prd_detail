@@ -145,9 +145,10 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
         'git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
         "((${#candidate_evidence_paths[@]} > 0))",
         'git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" --',
-        'test "$version" = "1.0.11"',
-        "':(exclude)release-evidence/v1.0.11/**'",
-        "release-evidence/v1.0.11/*) ;;",
+        'test "$version" = "1.0.12"',
+        "if: ${{ inputs.version == '1.0.12' }}",
+        "':(exclude)release-evidence/v1.0.12/**'",
+        "release-evidence/v1.0.12/*) ;;",
         'candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"',
         'test "$(sha256sum "$candidate_acceptance" | awk \'{print $1}\')" =',
         "candidate_validation=$(",
@@ -168,6 +169,8 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
 
     assert workflow.count('--expected-source-commit "$CANDIDATE_SOURCE_COMMIT"') == 4
     assert '--expected-source-commit "$GITHUB_SHA"' not in workflow
+    assert 'test "$version" = "1.0.11"' not in workflow
+    assert "release-evidence/v1.0.11" not in workflow
 
 
 def test_release_legacy_validator_binds_the_contemporaneous_execution_record() -> None:

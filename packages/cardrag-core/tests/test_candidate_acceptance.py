@@ -290,20 +290,20 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         generation_objects_by_path[path] for path in sorted(generation_objects_by_path)
     )
     config = EffectiveConfigEvidence(
-        schema_version="cardrag.candidate-effective-config.v2",
+        schema_version="cardrag.candidate-effective-config.v3",
         source_commit=SOURCE_COMMIT,
-        release_version="1.0.11",
-        compose_project="cardrag-v111-candidate",
+        release_version="1.0.12",
+        compose_project="cardrag-v112-candidate",
         channel="candidate-v1.0.11",
-        worker_volume="cardrag-worker-v111-candidate-state",
+        worker_volume="cardrag-worker-v112-candidate-state",
         worker_state_mount_path="/var/lib/cardrag-worker",
-        worker_codex_home_volume="cardrag-worker-v111-candidate-codex-home",
+        worker_codex_home_volume="cardrag-worker-v112-candidate-codex-home",
         worker_codex_home_mount_path="/var/lib/cardrag-codex-home",
         worker_codex_auth_root="/var/lib/cardrag-codex-home",
         worker_home="/var/lib/cardrag-codex-home/home",
-        mcp_volume="cardrag-mcp-v111-candidate-state",
+        mcp_volume="cardrag-mcp-v112-candidate-state",
         mcp_host="127.0.0.1",
-        mcp_port=18011,
+        mcp_port=18012,
         rootfs_read_only=True,
         cap_drop_all=True,
         no_new_privileges=True,
@@ -351,7 +351,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'c' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.11",
+            version="1.0.12",
             platform="linux/amd64",
             entrypoint="cardrag-worker",
             user="10001:10001",
@@ -375,7 +375,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'e' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.11",
+            version="1.0.12",
             platform="linux/amd64",
             entrypoint="cardrag-mcp",
             user="10001:10001",
@@ -395,6 +395,9 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         embedding_normalization="l2",
         embedding_provider_id=embedding_profile.provider_id,
         embedding_maximum_tokens=embedding_profile.maximum_tokens,
+        embedding_request_max_attempts=12,
+        embedding_retry_base_seconds=1,
+        embedding_retry_cap_seconds=60,
         retrieval_mode="exact-all-active-rows.v1",
         candidate_prefilter="none",
         approximate=False,
@@ -720,9 +723,9 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         bindings[field] = _file_binding(names[field], raw)
     receipt = CandidateAcceptanceReceipt(
         schema_version=RECEIPT_SCHEMA,
-        release_version="1.0.11",
+        release_version="1.0.12",
         source_commit=SOURCE_COMMIT,
-        compose_project="cardrag-v111-candidate",
+        compose_project="cardrag-v112-candidate",
         channel="candidate-v1.0.11",
         generation_id=manifest.generation_id,
         issuers=CANDIDATE_ISSUERS,
@@ -904,7 +907,7 @@ def test_effective_config_rejects_a_cross_role_platform_manifest(tmp_path: Path)
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("worker_codex_home_volume", "cardrag-worker-v111-candidate-state"),
+        ("worker_codex_home_volume", "cardrag-worker-v112-candidate-state"),
         ("worker_codex_home_mount_path", "/var/lib/cardrag-worker/codex"),
         ("worker_codex_auth_root", "/var/lib/cardrag-worker/codex"),
         ("worker_home", "/var/lib/cardrag-worker/home"),
@@ -972,6 +975,56 @@ def test_effective_config_rejects_every_capacity_override(tmp_path: Path, field:
     config = bundle.models["effective_config"]
     payload = config.model_dump(mode="python")
     payload[field] = 0
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("embedding_request_max_attempts", 11),
+        ("embedding_retry_base_seconds", 2),
+        ("embedding_retry_cap_seconds", 61),
+    ),
+)
+def test_effective_config_rejects_every_retry_override(
+    tmp_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "embedding_request_max_attempts",
+        "embedding_retry_base_seconds",
+        "embedding_retry_cap_seconds",
+    ),
+)
+def test_effective_config_requires_every_retry_evidence_field(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    del payload[field]
+
+    with pytest.raises(ValidationError):
+        EffectiveConfigEvidence.model_validate(payload)
+
+
+def test_effective_config_rejects_pre_retry_schema(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["effective_config"].model_dump(mode="python")
+    payload["schema_version"] = "cardrag.candidate-effective-config.v2"
 
     with pytest.raises(ValidationError):
         EffectiveConfigEvidence.model_validate(payload)

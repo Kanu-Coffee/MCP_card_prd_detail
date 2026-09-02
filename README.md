@@ -1,4 +1,4 @@
-# CardRAG v1.0.11 candidate
+# CardRAG v1.0.12 reliability patch candidate
 
 CardRAG는 카드사 상품안내장 PDF를 구조 보존형 검색 generation으로 만드는 두
 프로세스 서비스입니다.
@@ -7,16 +7,19 @@ CardRAG는 카드사 상품안내장 PDF를 구조 보존형 검색 generation�
 finite Worker -> immutable WebDAV generation -> always-on read-only MCP
 ```
 
-v1.0.11 candidate는 현재 운영 중인 v1.0.9 Worker, image, state volume, 설치 pointer,
+v1.0.12 candidate는 현재 운영 중인 v1.0.9 Worker, image, state volume, 설치 pointer,
 WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable cutover와 구버전
 정리는 candidate acceptance 보고 뒤 별도 승인이 필요합니다.
 
-## v1.0.11 핵심
+## v1.0.12 핵심
 
 - Codex CLI를 checksum-pinned 0.151.0으로 올리고, 비정상 종료의 stderr 원문은
   보존하지 않으면서 크기·SHA-256과 제한된 분류만 남깁니다. 인증·설정 오류는 즉시
   중단하고, rate limit·일시 network/provider 오류만 기존 유한 stage budget 안에서
   재시도합니다.
+- OpenRouter 임베딩과 endpoint metadata의 일시적 408/425/429/5xx·timeout·network
+  실패는 요청 단위에서 최대 12회 재시도합니다. 인증·결제·권한·입력 오류와 응답
+  계약 위반은 즉시 중단하며, 실제 wire 호출 수를 비용·운영 지표로 봉인합니다.
 
 - 검증된 v1.0.9 PDF/OCR cache는 read-only seed와 기존 reuse key로 재사용합니다.
   1,536D Small cache와 별도 legacy Qwen vectors는 재사용하지 않습니다.
@@ -46,13 +49,13 @@ WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable c
 
 | 항목 | 값 |
 |---|---|
-| branch | `codex/cardrag-v1.0.11` |
+| branch | `codex/cardrag-v1.0.12` |
 | WebDAV channel | `candidate-v1.0.11` |
-| Compose project | `cardrag-v111-candidate` |
-| Worker volume | `cardrag-worker-v111-candidate-state` |
-| Codex auth volume | `cardrag-worker-v111-candidate-codex-home` |
-| MCP volume | `cardrag-mcp-v111-candidate-state` |
-| MCP bind | `127.0.0.1:18011` |
+| Compose project | `cardrag-v112-candidate` |
+| Worker volume | `cardrag-worker-v112-candidate-state` |
+| Codex auth volume | `cardrag-worker-v112-candidate-codex-home` |
+| MCP volume | `cardrag-mcp-v112-candidate-state` |
+| MCP bind | `127.0.0.1:18012` |
 
 Candidate Worker는 remote GC를 하지 않습니다. v1.0.9 source volume은 운영 Worker가
 terminal인 것을 확인한 뒤 seed command에서만 read-only로 mount합니다.
@@ -61,6 +64,7 @@ terminal인 것을 확인한 뒤 seed command에서만 read-only로 mount합니�
 
 - [구조·임베딩·exact 검색 계약](docs/V1_0_10_STRUCTURE_EMBEDDING.md)
 - [v1.0.11 장애 분석](docs/V1_0_11_INCIDENT.md)
+- [v1.0.12 임베딩 재시도 장애 분석](docs/V1_0_12_INCIDENT.md)
 - [v1.0.11 candidate migration](docs/V1_0_11_MIGRATION.md)
 - [archive와 운영 state 관리](docs/V1_0_11_ARCHIVE_MANAGEMENT.md)
 - [v1.0.10 구조·검색 baseline](docs/V1_0_10_STRUCTURE_EMBEDDING.md)

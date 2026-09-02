@@ -233,6 +233,9 @@ async def _qwen_embedding_provider(
         timeout_seconds=settings.embedding_timeout_seconds,
         embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
         metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
+        request_max_attempts=settings.embedding_request_max_attempts,
+        retry_base_seconds=settings.embedding_retry_base_seconds,
+        retry_cap_seconds=settings.embedding_retry_cap_seconds,
     )
     selected = next(
         report
@@ -260,25 +263,28 @@ async def _qwen_embedding_provider(
         base_url=settings.openrouter_base_url,
         timeout_seconds=settings.embedding_timeout_seconds,
         maximum_response_bytes=settings.embedding_max_response_bytes,
+        request_max_attempts=settings.embedding_request_max_attempts,
+        retry_base_seconds=settings.embedding_retry_base_seconds,
+        retry_cap_seconds=settings.embedding_retry_cap_seconds,
     )
 
 
-def _guard_v111_publication_channel(settings: WorkerSettings) -> None:
+def _guard_v112_publication_channel(settings: WorkerSettings) -> None:
     if settings.channel == "candidate-v1.0.11":
         return
     if settings.channel == "stable":
         if settings.stable_publication_approved:
             return
         raise ValueError(
-            "stable v1.0.11 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
+            "stable v1.0.12 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
         )
-    raise ValueError("v1.0.11 Worker publication channel must be candidate-v1.0.11 or stable")
+    raise ValueError("v1.0.12 Worker publication channel must be candidate-v1.0.11 or stable")
 
 
 async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
-    _guard_v111_publication_channel(settings)
+    _guard_v112_publication_channel(settings)
     startup_capacity = preflight_worker_start_capacity(
         settings.state_dir,
         minimum_free_bytes=settings.minimum_start_free_bytes,

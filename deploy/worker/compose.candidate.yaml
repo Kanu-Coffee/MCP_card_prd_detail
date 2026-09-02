@@ -1,4 +1,4 @@
-name: cardrag-v111-candidate
+name: cardrag-v112-candidate
 
 services:
   worker:
@@ -28,9 +28,12 @@ services:
       CARDRAG_EMBEDDING_PROVIDER_ID: ${CARDRAG_EMBEDDING_PROVIDER_ID:-deepinfra}
       CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES: ${CARDRAG_EMBEDDING_MAX_RESPONSE_BYTES:-33554432}
       CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES: ${CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES:-2097152}
+      CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS: "12"
+      CARDRAG_EMBEDDING_RETRY_BASE_SECONDS: "1"
+      CARDRAG_EMBEDDING_RETRY_CAP_SECONDS: "60"
 
 volumes:
   worker-state:
-    name: cardrag-worker-v111-candidate-state
+    name: cardrag-worker-v112-candidate-state
   codex-home:
-    name: cardrag-worker-v111-candidate-codex-home
+    name: cardrag-worker-v112-candidate-codex-home
