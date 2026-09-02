@@ -148,6 +148,62 @@ def test_v112_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "cardrag-mcp-v112-candidate-state" not in mcp_base
 
 
+def test_v112_offline_snapshot_copies_during_each_destination_first_mount() -> None:
+    migration = (ROOT / "docs/V1_0_11_MIGRATION.md").read_text(encoding="utf-8")
+    section = migration.split("### 3.1 stopped v111 state/auth의 v112 offline snapshot", 1)[1]
+    copy_phase = section.split("복사 뒤 verifier", 1)[0]
+    copy_helpers = [
+        block
+        for block in re.findall(r"```bash\n(.*?)```", copy_phase, flags=re.DOTALL)
+        if "docker run --rm --interactive" in block
+    ]
+
+    assert len(copy_helpers) == 2
+    state_helper = next(block for block in copy_helpers if "$source_state:/source:ro" in block)
+    codex_helper = next(block for block in copy_helpers if "$source_codex:/source:ro" in block)
+    assert "$destination_state:/var/lib/cardrag-worker" in state_helper
+    assert "$destination_codex:/var/lib/cardrag-codex-home" in codex_helper
+    for helper in copy_helpers:
+        for contract in (
+            "--pull never",
+            "--network none",
+            "--read-only",
+            "--cap-drop ALL",
+            "--security-opt no-new-privileges=true",
+            "--user 10001:10001",
+        ):
+            assert contract in helper
+
+    assert "v112-worker-state-root-initialized" not in copy_phase
+    assert "v112-codex-home-root-initialized" not in copy_phase
+    state_order = (
+        state_helper.index('raise SystemExit("state_destination_initialization_invalid")'),
+        state_helper.index("os.chmod(destination, 0o700, follow_symlinks=False)"),
+        state_helper.index("os.fsync(root_descriptor)"),
+        state_helper.index("sync_directory(source, destination)"),
+        state_helper.index('print("v112-worker-state-offline-snapshot-complete")'),
+    )
+    assert state_order == tuple(sorted(state_order))
+    assert "stat.S_IMODE(destination_root.st_mode) not in {0o700, 0o755}" in state_helper
+    assert "value.st_nlink == 1" in state_helper
+    assert 'raise SystemExit("state_cross_filesystem_entry")' in state_helper
+    assert 'raise SystemExit("state_destination_copy_empty")' in state_helper
+
+    codex_order = (
+        codex_helper.index('raise SystemExit("codex_destination_initialization_invalid")'),
+        codex_helper.index("os.chmod(destination_root, 0o700, follow_symlinks=False)"),
+        codex_helper.index("os.fsync(root_fd)"),
+        codex_helper.index("os.replace(temporary, destination)"),
+        codex_helper.index('print("v112-codex-auth-offline-snapshot-complete")'),
+    )
+    assert codex_order == tuple(sorted(codex_order))
+    assert "stat.S_IMODE(destination_root_stat.st_mode) not in {0o700, 0o755}" in codex_helper
+    assert '{item.name for item in destination_root.iterdir()} != {"home"}' in codex_helper
+    assert "or any(home.iterdir())" in codex_helper
+    assert 'getattr(os, "O_NOFOLLOW", 0)' in codex_helper
+    assert "source_stat.st_nlink != 1" in codex_helper
+
+
 def test_codex_auth_migration_procedure_is_fail_closed_and_redacted() -> None:
     migration = (ROOT / "docs/V1_0_10_MIGRATION.md").read_text(encoding="utf-8")
     section = migration.split("## 3. Codex OAuth/home 분리", 1)[1].split("## 4. v1.0.9 PDF/OCR seed", 1)[0]
