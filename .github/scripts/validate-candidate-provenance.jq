@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-  + "@candidate-v1.0.12-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.13-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -19,7 +19,7 @@ def exact_subject:
 
 def expected_build_args:
   {
-    "build-arg:APP_VERSION": "1.0.12",
+    "build-arg:APP_VERSION": "1.0.13",
     "build-arg:CODEX_SHA256":
       "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
     "build-arg:CODEX_VERSION": "0.151.0",

@@ -1,4 +1,4 @@
-name: cardrag-v112-candidate
+name: cardrag-v113-candidate
 
 services:
   worker:
@@ -34,6 +34,6 @@ services:
 
 volumes:
   worker-state:
-    name: cardrag-worker-v112-candidate-state
+    name: cardrag-worker-v113-candidate-state
   codex-home:
-    name: cardrag-worker-v112-candidate-codex-home
+    name: cardrag-worker-v113-candidate-codex-home

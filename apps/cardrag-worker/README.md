@@ -76,7 +76,7 @@ date, and source version back to the stable desktop discovery record before it
 downloads any bytes.
 
 Live discovery, OCR, embeddings, and WebDAV publishing require real issuer and
-provider credentials/endpoints. The v1.0.12 reliability-patch worker accepts
+provider credentials/endpoints. The v1.0.13 reliability-patch worker accepts
 `candidate-v1.0.11` by default; `stable` remains blocked unless the separately
 approved cutover explicitly sets `CARDRAG_STABLE_PUBLICATION_APPROVED=true`.
 No provided environment or Compose file enables that flag. Shared native or
@@ -124,7 +124,7 @@ Codex executable cannot read its own authentication store.
 
 Stable container deployments persist Codex data in the dedicated
 `cardrag-worker-v111-codex-home` volume at `/var/lib/cardrag-codex-home`; the
-v1.0.12 candidate overlay instead uses `cardrag-worker-v112-candidate-codex-home`.
+v1.0.13 candidate overlay instead uses `cardrag-worker-v113-candidate-codex-home`.
 `CARDRAG_CODEX_AUTH_ROOT` and `CODEX_HOME` equal that mount root, while `HOME`
 is its owned mode-0700 `home/` child. The Worker recovery volume remains mounted
 only at `/var/lib/cardrag-worker`; settings reject an auth root that is equal to,
@@ -139,10 +139,11 @@ typed error contains only a constant reason code; it never records the matched
 value, byte offset, pattern, or surrounding OCR text.
 
 `worker-state.sqlite3` and its revision metadata remain Worker-only recovery
-state; the MCP never reads them. Candidate runs use the shared canonical WebDAV
-root but a separate `candidate-v1.0.11` channel and v112 state volume, and never
-perform remote GC. Unit tests use local
-deterministic fakes.
+state; the MCP and external progress monitors never open the live database.
+Operational progress comes from the Worker's structured container/journal logs.
+Candidate runs use the shared canonical WebDAV root but a separate
+`candidate-v1.0.11` channel and v113 state volume, and never perform remote GC.
+Unit tests use local deterministic fakes.
 
 The v5 path has fail-closed local capacity gates; legacy v1-v4 behavior is
 unchanged. Before provider or WebDAV work, the Worker checks the filesystem
@@ -169,13 +170,17 @@ Startup walks path components with no-follow directory descriptors and scans
 an existing state tree for regular files only. It seals the deepest existing
 ancestor's device/inode and filesystem identity, then revalidates the created
 or existing state root immediately before WorkerState opens it. The database,
-WAL, SHM, and lock leaves are opened with `O_NOFOLLOW` and rechecked as regular
-files; SQLite-created WAL/SHM leaves are checked again immediately after WAL
-mode is enabled and after schema initialization. Compose runs one Worker under
-its dedicated UID and the Worker lock. A hostile process already running as
-that same UID that can continuously swap an ancestor or leaf during SQLite's
-unavoidable pathname-open window remains outside this local gate's threat
-boundary; detected replacements still fail closed.
+WAL, any crash-leftover SHM, and lock leaves are opened with `O_NOFOLLOW` and
+rechecked as regular files. Post-connect verification descriptors stay open
+until after the SQLite connection closes, so their close cannot discard
+process-wide POSIX record locks. A process-local path/inode registry rejects a
+second `WorkerState` before it can open an active database. The Worker uses the `unix-excl` VFS: WAL
+remains durable while no file-backed SHM is created or mapped, and a second
+process opening the live database fails with `database is locked`. Compose runs one Worker
+under its dedicated UID and the Worker lock. A hostile process already running
+as that same UID that can continuously swap an ancestor or leaf during
+SQLite's unavoidable pathname-open window remains outside this local gate's
+threat boundary; detected replacements still fail closed.
 
 V5 cache hit/miss metrics count derived sidecar rows. Equal exact embedding
 inputs share one cache key, so the provider is called once per unique miss and
@@ -210,7 +215,7 @@ body limit when absent. Configure them with
 `CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES`; invalid or oversized values
 fail closed without including provider bodies or credentials in errors.
 
-The supported v1.0.11 data-publication path uses the v1.0.12 Worker
+The supported v1.0.11 data-publication path uses the v1.0.13 Worker
 CLI/container. The v5
 bundle publisher also denies a stable pointer move unless the caller carries
 the explicit stable-publication capability; calling the primitive directly is

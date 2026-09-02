@@ -1227,20 +1227,20 @@ def test_v111_publication_channel_requires_explicit_stable_approval(
 ) -> None:
     monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
-    cli_module._guard_v112_publication_channel(WorkerSettings.from_env())
+    cli_module._guard_v113_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
     with pytest.raises(ValueError, match="explicit.*APPROVED=true"):
-        cli_module._guard_v112_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v113_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "true")
     approved = WorkerSettings.from_env()
     assert approved.stable_publication_approved is True
-    cli_module._guard_v112_publication_channel(approved)
+    cli_module._guard_v113_publication_channel(approved)
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "development")
     with pytest.raises(ValueError, match="candidate-v1.0.11 or stable"):
-        cli_module._guard_v112_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v113_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "yes")
     with pytest.raises(ValueError, match="CARDRAG_STABLE_PUBLICATION_APPROVED"):

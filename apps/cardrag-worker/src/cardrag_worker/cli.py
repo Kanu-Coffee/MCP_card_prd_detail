@@ -269,22 +269,22 @@ async def _qwen_embedding_provider(
     )
 
 
-def _guard_v112_publication_channel(settings: WorkerSettings) -> None:
+def _guard_v113_publication_channel(settings: WorkerSettings) -> None:
     if settings.channel == "candidate-v1.0.11":
         return
     if settings.channel == "stable":
         if settings.stable_publication_approved:
             return
         raise ValueError(
-            "stable v1.0.12 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
+            "stable v1.0.13 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
         )
-    raise ValueError("v1.0.12 Worker publication channel must be candidate-v1.0.11 or stable")
+    raise ValueError("v1.0.13 Worker publication channel must be candidate-v1.0.11 or stable")
 
 
 async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
-    _guard_v112_publication_channel(settings)
+    _guard_v113_publication_channel(settings)
     startup_capacity = preflight_worker_start_capacity(
         settings.state_dir,
         minimum_free_bytes=settings.minimum_start_free_bytes,

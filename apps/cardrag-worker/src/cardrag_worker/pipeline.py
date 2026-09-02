@@ -1753,7 +1753,7 @@ class WorkerPipeline:
         if v5_profile is None and ocr_cache_mode != "read-write":
             raise ValueError("legacy v4 Worker requires its original read-write OCR cache contract")
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
-            raise ValueError("stable v1.0.12 publication requires explicit approval")
+            raise ValueError("stable v1.0.13 publication requires explicit approval")
         if v5_profile is not None and webdav.channel == "candidate-v1.0.11" and ocr_cache_mode != "read-only":
             raise ValueError("v1.0.11 candidate requires read-only remote OCR cache access")
         if v5_profile is not None and ocr_cache_mode == "read-write" and not ocr_cache_publication_approved:

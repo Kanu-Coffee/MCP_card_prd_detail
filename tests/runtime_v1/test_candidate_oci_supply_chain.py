@@ -69,13 +69,13 @@ def _material(uri: str, algorithm: str, digest: str) -> dict[str, Any]:
 def _subject_name(role: str) -> str:
     return (
         "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-        f"@candidate-v1.0.12-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
+        f"@candidate-v1.0.13-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
     )
 
 
 def _build_args() -> dict[str, str]:
     return {
-        "build-arg:APP_VERSION": "1.0.12",
+        "build-arg:APP_VERSION": "1.0.13",
         "build-arg:CODEX_SHA256": ("605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"),
         "build-arg:CODEX_VERSION": "0.151.0",
         "build-arg:PYTHON_DEV_IMAGE": (
@@ -233,13 +233,13 @@ def _cardrag_spdx_package(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "SPDXID": f"SPDXRef-Package-python-{name}",
-        "versionInfo": "1.0.12",
+        "versionInfo": "1.0.13",
         "licenseDeclared": "Apache-2.0",
         "externalRefs": [
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": f"pkg:pypi/{name}@1.0.12",
+                "referenceLocator": f"pkg:pypi/{name}@1.0.13",
             }
         ],
     }
@@ -594,7 +594,7 @@ def test_sbom_policy_matches_buildkit_032_shape_and_rejects_unbound_inventory() 
 
 
 def test_documented_public_source_candidate_producer_matches_the_provenance_policy() -> None:
-    document = (ROOT / "docs/V1_0_11_MIGRATION.md").read_text(encoding="utf-8")
+    document = (ROOT / "docs/V1_0_13_MIGRATION.md").read_text(encoding="utf-8")
     producer = document.split("```bash", maxsplit=1)[1].split("```", maxsplit=1)[0]
 
     assert (
@@ -610,7 +610,7 @@ def test_documented_public_source_candidate_producer_matches_the_provenance_poli
     assert "두 Git auth ID의 optional 내장 선언" in document
     assert "이 선언 자체는 token 값의 미전달을 증명하지 않으므로" in document
     for build_arg in (
-        "APP_VERSION=1.0.12",
+        "APP_VERSION=1.0.13",
         '"VCS_REF=$CANDIDATE_SOURCE_COMMIT"',
         "PYTHON_DEV_IMAGE=cgr.dev/chainguard/python:latest-dev@sha256:",
         "PYTHON_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest@sha256:",
@@ -628,6 +628,19 @@ def test_documented_public_source_candidate_producer_matches_the_provenance_poli
     assert '"$source_context"' in document
     assert "docker buildx build \\" in document
     assert "docker buildx build ." not in document
+    for sealing_contract in (
+        '--metadata-file "$role_metadata"',
+        '."containerimage.digest"',
+        '."containerimage.config.digest"',
+        "validate-candidate-oci-index.jq",
+        "validate-candidate-platform-manifest.jq",
+        "validate-candidate-attestation-manifest.jq",
+        "validate-candidate-provenance.jq",
+        "validate-candidate-sbom.jq",
+        'test "sha256:$(sha256sum "$layer_path"',
+        'docker pull --platform linux/amd64 "$exact_image"',
+    ):
+        assert sealing_contract in document
     assert "외부 trust boundary" in document
     assert "raw SLSA statement" in document
     assert "기술적 release blocker" in document

@@ -157,7 +157,7 @@ jobs:
               -f deploy/worker/compose.candidate.yaml \
               -f deploy/worker/compose.aggregation-profile.yaml \
               config --format json | \
-            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["worker"]; e=s["environment"]; assert d["name"]=="cardrag-v112-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.11"; assert e["CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE"]=="/run/secrets/document_aggregation_profile"; assert e["CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256"]=="a"*64; assert s["secrets"]==[{"source":"document_aggregation_profile","target":"document_aggregation_profile"}]; assert d["secrets"]["document_aggregation_profile"]["file"]=="/etc/hostname"'
+            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["worker"]; e=s["environment"]; assert d["name"]=="cardrag-v113-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.11"; assert e["CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE"]=="/run/secrets/document_aggregation_profile"; assert e["CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256"]=="a"*64; assert s["secrets"]==[{"source":"document_aggregation_profile","target":"document_aggregation_profile"}]; assert d["secrets"]["document_aggregation_profile"]["file"]=="/etc/hostname"'
           CARDRAG_WEBDAV_USERNAME=fixture-user \
           CARDRAG_WEBDAV_PASSWORD=fixture-password \
           CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
@@ -170,7 +170,7 @@ jobs:
           CARDRAG_WEBDAV_PASSWORD=fixture-password \
           CARDRAG_MCP_BEARER_TOKEN=fixture-bearer-token-with-sufficient-length \
           CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
-          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://cardrag-v112.example \
+          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://cardrag-v113.example \
             docker compose \
               -f deploy/mcp/compose.yaml \
               -f deploy/mcp/compose.candidate.yaml \
@@ -186,17 +186,17 @@ jobs:
               -f deploy/worker/compose.candidate.yaml \
               -f deploy/worker/compose.cache-seed.yaml \
               config --format json | \
-            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["worker"]; e=s["environment"]; v=d["volumes"]; assert d["name"]=="cardrag-v112-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.11"; assert e["CARDRAG_WEBDAV_BASE_URL"]=="https://webdav.example/cardrag"; assert e["CARDRAG_COLLECT_REMOTE_GARBAGE"]=="false"; assert e["CARDRAG_EMBEDDING_MODEL"]=="qwen/qwen3-embedding-8b"; assert e["CARDRAG_EMBEDDING_DIMENSION"]=="4096"; assert e["CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS"]=="12"; assert e["CARDRAG_EMBEDDING_RETRY_BASE_SECONDS"]=="1"; assert e["CARDRAG_EMBEDDING_RETRY_CAP_SECONDS"]=="60"; assert v["worker-state"]["name"]=="cardrag-worker-v112-candidate-state"; assert v["codex-home"]["name"]=="cardrag-worker-v112-candidate-codex-home"; assert v["v109-worker-state"]=={"name":"cardrag-worker-v109-state","external":True}; m={x["target"]:x for x in s["volumes"]}; assert m["/mnt/cardrag-v109-state"]["read_only"] is True'
+            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["worker"]; e=s["environment"]; v=d["volumes"]; assert d["name"]=="cardrag-v113-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.11"; assert e["CARDRAG_WEBDAV_BASE_URL"]=="https://webdav.example/cardrag"; assert e["CARDRAG_COLLECT_REMOTE_GARBAGE"]=="false"; assert e["CARDRAG_EMBEDDING_MODEL"]=="qwen/qwen3-embedding-8b"; assert e["CARDRAG_EMBEDDING_DIMENSION"]=="4096"; assert e["CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS"]=="12"; assert e["CARDRAG_EMBEDDING_RETRY_BASE_SECONDS"]=="1"; assert e["CARDRAG_EMBEDDING_RETRY_CAP_SECONDS"]=="60"; assert v["worker-state"]["name"]=="cardrag-worker-v113-candidate-state"; assert v["codex-home"]["name"]=="cardrag-worker-v113-candidate-codex-home"; assert v["v109-worker-state"]=={"name":"cardrag-worker-v109-state","external":True}; m={x["target"]:x for x in s["volumes"]}; assert m["/mnt/cardrag-v109-state"]["read_only"] is True'
           CARDRAG_WEBDAV_USERNAME=fixture-user \
           CARDRAG_WEBDAV_PASSWORD=fixture-password \
           CARDRAG_MCP_BEARER_TOKEN=fixture-bearer-token-with-sufficient-length \
           CARDRAG_OPENROUTER_API_KEY=fixture-openrouter-key \
-          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://cardrag-v112.example \
+          CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=https://cardrag-v113.example \
             docker compose \
               -f deploy/mcp/compose.yaml \
               -f deploy/mcp/compose.candidate.yaml \
               config --format json | \
-            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["mcp"]; e=s["environment"]; p=s["ports"]; assert d["name"]=="cardrag-v112-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.11"; assert e["CARDRAG_WEBDAV_BASE_URL"]=="https://webdav.example/cardrag"; assert e["CARDRAG_MCP_PUBLIC_BASE_URL"]=="https://cardrag-v112.example"; assert d["volumes"]["mcp-state"]["name"]=="cardrag-mcp-v112-candidate-state"; assert p==[{"mode":"ingress","host_ip":"127.0.0.1","target":8000,"published":"18012","protocol":"tcp"}]'
+            uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d["services"]["mcp"]; e=s["environment"]; p=s["ports"]; assert d["name"]=="cardrag-v113-candidate"; assert e["CARDRAG_CHANNEL"]=="candidate-v1.0.11"; assert e["CARDRAG_WEBDAV_BASE_URL"]=="https://webdav.example/cardrag"; assert e["CARDRAG_MCP_PUBLIC_BASE_URL"]=="https://cardrag-v113.example"; assert d["volumes"]["mcp-state"]["name"]=="cardrag-mcp-v113-candidate-state"; assert p==[{"mode":"ingress","host_ip":"127.0.0.1","target":8000,"published":"18013","protocol":"tcp"}]'
           docker compose \
             -f deploy/worker/compose.yaml \
             -f deploy/worker/compose.secrets.yaml \

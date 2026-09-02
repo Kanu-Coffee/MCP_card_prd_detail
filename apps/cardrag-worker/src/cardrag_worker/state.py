@@ -12,9 +12,11 @@ import re
 import sqlite3
 import stat
 import struct
+import sys
+import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +30,9 @@ _SOURCE_ID = re.compile(r"^source_[0-9a-f]{64}$")
 _INTERRUPTED_ERROR = "worker process ended before the run reached a terminal state"
 WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES = 1000
 WORKER_STATE_SQLITE_PAGE_BYTES = 4096
+WORKER_STATE_USE_UNIX_EXCL = sys.platform == "linux"
+_ACTIVE_WORKER_STATE_REGISTRY_LOCK = threading.Lock()
+_ACTIVE_WORKER_STATE_KEYS: set[tuple[object, ...]] = set()
 
 
 class AlreadyRunning(RuntimeError):
@@ -38,6 +43,48 @@ class WorkerStateWALCapacityError(RuntimeError):
     """The embedding-cache WAL cannot be kept inside its predicted hard bound."""
 
 
+def _worker_state_registry_keys(path: Path) -> set[tuple[object, ...]]:
+    absolute = os.path.normcase(os.path.abspath(os.fspath(path)))
+    keys: set[tuple[object, ...]] = {("path", absolute)}
+    try:
+        observed = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return keys
+    except OSError as exc:
+        raise RuntimeError("Worker state file path identity is unavailable") from exc
+    keys.add(("inode", observed.st_dev, observed.st_ino))
+    return keys
+
+
+def _reserve_worker_state(path: Path) -> set[tuple[object, ...]]:
+    keys = _worker_state_registry_keys(path)
+    with _ACTIVE_WORKER_STATE_REGISTRY_LOCK:
+        if not _ACTIVE_WORKER_STATE_KEYS.isdisjoint(keys):
+            raise RuntimeError("Worker state database is already open in this process")
+        _ACTIVE_WORKER_STATE_KEYS.update(keys)
+    return keys
+
+
+def _record_worker_state_identity(
+    keys: set[tuple[object, ...]],
+    observed: os.stat_result,
+) -> None:
+    identity = ("inode", observed.st_dev, observed.st_ino)
+    with _ACTIVE_WORKER_STATE_REGISTRY_LOCK:
+        if identity in _ACTIVE_WORKER_STATE_KEYS and identity not in keys:
+            # Do not close the just-opened descriptor on this impossible-under-
+            # contract race: close(2) could invalidate the incumbent SQLite
+            # connection's POSIX locks. Process exit will reclaim the descriptor.
+            raise RuntimeError("Worker state database is already open in this process")
+        keys.add(identity)
+        _ACTIVE_WORKER_STATE_KEYS.add(identity)
+
+
+def _release_worker_state(keys: set[tuple[object, ...]]) -> None:
+    with _ACTIVE_WORKER_STATE_REGISTRY_LOCK:
+        _ACTIVE_WORKER_STATE_KEYS.difference_update(keys)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -46,7 +93,12 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
 
 
-def _open_nofollow_regular(path: Path, *, create: bool) -> tuple[int, os.stat_result]:
+def _open_nofollow_regular(
+    path: Path,
+    *,
+    create: bool,
+    retain_descriptor_in: list[int] | None = None,
+) -> tuple[int, os.stat_result]:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise RuntimeError("Worker state requires no-follow file descriptors")
@@ -62,6 +114,12 @@ def _open_nofollow_regular(path: Path, *, create: bool) -> tuple[int, os.stat_re
         raise
     except OSError as exc:
         raise RuntimeError("Worker state file is unavailable or not a regular file") from exc
+    if retain_descriptor_in is not None:
+        # A close(2) of any descriptor for an inode releases every traditional
+        # POSIX record lock this process owns for that inode.  Callers that run
+        # after sqlite3.connect() therefore retain even failed verification
+        # opens until the SQLite connection itself has closed.
+        retain_descriptor_in.append(descriptor)
     try:
         observed = os.fstat(descriptor)
         try:
@@ -76,17 +134,22 @@ def _open_nofollow_regular(path: Path, *, create: bool) -> tuple[int, os.stat_re
             raise RuntimeError("Worker state file is not a regular file")
         return descriptor, observed
     except BaseException:
-        os.close(descriptor)
+        if retain_descriptor_in is None:
+            os.close(descriptor)
         raise
 
 
 def _require_nofollow_regular_identity(
     path: Path,
+    retained_descriptors: list[int],
     *,
     expected: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
-    descriptor, observed = _open_nofollow_regular(path, create=False)
-    os.close(descriptor)
+    _descriptor, observed = _open_nofollow_regular(
+        path,
+        create=False,
+        retain_descriptor_in=retained_descriptors,
+    )
     identity = (observed.st_dev, observed.st_ino)
     if expected is not None and identity != expected:
         raise RuntimeError("Worker state file identity changed while opening SQLite")
@@ -94,14 +157,19 @@ def _require_nofollow_regular_identity(
 
 
 def _revalidate_sqlite_sidecars(
-    paths: tuple[Path, Path],
+    paths: Sequence[Path],
     identities: dict[Path, tuple[int, int] | None],
+    retained_descriptors: list[int],
     *,
     require_present: bool,
 ) -> None:
     for path in paths:
         try:
-            identity = _require_nofollow_regular_identity(path, expected=identities[path])
+            identity = _require_nofollow_regular_identity(
+                path,
+                retained_descriptors,
+                expected=identities[path],
+            )
         except FileNotFoundError:
             if require_present:
                 raise RuntimeError("Worker state WAL/SHM file was not created as a regular file") from None
@@ -470,81 +538,119 @@ class WorkerState:
         self._ocr_native_run_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._ocr_run_local_manifest_indexes: dict[tuple[str, str], dict[str, tuple[Path, ...]]] = {}
         self._ocr_run_local_manifest_index_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        descriptor, sealed_database = _open_nofollow_regular(path, create=True)
-        os.close(descriptor)
-        sidecar_paths = (
-            path.with_name(f"{path.name}-wal"),
-            path.with_name(f"{path.name}-shm"),
+        self._sqlite_registry_keys = _reserve_worker_state(path)
+        try:
+            descriptor, sealed_database = _open_nofollow_regular(path, create=True)
+            _record_worker_state_identity(self._sqlite_registry_keys, sealed_database)
+            os.close(descriptor)
+            sidecar_paths = (
+                path.with_name(f"{path.name}-wal"),
+                path.with_name(f"{path.name}-shm"),
+            )
+            wal_path, shm_path = sidecar_paths
+            sidecar_identities: dict[Path, tuple[int, int] | None] = {}
+            for sidecar in sidecar_paths:
+                try:
+                    sidecar_descriptor, sidecar_stat = _open_nofollow_regular(sidecar, create=False)
+                except FileNotFoundError:
+                    sidecar_identities[sidecar] = None
+                else:
+                    os.close(sidecar_descriptor)
+                    sidecar_identities[sidecar] = (sidecar_stat.st_dev, sidecar_stat.st_ino)
+        except BaseException:
+            registry_keys = self._sqlite_registry_keys
+            self._sqlite_registry_keys = set()
+            _release_worker_state(registry_keys)
+            raise
+        self._sqlite_verification_descriptors: list[int] = []
+        use_unix_excl = WORKER_STATE_USE_UNIX_EXCL
+        connection_target = (
+            f"{path.absolute().as_uri()}?mode=rw&vfs=unix-excl" if use_unix_excl else os.fspath(path)
         )
-        sidecar_identities: dict[Path, tuple[int, int] | None] = {}
-        for sidecar in sidecar_paths:
+        try:
+            self.connection = sqlite3.connect(
+                connection_target,
+                timeout=30,
+                isolation_level=None,
+                uri=use_unix_excl,
+            )
+        except BaseException:
+            registry_keys = self._sqlite_registry_keys
+            self._sqlite_registry_keys = set()
+            _release_worker_state(registry_keys)
+            raise
+        try:
             try:
-                sidecar_descriptor, sidecar_stat = _open_nofollow_regular(sidecar, create=False)
-            except FileNotFoundError:
-                sidecar_identities[sidecar] = None
-            else:
-                os.close(sidecar_descriptor)
-                sidecar_identities[sidecar] = (sidecar_stat.st_dev, sidecar_stat.st_ino)
-        self.connection = sqlite3.connect(path, timeout=30, isolation_level=None)
-        try:
-            _require_nofollow_regular_identity(
-                path,
-                expected=(sealed_database.st_dev, sealed_database.st_ino),
-            )
-        except (OSError, RuntimeError):
-            self.connection.close()
-            raise RuntimeError("Worker state database identity is unavailable") from None
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute(f"PRAGMA page_size={WORKER_STATE_SQLITE_PAGE_BYTES}")
-        page_size = self.connection.execute("PRAGMA page_size").fetchone()
-        if page_size is None or int(page_size[0]) != WORKER_STATE_SQLITE_PAGE_BYTES:
-            self.connection.close()
-            raise RuntimeError("Worker state SQLite page size is not the sealed 4096-byte contract")
-        journal_mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()
-        if journal_mode is None or str(journal_mode[0]).casefold() != "wal":
-            self.connection.close()
-            raise RuntimeError("Worker state SQLite journal mode could not be sealed as WAL")
-        try:
-            _revalidate_sqlite_sidecars(
-                sidecar_paths,
-                sidecar_identities,
-                require_present=False,
-            )
-        except (OSError, RuntimeError):
-            self.connection.close()
-            raise RuntimeError("Worker state WAL/SHM identity changed while enabling WAL") from None
-        wal_checkpoint = self.connection.execute(
-            f"PRAGMA wal_autocheckpoint={WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES}"
-        ).fetchone()
-        if wal_checkpoint is None or int(wal_checkpoint[0]) != WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES:
-            self.connection.close()
-            raise RuntimeError("Worker state WAL checkpoint policy could not be sealed")
-        self.connection.execute("PRAGMA synchronous=FULL")
-        self.connection.execute("PRAGMA busy_timeout=30000")
-        # Keep foreign-key rewriting disabled while upgrading the v1.0.8 run
-        # CHECK constraint.  ``legacy_alter_table`` preserves every existing
-        # child table's reference to ``run`` during the table replacement.
-        self.connection.execute("PRAGMA foreign_keys=OFF")
-        self.connection.executescript(SCHEMA)
-        self._migrate_run_status_constraint()
-        self.connection.execute("PRAGMA foreign_keys=ON")
-        violation = self.connection.execute("PRAGMA foreign_key_check").fetchone()
-        if violation is not None:
-            self.connection.close()
-            raise RuntimeError("worker state failed its foreign-key integrity check")
-        try:
-            _require_nofollow_regular_identity(
-                path,
-                expected=(sealed_database.st_dev, sealed_database.st_ino),
-            )
-            _revalidate_sqlite_sidecars(
-                sidecar_paths,
-                sidecar_identities,
-                require_present=True,
-            )
-        except (OSError, RuntimeError):
-            self.connection.close()
-            raise RuntimeError("Worker state SQLite files changed during initialization") from None
+                _require_nofollow_regular_identity(
+                    path,
+                    self._sqlite_verification_descriptors,
+                    expected=(sealed_database.st_dev, sealed_database.st_ino),
+                )
+            except (OSError, RuntimeError):
+                raise RuntimeError("Worker state database identity is unavailable") from None
+            self.connection.row_factory = sqlite3.Row
+            self.connection.execute(f"PRAGMA page_size={WORKER_STATE_SQLITE_PAGE_BYTES}")
+            page_size = self.connection.execute("PRAGMA page_size").fetchone()
+            if page_size is None or int(page_size[0]) != WORKER_STATE_SQLITE_PAGE_BYTES:
+                raise RuntimeError("Worker state SQLite page size is not the sealed 4096-byte contract")
+            journal_mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()
+            if journal_mode is None or str(journal_mode[0]).casefold() != "wal":
+                raise RuntimeError("Worker state SQLite journal mode could not be sealed as WAL")
+            try:
+                _revalidate_sqlite_sidecars(
+                    sidecar_paths,
+                    sidecar_identities,
+                    self._sqlite_verification_descriptors,
+                    require_present=False,
+                )
+            except (OSError, RuntimeError):
+                raise RuntimeError("Worker state WAL/SHM identity changed while enabling WAL") from None
+            wal_checkpoint = self.connection.execute(
+                f"PRAGMA wal_autocheckpoint={WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES}"
+            ).fetchone()
+            if wal_checkpoint is None or int(wal_checkpoint[0]) != WORKER_STATE_WAL_AUTOCHECKPOINT_PAGES:
+                raise RuntimeError("Worker state WAL checkpoint policy could not be sealed")
+            self.connection.execute("PRAGMA synchronous=FULL")
+            self.connection.execute("PRAGMA busy_timeout=30000")
+            # Keep foreign-key rewriting disabled while upgrading the v1.0.8 run
+            # CHECK constraint.  ``legacy_alter_table`` preserves every existing
+            # child table's reference to ``run`` during the table replacement.
+            self.connection.execute("PRAGMA foreign_keys=OFF")
+            self.connection.executescript(SCHEMA)
+            self._migrate_run_status_constraint()
+            self.connection.execute("PRAGMA foreign_keys=ON")
+            violation = self.connection.execute("PRAGMA foreign_key_check").fetchone()
+            if violation is not None:
+                raise RuntimeError("worker state failed its foreign-key integrity check")
+            try:
+                _require_nofollow_regular_identity(
+                    path,
+                    self._sqlite_verification_descriptors,
+                    expected=(sealed_database.st_dev, sealed_database.st_ino),
+                )
+                _revalidate_sqlite_sidecars(
+                    (wal_path,),
+                    sidecar_identities,
+                    self._sqlite_verification_descriptors,
+                    require_present=True,
+                )
+                _revalidate_sqlite_sidecars(
+                    (shm_path,),
+                    sidecar_identities,
+                    self._sqlite_verification_descriptors,
+                    # unix-excl keeps the WAL index in heap memory.  It must
+                    # tolerate an identity-checked stale regular SHM left by
+                    # the stock unix VFS, but never requires a new SHM file.
+                    require_present=(not use_unix_excl or sidecar_identities[shm_path] is not None),
+                )
+            except (OSError, RuntimeError):
+                raise RuntimeError("Worker state SQLite files changed during initialization") from None
+        except BaseException:
+            with suppress(BaseException):
+                self.close()
+            # Preserve the initialization failure.  close() only releases
+            # verification descriptors after SQLite has closed safely.
+            raise
 
     def _migrate_run_status_constraint(self) -> None:
         row = self.connection.execute(
@@ -576,6 +682,20 @@ class WorkerState:
 
     def close(self) -> None:
         self.connection.close()
+        descriptors = self._sqlite_verification_descriptors
+        self._sqlite_verification_descriptors = []
+        first_error: OSError | None = None
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if first_error is None:
+                    first_error = exc
+        registry_keys = self._sqlite_registry_keys
+        self._sqlite_registry_keys = set()
+        _release_worker_state(registry_keys)
+        if first_error is not None:
+            raise first_error
 
     def __enter__(self) -> WorkerState:
         return self

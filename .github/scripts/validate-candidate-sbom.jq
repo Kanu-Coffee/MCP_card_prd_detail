@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-  + "@candidate-v1.0.12-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.13-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -24,14 +24,14 @@ def unique_spdx_ids:
 def exact_cardrag_package($name):
   [.predicate.packages[] | select(.name == $name)] as $matches
   | ($matches | length == 1)
-  and $matches[0].versionInfo == "1.0.12"
+  and $matches[0].versionInfo == "1.0.13"
   and $matches[0].licenseDeclared == "Apache-2.0"
   and ([
     $matches[0].externalRefs[]?
     | select(
         .referenceCategory == "PACKAGE-MANAGER"
         and .referenceType == "purl"
-        and .referenceLocator == "pkg:pypi/\($name)@1.0.12"
+        and .referenceLocator == "pkg:pypi/\($name)@1.0.13"
       )
   ] | length == 1);
 
