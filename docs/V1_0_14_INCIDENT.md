@@ -122,6 +122,26 @@ patch이며 다음을 적용합니다.
   metadata drift로 추론한 contract mismatch가 있더라도 OCR/embedding으로 재진입하지
   않습니다.
 
+## 첫 MCP activation health-gate 실패
+
+Same-run publication과 WebDAV five-object gate가 통과한 뒤 source
+`dc41f7d79a8bc446e59dc45cebf883043f5b6634`의 첫 v1.0.14 MCP를 기동했습니다. MCP는
+DB/vector download를 완료했지만 `ServingDatabaseV5Error`로 generation을 활성화하지
+못했고 readiness는 계속 `503`이었습니다. 원인은 초기 v5 Worker가 unsupported-document
+배열을 relational `(issuer, product_code)` 순서로 hash한 반면 MCP validator는 canonical
+payload 순서의 hash만 허용한 cross-role 호환성 결함입니다. 둘 이상의 unsupported
+document에서 두 순서가 달라지면 봉인된 DB가 손상되지 않았어도 검증이 실패합니다.
+
+첫 실패의 exact MCP index
+`sha256:a78512283a5d7fab3809a9a7229832ee240fed514fbdf3d55dc0660e7521747d`,
+`cardrag-v114-candidate-mcp-1` container와
+`cardrag-mcp-v114-candidate-state` volume은 후속 hotfix 검증과 분리해 사고 증거로
+보존합니다. Container는 OOM 없이 operator stop 뒤 `exited 143`이며 volume은 삭제하거나
+재사용하지 않습니다. Hotfix는 기존 early-v5 hash와 canonical hash라는 두 개의 정확한
+encoding만 허용하고, 새 Worker export는 canonical 순서로 고정합니다. 재배치는 새 exact
+image, 별도 Compose project와 빈 MCP state volume으로만 수행하며 상세 절차는
+[v1.0.14 migration](V1_0_14_MIGRATION.md)의 MCP 격리 재시도 절에 있습니다.
+
 ## 복구 및 release 경계
 
 원본 v1.0.13 container와 `cardrag-worker-v113-candidate-state`/

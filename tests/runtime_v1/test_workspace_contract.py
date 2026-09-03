@@ -99,7 +99,7 @@ def test_v114_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert 'CARDRAG_OCR_CACHE_MODE: "read-only"' in worker
     assert "cardrag-worker-v114-candidate-state" in worker
     assert "cardrag-worker-v114-candidate-codex-home" in worker
-    assert "cardrag-mcp-v114-candidate-state" in mcp
+    assert "${CARDRAG_CANDIDATE_MCP_STATE_VOLUME:-cardrag-mcp-v114-candidate-state}" in mcp
     assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18014" in mcp
     assert "target: /mnt/cardrag-v109-state" in cache_seed
     assert "read_only: true" in cache_seed
@@ -146,6 +146,268 @@ def test_v114_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "cardrag-worker-v114-candidate-state" not in worker_base
     assert "cardrag-worker-v114-candidate-codex-home" not in worker_base
     assert "cardrag-mcp-v114-candidate-state" not in mcp_base
+
+
+def test_v114_exact_security_gate_precedes_candidate_runtime_and_volumes() -> None:
+    migration = (ROOT / "docs/V1_0_14_MIGRATION.md").read_text(encoding="utf-8")
+    heading = "### 1.1 Exact image 및 attestation security gate"
+    security_start = migration.index(heading)
+    security_end = migration.index("## 2. 격리와 보존 경계", security_start)
+    security = migration[security_start:security_end]
+    security_command = security.split("```bash\n", 1)[1].split("```", 1)[0]
+
+    assert 'test "$("$trivy_bin" --version --format json | jq -er \'.Version\')" = "0.74.0"' in security
+    assert 'test "$gitleaks_version" = "8.30.1"' in security
+    assert '"$CANDIDATE_SOURCE_COMMIT:.gitleaks.toml"' in security
+    assert 'sha256sum "$gitleaks_config"' in security
+    assert security.count("for role in worker mcp; do") == 2
+    assert 'exact_image="$candidate_repository@$image_digest"' in security
+    for role in ("worker", "mcp"):
+        assert f"trivy-image-{role}.json" in security
+
+    assert '"$trivy_bin" image --quiet \\' in security
+    for argument in (
+        "--platform linux/amd64",
+        "--scanners vuln,secret",
+        "--severity HIGH,CRITICAL",
+        "--exit-code 1",
+        '--format json \\\n    --output "$image_report"',
+        '"$exact_image"',
+    ):
+        assert argument in security
+    assert "--ignore-unfixed" not in security_command
+    assert "ignore_unfixed: false" in security
+
+    assert 'attestation_evidence_root="$security_receipt_root/attestation-evidence"' in security
+    assert "worker-provenance.json worker-sbom.json mcp-provenance.json mcp-sbom.json" in security
+    assert security.count('"$trivy_bin" fs --quiet') == 1
+    assert "--scanners secret" in security
+    assert '--output "$trivy_evidence_report" \\\n  "$attestation_evidence_root"' in security
+    assert security.count('--source "$attestation_evidence_root"') == 1
+    assert "--no-git" in security
+    assert '--config "$gitleaks_config"' in security
+    assert "--redact=100" in security
+    assert "--log-level error" in security
+    assert "--report-format json" in security
+    assert '--report-path "$gitleaks_evidence_report"' in security
+    assert "printf '%s\\n' \"$trivy_evidence_report\"" not in security
+    assert "printf '%s\\n' \"$gitleaks_evidence_report\"" not in security
+
+    for receipt_contract in (
+        'trivy_version_json="$security_receipt_root/trivy-version.json"',
+        'metadata.get("Version") != "0.74.0"',
+        'timestamp("UpdatedAt")',
+        'timestamp("DownloadedAt")',
+        "timedelta(hours=36)",
+        "timedelta(hours=2)",
+        "worker_report_sha256",
+        "mcp_report_sha256",
+        "trivy_evidence_sha256",
+        "gitleaks_evidence_sha256",
+        "trivy_version_sha256",
+        'schema_version: "cardrag.v114-exact-security-gate.v1"',
+    ):
+        assert receipt_contract in security
+
+    gate_complete = security_start + security.index("printf 'security gate receipt: %s\\n'")
+    for runtime_or_volume_command in (
+        "docker volume create",
+        "worker resume-publication",
+        "up --detach --no-build",
+    ):
+        assert gate_complete < migration.index(runtime_or_volume_command, security_end)
+
+
+def test_v114_candidate_mcp_retry_can_isolate_project_and_state_volume() -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise AssertionError("docker compose is required to verify the release candidate config")
+    environment = os.environ.copy()
+    for name in ("COMPOSE_PROJECT_NAME", "CARDRAG_CANDIDATE_MCP_STATE_VOLUME"):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "CARDRAG_WEBDAV_BASE_URL": "https://shared.invalid/cardrag",
+            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18014",
+            "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST": "sha256:" + "b" * 64,
+            "CARDRAG_MCP_STATE_VOLUME": "attacker-stable-state",
+        }
+    )
+
+    def render(render_environment: dict[str, str]) -> dict[str, object]:
+        result = subprocess.run(  # noqa: S603 - executable and inputs are test-controlled
+            [
+                docker,
+                "compose",
+                "-f",
+                "deploy/mcp/compose.yaml",
+                "-f",
+                "deploy/mcp/compose.candidate.yaml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=render_environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    default_config = render(environment)
+    assert default_config["name"] == "cardrag-v114-candidate"
+    assert default_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v114-candidate-state")
+
+    retry_environment = environment | {
+        "COMPOSE_PROJECT_NAME": "cardrag-v114-candidate-hashcompat",
+        "CARDRAG_CANDIDATE_MCP_STATE_VOLUME": ("cardrag-mcp-v114-candidate-hashcompat-state"),
+    }
+    retry_config = render(retry_environment)
+    assert retry_config["name"] == "cardrag-v114-candidate-hashcompat"
+    assert retry_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v114-candidate-hashcompat-state")
+    assert retry_config["services"]["mcp"]["volumes"] == [
+        {
+            "type": "volume",
+            "source": "mcp-state",
+            "target": "/var/lib/cardrag-mcp",
+            "volume": {},
+        }
+    ]
+
+
+def test_v114_mcp_activation_waits_for_large_sync_and_checks_active_generation() -> None:
+    migration = (ROOT / "docs/V1_0_14_MIGRATION.md").read_text(encoding="utf-8")
+    base = migration.split("### 4.2 MCP start와 runtime identity", 1)[1].split(
+        "### 4.3 MCP health-gate 실패 뒤 hotfix 격리 재시도",
+        1,
+    )[0]
+    retry = migration.split("### 4.3 MCP health-gate 실패 뒤 hotfix 격리 재시도", 1)[1].split(
+        "배치 receipt에는",
+        1,
+    )[0]
+
+    for section in (base, retry):
+        assert "set -Eeuo pipefail" in section
+        assert "up --detach --no-build --pull never --no-start mcp" in section
+        assert "up --detach --wait" not in section
+        assert "health_deadline=$((SECONDS + 3600))" in section
+        assert "sleep 30" in section
+        assert ".State.Running == true" in section
+        assert ".State.OOMKilled == false" in section
+        assert ".RestartCount == 0" in section
+        assert "starting | unhealthy" in section
+        assert 'Path("/var/lib/cardrag-mcp/current.json")' in section
+        assert '"cardrag.mcp-local-pointer.v1"' in section
+        assert 'test "$active_generation" = "$expected_generation"' in section
+        assert "trap - EXIT ERR INT TERM" in section
+        assert "observed_id=$(docker inspect --format '{{.Id}}'" in section
+        assert 'test "$observed_id" =' in section
+        assert "ps --all --quiet mcp" in section
+        for direct_name in (
+            "CARDRAG_WEBDAV_USERNAME",
+            "CARDRAG_WEBDAV_PASSWORD",
+            "CARDRAG_MCP_BEARER_TOKEN",
+            "CARDRAG_OPENROUTER_API_KEY",
+        ):
+            assert f".{direct_name}" in section
+        for secret_path in (
+            "/run/secrets/webdav_username",
+            "/run/secrets/webdav_password",
+            "/run/secrets/mcp_bearer_token",
+            "/run/secrets/openrouter_api_key",
+        ):
+            assert secret_path in section
+
+    assert 'docker stop --timeout 30 "$failed_container_id"' in retry
+    assert "docker volume create" in retry
+    assert "com.docker.compose.project=$retry_project" in retry
+    assert "com.docker.compose.volume=mcp-state" in retry
+    assert '.Labels["com.cardrag.purpose"] == "v114-hashcompat-retry"' in retry
+    assert "verify_retry_volume_empty" in retry
+    assert retry.count("verify_retry_volume_empty") == 3
+    assert '--mount type=volume,src="$retry_volume",dst=/var/lib/cardrag-mcp,readonly,volume-nocopy' in retry
+    assert '--volume "$retry_volume:/var/lib/cardrag-mcp:ro"' not in retry
+    assert "metadata.st_uid" not in retry
+    assert "stat.S_IMODE" not in retry
+    assert retry.count('docker ps --all --quiet --filter "volume=$retry_volume"') == 2
+    assert "MCPArtifactReader" in retry
+    assert "retry_remote_receipt=$(docker run" in retry
+    assert 'retry_remote_receipt=$("${mcp_compose[@]}" run' not in retry
+    remote_probe = retry.split("retry_remote_receipt=$(docker run", 1)[1].split(
+        "unset retry_remote_receipt",
+        1,
+    )[0]
+    assert "$retry_volume" not in remote_probe
+    assert '--mount type=bind,src="$webdav_username_secret"' in remote_probe
+    assert '--mount type=bind,src="$webdav_password_secret"' in remote_probe
+    assert "printf '%s\\n' \"$retry_remote_receipt\"" not in retry
+    assert "current.pointer.generation_id != expected_generation" in retry
+    assert "generation_ready_path(expected_generation)" in retry
+    assert "generation_manifest_path(expected_generation)" in retry
+    assert "generation_database_path(expected_generation)" in retry
+    assert "generation_vectors_path(expected_generation)" in retry
+    assert ".generation_id == $generation and .head_count == 5" in retry
+    assert "docker volume rm" not in retry
+    assert "retry_activation_complete=true" in retry
+    assert retry.index("docker volume create \\") < retry.index("verify_retry_volume_empty")
+    assert retry.index("retry_remote_receipt=$(") < retry.rindex("verify_retry_volume_empty")
+    assert retry.rindex("verify_retry_volume_empty") < retry.index('"${mcp_compose[@]}" up --detach')
+    for section, captured_id, completion in (
+        (base, "$mcp_container_id", "mcp_activation_complete=true"),
+        (retry, "$retry_container_id", "retry_activation_complete=true"),
+    ):
+        assert f'docker stop --timeout 30 "{captured_id}"' in section
+        assert section.index('test "$active_generation" = "$expected_generation"') < section.index(completion)
+        start = section.index(f'docker start "{captured_id}"')
+        prestart = section[:start]
+        assert '.State.Status == "created"' in prestart
+        assert ".State.Running == false" in prestart
+        assert ".State.OOMKilled == false" in prestart
+        assert ".RestartCount == 0" in prestart
+        assert ".Config.Image == $image" in prestart
+        assert "(.[0].Image == $index_digest or .[0].Image == $config_digest)" in prestart
+        assert '.Config.Labels["org.opencontainers.image.revision"] == $revision' in prestart
+        assert '.Config.Labels["com.docker.compose.project"]' in prestart
+        assert '.Config.Labels["com.docker.compose.service"] == "mcp"' in prestart
+        assert '.HostConfig.PortBindings["8000/tcp"]' in prestart
+        assert 'Destination:"/var/lib/cardrag-mcp",RW:true' in prestart
+    assert "docker stop --time 30" not in migration
+
+    stop = migration.split("## 5. 중단, rollback과 불변 경계", 1)[1]
+    assert "stop_project=${CARDRAG_V114_STOP_PROJECT:-cardrag-v114-candidate}" in stop
+    assert "cardrag-v114-candidate-hashcompat)" in stop
+    assert "stop_mcp_volume=cardrag-mcp-v114-candidate-state" in stop
+    assert "stop_mcp_volume=cardrag-mcp-v114-candidate-hashcompat-state" in stop
+    assert "refusing non-allowlisted candidate project" in stop
+    assert "unset COMPOSE_PROJECT_NAME CARDRAG_CANDIDATE_MCP_STATE_VOLUME" in stop
+    assert 'export COMPOSE_PROJECT_NAME="$stop_project"' in stop
+    assert 'export CARDRAG_CANDIDATE_MCP_STATE_VOLUME="$stop_mcp_volume"' in stop
+    assert ".name == $project" in stop
+    assert ".services.mcp.image == $image" in stop
+    assert "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate" in stop
+    assert '.services.mcp.environment.CARDRAG_CHANNEL == "candidate-v1.0.11"' in stop
+    assert '.volumes["mcp-state"].name == $volume' in stop
+    assert "ps --all --quiet mcp" in stop
+    assert 'docker stop --timeout 30 "$stop_mcp_container_id"' in stop
+    assert '"${mcp_compose[@]}" stop mcp' not in stop
+    assert (
+        stop.index('mcp_render=$("${mcp_compose[@]}" config')
+        < stop.index('stop_mcp_container_id=$("${mcp_compose[@]}" ps')
+        < stop.index('docker stop --timeout 30 "$stop_mcp_container_id"')
+    )
+
+    for evidence in (
+        "sha256:a78512283a5d7fab3809a9a7229832ee240fed514fbdf3d55dc0660e7521747d",
+        "sha256:21196d1f44553fd84485eb1d9287d14aa1804ad5820de0098f590a7d329b91f1",
+        "dc41f7d79a8bc446e59dc45cebf883043f5b6634",
+        '.Config.Labels["com.docker.compose.project"] == "cardrag-v114-candidate"',
+        '.Config.Labels["com.docker.compose.service"] == "mcp"',
+        '.HostConfig.PortBindings["8000/tcp"]',
+        'Name:$volume,Destination:"/var/lib/cardrag-mcp",RW:true',
+    ):
+        assert evidence in retry
+    assert 'docker stop --timeout 30 "$failed_container_id"' in retry
 
 
 def test_v112_offline_snapshot_copies_during_each_destination_first_mount() -> None:

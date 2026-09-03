@@ -449,16 +449,25 @@ def _validate_dispositions(
         )
     if len(unsupported_payloads) != unsupported_expected:
         raise ServingDatabaseV5Error("unsupported product count differs from metadata")
+    # Early v5 Worker exporters hashed this array in the table's deterministic
+    # (issuer, product_code) order, while the v4 contract and current exporter
+    # use canonical payload order.  Accept only those two exact encodings so a
+    # sealed early-v5 database remains readable without weakening any payload
+    # binding or admitting an arbitrary metadata digest.
+    worker_order_sha256 = canonical_sha256(
+        {
+            "documents": unsupported_payloads,
+            "schema_version": _UNSUPPORTED_DOCUMENTS_SCHEMA,
+        }
+    )
     unsupported_payloads.sort(key=_canonical_json_bytes)
-    if (
-        canonical_sha256(
-            {
-                "documents": unsupported_payloads,
-                "schema_version": _UNSUPPORTED_DOCUMENTS_SCHEMA,
-            }
-        )
-        != unsupported_sha256
-    ):
+    canonical_order_sha256 = canonical_sha256(
+        {
+            "documents": unsupported_payloads,
+            "schema_version": _UNSUPPORTED_DOCUMENTS_SCHEMA,
+        }
+    )
+    if unsupported_sha256 not in {canonical_order_sha256, worker_order_sha256}:
         raise ServingDatabaseV5Error("unsupported product hash differs from metadata")
 
     ocr_expected = _metadata_int(values, "ocr_failed_document_count")

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cardrag_core import canonical_sha256
+from cardrag_core import canonical_json_bytes, canonical_sha256
 from cardrag_core.embedding import (
     QWEN3_DOCUMENT_POLICY,
     QWEN3_EMBEDDING_DIMENSION,
@@ -1196,6 +1196,32 @@ def test_v5_export_preserves_nonzero_bounded_dispositions_and_hashes(tmp_path: P
         protected_size_bytes=2048,
         source_payload_json=source_payload_json,
     )
+    second_source_payload = {
+        **source_payload,
+        "product_code": "A-CARD-DRM",
+        "product_name": "두 번째 보호 문서 카드",
+        "source_url": "https://public.example/second-protected.pdf",
+    }
+    second_source_payload_json = json.dumps(
+        second_source_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    second_unsupported = UnsupportedProductInput(
+        issuer="kb",
+        product_code="A-CARD-DRM",
+        name="두 번째 보호 문서 카드",
+        disposition="unsupported_drm",
+        source_id="source_" + canonical_sha256(second_source_payload),
+        source_version="2026-08-01",
+        source_url="https://public.example/second-protected.pdf",
+        protected_magic="SCDSA004",
+        protected_sha256="c" * 64,
+        protected_size_bytes=1024,
+        source_payload_json=second_source_payload_json,
+    )
     failed = OCRFailedProductInput(
         issuer="kb",
         product_code="CARD-OCR-FAILED",
@@ -1209,7 +1235,7 @@ def test_v5_export_preserves_nonzero_bounded_dispositions_and_hashes(tmp_path: P
         reason="The OCR provider could not process this document.",
         attempts=3,
     )
-    records["unsupported_products"] = (unsupported,)
+    records["unsupported_products"] = (unsupported, second_unsupported)
     records["ocr_failed_products"] = (failed,)
 
     database = tmp_path / "index.sqlite3"
@@ -1218,16 +1244,43 @@ def test_v5_export_preserves_nonzero_bounded_dispositions_and_hashes(tmp_path: P
         tmp_path / "vectors.f32",
         **records,
     )
-    assert (result.unsupported_product_count, result.ocr_failed_product_count) == (1, 1)
+    assert (result.unsupported_product_count, result.ocr_failed_product_count) == (2, 1)
     with sqlite3.connect(database) as connection:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
-        assert metadata["unsupported_document_count"] == "1"
+        assert metadata["unsupported_document_count"] == "2"
         assert metadata["ocr_failed_document_count"] == "1"
-        assert len(metadata["unsupported_documents_sha256"]) == 64
+        unsupported_payloads = [
+            {
+                "disposition": row.disposition,
+                "protected_magic": row.protected_magic,
+                "protected_sha256": row.protected_sha256,
+                "protected_size_bytes": row.protected_size_bytes,
+                "source": json.loads(row.source_payload_json),
+                "source_id": row.source_id,
+            }
+            for row in (second_unsupported, unsupported)
+        ]
+        worker_table_order_sha256 = canonical_sha256(
+            {
+                "schema_version": "cardrag.unsupported-documents.v1",
+                "documents": unsupported_payloads,
+            }
+        )
+        canonical_order_sha256 = canonical_sha256(
+            {
+                "schema_version": "cardrag.unsupported-documents.v1",
+                "documents": sorted(unsupported_payloads, key=canonical_json_bytes),
+            }
+        )
+        assert worker_table_order_sha256 != canonical_order_sha256
+        assert metadata["unsupported_documents_sha256"] == canonical_order_sha256
         assert len(metadata["ocr_failed_documents_sha256"]) == 64
         assert connection.execute(
-            "SELECT issuer,product_code,disposition FROM unsupported_products"
-        ).fetchone() == ("kb", "CARD-DRM", "unsupported_drm")
+            "SELECT issuer,product_code,disposition FROM unsupported_products ORDER BY issuer,product_code"
+        ).fetchall() == [
+            ("kb", "A-CARD-DRM", "unsupported_drm"),
+            ("kb", "CARD-DRM", "unsupported_drm"),
+        ]
         assert connection.execute(
             "SELECT issuer,product_code,reason_code,attempts FROM ocr_failed_products"
         ).fetchone() == ("kb", "CARD-OCR-FAILED", "provider_document_rejected", 3)

@@ -25,7 +25,7 @@ from numbers import Real
 from pathlib import Path
 from typing import Final, Literal, final
 
-from cardrag_core import canonical_sha256, v5_exact_row_corpus_sha256
+from cardrag_core import canonical_json_bytes, canonical_sha256, v5_exact_row_corpus_sha256
 from cardrag_core.embedding import (
     QWEN3_DOCUMENT_POLICY,
     QWEN3_EMBEDDING_DIMENSION,
@@ -1677,17 +1677,20 @@ class ServingDatabaseExporterV5:
         current_count = sum(row.temporal_status == "current" for row in ordered_revisions)
         superseded_count = sum(row.temporal_status == "superseded" for row in ordered_revisions)
         ambiguous_count = sum(row.temporal_status == "ambiguous" for row in ordered_revisions)
-        unsupported_payload = [
-            {
-                "disposition": row.disposition,
-                "protected_magic": row.protected_magic,
-                "protected_sha256": row.protected_sha256,
-                "protected_size_bytes": row.protected_size_bytes,
-                "source": json.loads(row.source_payload_json),
-                "source_id": row.source_id,
-            }
-            for row in ordered_unsupported
-        ]
+        unsupported_payload = sorted(
+            (
+                {
+                    "disposition": row.disposition,
+                    "protected_magic": row.protected_magic,
+                    "protected_sha256": row.protected_sha256,
+                    "protected_size_bytes": row.protected_size_bytes,
+                    "source": json.loads(row.source_payload_json),
+                    "source_id": row.source_id,
+                }
+                for row in ordered_unsupported
+            ),
+            key=canonical_json_bytes,
+        )
         vector_sha256 = ""
         vector_size_bytes = 0
         exact_row_corpus_sha256 = ""

@@ -30,4 +30,4 @@ services:
 
 volumes:
   mcp-state:
-    name: cardrag-mcp-v114-candidate-state
+    name: ${CARDRAG_CANDIDATE_MCP_STATE_VOLUME:-cardrag-mcp-v114-candidate-state}
