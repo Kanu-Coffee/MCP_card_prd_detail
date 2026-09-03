@@ -218,12 +218,240 @@ done
 unset registry_token
 ```
 
+### 1.1 Exact image 및 attestation security gate
+
+OCI/provenance/SBOM gate가 통과해 봉인된 두 index digest만 검사합니다. 이 gate는 어떤
+CardRAG runtime container 또는 volume도 만들기 전에 완료해야 합니다. 로컬에 이미 설치된
+Trivy `0.74.0`과 Gitleaks `8.30.1`만 허용하며 도구를 설치하거나 갱신하지 않습니다. 두
+exact image는 `vuln,secret`, `HIGH,CRITICAL`, unfixed 포함 정책으로 검사합니다.
+`--ignore-unfixed`는 사용하지 않습니다.
+
+다운로드한 provenance/SBOM 네 파일만 mode `0600`의 별도 evidence directory로 복사해
+Trivy secret scanner와 repository의 exact `.gitleaks.toml`로 검사합니다. Scanner는
+evidence directory 밖의 repository, home, `/etc/cardrag`, Docker volume 또는 secret file을
+읽지 않습니다. 모든 scanner output은 mode `0600` JSON 파일로만 남기며 stdout/stderr에
+finding이나 evidence 내용을 출력하지 않습니다. Gitleaks finding은 report와 error log에서
+전부 redact합니다. 성공 receipt에는 report SHA-256, exact image digest, 도구 버전과 Trivy
+Vulnerability DB timestamp만 기록합니다.
+
+```bash
+set -euo pipefail
+: "${repository_root:?absolute repository root is required}"
+: "${build_metadata_root:?build metadata directory is required}"
+: "${CANDIDATE_SOURCE_COMMIT:?exact v1.0.14 PR-head commit is required}"
+: "${CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST:?sealed Worker index digest is required}"
+: "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?sealed MCP index digest is required}"
+[[ "$repository_root" = /* && "$repository_root" != / ]]
+[[ "$build_metadata_root" = /* && "$build_metadata_root" != / ]]
+[[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+for image_digest in \
+  "$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST" \
+  "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"; do
+  [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+done
+test -d "$build_metadata_root" && test ! -L "$build_metadata_root"
+test "$(git -C "$repository_root" rev-parse HEAD)" = "$CANDIDATE_SOURCE_COMMIT"
+test -z "$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+
+trivy_bin=$(command -v trivy)
+gitleaks_bin=$(command -v gitleaks)
+[[ "$trivy_bin" = /* && "$gitleaks_bin" = /* ]]
+test "$("$trivy_bin" --version --format json | jq -er '.Version')" = "0.74.0"
+gitleaks_version=$("$gitleaks_bin" version)
+test "$gitleaks_version" = "8.30.1"
+
+gitleaks_config="$repository_root/.gitleaks.toml"
+test -f "$gitleaks_config" && test ! -L "$gitleaks_config"
+test "$(stat --format='%h' "$gitleaks_config")" = "1"
+gitleaks_config_git_sha256=$(git -C "$repository_root" show \
+  "$CANDIDATE_SOURCE_COMMIT:.gitleaks.toml" | sha256sum | awk '{print $1}')
+test "$(sha256sum "$gitleaks_config" | awk '{print $1}')" = \
+  "$gitleaks_config_git_sha256"
+
+security_receipt_root=$(mktemp -d /tmp/cardrag-v114-security-receipt.XXXXXX)
+chmod 700 "$security_receipt_root"
+umask 077
+attestation_evidence_root="$security_receipt_root/attestation-evidence"
+mkdir -m 0700 "$attestation_evidence_root"
+for role in worker mcp; do
+  for kind in provenance sbom; do
+    source_evidence="$build_metadata_root/$role-$kind.json"
+    destination_evidence="$attestation_evidence_root/$role-$kind.json"
+    test -f "$source_evidence" && test ! -L "$source_evidence"
+    test "$(stat --format='%h' "$source_evidence")" = "1"
+    install -m 0600 "$source_evidence" "$destination_evidence"
+    test "$(stat --format='%a %h' "$destination_evidence")" = "600 1"
+  done
+done
+for evidence_name in \
+  worker-provenance.json worker-sbom.json mcp-provenance.json mcp-sbom.json; do
+  test -f "$attestation_evidence_root/$evidence_name"
+done
+
+trivy_evidence_report="$security_receipt_root/trivy-attestation-evidence.json"
+gitleaks_evidence_report="$security_receipt_root/gitleaks-attestation-evidence.json"
+"$trivy_bin" fs --quiet \
+  --scanners secret \
+  --exit-code 1 \
+  --format json \
+  --output "$trivy_evidence_report" \
+  "$attestation_evidence_root"
+"$gitleaks_bin" detect \
+  --source "$attestation_evidence_root" \
+  --no-git \
+  --config "$gitleaks_config" \
+  --no-banner \
+  --no-color \
+  --redact=100 \
+  --log-level error \
+  --exit-code 1 \
+  --report-format json \
+  --report-path "$gitleaks_evidence_report"
+chmod 600 "$trivy_evidence_report" "$gitleaks_evidence_report"
+python3 "$repository_root/.github/scripts/validate-strict-json.py" \
+  "$trivy_evidence_report" "$gitleaks_evidence_report"
+jq -e 'type == "object" and ([.Results[]? | .Secrets[]?] | length == 0)' \
+  "$trivy_evidence_report" >/dev/null
+jq -e 'type == "array" and length == 0' "$gitleaks_evidence_report" >/dev/null
+
+candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+for role in worker mcp; do
+  case "$role" in
+    worker) image_digest=$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST ;;
+    mcp) image_digest=$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST ;;
+  esac
+  exact_image="$candidate_repository@$image_digest"
+  image_report="$security_receipt_root/trivy-image-$role.json"
+  "$trivy_bin" image --quiet \
+    --platform linux/amd64 \
+    --scanners vuln,secret \
+    --severity HIGH,CRITICAL \
+    --exit-code 1 \
+    --format json \
+    --output "$image_report" \
+    "$exact_image"
+  chmod 600 "$image_report"
+  python3 "$repository_root/.github/scripts/validate-strict-json.py" "$image_report"
+  jq -e '
+    type == "object" and
+    ([.Results[]? | ((.Vulnerabilities // []) + (.Secrets // []))[]] | length == 0)
+  ' "$image_report" >/dev/null
+done
+
+trivy_version_json="$security_receipt_root/trivy-version.json"
+"$trivy_bin" --version --format json >"$trivy_version_json"
+chmod 600 "$trivy_version_json"
+python3 "$repository_root/.github/scripts/validate-strict-json.py" "$trivy_version_json"
+python3 - "$trivy_version_json" <<'PY'
+import json
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+metadata = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if metadata.get("Version") != "0.74.0":
+    raise SystemExit("trivy_version_mismatch")
+database = metadata.get("VulnerabilityDB")
+if not isinstance(database, dict):
+    raise SystemExit("trivy_vulnerability_database_metadata_missing")
+
+
+def timestamp(name: str) -> datetime:
+    value = database.get(name)
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise SystemExit("trivy_vulnerability_database_timestamp_invalid")
+    return datetime.fromisoformat(value[:-1] + "+00:00")
+
+
+now = datetime.now(UTC)
+updated_at = timestamp("UpdatedAt")
+downloaded_at = timestamp("DownloadedAt")
+if updated_at > now + timedelta(minutes=5) or downloaded_at > now + timedelta(minutes=5):
+    raise SystemExit("trivy_vulnerability_database_timestamp_in_future")
+if now - updated_at > timedelta(hours=36):
+    raise SystemExit("trivy_vulnerability_database_is_stale")
+if now - downloaded_at > timedelta(hours=2):
+    raise SystemExit("trivy_vulnerability_database_download_is_stale")
+PY
+
+worker_image_report="$security_receipt_root/trivy-image-worker.json"
+mcp_image_report="$security_receipt_root/trivy-image-mcp.json"
+security_receipt="$security_receipt_root/security-gate.json"
+jq -cnS \
+  --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
+  --arg worker_digest "$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST" \
+  --arg mcp_digest "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" \
+  --arg worker_report_sha256 "$(sha256sum "$worker_image_report" | awk '{print $1}')" \
+  --arg mcp_report_sha256 "$(sha256sum "$mcp_image_report" | awk '{print $1}')" \
+  --arg trivy_evidence_sha256 "$(sha256sum "$trivy_evidence_report" | awk '{print $1}')" \
+  --arg gitleaks_evidence_sha256 "$(sha256sum "$gitleaks_evidence_report" | awk '{print $1}')" \
+  --arg trivy_version_sha256 "$(sha256sum "$trivy_version_json" | awk '{print $1}')" \
+  --arg trivy_db_updated_at "$(jq -er '.VulnerabilityDB.UpdatedAt' "$trivy_version_json")" \
+  --arg trivy_db_downloaded_at \
+    "$(jq -er '.VulnerabilityDB.DownloadedAt' "$trivy_version_json")" \
+  --arg gitleaks_config_sha256 "$(sha256sum "$gitleaks_config" | awk '{print $1}')" \
+  --arg gitleaks_version "$gitleaks_version" '
+  {
+    schema_version: "cardrag.v114-exact-security-gate.v1",
+    source_commit: $source_commit,
+    exact_images: {
+      worker: {index_digest: $worker_digest, report_sha256: $worker_report_sha256},
+      mcp: {index_digest: $mcp_digest, report_sha256: $mcp_report_sha256}
+    },
+    attestation_evidence: {
+      file_count: 4,
+      trivy_report_sha256: $trivy_evidence_sha256,
+      gitleaks_report_sha256: $gitleaks_evidence_sha256
+    },
+    tools: {
+      trivy: {
+        version: "0.74.0",
+        version_metadata_sha256: $trivy_version_sha256,
+        database_updated_at: $trivy_db_updated_at,
+        database_downloaded_at: $trivy_db_downloaded_at
+      },
+      gitleaks: {
+        version: $gitleaks_version,
+        config_sha256: $gitleaks_config_sha256
+      }
+    },
+    policy: {
+      image_scanners: ["vuln", "secret"],
+      image_severities: ["HIGH", "CRITICAL"],
+      ignore_unfixed: false,
+      attestation_scanners: ["trivy-secret", "gitleaks"]
+    },
+    result: "passed"
+  }
+' >"$security_receipt"
+chmod 600 "$security_receipt"
+python3 "$repository_root/.github/scripts/validate-strict-json.py" "$security_receipt"
+jq -e '
+  .schema_version == "cardrag.v114-exact-security-gate.v1" and
+  .source_commit == $source_commit and .result == "passed" and
+  .exact_images.worker.index_digest == $worker_digest and
+  .exact_images.mcp.index_digest == $mcp_digest and
+  .attestation_evidence.file_count == 4 and
+  .tools.trivy.version == "0.74.0" and .tools.gitleaks.version == "8.30.1" and
+  .policy.ignore_unfixed == false
+' --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
+  --arg worker_digest "$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST" \
+  --arg mcp_digest "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" \
+  "$security_receipt" >/dev/null
+printf 'security gate receipt: %s\n' "$security_receipt"
+```
+
+어느 scanner나 timestamp/receipt 검증이 실패하면 candidate runtime/volume 생성으로 진행하지
+않습니다. 실패 report는 내용 출력 없이 mode `0600`인 receipt directory와 함께 격리합니다.
+Security gate 성공은 stable 승격 승인이 아니며 DockerHub publish, stable pointer 변경 또는
+기존 실패 증거 cleanup을 허용하지 않습니다.
+
 ## 2. 격리와 보존 경계
 
 | 항목 | v1.0.14 candidate |
 |---|---|
 | application/runtime/OCI label | `1.0.14` |
-| source branch | `codex/cardrag-v1.0.14` |
+| source branch | `codex/cardrag-v1.0.14-hashcompat` |
 | GHCR source-revision tags | `candidate-v1.0.14-worker-$CANDIDATE_SOURCE_COMMIT`, `candidate-v1.0.14-mcp-$CANDIDATE_SOURCE_COMMIT` |
 | data/publication channel | `candidate-v1.0.11` |
 | Compose project | `cardrag-v114-candidate` |
@@ -233,6 +461,11 @@ unset registry_token
 | MCP bind | `127.0.0.1:18014` |
 | preserved run | `1f1763a9cd474a81952a6eb6ffb6e397` |
 | stable runtime/publication | 변경 금지 |
+
+Candidate overlay의 `CARDRAG_CANDIDATE_MCP_STATE_VOLUME`은 MCP health-gate 실패 뒤
+증거 volume을 보존하는 격리 재시도에만 사용합니다. 미설정 기본값은 위 표의
+`cardrag-mcp-v114-candidate-state`로 그대로이며, stable base manifest의
+`CARDRAG_MCP_STATE_VOLUME`과 `cardrag-mcp-v111-state` 기본값은 변경하지 않습니다.
 
 다음 v1.0.13 사고 증거는 write, restart, checkpoint, rename 또는 cleanup하지 않습니다.
 
@@ -810,18 +1043,41 @@ printf '%s\n' "$remote_receipt"
 ### 4.2 MCP start와 runtime identity
 
 위 terminal 및 remote receipt가 모두 통과한 뒤에만 loopback `18014`에서 MCP를
-시작합니다.
+시작합니다. Container는 `--no-start`로 먼저 생성해 exact ID를 캡처한 뒤 시작합니다.
+그 뒤 어느 identity, health 또는 active-generation gate라도 실패하면 `EXIT`/`ERR` trap이
+그 ID만 stop하고 container와 volume은 보존합니다. 모든 gate가 통과한 뒤에만 trap을
+해제합니다.
 
 ```bash
-set -euo pipefail
+set -Eeuo pipefail
 : "${CANDIDATE_SOURCE_COMMIT:?exact v1.0.14 PR-head commit is required}"
 : "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?sealed MCP index digest is required}"
 : "${CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST:?sealed MCP config digest is required}"
 candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
 candidate_mcp_image="$candidate_repository@$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"
+expected_generation=g-1f1763a9cd474a81952a6eb6-2405a03c6f8e
+unset COMPOSE_PROJECT_NAME CARDRAG_CANDIDATE_MCP_STATE_VOLUME
 export CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=http://127.0.0.1:18014
 export CARDRAG_CANDIDATE_MCP_BIND_ADDRESS=127.0.0.1
 export CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT=18014
+mcp_activation_complete=false
+mcp_container_id=
+cleanup_base_mcp_activation() {
+  local failure_status=$?
+  local observed_id=
+  trap - EXIT ERR INT TERM
+  if ((failure_status == 0)); then
+    failure_status=1
+  fi
+  if [[ "$mcp_activation_complete" != true && "$mcp_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+    observed_id=$(docker inspect --format '{{.Id}}' "$mcp_container_id" 2>/dev/null || true)
+    if test "$observed_id" = "$mcp_container_id"; then
+      docker stop --timeout 30 "$mcp_container_id" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit "$failure_status"
+}
+trap cleanup_base_mcp_activation EXIT ERR INT TERM
 test -z "$(docker ps --quiet --filter publish=18014)"
 mcp_compose=(docker compose --env-file /etc/cardrag/mcp.env
   -f deploy/mcp/compose.yaml
@@ -836,15 +1092,66 @@ jq -e --arg image "$candidate_mcp_image" '
   .services.mcp.user == "10001:10001" and
   .services.mcp.environment.CARDRAG_CHANNEL == "candidate-v1.0.11" and
   .services.mcp.environment.CARDRAG_MCP_PUBLIC_BASE_URL == "http://127.0.0.1:18014" and
+  (.services.mcp.environment | [
+    .CARDRAG_WEBDAV_USERNAME, .CARDRAG_WEBDAV_PASSWORD,
+    .CARDRAG_MCP_BEARER_TOKEN, .CARDRAG_OPENROUTER_API_KEY
+  ] | all(. == null or . == "")) and
+  .services.mcp.environment.CARDRAG_WEBDAV_USERNAME_FILE ==
+    "/run/secrets/webdav_username" and
+  .services.mcp.environment.CARDRAG_WEBDAV_PASSWORD_FILE ==
+    "/run/secrets/webdav_password" and
+  .services.mcp.environment.CARDRAG_MCP_BEARER_TOKEN_FILE ==
+    "/run/secrets/mcp_bearer_token" and
+  .services.mcp.environment.CARDRAG_OPENROUTER_API_KEY_FILE ==
+    "/run/secrets/openrouter_api_key" and
   .volumes["mcp-state"].name == "cardrag-mcp-v114-candidate-state" and
   .services.mcp.ports == [{
     mode:"ingress",host_ip:"127.0.0.1",target:8000,published:"18014",protocol:"tcp"
   }]
 ' <<<"$mcp_render" >/dev/null
-"${mcp_compose[@]}" up --detach --wait --no-build --pull never mcp
-mcp_container_id=$("${mcp_compose[@]}" ps --quiet mcp)
+test -z "$("${mcp_compose[@]}" ps --all --quiet mcp)"
+"${mcp_compose[@]}" up --detach --no-build --pull never --no-start mcp
+mcp_container_id=$("${mcp_compose[@]}" ps --all --quiet mcp)
 [[ "$mcp_container_id" =~ ^[0-9a-f]{64}$ ]]
 mcp_runtime=$(docker inspect "$mcp_container_id")
+jq -e --arg image "$candidate_mcp_image" \
+  --arg index_digest "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" \
+  --arg config_digest "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" \
+  --arg revision "$CANDIDATE_SOURCE_COMMIT" '
+  type == "array" and length == 1 and .[0].State.Status == "created" and
+  .[0].State.Running == false and .[0].State.OOMKilled == false and
+  .[0].RestartCount == 0 and .[0].Config.Image == $image and
+  (.[0].Image == $index_digest or .[0].Image == $config_digest) and
+  .[0].Config.Labels["org.opencontainers.image.version"] == "1.0.14" and
+  .[0].Config.Labels["org.opencontainers.image.revision"] == $revision and
+  .[0].Config.Labels["com.docker.compose.project"] == "cardrag-v114-candidate" and
+  .[0].Config.Labels["com.docker.compose.service"] == "mcp" and
+  ([.[0].Mounts[] | select(.Type == "volume") | {Name,Destination,RW}]) == [{
+    Name:"cardrag-mcp-v114-candidate-state",Destination:"/var/lib/cardrag-mcp",RW:true
+  }] and
+  .[0].HostConfig.PortBindings["8000/tcp"] == [{HostIp:"127.0.0.1",HostPort:"18014"}]
+' <<<"$mcp_runtime" >/dev/null
+docker start "$mcp_container_id" >/dev/null
+health_deadline=$((SECONDS + 3600))
+while :; do
+  test "$("${mcp_compose[@]}" ps --quiet mcp)" = "$mcp_container_id"
+  mcp_runtime=$(docker inspect "$mcp_container_id")
+  jq -e '
+    type == "array" and length == 1 and .[0].State.Running == true and
+    .[0].State.OOMKilled == false and .[0].RestartCount == 0
+  ' <<<"$mcp_runtime" >/dev/null
+  mcp_health=$(jq -er '.[0].State.Health.Status' <<<"$mcp_runtime")
+  case "$mcp_health" in
+    healthy) break ;;
+    starting | unhealthy) ;;
+    *) printf 'unexpected MCP health state\n' >&2; exit 1 ;;
+  esac
+  if ((SECONDS >= health_deadline)); then
+    printf 'MCP did not become healthy within 3600 seconds\n' >&2
+    exit 1
+  fi
+  sleep 30
+done
 jq -e --arg image "$candidate_mcp_image" \
   --arg index_digest "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" \
   --arg config_digest "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" \
@@ -862,7 +1169,339 @@ jq -e --arg image "$candidate_mcp_image" \
   }] and
   .[0].NetworkSettings.Ports["8000/tcp"] == [{HostIp:"127.0.0.1",HostPort:"18014"}]
 ' <<<"$mcp_runtime" >/dev/null
+active_generation=$(docker exec "$mcp_container_id" python -c '
+import json
+import stat
+import sys
+from pathlib import Path
+
+path = Path("/var/lib/cardrag-mcp/current.json")
+metadata = path.lstat()
+if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 4096:
+    raise SystemExit("active_generation_pointer_invalid")
+payload = json.loads(path.read_text(encoding="utf-8"))
+expected = {"generation_id": sys.argv[1], "schema_version": "cardrag.mcp-local-pointer.v1"}
+if payload != expected:
+    raise SystemExit("active_generation_mismatch")
+print(payload["generation_id"])
+' "$expected_generation")
+test "$active_generation" = "$expected_generation"
+mcp_activation_complete=true
+trap - EXIT ERR INT TERM
 ```
+
+### 4.3 MCP health-gate 실패 뒤 hotfix 격리 재시도
+
+최초 MCP가 generation download 뒤 readiness `503` 또는 다른 health failure로 실패하면
+그 container와 state volume을 수정하거나 재사용하지 않습니다. Worker terminal과 remote
+five-object gate가 이미 통과했고 candidate pointer가 같은 generation을 유지한다면 Worker
+state/Codex home을 다시 복사하거나 publication을 다시 실행하지 않습니다. 수정된 MCP
+source commit으로 새 exact OCI receipt와 앞 절의 supply-chain gate를 먼저 통과시킨 뒤,
+Compose의 표준 `COMPOSE_PROJECT_NAME`과 candidate 전용
+`CARDRAG_CANDIDATE_MCP_STATE_VOLUME`을 함께 바꿔 MCP만 빈 volume에서 재시도합니다.
+
+아래 예시는 첫 실패의 project/container/volume을 그대로 보존하고 hash-compat hotfix를
+`cardrag-v114-candidate-hashcompat` project에 배치합니다. 실패 container가 아직 실행
+중이면 exact 이름으로 stop만 하며 remove, `down`, `down -v` 또는 volume cleanup은 하지
+않습니다. 기존 container가 port를 해제한 뒤 같은 loopback `18014`를 사용합니다.
+
+```bash
+set -Eeuo pipefail
+: "${CANDIDATE_SOURCE_COMMIT:?exact hotfix PR-head commit is required}"
+: "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?sealed hotfix MCP index digest is required}"
+: "${CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST:?sealed hotfix MCP config digest is required}"
+candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+candidate_mcp_image="$candidate_repository@$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"
+expected_generation=g-1f1763a9cd474a81952a6eb6-2405a03c6f8e
+failed_container=cardrag-v114-candidate-mcp-1
+failed_volume=cardrag-mcp-v114-candidate-state
+failed_index_digest=sha256:a78512283a5d7fab3809a9a7229832ee240fed514fbdf3d55dc0660e7521747d
+failed_config_digest=sha256:21196d1f44553fd84485eb1d9287d14aa1804ad5820de0098f590a7d329b91f1
+failed_revision=dc41f7d79a8bc446e59dc45cebf883043f5b6634
+failed_image="$candidate_repository@$failed_index_digest"
+retry_project=cardrag-v114-candidate-hashcompat
+retry_volume=cardrag-mcp-v114-candidate-hashcompat-state
+retry_activation_complete=false
+retry_container_id=
+cleanup_retry_mcp_activation() {
+  local failure_status=$?
+  local observed_id=
+  trap - EXIT ERR INT TERM
+  if ((failure_status == 0)); then
+    failure_status=1
+  fi
+  if [[ "$retry_activation_complete" != true && "$retry_container_id" =~ ^[0-9a-f]{64}$ ]]; then
+    observed_id=$(docker inspect --format '{{.Id}}' "$retry_container_id" 2>/dev/null || true)
+    if test "$observed_id" = "$retry_container_id"; then
+      docker stop --timeout 30 "$retry_container_id" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit "$failure_status"
+}
+trap cleanup_retry_mcp_activation EXIT ERR INT TERM
+
+docker volume inspect "$failed_volume" >/dev/null
+failed_runtime=$(docker inspect "$failed_container")
+jq -e --arg image "$failed_image" --arg index_digest "$failed_index_digest" \
+  --arg config_digest "$failed_config_digest" --arg revision "$failed_revision" \
+  --arg volume "$failed_volume" '
+  type == "array" and length == 1 and
+  .[0].Config.Image == $image and
+  (.[0].Image == $index_digest or .[0].Image == $config_digest) and
+  .[0].Config.Labels["org.opencontainers.image.version"] == "1.0.14" and
+  .[0].Config.Labels["org.opencontainers.image.revision"] == $revision and
+  .[0].Config.Labels["com.docker.compose.project"] == "cardrag-v114-candidate" and
+  .[0].Config.Labels["com.docker.compose.service"] == "mcp" and
+  .[0].State.OOMKilled == false and .[0].RestartCount == 0 and
+  ([.[0].Mounts[] | select(.Type == "volume") | {Name,Destination,RW}]) == [{
+    Name:$volume,Destination:"/var/lib/cardrag-mcp",RW:true
+  }] and
+  .[0].HostConfig.PortBindings["8000/tcp"] == [{
+    HostIp:"127.0.0.1",HostPort:"18014"
+  }]
+' <<<"$failed_runtime" >/dev/null
+failed_container_id=$(jq -er '.[0].Id' <<<"$failed_runtime")
+[[ "$failed_container_id" =~ ^[0-9a-f]{64}$ ]]
+if test "$(jq -er '.[0].State.Running' <<<"$failed_runtime")" = "true"; then
+  docker stop --timeout 30 "$failed_container_id" >/dev/null
+fi
+test "$(docker inspect --format '{{.State.Running}}' "$failed_container_id")" = "false"
+test -z "$(docker ps --quiet --filter "volume=$failed_volume")"
+if docker volume inspect "$retry_volume" >/dev/null 2>&1; then
+  printf 'isolated retry volume already exists: %s\n' "$retry_volume" >&2
+  exit 1
+fi
+test -z "$(docker ps --all --quiet \
+  --filter "label=com.docker.compose.project=$retry_project")"
+test -z "$(docker ps --quiet --filter publish=18014)"
+created_retry_volume=$(docker volume create \
+  --label "com.docker.compose.project=$retry_project" \
+  --label com.docker.compose.volume=mcp-state \
+  --label com.cardrag.purpose=v114-hashcompat-retry \
+  "$retry_volume")
+test "$created_retry_volume" = "$retry_volume"
+retry_volume_inspect=$(docker volume inspect "$retry_volume")
+jq -e --arg name "$retry_volume" --arg project "$retry_project" '
+  type == "array" and length == 1 and .[0].Name == $name and
+  .[0].Labels["com.docker.compose.project"] == $project and
+  .[0].Labels["com.docker.compose.volume"] == "mcp-state" and
+  .[0].Labels["com.cardrag.purpose"] == "v114-hashcompat-retry"
+' <<<"$retry_volume_inspect" >/dev/null
+verify_retry_volume_empty() {
+  local empty_receipt
+  test -z "$(docker ps --all --quiet --filter "volume=$retry_volume")"
+  empty_receipt=$(docker run --rm --pull never --network none --read-only \
+    --cap-drop ALL --security-opt no-new-privileges=true --user 10001:10001 \
+    --entrypoint python \
+    --mount type=volume,src="$retry_volume",dst=/var/lib/cardrag-mcp,readonly,volume-nocopy \
+    "$candidate_mcp_image" -c '
+from pathlib import Path
+
+root = Path("/var/lib/cardrag-mcp")
+if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
+    raise SystemExit("retry_mcp_volume_not_empty")
+print("retry-mcp-volume-empty")
+')
+  test "$empty_receipt" = "retry-mcp-volume-empty"
+  test -z "$(docker ps --all --quiet --filter "volume=$retry_volume")"
+}
+verify_retry_volume_empty
+
+export COMPOSE_PROJECT_NAME="$retry_project"
+export CARDRAG_CANDIDATE_MCP_STATE_VOLUME="$retry_volume"
+export CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=http://127.0.0.1:18014
+export CARDRAG_CANDIDATE_MCP_BIND_ADDRESS=127.0.0.1
+export CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT=18014
+mcp_compose=(docker compose --env-file /etc/cardrag/mcp.env
+  -f deploy/mcp/compose.yaml
+  -f deploy/mcp/compose.candidate.yaml
+  -f deploy/mcp/compose.secrets.yaml)
+mcp_render=$("${mcp_compose[@]}" config --format json)
+jq -e --arg image "$candidate_mcp_image" \
+  --arg project "$retry_project" --arg volume "$retry_volume" '
+  .name == $project and
+  .services.mcp.image == $image and
+  (.services.mcp | has("build") | not) and
+  .services.mcp.pull_policy == "always" and
+  .services.mcp.user == "10001:10001" and
+  .services.mcp.environment.CARDRAG_CHANNEL == "candidate-v1.0.11" and
+  .services.mcp.environment.CARDRAG_MCP_PUBLIC_BASE_URL == "http://127.0.0.1:18014" and
+  (.services.mcp.environment | [
+    .CARDRAG_WEBDAV_USERNAME, .CARDRAG_WEBDAV_PASSWORD,
+    .CARDRAG_MCP_BEARER_TOKEN, .CARDRAG_OPENROUTER_API_KEY
+  ] | all(. == null or . == "")) and
+  .services.mcp.environment.CARDRAG_WEBDAV_USERNAME_FILE ==
+    "/run/secrets/webdav_username" and
+  .services.mcp.environment.CARDRAG_WEBDAV_PASSWORD_FILE ==
+    "/run/secrets/webdav_password" and
+  .services.mcp.environment.CARDRAG_MCP_BEARER_TOKEN_FILE ==
+    "/run/secrets/mcp_bearer_token" and
+  .services.mcp.environment.CARDRAG_OPENROUTER_API_KEY_FILE ==
+    "/run/secrets/openrouter_api_key" and
+  .volumes["mcp-state"].name == $volume and
+  .services.mcp.ports == [{
+    mode:"ingress",host_ip:"127.0.0.1",target:8000,published:"18014",protocol:"tcp"
+  }]
+' <<<"$mcp_render" >/dev/null
+
+webdav_base_url=$(jq -er '.services.mcp.environment.CARDRAG_WEBDAV_BASE_URL' \
+  <<<"$mcp_render")
+webdav_username_secret=$(jq -er '.secrets.webdav_username.file' <<<"$mcp_render")
+webdav_password_secret=$(jq -er '.secrets.webdav_password.file' <<<"$mcp_render")
+for secret_file in "$webdav_username_secret" "$webdav_password_secret"; do
+  [[ "$secret_file" = /* && "$secret_file" != */ ]]
+  test -f "$secret_file" && test ! -L "$secret_file"
+done
+retry_remote_receipt=$(docker run --rm --interactive --pull never --read-only \
+  --cap-drop ALL --security-opt no-new-privileges=true --user 10001:10001 \
+  --entrypoint python \
+  --env CARDRAG_CHANNEL=candidate-v1.0.11 \
+  --env "CARDRAG_WEBDAV_BASE_URL=$webdav_base_url" \
+  --env CARDRAG_WEBDAV_USERNAME_FILE=/run/secrets/webdav_username \
+  --env CARDRAG_WEBDAV_PASSWORD_FILE=/run/secrets/webdav_password \
+  --mount type=bind,src="$webdav_username_secret",dst=/run/secrets/webdav_username,readonly \
+  --mount type=bind,src="$webdav_password_secret",dst=/run/secrets/webdav_password,readonly \
+  "$candidate_mcp_image" - "$expected_generation" <<'PY'
+import json
+import os
+import sys
+
+from cardrag_core import (
+    MCPArtifactReader,
+    WebDAVClient,
+    WebDAVSettings,
+    generation_database_path,
+    generation_manifest_path,
+    generation_ready_path,
+    generation_vectors_path,
+)
+
+expected_generation = sys.argv[1]
+client = WebDAVClient(WebDAVSettings.from_env())
+try:
+    read_only = client.read_only()
+    reader = MCPArtifactReader(read_only, channel=os.environ["CARDRAG_CHANNEL"])
+    current = reader.read_current_generation()
+    if current.pointer.generation_id != expected_generation:
+        raise SystemExit("retry_candidate_pointer_generation_mismatch")
+    paths = (
+        reader.pointer_path,
+        generation_ready_path(expected_generation),
+        generation_manifest_path(expected_generation),
+        generation_database_path(expected_generation),
+        generation_vectors_path(expected_generation),
+    )
+    if not all(read_only.exists(path) for path in paths):
+        raise SystemExit("retry_candidate_generation_head_missing")
+    print(json.dumps({
+        "channel": os.environ["CARDRAG_CHANNEL"],
+        "generation_id": current.pointer.generation_id,
+        "head_count": len(paths),
+        "status": "passed",
+    }, separators=(",", ":"), sort_keys=True))
+finally:
+    client.close()
+PY
+)
+jq -e --arg generation "$expected_generation" '
+  .status == "passed" and .channel == "candidate-v1.0.11" and
+  .generation_id == $generation and .head_count == 5
+' <<<"$retry_remote_receipt" >/dev/null
+unset retry_remote_receipt
+verify_retry_volume_empty
+
+"${mcp_compose[@]}" up --detach --no-build --pull never --no-start mcp
+retry_container_id=$("${mcp_compose[@]}" ps --all --quiet mcp)
+[[ "$retry_container_id" =~ ^[0-9a-f]{64}$ ]]
+retry_runtime=$(docker inspect "$retry_container_id")
+jq -e --arg image "$candidate_mcp_image" \
+  --arg index_digest "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" \
+  --arg config_digest "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" \
+  --arg revision "$CANDIDATE_SOURCE_COMMIT" \
+  --arg project "$retry_project" --arg volume "$retry_volume" '
+  type == "array" and length == 1 and .[0].State.Status == "created" and
+  .[0].State.Running == false and .[0].State.OOMKilled == false and
+  .[0].RestartCount == 0 and .[0].Config.Image == $image and
+  (.[0].Image == $index_digest or .[0].Image == $config_digest) and
+  .[0].Config.Labels["org.opencontainers.image.version"] == "1.0.14" and
+  .[0].Config.Labels["org.opencontainers.image.revision"] == $revision and
+  .[0].Config.Labels["com.docker.compose.project"] == $project and
+  .[0].Config.Labels["com.docker.compose.service"] == "mcp" and
+  ([.[0].Mounts[] | select(.Type == "volume") | {Name,Destination,RW}]) == [{
+    Name:$volume,Destination:"/var/lib/cardrag-mcp",RW:true
+  }] and
+  .[0].HostConfig.PortBindings["8000/tcp"] == [{HostIp:"127.0.0.1",HostPort:"18014"}]
+' <<<"$retry_runtime" >/dev/null
+docker start "$retry_container_id" >/dev/null
+health_deadline=$((SECONDS + 3600))
+while :; do
+  test "$("${mcp_compose[@]}" ps --quiet mcp)" = "$retry_container_id"
+  retry_runtime=$(docker inspect "$retry_container_id")
+  jq -e '
+    type == "array" and length == 1 and .[0].State.Running == true and
+    .[0].State.OOMKilled == false and .[0].RestartCount == 0
+  ' <<<"$retry_runtime" >/dev/null
+  retry_health=$(jq -er '.[0].State.Health.Status' <<<"$retry_runtime")
+  case "$retry_health" in
+    healthy) break ;;
+    starting | unhealthy) ;;
+    *) printf 'unexpected retry MCP health state\n' >&2; exit 1 ;;
+  esac
+  if ((SECONDS >= health_deadline)); then
+    printf 'retry MCP did not become healthy within 3600 seconds\n' >&2
+    exit 1
+  fi
+  sleep 30
+done
+jq -e --arg image "$candidate_mcp_image" \
+  --arg index_digest "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" \
+  --arg config_digest "$CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST" \
+  --arg revision "$CANDIDATE_SOURCE_COMMIT" \
+  --arg project "$retry_project" --arg volume "$retry_volume" '
+  type == "array" and length == 1 and .[0].State.Running == true and
+  .[0].State.Health.Status == "healthy" and .[0].RestartCount == 0 and
+  .[0].State.OOMKilled == false and .[0].Config.Image == $image and
+  (.[0].Image == $index_digest or .[0].Image == $config_digest) and
+  .[0].Config.Labels["org.opencontainers.image.version"] == "1.0.14" and
+  .[0].Config.Labels["org.opencontainers.image.revision"] == $revision and
+  .[0].Config.Labels["com.docker.compose.project"] == $project and
+  .[0].Config.Labels["com.docker.compose.service"] == "mcp" and
+  ([.[0].Mounts[] | select(.Type == "volume") | {Name,Destination,RW}]) == [{
+    Name:$volume,Destination:"/var/lib/cardrag-mcp",RW:true
+  }] and
+  .[0].NetworkSettings.Ports["8000/tcp"] == [{HostIp:"127.0.0.1",HostPort:"18014"}]
+' <<<"$retry_runtime" >/dev/null
+active_generation=$(docker exec "$retry_container_id" python -c '
+import json
+import stat
+import sys
+from pathlib import Path
+
+path = Path("/var/lib/cardrag-mcp/current.json")
+metadata = path.lstat()
+if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 4096:
+    raise SystemExit("active_generation_pointer_invalid")
+payload = json.loads(path.read_text(encoding="utf-8"))
+expected = {"generation_id": sys.argv[1], "schema_version": "cardrag.mcp-local-pointer.v1"}
+if payload != expected:
+    raise SystemExit("active_generation_mismatch")
+print(payload["generation_id"])
+' "$expected_generation")
+test "$active_generation" = "$expected_generation"
+
+test "$(docker inspect --format '{{.Id}}' "$failed_container")" = "$failed_container_id"
+docker volume inspect "$failed_volume" >/dev/null
+test "$(docker inspect --format '{{.State.Running}}' "$failed_container_id")" = "false"
+test -z "$(docker ps --quiet --filter "volume=$failed_volume")"
+retry_activation_complete=true
+trap - EXIT ERR INT TERM
+```
+
+재시도 receipt에는 최초 실패 container의 exact image/state/health, 보존 volume identity,
+hotfix exact image/revision, 격리 project/volume render와 최종 health를 함께 남깁니다. 이
+재시도도 실패하면 cleanup trap은 캡처한 exact retry container만 stop하고 container와
+volume을 제거하지 않습니다. 같은 retry volume을 비우거나 재사용하지 않고 새로운
+project/volume 이름으로 반복합니다.
 
 배치 receipt에는 Worker/MCP exact index/config identity, source revision, Compose render,
 same-run terminal receipt, WebDAV five-object `HEAD`와 MCP health 결과를 함께 보존합니다.
@@ -875,11 +1514,13 @@ same-run terminal receipt, WebDAV five-object `HEAD`와 MCP health 결과를 함
 어느 identity, copy, integrity, publication 또는 health gate라도 실패하면 다음 순서로
 candidate만 격리합니다.
 
-1. 실행 중인 `cardrag-v114-candidate` MCP와 Worker만 stop합니다. Source v1.0.13
-   container는 restart하지 않습니다.
-2. 실패한 v114 container, 세 destination volume, build metadata와 receipt를 보존합니다.
-   Partial destination을 지우거나 재사용하지 않고 다음 시도는 새 volume 이름으로
-   source read-only copy부터 시작합니다.
+1. 실행 중인 기본 `cardrag-v114-candidate` 또는 명시한 retry project의 MCP와 Worker만
+   stop합니다. Source v1.0.13 container는 restart하지 않습니다.
+2. 실패한 v114 container, destination volume, build metadata와 receipt를 보존합니다.
+   Worker copy/integrity/publication gate가 실패했다면 partial destination을 지우거나
+   재사용하지 않고 세 volume 모두 새 이름으로 source read-only copy부터 시작합니다.
+   Worker terminal/remote gate 뒤 MCP health만 실패했다면 Worker/Codex volume과 publication은
+   그대로 두고 4.3절처럼 새 project와 빈 MCP state volume에서 MCP만 재시도합니다.
 3. Candidate pointer가 아직 없거나 이전 generation이면 remote write를 하지 않습니다.
    새 candidate generation으로 이미 전환되었다면 v114 MCP를 중단하고 봉인된 last-good
    candidate를 별도 검토된 pointer rollback 절차로만 활성화합니다. Generation/CAS를
@@ -888,11 +1529,34 @@ candidate만 격리합니다.
    systemd unit/timer와 LibreChat 경로가 배포 전 identity 그대로인지 확인합니다.
 
 Candidate runtime 중단은 volume/container 제거 없이 다음처럼 수행합니다. `down -v`, image
-prune, remote DELETE와 source container start는 사용하지 않습니다.
+prune, remote DELETE와 source container start는 사용하지 않습니다. 호출자가 설정한
+`COMPOSE_PROJECT_NAME`과 candidate volume 변수는 사용하지 않습니다. 중단 대상은
+`CARDRAG_V114_STOP_PROJECT`의 두 allowlist 값 중 하나로 선택하고, 그 project에 고정된
+volume과 rendered candidate identity가 모두 일치한 뒤 캡처한 exact container ID만
+stop합니다.
 
 ```bash
 set -euo pipefail
 : "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?sealed MCP index digest is required}"
+[[ "$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+candidate_mcp_image="$candidate_repository@$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"
+stop_project=${CARDRAG_V114_STOP_PROJECT:-cardrag-v114-candidate}
+case "$stop_project" in
+  cardrag-v114-candidate)
+    stop_mcp_volume=cardrag-mcp-v114-candidate-state
+    ;;
+  cardrag-v114-candidate-hashcompat)
+    stop_mcp_volume=cardrag-mcp-v114-candidate-hashcompat-state
+    ;;
+  *)
+    printf 'refusing non-allowlisted candidate project\n' >&2
+    exit 1
+    ;;
+esac
+unset COMPOSE_PROJECT_NAME CARDRAG_CANDIDATE_MCP_STATE_VOLUME
+export COMPOSE_PROJECT_NAME="$stop_project"
+export CARDRAG_CANDIDATE_MCP_STATE_VOLUME="$stop_mcp_volume"
 export CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=http://127.0.0.1:18014
 export CARDRAG_CANDIDATE_MCP_BIND_ADDRESS=127.0.0.1
 export CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT=18014
@@ -900,24 +1564,63 @@ mcp_compose=(docker compose --env-file /etc/cardrag/mcp.env
   -f deploy/mcp/compose.yaml
   -f deploy/mcp/compose.candidate.yaml
   -f deploy/mcp/compose.secrets.yaml)
-"${mcp_compose[@]}" stop mcp
-if docker container inspect cardrag-v114-candidate-worker-acceptance >/dev/null 2>&1 &&
-   test "$(docker inspect --format '{{.State.Running}}' \
-     cardrag-v114-candidate-worker-acceptance)" = "true"; then
-  docker stop --time 30 cardrag-v114-candidate-worker-acceptance >/dev/null
+mcp_render=$("${mcp_compose[@]}" config --format json)
+jq -e --arg image "$candidate_mcp_image" \
+  --arg project "$stop_project" --arg volume "$stop_mcp_volume" '
+  .name == $project and
+  .services.mcp.image == $image and
+  (.services.mcp | has("build") | not) and
+  .services.mcp.environment.CARDRAG_CHANNEL == "candidate-v1.0.11" and
+  .volumes["mcp-state"].name == $volume and
+  .services.mcp.ports == [{
+    mode:"ingress",host_ip:"127.0.0.1",target:8000,published:"18014",protocol:"tcp"
+  }]
+' <<<"$mcp_render" >/dev/null
+
+stop_mcp_container_id=$("${mcp_compose[@]}" ps --all --quiet mcp)
+[[ "$stop_mcp_container_id" =~ ^[0-9a-f]{64}$ ]]
+stop_mcp_runtime=$(docker inspect "$stop_mcp_container_id")
+jq -e --arg image "$candidate_mcp_image" \
+  --arg project "$stop_project" --arg volume "$stop_mcp_volume" '
+  type == "array" and length == 1 and .[0].Config.Image == $image and
+  .[0].Config.Labels["com.docker.compose.project"] == $project and
+  .[0].Config.Labels["com.docker.compose.service"] == "mcp" and
+  ([.[0].Mounts[] | select(.Type == "volume") | {Name,Destination,RW}]) == [{
+    Name:$volume,Destination:"/var/lib/cardrag-mcp",RW:true
+  }]
+' <<<"$stop_mcp_runtime" >/dev/null
+if test "$(jq -er '.[0].State.Running' <<<"$stop_mcp_runtime")" = "true"; then
+  docker stop --timeout 30 "$stop_mcp_container_id" >/dev/null
 fi
-for volume in \
-  cardrag-worker-v114-candidate-state \
-  cardrag-worker-v114-candidate-codex-home \
-  cardrag-mcp-v114-candidate-state; do
-  docker volume inspect "$volume" >/dev/null
-  test -z "$(docker ps --quiet --filter "volume=$volume")"
-done
+test "$(docker inspect --format '{{.State.Running}}' "$stop_mcp_container_id")" = "false"
+docker volume inspect "$stop_mcp_volume" >/dev/null
+test -z "$(docker ps --quiet --filter "volume=$stop_mcp_volume")"
+
+if test "$stop_project" = "cardrag-v114-candidate" &&
+   docker container inspect cardrag-v114-candidate-worker-acceptance >/dev/null 2>&1; then
+  stop_worker_runtime=$(docker inspect cardrag-v114-candidate-worker-acceptance)
+  jq -e '
+    type == "array" and length == 1 and
+    .[0].Config.Labels["com.docker.compose.project"] == "cardrag-v114-candidate" and
+    .[0].Config.Labels["com.docker.compose.service"] == "worker" and
+    ([.[0].Mounts[] | select(.Type == "volume") | .Name] | sort) == [
+      "cardrag-worker-v114-candidate-codex-home",
+      "cardrag-worker-v114-candidate-state"
+    ]
+  ' <<<"$stop_worker_runtime" >/dev/null
+  stop_worker_container_id=$(jq -er '.[0].Id' <<<"$stop_worker_runtime")
+  [[ "$stop_worker_container_id" =~ ^[0-9a-f]{64}$ ]]
+  if test "$(jq -er '.[0].State.Running' <<<"$stop_worker_runtime")" = "true"; then
+    docker stop --timeout 30 "$stop_worker_container_id" >/dev/null
+  fi
+  test "$(docker inspect --format '{{.State.Running}}' "$stop_worker_container_id")" = "false"
+fi
 test "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' \
   cardrag-v113-candidate-worker-acceptance)" = "exited 1"
 ```
 
-이 migration의 명령은 `candidate-v1.0.11`, `cardrag-v114-candidate`와 v114 전용 volume만
-write 대상으로 삼습니다. Stable publication approval, OCR-cache publication approval와
-remote-GC approval은 모두 false이며 stable cutover, release tag, DockerHub publication과
-구버전 cleanup은 운영 acceptance 및 별도 승인 전까지 금지합니다.
+이 migration의 명령은 `candidate-v1.0.11`, 기본 `cardrag-v114-candidate` 또는 명시한
+격리 retry project와 각각의 v114 전용 volume만 write 대상으로 삼습니다. Stable
+publication approval, OCR-cache publication approval와 remote-GC approval은 모두 false이며
+stable cutover, release tag, DockerHub publication과 구버전 cleanup은 운영 acceptance 및
+별도 승인 전까지 금지합니다.

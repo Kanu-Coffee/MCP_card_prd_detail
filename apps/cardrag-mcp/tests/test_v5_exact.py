@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from cardrag_core import canonical_json_bytes, canonical_sha256
 from conftest import FakeEmbedder, create_database, unit_vector
 from v5_fixtures import V5Fixture, build_v5_fixture, install_v5_fixture
 
@@ -194,6 +195,119 @@ async def test_v5_dispositions_are_hash_bound_and_exposed_by_legacy_catalog_api(
     }
     documents = await repository.list_documents()
     assert fixture.ocr_failed_document_id in {document.document_id for document in documents}
+
+
+def _add_early_v5_worker_order_disposition(database: Path) -> tuple[str, str]:
+    with sqlite3.connect(database) as connection:
+        existing_source_json = str(
+            connection.execute("SELECT source_payload_json FROM unsupported_products").fetchone()[0]
+        )
+        source = {
+            **json.loads(existing_source_json),
+            "file_name": "a-locked.pdf",
+            "product_code": "A-LOCKED",
+            "product_name": "이전 v5 보호 카드",
+            "source_post_id": "post-a-locked",
+            "source_url": "https://public.example/a-locked.pdf",
+        }
+        source_json = canonical_json_bytes(source).decode("utf-8")
+        source_id = "source_" + hashlib.sha256(source_json.encode("utf-8")).hexdigest()
+        connection.execute(
+            "INSERT INTO unsupported_products VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "kb",
+                "A-LOCKED",
+                "이전 v5 보호 카드",
+                "unsupported_drm",
+                source_id,
+                "v1",
+                "https://public.example/a-locked.pdf",
+                "SCDSA002",
+                hashlib.sha256(b"early-v5-protected-pdf").hexdigest(),
+                2048,
+                source_json,
+            ),
+        )
+        rows = connection.execute(
+            """SELECT disposition,protected_magic,protected_sha256,protected_size_bytes,
+                      source_payload_json,source_id
+                 FROM unsupported_products ORDER BY issuer,product_code"""
+        ).fetchall()
+        worker_order_payloads = [
+            {
+                "disposition": str(row[0]),
+                "protected_magic": str(row[1]),
+                "protected_sha256": str(row[2]),
+                "protected_size_bytes": row[3],
+                "source": json.loads(str(row[4])),
+                "source_id": str(row[5]),
+            }
+            for row in rows
+        ]
+        worker_order_sha256 = canonical_sha256(
+            {
+                "documents": worker_order_payloads,
+                "schema_version": "cardrag.unsupported-documents.v1",
+            }
+        )
+        canonical_order_sha256 = canonical_sha256(
+            {
+                "documents": sorted(worker_order_payloads, key=canonical_json_bytes),
+                "schema_version": "cardrag.unsupported-documents.v1",
+            }
+        )
+        assert worker_order_sha256 != canonical_order_sha256
+        connection.execute("UPDATE metadata SET value='2' WHERE key='unsupported_document_count'")
+        connection.commit()
+    return worker_order_sha256, canonical_order_sha256
+
+
+def test_v5_accepts_sealed_early_worker_order_disposition_hash(tmp_path: Path) -> None:
+    fixture = build_v5_fixture(
+        tmp_path / "gen-v5-worker-order",
+        generation_id="gen-v5-worker-order",
+        include_dispositions=True,
+    )
+    worker_order_sha256, _canonical_order_sha256 = _add_early_v5_worker_order_disposition(
+        fixture.database
+    )
+    with sqlite3.connect(fixture.database) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='unsupported_documents_sha256'",
+            (worker_order_sha256,),
+        )
+        connection.commit()
+
+    handle = load_generation_handle(
+        fixture.database.parent,
+        tmp_path / "objects",
+        maximum_vector_bytes=2 * 1024 * 1024,
+    )
+
+    assert handle.metadata.unsupported_document_count == 2
+    assert handle.metadata.unsupported_documents_sha256 == worker_order_sha256
+
+
+def test_v5_disposition_compatibility_rejects_arbitrary_hash(tmp_path: Path) -> None:
+    fixture = build_v5_fixture(
+        tmp_path / "gen-v5-worker-order-invalid",
+        generation_id="gen-v5-worker-order-invalid",
+        include_dispositions=True,
+    )
+    _add_early_v5_worker_order_disposition(fixture.database)
+    with sqlite3.connect(fixture.database) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='unsupported_documents_sha256'",
+            ("0" * 64,),
+        )
+        connection.commit()
+
+    with pytest.raises(ServingDatabaseV5Error, match="unsupported product hash differs"):
+        load_generation_handle(
+            fixture.database.parent,
+            tmp_path / "objects",
+            maximum_vector_bytes=2 * 1024 * 1024,
+        )
 
 
 def test_v5_promotion_rejects_disposition_payload_tamper(tmp_path: Path) -> None:
