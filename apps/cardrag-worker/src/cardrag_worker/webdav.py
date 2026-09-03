@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tempfile
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -296,24 +295,22 @@ class WebDAVClient:
         def verify() -> RemoteGenerationIdentity:
             reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
             current = reader.read_current_generation()
-            with tempfile.TemporaryDirectory(prefix="cardrag-current-verify-") as directory:
-                root = Path(directory).resolve()
-                reader.download_serving_database(root / "index.sqlite3", current=current)
-                if current.manifest.schema_version == "cardrag.generation.v5":
-                    reader.download_vector_sidecar(root / "vectors.f32", current=current)
-                references = {
-                    (document.pdf.sha256, document.pdf.path): document.pdf
+            reader.verify_serving_database(current=current)
+            if current.manifest.schema_version == "cardrag.generation.v5":
+                reader.verify_vector_sidecar(current=current)
+            references = {
+                (document.pdf.sha256, document.pdf.path): document.pdf
+                for document in current.manifest.documents
+            }
+            references.update(
+                {
+                    (document.ocr.sha256, document.ocr.path): document.ocr
                     for document in current.manifest.documents
+                    if document.ocr is not None
                 }
-                references.update(
-                    {
-                        (document.ocr.sha256, document.ocr.path): document.ocr
-                        for document in current.manifest.documents
-                        if document.ocr is not None
-                    }
-                )
-                for index, reference in enumerate(references.values()):
-                    reader.download_object(reference, root / f"object-{index:06d}")
+            )
+            for reference in references.values():
+                reader.verify_object(reference)
             return RemoteGenerationIdentity(
                 generation_id=current.manifest.generation_id,
                 corpus_sha256=current.manifest.corpus_sha256,
@@ -359,7 +356,7 @@ def _guard_v5_stable_publication(client: object, *, schema_version: str) -> None
         and getattr(client, "channel", "stable") == "stable"
         and not getattr(client, "stable_publication_approved", False)
     ):
-        raise ValueError("stable v1.0.13 publication requires explicit approval")
+        raise ValueError("stable v1.0.14 publication requires explicit approval")
 
 
 def _require_exact_artifact(

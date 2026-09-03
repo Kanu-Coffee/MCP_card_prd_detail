@@ -6,7 +6,6 @@ import hashlib
 import logging
 import os
 import stat
-import tempfile
 import uuid
 from collections.abc import Callable, Iterable
 from contextlib import suppress
@@ -47,14 +46,11 @@ class ImmutablePublisher:
         self._client = client
 
     def _verify_remote(self, path: PurePosixPath, *, digest: str, size_bytes: int) -> VerifiedArtifact:
-        with tempfile.TemporaryDirectory(prefix="cardrag-webdav-verify-") as directory:
-            target = Path(directory).resolve() / "artifact"
-            return self._client.download(
-                path,
-                target,
-                expected_sha256=digest,
-                expected_size_bytes=size_bytes,
-            )
+        return self._client.verify(
+            path,
+            expected_sha256=digest,
+            expected_size_bytes=size_bytes,
+        )
 
     def _publish(
         self,

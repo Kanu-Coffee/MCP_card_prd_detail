@@ -1,4 +1,4 @@
-"""Fail-closed verifier for the v1.0.13 real-candidate acceptance receipt.
+"""Fail-closed verifier for the v1.0.14 real-candidate acceptance receipt.
 
 The receipt is a canonical technical trust root.  It does not manufacture
 runtime evidence or imply a separate human approval: it binds exact canonical
@@ -113,7 +113,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.13"]
+    version: Literal["1.0.14"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -146,18 +146,18 @@ class CandidateImageIdentity(_CanonicalModel):
 class EffectiveConfigEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-effective-config.v3"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.13"]
-    compose_project: Literal["cardrag-v113-candidate"]
+    release_version: Literal["1.0.14"]
+    compose_project: Literal["cardrag-v114-candidate"]
     channel: Literal["candidate-v1.0.11"]
-    worker_volume: Literal["cardrag-worker-v113-candidate-state"]
+    worker_volume: Literal["cardrag-worker-v114-candidate-state"]
     worker_state_mount_path: Literal["/var/lib/cardrag-worker"]
-    worker_codex_home_volume: Literal["cardrag-worker-v113-candidate-codex-home"]
+    worker_codex_home_volume: Literal["cardrag-worker-v114-candidate-codex-home"]
     worker_codex_home_mount_path: Literal["/var/lib/cardrag-codex-home"]
     worker_codex_auth_root: Literal["/var/lib/cardrag-codex-home"]
     worker_home: Literal["/var/lib/cardrag-codex-home/home"]
-    mcp_volume: Literal["cardrag-mcp-v113-candidate-state"]
+    mcp_volume: Literal["cardrag-mcp-v114-candidate-state"]
     mcp_host: Literal["127.0.0.1"]
-    mcp_port: Literal[18013]
+    mcp_port: Literal[18014]
     rootfs_read_only: Literal[True]
     cap_drop_all: Literal[True]
     no_new_privileges: Literal[True]
@@ -718,9 +718,9 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v1"]
-    release_version: Literal["1.0.13"]
+    release_version: Literal["1.0.14"]
     source_commit: SourceCommit
-    compose_project: Literal["cardrag-v113-candidate"]
+    compose_project: Literal["cardrag-v114-candidate"]
     channel: Literal["candidate-v1.0.11"]
     generation_id: str
     issuers: tuple[str, ...]

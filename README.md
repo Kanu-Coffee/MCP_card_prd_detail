@@ -1,4 +1,4 @@
-# CardRAG v1.0.13 SQLite lock-safety patch candidate
+# CardRAG v1.0.14 streaming publication-verification patch candidate
 
 CardRAG는 카드사 상품안내장 PDF를 구조 보존형 검색 generation으로 만드는 두
 프로세스 서비스입니다.
@@ -7,12 +7,15 @@ CardRAG는 카드사 상품안내장 PDF를 구조 보존형 검색 generation�
 finite Worker -> immutable WebDAV generation -> always-on read-only MCP
 ```
 
-v1.0.13 candidate는 현재 운영 중인 v1.0.9 Worker, image, state volume, 설치 pointer,
+v1.0.14 candidate는 현재 운영 중인 v1.0.9 Worker, image, state volume, 설치 pointer,
 WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable cutover와 구버전
 정리는 candidate acceptance 보고 뒤 별도 승인이 필요합니다.
 
-## v1.0.13 핵심
+## v1.0.14 핵심
 
+- 게시 후 원격 DB·vector·PDF/OCR 검증은 파일을 로컬 임시 디렉터리에 다시 저장하지
+  않고, 제한된 GET stream의 크기와 SHA-256을 직접 확인합니다. 로컬 seal 뒤 대형
+  artifact의 두 번째 복사본을 만들지 않으면서 같은 immutable identity gate를 유지합니다.
 - SQLite 연결 뒤 수행하는 main/WAL/SHM identity 검증 FD를 연결 종료 시점까지 유지해
   POSIX record lock이 중간에 해제되지 않게 합니다. Worker state는 Linux
   `unix-excl` VFS를 사용해 file-backed SHM mapping 자체를 제거하고 외부 프로세스의
@@ -54,13 +57,13 @@ WebDAV stable channel과 LibreChat 경로를 변경하지 않습니다. stable c
 
 | 항목 | 값 |
 |---|---|
-| branch | `codex/cardrag-v1.0.13` |
+| branch | `codex/cardrag-v1.0.14` |
 | WebDAV channel | `candidate-v1.0.11` |
-| Compose project | `cardrag-v113-candidate` |
-| Worker volume | `cardrag-worker-v113-candidate-state` |
-| Codex auth volume | `cardrag-worker-v113-candidate-codex-home` |
-| MCP volume | `cardrag-mcp-v113-candidate-state` |
-| MCP bind | `127.0.0.1:18013` |
+| Compose project | `cardrag-v114-candidate` |
+| Worker volume | `cardrag-worker-v114-candidate-state` |
+| Codex auth volume | `cardrag-worker-v114-candidate-codex-home` |
+| MCP volume | `cardrag-mcp-v114-candidate-state` |
+| MCP bind | `127.0.0.1:18014` |
 
 Candidate Worker는 remote GC를 하지 않습니다. v1.0.9 source volume은 운영 Worker가
 terminal인 것을 확인한 뒤 seed command에서만 read-only로 mount합니다.
@@ -72,6 +75,8 @@ terminal인 것을 확인한 뒤 seed command에서만 read-only로 mount합니�
 - [v1.0.12 임베딩 재시도 장애 분석](docs/V1_0_12_INCIDENT.md)
 - [v1.0.13 SIGBUS 장애 분석](docs/V1_0_13_INCIDENT.md)
 - [v1.0.13 복구·배포 절차](docs/V1_0_13_MIGRATION.md)
+- [v1.0.14 게시 장애 분석](docs/V1_0_14_INCIDENT.md)
+- [v1.0.14 복구·배포 절차](docs/V1_0_14_MIGRATION.md)
 - [v1.0.11 candidate migration](docs/V1_0_11_MIGRATION.md)
 - [archive와 운영 state 관리](docs/V1_0_11_ARCHIVE_MANAGEMENT.md)
 - [v1.0.10 구조·검색 baseline](docs/V1_0_10_STRUCTURE_EMBEDDING.md)

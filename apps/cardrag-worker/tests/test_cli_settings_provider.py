@@ -797,6 +797,7 @@ def test_cli_worker_failure_is_structured_without_raw_exception(
         run_id="run-worker-failure",
         occurred_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
         error_class_category="network",
+        phase="remote_publication",
     )
     error = WorkerUnexpectedFailureError(
         run_id=failure.run_id,
@@ -812,6 +813,7 @@ def test_cli_worker_failure_is_structured_without_raw_exception(
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {
         "error_class_category": "network",
+        "phase": "remote_publication",
         "reason": "Worker pipeline failed unexpectedly.",
         "reason_code": "worker_unexpected_failure",
         "report": "runs/run-worker-failure/reports/worker-failure.json",
@@ -1227,20 +1229,20 @@ def test_v111_publication_channel_requires_explicit_stable_approval(
 ) -> None:
     monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
     monkeypatch.delenv("CARDRAG_STABLE_PUBLICATION_APPROVED", raising=False)
-    cli_module._guard_v113_publication_channel(WorkerSettings.from_env())
+    cli_module._guard_v114_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "stable")
     with pytest.raises(ValueError, match="explicit.*APPROVED=true"):
-        cli_module._guard_v113_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v114_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "true")
     approved = WorkerSettings.from_env()
     assert approved.stable_publication_approved is True
-    cli_module._guard_v113_publication_channel(approved)
+    cli_module._guard_v114_publication_channel(approved)
 
     monkeypatch.setenv("CARDRAG_CHANNEL", "development")
     with pytest.raises(ValueError, match="candidate-v1.0.11 or stable"):
-        cli_module._guard_v113_publication_channel(WorkerSettings.from_env())
+        cli_module._guard_v114_publication_channel(WorkerSettings.from_env())
 
     monkeypatch.setenv("CARDRAG_STABLE_PUBLICATION_APPROVED", "yes")
     with pytest.raises(ValueError, match="CARDRAG_STABLE_PUBLICATION_APPROVED"):

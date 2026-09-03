@@ -135,6 +135,15 @@ class MCPArtifactReader:
             raise ArtifactContractError("CAS object bytes do not match their artifact reference")
         return payload
 
+    def verify_object(self, reference: ArtifactRef) -> VerifiedArtifact:
+        if PurePosixPath(reference.path) != object_path(reference.sha256):
+            raise ArtifactContractError("object reference is not bound to its CAS path")
+        return self.__reader.verify(
+            reference.path,
+            expected_sha256=reference.sha256,
+            expected_size_bytes=reference.size_bytes,
+        )
+
     def download_object(self, reference: ArtifactRef, destination: str | Path) -> VerifiedArtifact:
         if PurePosixPath(reference.path) != object_path(reference.sha256):
             raise ArtifactContractError("object reference is not bound to its CAS path")
@@ -163,6 +172,22 @@ class MCPArtifactReader:
             expected_size_bytes=database.size_bytes,
         )
 
+    def verify_serving_database(
+        self,
+        *,
+        current: CurrentGeneration | None = None,
+    ) -> VerifiedArtifact:
+        selected = current or self.read_current_generation()
+        database = selected.manifest.serving_database
+        expected_path = generation_database_path(selected.manifest.generation_id)
+        if PurePosixPath(database.path) != expected_path:
+            raise ArtifactContractError("serving database path does not match its generation")
+        return self.__reader.verify(
+            database.path,
+            expected_sha256=database.sha256,
+            expected_size_bytes=database.size_bytes,
+        )
+
     def download_vector_sidecar(
         self,
         destination: str | Path,
@@ -187,6 +212,30 @@ class MCPArtifactReader:
         return self.__reader.download(
             artifact.path,
             destination,
+            expected_sha256=artifact.sha256,
+            expected_size_bytes=artifact.size_bytes,
+        )
+
+    def verify_vector_sidecar(
+        self,
+        *,
+        current: CurrentGeneration | None = None,
+    ) -> VerifiedArtifact:
+        selected = current or self.read_current_generation()
+        sidecar = selected.manifest.vector_sidecar
+        if selected.manifest.schema_version != "cardrag.generation.v5" or sidecar is None:
+            raise ArtifactContractError("selected generation has no v5 vector sidecar")
+        artifact = sidecar.artifact
+        expected_path = generation_vectors_path(selected.manifest.generation_id)
+        if PurePosixPath(artifact.path) != expected_path:
+            raise ArtifactContractError("vector sidecar path does not match its generation")
+        if (
+            selected.ready.vector_sidecar_sha256 != artifact.sha256
+            or selected.ready.vector_sidecar_size_bytes != artifact.size_bytes
+        ):
+            raise ArtifactContractError("generation READY does not bind the vector sidecar")
+        return self.__reader.verify(
+            artifact.path,
             expected_sha256=artifact.sha256,
             expected_size_bytes=artifact.size_bytes,
         )
