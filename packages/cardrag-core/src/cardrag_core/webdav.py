@@ -15,7 +15,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 
 from .domain import VerifiedArtifact
-from .paths import validate_relative_path
+from .paths import validate_relative_path, validate_sha256
 from .settings import WebDAVSettings
 
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024
@@ -184,6 +184,51 @@ class WebDAVClient:
                 )
         except httpx.HTTPError as exc:
             raise WebDAVError(f"WebDAV GET {relative.as_posix()} failed") from exc
+
+    def verify(
+        self,
+        path: str | PurePosixPath,
+        *,
+        expected_sha256: str,
+        expected_size_bytes: int,
+        max_bytes: int | None = None,
+    ) -> VerifiedArtifact:
+        """Stream-verify a remote object without retaining a local copy."""
+
+        relative = validate_relative_path(path)
+        trusted_digest = validate_sha256(expected_sha256)
+        if (
+            isinstance(expected_size_bytes, bool)
+            or not isinstance(expected_size_bytes, int)
+            or expected_size_bytes < 0
+        ):
+            raise ValueError("expected byte size must be a non-negative integer")
+        if max_bytes is not None and (
+            isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0
+        ):
+            raise ValueError("max_bytes must be a non-negative integer")
+        hard_cap = expected_size_bytes if max_bytes is None else min(expected_size_bytes, max_bytes)
+        digest = hashlib.sha256()
+        size_bytes = 0
+        try:
+            with self._client.stream("GET", self._url(relative)) as response:
+                if response.status_code != 200:
+                    raise WebDAVHTTPError("GET", relative, response.status_code)
+                raw_length = response.headers.get("content-length")
+                if raw_length is not None and raw_length.isdigit() and int(raw_length) > hard_cap:
+                    raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
+                for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
+                    size_bytes += len(chunk)
+                    if size_bytes > hard_cap:
+                        raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
+                    digest.update(chunk)
+        except httpx.HTTPError as exc:
+            raise WebDAVError(f"WebDAV GET {relative.as_posix()} failed") from exc
+        if size_bytes != expected_size_bytes:
+            raise WebDAVIntegrityError("remote byte size does not match the sealed identity")
+        if digest.hexdigest() != trusted_digest:
+            raise WebDAVIntegrityError("remote SHA-256 does not match the sealed identity")
+        return VerifiedArtifact(relative, trusted_digest, size_bytes)
 
     def propfind(
         self,
@@ -363,6 +408,21 @@ class ReadOnlyWebDAVClient:
 
     def get(self, path: str | PurePosixPath, *, max_bytes: int | None = None) -> WebDAVResponse:
         return self.__client.get(path, max_bytes=max_bytes)
+
+    def verify(
+        self,
+        path: str | PurePosixPath,
+        *,
+        expected_sha256: str,
+        expected_size_bytes: int,
+        max_bytes: int | None = None,
+    ) -> VerifiedArtifact:
+        return self.__client.verify(
+            path,
+            expected_sha256=expected_sha256,
+            expected_size_bytes=expected_size_bytes,
+            max_bytes=max_bytes,
+        )
 
     def propfind(
         self,

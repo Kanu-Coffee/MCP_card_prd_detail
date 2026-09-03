@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -200,6 +201,44 @@ def test_get_hard_cap_and_verified_atomic_download(
     assert destination.read_bytes() == b"x" * 100
 
 
+def test_stream_verify_accepts_exact_identity_and_rejects_integrity_failures(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+) -> None:
+    _, client = webdav
+    payload = b"stream-verified" * 100
+    path = PurePosixPath("v1/files/stream-verified.bin")
+    digest = sha256_bytes(payload)
+    client.ensure_collection(path.parent)
+    client.put(path, payload)
+
+    verified = client.verify(
+        path,
+        expected_sha256=digest,
+        expected_size_bytes=len(payload),
+    )
+
+    assert (verified.path, verified.sha256, verified.size_bytes) == (path, digest, len(payload))
+    with pytest.raises(WebDAVIntegrityError, match="byte size"):
+        client.verify(
+            path,
+            expected_sha256=digest,
+            expected_size_bytes=len(payload) + 1,
+        )
+    with pytest.raises(WebDAVIntegrityError, match="SHA-256"):
+        client.verify(
+            path,
+            expected_sha256="0" * 64,
+            expected_size_bytes=len(payload),
+        )
+    with pytest.raises(WebDAVIntegrityError, match="exceeds"):
+        client.verify(
+            path,
+            expected_sha256=digest,
+            expected_size_bytes=len(payload),
+            max_bytes=len(payload) - 1,
+        )
+
+
 def test_cas_publisher_is_create_once_and_readback_verified(
     webdav: tuple[_MemoryWebDAV, WebDAVClient],
 ) -> None:
@@ -214,6 +253,37 @@ def test_cas_publisher_is_create_once_and_readback_verified(
     backend.files[reference.path] = b"corrupt"
     with pytest.raises(WebDAVIntegrityError):
         publisher.publish_bytes(b"immutable", media_type="text/plain")
+
+
+def test_file_publication_readback_does_not_allocate_temporary_files(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, client = webdav
+    payload = b"sealed-database" * 100
+    source = tmp_path / "index.sqlite3"
+    source.write_bytes(payload)
+
+    def reject_temporary_file(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("publication readback must not allocate a local temporary file")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", reject_temporary_file)
+    monkeypatch.setattr(tempfile, "mkstemp", reject_temporary_file)
+
+    reference = CASPublisher(client).publish_file(
+        source,
+        media_type="application/vnd.sqlite3",
+        expected_sha256=sha256_bytes(payload),
+        expected_size_bytes=len(payload),
+    )
+
+    assert backend.files[reference.path] == payload
+    readbacks = [path for method, path in backend.requests if method == "GET"]
+    assert len(readbacks) == 2
+    assert ".incoming/publish/" in readbacks[0]
+    assert readbacks[1] == reference.path
+    assert not any(".incoming" in path for path in backend.files)
 
 
 def test_file_publication_rejects_symlinks_before_remote_mutation(
@@ -648,6 +718,11 @@ def test_mcp_facade_downloads_only_ready_bound_v5_vector_sidecar(
     assert verified.sha256 == sha256_bytes(vector_bytes)
     assert destination.read_bytes() == vector_bytes
     assert manifest.vector_sidecar is not None
+    assert reader.verify_serving_database(current=current).sha256 == manifest.serving_database.sha256
+    assert reader.verify_vector_sidecar(current=current).sha256 == manifest.vector_sidecar.artifact.sha256
+    assert reader.verify_object(manifest.documents[0].pdf).sha256 == manifest.documents[0].pdf.sha256
+    assert manifest.documents[0].ocr is not None
+    assert reader.verify_object(manifest.documents[0].ocr).sha256 == manifest.documents[0].ocr.sha256
     vector_path = manifest.vector_sidecar.artifact.path
     backend.files[vector_path] = b"x" * len(vector_bytes)
     last_good = (tmp_path / "last-good.f32").resolve()

@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.13"}
+    assert versions == {"1.0.14"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -80,7 +80,7 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
     assert "from runtime as admin" not in lowered
 
 
-def test_v113_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
+def test_v114_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     root_env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     worker_base = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     mcp_base = (ROOT / "deploy/mcp/compose.yaml").read_text(encoding="utf-8")
@@ -97,10 +97,10 @@ def test_v113_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert 'CARDRAG_OCR_CACHE_PUBLICATION_APPROVED: "false"' in worker
     assert 'CARDRAG_REMOTE_GC_APPROVED: "false"' in worker
     assert 'CARDRAG_OCR_CACHE_MODE: "read-only"' in worker
-    assert "cardrag-worker-v113-candidate-state" in worker
-    assert "cardrag-worker-v113-candidate-codex-home" in worker
-    assert "cardrag-mcp-v113-candidate-state" in mcp
-    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18013" in mcp
+    assert "cardrag-worker-v114-candidate-state" in worker
+    assert "cardrag-worker-v114-candidate-codex-home" in worker
+    assert "cardrag-mcp-v114-candidate-state" in mcp
+    assert "CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18014" in mcp
     assert "target: /mnt/cardrag-v109-state" in cache_seed
     assert "read_only: true" in cache_seed
     assert "external: true" in cache_seed
@@ -143,9 +143,9 @@ def test_v113_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "cardrag-worker-v111-state" in worker_base
     assert "cardrag-worker-v111-codex-home" in worker_base
     assert "cardrag-mcp-v111-state" in mcp_base
-    assert "cardrag-worker-v113-candidate-state" not in worker_base
-    assert "cardrag-worker-v113-candidate-codex-home" not in worker_base
-    assert "cardrag-mcp-v113-candidate-state" not in mcp_base
+    assert "cardrag-worker-v114-candidate-state" not in worker_base
+    assert "cardrag-worker-v114-candidate-codex-home" not in worker_base
+    assert "cardrag-mcp-v114-candidate-state" not in mcp_base
 
 
 def test_v112_offline_snapshot_copies_during_each_destination_first_mount() -> None:
@@ -304,7 +304,7 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
         {
             "CARDRAG_WEBDAV_BASE_URL": "https://shared.invalid/cardrag",
             "CARDRAG_CANDIDATE_WEBDAV_BASE_URL": "https://attacker.invalid/isolated-base",
-            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18013",
+            "CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL": "http://127.0.0.1:18014",
             "CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST": "sha256:" + "a" * 64,
             "CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST": "sha256:" + "b" * 64,
             "CARDRAG_WORKER_IMAGE": "attacker.invalid/worker:local",
@@ -399,8 +399,8 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert worker_environment["HOME"] == "/var/lib/cardrag-codex-home/home"
     assert worker_volumes["/var/lib/cardrag-worker"]["source"] == "worker-state"
     assert worker_volumes["/var/lib/cardrag-codex-home"]["source"] == "codex-home"
-    assert worker_config["volumes"]["worker-state"]["name"] == ("cardrag-worker-v113-candidate-state")
-    assert worker_config["volumes"]["codex-home"]["name"] == ("cardrag-worker-v113-candidate-codex-home")
+    assert worker_config["volumes"]["worker-state"]["name"] == ("cardrag-worker-v114-candidate-state")
+    assert worker_config["volumes"]["codex-home"]["name"] == ("cardrag-worker-v114-candidate-codex-home")
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_WORKER_"):
             assert worker_environment[name] == expected
@@ -420,7 +420,7 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert mcp_service["security_opt"] == ["no-new-privileges:true"]
     assert mcp_environment["CARDRAG_EXPERIMENTAL_MAP_REDUCE_ENABLED"] == "false"
     assert mcp_environment["CARDRAG_WEBDAV_BASE_URL"] == "https://shared.invalid/cardrag"
-    assert mcp_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v113-candidate-state")
+    assert mcp_config["volumes"]["mcp-state"]["name"] == ("cardrag-mcp-v114-candidate-state")
     for name, expected in capacity.items():
         if name.startswith("CARDRAG_MCP_"):
             assert mcp_environment[name] == expected

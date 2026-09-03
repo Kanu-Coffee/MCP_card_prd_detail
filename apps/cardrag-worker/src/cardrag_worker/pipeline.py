@@ -554,6 +554,7 @@ class WorkerUnexpectedFailureRecord:
     run_id: str
     occurred_at: datetime
     error_class_category: str
+    phase: str | None = None
     status_code: int | None = None
     errno: int | None = None
     reason_code: str = "worker_unexpected_failure"
@@ -570,6 +571,8 @@ class WorkerUnexpectedFailureRecord:
             raise ValueError("Worker failure timestamp must be timezone-aware")
         if not re.fullmatch(r"[a-z0-9_]{1,64}", self.error_class_category):
             raise ValueError("Worker failure error class category is invalid")
+        if self.phase is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", self.phase):
+            raise ValueError("Worker failure phase is invalid")
         if self.status_code is not None and not 100 <= self.status_code <= 599:
             raise ValueError("Worker failure status_code is invalid")
         if self.errno is not None and (isinstance(self.errno, bool) or not 1 <= self.errno <= 4095):
@@ -592,6 +595,8 @@ class WorkerUnexpectedFailureRecord:
             payload["status_code"] = self.status_code
         if self.errno is not None:
             payload["errno"] = self.errno
+        if self.phase is not None:
+            payload["phase"] = self.phase
         return payload
 
 
@@ -726,6 +731,7 @@ class _ValidatedSeal:
     objects: tuple[tuple[Path, str, str, int], ...]
     ocr_cache_publication_deferred: int
     v5_metrics: Mapping[str, Any] | None
+    seal_sha256: str
 
 
 def _atomic_write(path: Path, body: bytes) -> None:
@@ -1310,9 +1316,29 @@ def _write_ocr_systemic_failure_report(
         raise RuntimeError("OCR systemic failure report write failed") from None
 
 
+class _WorkerPhaseFailure(RuntimeError):
+    """A secret-safe snapshot of a failed worker phase."""
+
+    def __init__(
+        self,
+        *,
+        phase: str,
+        error_class_category: str,
+        status_code: int | None,
+        errno: int | None,
+    ) -> None:
+        self.phase = phase
+        self.error_class_category = error_class_category
+        self.status_code = status_code
+        self.errno = errno
+        super().__init__("Worker pipeline phase failed.")
+
+
 def _classify_worker_failure(exc: Exception) -> tuple[str, int | None, int | None]:
     """Return only allowlisted diagnostic categories and bounded integers."""
 
+    if isinstance(exc, _WorkerPhaseFailure):
+        return exc.error_class_category, exc.status_code, exc.errno
     if isinstance(exc, ProviderSystemicError):
         return "provider_systemic", None, None
     if isinstance(exc, ProviderError):
@@ -1753,7 +1779,7 @@ class WorkerPipeline:
         if v5_profile is None and ocr_cache_mode != "read-write":
             raise ValueError("legacy v4 Worker requires its original read-write OCR cache contract")
         if v5_profile is not None and webdav.channel == "stable" and not stable_publication_approved:
-            raise ValueError("stable v1.0.13 publication requires explicit approval")
+            raise ValueError("stable v1.0.14 publication requires explicit approval")
         if v5_profile is not None and webdav.channel == "candidate-v1.0.11" and ocr_cache_mode != "read-only":
             raise ValueError("v1.0.11 candidate requires read-only remote OCR cache access")
         if v5_profile is not None and ocr_cache_mode == "read-write" and not ocr_cache_publication_approved:
@@ -2071,6 +2097,7 @@ class WorkerPipeline:
                     run_id=run_id,
                     occurred_at=datetime.now(UTC),
                     error_class_category=category,
+                    phase=exc.phase if isinstance(exc, _WorkerPhaseFailure) else None,
                     status_code=status_code,
                     errno=error_number,
                 )
@@ -2772,7 +2799,13 @@ class WorkerPipeline:
                     and validated_resume_seal.ocr_cache_publication_deferred > 0
                 )
                 if not resume_seal_is_current_deferred:
-                    return await finalize_pdf_activity(await self._publish_sealed(run_id, deferred_seal))
+                    return await finalize_pdf_activity(
+                        await self._publish_sealed(
+                            run_id,
+                            deferred_seal,
+                            validated=validated_resume_seal,
+                        )
+                    )
                 assert current_remote is not None
                 if await self._reconcile_remote_bundle(validated_resume_seal.manifest) is None:
                     raise RuntimeError(
@@ -4957,6 +4990,7 @@ class WorkerPipeline:
     async def _validate_local_seal(self, sealed: Mapping[str, Any]) -> _ValidatedSeal:
         if sealed.get("schema_version") != "cardrag.worker-seal.v1":
             raise RuntimeError("unknown worker publication seal schema")
+        seal_sha256 = canonical_sha256(sealed)
         local_root = (self.state_dir / "runs").resolve(strict=True)
         pdf_cache_root = self.pdf_cache.objects_root.resolve(strict=True)
 
@@ -5358,6 +5392,8 @@ class WorkerPipeline:
             validated_objects.append((path, media_type, digest, size))
         if actual_references != expected_references:
             raise RuntimeError("sealed CAS rows do not exactly match generation manifest references")
+        if canonical_sha256(sealed) != seal_sha256:
+            raise RuntimeError("worker publication seal changed during validation")
 
         return _ValidatedSeal(
             manifest,
@@ -5366,10 +5402,19 @@ class WorkerPipeline:
             tuple(validated_objects),
             ocr_cache_publication_deferred,
             v5_metrics,
+            seal_sha256,
         )
 
-    async def _publish_remote_only(self, sealed: Mapping[str, Any]) -> tuple[PublishedBundle, _ValidatedSeal]:
-        validated = await self._validate_local_seal(sealed)
+    async def _publish_remote_only(
+        self,
+        sealed: Mapping[str, Any],
+        *,
+        validated: _ValidatedSeal | None = None,
+    ) -> tuple[PublishedBundle, _ValidatedSeal]:
+        if validated is None:
+            validated = await self._validate_local_seal(sealed)
+        elif canonical_sha256(sealed) != validated.seal_sha256:
+            raise RuntimeError("validated worker publication seal identity changed")
         generation_id = validated.manifest.generation_id
 
         # No remote mutation occurs until every seal/database/object check above succeeds.
@@ -5390,10 +5435,19 @@ class WorkerPipeline:
         )
         return published, validated
 
-    async def _publish_sealed(self, run_id: str, sealed: Mapping[str, Any]) -> PipelineResult:
+    async def _publish_sealed(
+        self,
+        run_id: str,
+        sealed: Mapping[str, Any],
+        *,
+        validated: _ValidatedSeal | None = None,
+    ) -> PipelineResult:
         if str(sealed.get("run_id") or "") != run_id:
             raise RuntimeError("sealed publication belongs to a different run")
-        validated = await self._validate_local_seal(sealed)
+        if validated is None:
+            validated = await self._validate_local_seal(sealed)
+        elif canonical_sha256(sealed) != validated.seal_sha256:
+            raise RuntimeError("validated worker publication seal identity changed")
         current = await self.webdav.validated_current_generation()
         stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
         if current is None and stable_body is not None:
@@ -5462,20 +5516,31 @@ class WorkerPipeline:
             validated=validated,
             current_generation_id=current.generation_id if current is not None else None,
         )
-        publication_failed = False
+        publication_failure: _WorkerPhaseFailure | None = None
         try:
-            published, published_seal = await self._publish_remote_only(aligned)
-        except Exception:
+            published, published_seal = await self._publish_remote_only(
+                aligned,
+                validated=validated,
+            )
+        except Exception as exc:
             # MOVE can commit stable.json immediately before its destination
-            # readback fails. Drop the raw source exception, then reconcile
-            # against the fully validated generation and exact manifest bytes.
-            publication_failed = True
-        if publication_failed:
-            reconciled = await self._reconcile_remote_bundle(validated.manifest)
+            # readback fails. Retain only an allowlisted diagnostic snapshot,
+            # then reconcile against the fully validated generation and exact
+            # manifest bytes.
+            category, status_code, error_number = _classify_worker_failure(exc)
+            publication_failure = _WorkerPhaseFailure(
+                phase="remote_publication",
+                error_class_category=category,
+                status_code=status_code,
+                errno=error_number,
+            )
+        if publication_failure is not None:
+            try:
+                reconciled = await self._reconcile_remote_bundle(validated.manifest)
+            except Exception:
+                raise publication_failure from None
             if reconciled is None:
-                raise RuntimeError(
-                    "remote publication failed and its stable commit could not be reconciled"
-                ) from None
+                raise publication_failure from None
             published = reconciled
             published_seal = validated
         manifest = published_seal.manifest

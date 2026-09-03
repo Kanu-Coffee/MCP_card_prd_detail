@@ -385,7 +385,12 @@ async def test_publish_sealed_reconciles_exact_commit_after_pointer_readback_fai
         state.start_run(run_id="run-sealed")
         worker = pipeline(tmp_path, state, webdav)
 
-        async def commit_then_fail(_sealed: object) -> Any:
+        async def commit_then_fail(
+            _sealed: object,
+            *,
+            validated: object | None = None,
+        ) -> Any:
+            assert validated is not None
             webdav.current = RemoteGenerationIdentity(
                 generation_id=manifest.generation_id,
                 corpus_sha256=manifest.corpus_sha256,
@@ -505,10 +510,12 @@ async def test_partial_current_generation_does_not_suppress_replacement_seal(tmp
 
         async def publish_replacement(
             current_seal: dict[str, Any],
+            *,
+            validated: Any | None = None,
         ) -> tuple[PublishedBundle, Any]:
             nonlocal publish_calls
             publish_calls += 1
-            validated = await worker._validate_local_seal(current_seal)
+            assert validated is not None
             return (
                 PublishedBundle(
                     generation_id=validated.manifest.generation_id,
@@ -524,3 +531,65 @@ async def test_partial_current_generation_does_not_suppress_replacement_seal(tmp
     assert publish_calls == 1
     assert result.status == "succeeded"
     assert result.generation_id == manifest.generation_id
+
+
+@pytest.mark.asyncio
+async def test_publication_failure_preserves_safe_phase_and_errno_for_resume(
+    tmp_path: Path,
+) -> None:
+    raw_sentinel = "RAW_ENOSPC_PATH_TOKEN_SECRET"
+    seal = build_seal(tmp_path)
+    webdav = NoWriteWebDAV()
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id="run-sealed")
+        state.finish_run("run-sealed", "failed", error="prior publication attempt failed")
+        worker = pipeline(tmp_path, state, webdav)
+        validation_calls = 0
+        validate_local_seal = worker._validate_local_seal
+
+        async def count_validation(current_seal: dict[str, Any]) -> Any:
+            nonlocal validation_calls
+            validation_calls += 1
+            return await validate_local_seal(current_seal)
+
+        async def fail_publication(
+            _sealed: object,
+            *,
+            validated: object | None = None,
+        ) -> Any:
+            assert validated is not None
+            raise OSError(28, raw_sentinel)
+
+        async def no_remote_commit(_manifest: object) -> None:
+            return None
+
+        async def publish_from_retained_seal(
+            run_id: str,
+            *,
+            refresh_sources: bool = False,
+        ) -> Any:
+            assert (run_id, refresh_sources) == ("run-sealed", True)
+            validated = await worker._validate_local_seal(seal)
+            return await worker._publish_sealed(run_id, seal, validated=validated)
+
+        worker._validate_local_seal = count_validation  # type: ignore[method-assign]
+        worker._publish_remote_only = fail_publication  # type: ignore[method-assign]
+        worker._reconcile_remote_bundle = no_remote_commit  # type: ignore[method-assign]
+        worker._run_locked = publish_from_retained_seal  # type: ignore[method-assign]
+
+        with pytest.raises(WorkerUnexpectedFailureError) as captured:
+            await worker.run(resume_run_id="run-sealed")
+
+        assert validation_calls == 1
+        assert captured.value.failure.error_class_category == "local_io"
+        assert captured.value.failure.phase == "remote_publication"
+        assert captured.value.failure.errno == 28
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
+        report = captured.value.report_path.read_text(encoding="utf-8")
+        run_error = state.connection.execute("SELECT error FROM run WHERE run_id='run-sealed'").fetchone()[0]
+        assert state.ready_publish("c" * 64, "d" * 64) is None
+        assert raw_sentinel not in report
+        assert raw_sentinel not in str(run_error)
+        assert (tmp_path / "runs" / "run-sealed" / "sealed" / "publish.json").is_file()

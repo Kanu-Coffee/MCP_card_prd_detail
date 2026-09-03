@@ -76,7 +76,7 @@ date, and source version back to the stable desktop discovery record before it
 downloads any bytes.
 
 Live discovery, OCR, embeddings, and WebDAV publishing require real issuer and
-provider credentials/endpoints. The v1.0.13 reliability-patch worker accepts
+provider credentials/endpoints. The v1.0.14 reliability-patch worker accepts
 `candidate-v1.0.11` by default; `stable` remains blocked unless the separately
 approved cutover explicitly sets `CARDRAG_STABLE_PUBLICATION_APPROVED=true`.
 No provided environment or Compose file enables that flag. Shared native or
@@ -124,7 +124,7 @@ Codex executable cannot read its own authentication store.
 
 Stable container deployments persist Codex data in the dedicated
 `cardrag-worker-v111-codex-home` volume at `/var/lib/cardrag-codex-home`; the
-v1.0.13 candidate overlay instead uses `cardrag-worker-v113-candidate-codex-home`.
+v1.0.14 candidate overlay instead uses `cardrag-worker-v114-candidate-codex-home`.
 `CARDRAG_CODEX_AUTH_ROOT` and `CODEX_HOME` equal that mount root, while `HOME`
 is its owned mode-0700 `home/` child. The Worker recovery volume remains mounted
 only at `/var/lib/cardrag-worker`; settings reject an auth root that is equal to,
@@ -142,7 +142,7 @@ value, byte offset, pattern, or surrounding OCR text.
 state; the MCP and external progress monitors never open the live database.
 Operational progress comes from the Worker's structured container/journal logs.
 Candidate runs use the shared canonical WebDAV root but a separate
-`candidate-v1.0.11` channel and v113 state volume, and never perform remote GC.
+`candidate-v1.0.11` channel and v114 state volume, and never perform remote GC.
 Unit tests use local deterministic fakes.
 
 The v5 path has fail-closed local capacity gates; legacy v1-v4 behavior is
@@ -215,7 +215,7 @@ body limit when absent. Configure them with
 `CARDRAG_EMBEDDING_METADATA_MAX_RESPONSE_BYTES`; invalid or oversized values
 fail closed without including provider bodies or credentials in errors.
 
-The supported v1.0.11 data-publication path uses the v1.0.13 Worker
+The supported v1.0.11 data-publication path uses the v1.0.14 Worker
 CLI/container. The v5
 bundle publisher also denies a stable pointer move unless the caller carries
 the explicit stable-publication capability; calling the primitive directly is
