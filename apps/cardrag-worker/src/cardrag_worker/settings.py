@@ -102,6 +102,65 @@ def _provider_base_url(name: str, default: str) -> str:
     return value
 
 
+def _worker_state_dir_from_env() -> Path:
+    # Keep the unresolved absolute spelling so the startup capacity gate can
+    # descriptor-walk and reject every symlinked ancestor.
+    return Path(os.path.abspath(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")))
+
+
+def _aggregation_profile_from_env() -> tuple[Path | None, str | None]:
+    path_raw = os.environ.get("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE")
+    sha256_raw = os.environ.get("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256")
+    if (path_raw is None) != (sha256_raw is None):
+        raise ValueError(
+            "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE and "
+            "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256 are all-or-nothing"
+        )
+    if path_raw is None or sha256_raw is None:
+        return None, None
+    if not path_raw or _CONTROL.search(path_raw) or not Path(path_raw).is_absolute():
+        raise ValueError("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE must be an absolute path")
+    artifact_sha256 = sha256_raw.strip()
+    if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None:
+        raise ValueError("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256 must be lowercase SHA-256")
+    return Path(os.path.abspath(path_raw)), artifact_sha256
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationResumeSettings:
+    """Only the local/publication controls needed to resume an exact seal."""
+
+    state_dir: Path
+    minimum_start_free_bytes: int
+    channel: str
+    stable_publication_approved: bool
+    document_aggregation_profile_path: Path | None
+    document_aggregation_profile_artifact_sha256: str | None
+
+    @classmethod
+    def from_env(cls) -> PublicationResumeSettings:
+        channel = os.environ.get("CARDRAG_CHANNEL", "stable")
+        channel_pointer_path(channel)
+        aggregation_path, aggregation_sha256 = _aggregation_profile_from_env()
+        return cls(
+            state_dir=_worker_state_dir_from_env(),
+            minimum_start_free_bytes=_bounded_int(
+                "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES",
+                DEFAULT_MINIMUM_START_FREE_BYTES,
+                minimum=0,
+                maximum=MAX_SAFE_BYTES,
+            ),
+            channel=channel,
+            stable_publication_approved=_boolean("CARDRAG_STABLE_PUBLICATION_APPROVED", False),
+            document_aggregation_profile_path=aggregation_path,
+            document_aggregation_profile_artifact_sha256=aggregation_sha256,
+        )
+
+    @property
+    def state_database(self) -> Path:
+        return self.state_dir / "worker-state.sqlite3"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     state_dir: Path
@@ -177,38 +236,14 @@ class WorkerSettings:
             minimum=1,
             maximum=32_768,
         )
-        # Keep the unresolved absolute spelling so the startup capacity gate
-        # can descriptor-walk and reject every symlinked ancestor. Resolving
-        # here would erase that security evidence before the gate runs.
-        state_dir = Path(os.path.abspath(os.environ.get("CARDRAG_WORKER_STATE_DIR", "./data/cardrag-worker")))
+        state_dir = _worker_state_dir_from_env()
         tokenizer_path_raw = os.environ.get("CARDRAG_QWEN_TOKENIZER_PATH")
         tokenizer_path = (
             Path(tokenizer_path_raw).resolve()
             if tokenizer_path_raw
             else state_dir / "contracts" / f"qwen3-embedding-8b-tokenizer-{QWEN_TOKENIZER_SHA256}.json"
         )
-        aggregation_path_raw = os.environ.get("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE")
-        aggregation_sha256_raw = os.environ.get("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256")
-        if (aggregation_path_raw is None) != (aggregation_sha256_raw is None):
-            raise ValueError(
-                "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE and "
-                "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256 are all-or-nothing"
-            )
-        aggregation_path: Path | None = None
-        aggregation_sha256: str | None = None
-        if aggregation_path_raw is not None and aggregation_sha256_raw is not None:
-            if (
-                not aggregation_path_raw
-                or _CONTROL.search(aggregation_path_raw)
-                or not Path(aggregation_path_raw).is_absolute()
-            ):
-                raise ValueError("CARDRAG_DOCUMENT_AGGREGATION_PROFILE_FILE must be an absolute path")
-            aggregation_sha256 = aggregation_sha256_raw.strip()
-            if re.fullmatch(r"[0-9a-f]{64}", aggregation_sha256) is None:
-                raise ValueError(
-                    "CARDRAG_DOCUMENT_AGGREGATION_PROFILE_ARTIFACT_SHA256 must be lowercase SHA-256"
-                )
-            aggregation_path = Path(os.path.abspath(aggregation_path_raw))
+        aggregation_path, aggregation_sha256 = _aggregation_profile_from_env()
         webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL")
         if require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")

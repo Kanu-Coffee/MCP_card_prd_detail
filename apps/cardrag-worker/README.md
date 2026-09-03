@@ -42,6 +42,7 @@ cardrag-worker webdav-check
 cardrag-worker seed-cache-v109 /mnt/cardrag-v109-state     # candidate only
 cardrag-worker run
 cardrag-worker resume <run-id>
+cardrag-worker resume-publication <32-hex-run-id>  # sealed publication only
 cardrag-worker gc                    # dry-run
 cardrag-worker gc --apply
 ```
@@ -216,7 +217,14 @@ body limit when absent. Configure them with
 fail closed without including provider bodies or credentials in errors.
 
 The supported v1.0.11 data-publication path uses the v1.0.14 Worker
-CLI/container. The v5
+CLI/container. `resume-publication` is the fail-closed recovery path for an
+existing failed/interrupted run, or a stale `running` run after an ungraceful
+process exit, with a canonical local `publish.json`. It holds
+the worker lock while opening existing state, validates the full local seal
+once, and performs only remote publication/reconciliation. It never constructs
+issuer discovery, OCR, embedding, cache-healing, cleanup, or remote-GC paths;
+this also prevents live endpoint-metadata drift from diverting a sealed
+recovery back into provider work. The v5
 bundle publisher also denies a stable pointer move unless the caller carries
 the explicit stable-publication capability; calling the primitive directly is
 not an approval bypass. Legacy v1-v4 publisher behavior is unchanged.

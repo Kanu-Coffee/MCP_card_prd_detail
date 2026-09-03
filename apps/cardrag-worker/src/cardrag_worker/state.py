@@ -529,8 +529,13 @@ JOIN pdf_cache_object o ON o.pdf_sha256=r.pdf_sha256
 
 
 class WorkerState:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path, *, create: bool = True) -> None:
+        if type(create) is not bool:
+            raise ValueError("Worker state create policy must be boolean")
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        elif not path.parent.is_dir() or path.parent.is_symlink():
+            raise RuntimeError("existing Worker state directory is unavailable or unsafe")
         self.path = path
         # OCR resolvers sharing this state object coordinate native reuse by
         # current run and exact contract. Values are deliberately runtime-only;
@@ -540,7 +545,7 @@ class WorkerState:
         self._ocr_run_local_manifest_index_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._sqlite_registry_keys = _reserve_worker_state(path)
         try:
-            descriptor, sealed_database = _open_nofollow_regular(path, create=True)
+            descriptor, sealed_database = _open_nofollow_regular(path, create=create)
             _record_worker_state_identity(self._sqlite_registry_keys, sealed_database)
             os.close(descriptor)
             sidecar_paths = (
@@ -783,6 +788,33 @@ class WorkerState:
                    WHERE run_id=? AND stage_name='discovery'""",
                 (now, now, run_id),
             )
+
+    def assert_publication_resumable(self, run_id: str) -> None:
+        """Begin a sealed-publication-only attempt without reopening provider stages.
+
+        The caller holds the worker lock, so a ``running`` row is necessarily
+        stale after an ungraceful prior process exit and may be reclaimed.
+        Failed/interrupted rows are accepted as well. Unlike general resume,
+        discovery/OCR/embedding stage rows are deliberately left byte-for-byte
+        unchanged.
+        """
+
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT status FROM run WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown run: {run_id}")
+            if str(row["status"]) not in {"failed", "interrupted", "running"}:
+                raise ValueError(f"run {run_id} is not a resumable publication candidate")
+            cursor = connection.execute(
+                """UPDATE run SET status='running',finished_at=NULL,error=NULL
+                   WHERE run_id=? AND status IN ('failed','interrupted','running')""",
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("publication resume state changed before activation")
 
     def finish_run(
         self,

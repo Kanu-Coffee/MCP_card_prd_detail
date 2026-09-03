@@ -295,6 +295,20 @@ def test_candidate_migration_resumes_the_exact_preserved_run() -> None:
     assert "candidate-worker-acceptance worker run" not in deployment
 
 
+def test_v114_incident_recovery_uses_sealed_publication_only_resume() -> None:
+    migration = (ROOT / "docs/V1_0_14_MIGRATION.md").read_text(encoding="utf-8")
+    section = migration.split("## 4. Same-run sealed-publication resume", 1)[1].split(
+        "### 4.1 Worker terminal",
+        1,
+    )[0]
+
+    assert 'worker resume-publication "$preserved_run_id"' in section
+    assert 'worker resume "$preserved_run_id"' not in section
+    assert "live embedding endpoint metadata" in section
+    assert "Provider, issuer discovery, OCR, embedding" in section
+    assert "full local seal 검증은 한\n번뿐" in section
+
+
 def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> None:
     docker = shutil.which("docker")
     if docker is None:
