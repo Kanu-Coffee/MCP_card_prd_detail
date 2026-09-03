@@ -443,12 +443,80 @@ def test_state_uses_wal_and_resume_resets_attempts_and_refreshes_discovery(tmp_p
         assert state.stage_started(run_id, "doc", "ocr") == 1
 
 
+def test_publication_resume_claim_does_not_reopen_any_pipeline_stage(tmp_path: Path) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(run_id="run-publication")
+        for document_id, stage_name in (
+            ("issuer-kb", "discovery"),
+            ("source-1", "download"),
+            ("doc-1", "ocr"),
+            ("doc-1", "embedding"),
+        ):
+            state.ensure_stage(run_id, document_id, stage_name, max_attempts=2)
+            state.stage_started(run_id, document_id, stage_name)
+            state.stage_terminal_failed(run_id, document_id, stage_name, "safe failure")
+        before = state.connection.execute(
+            """SELECT document_id,stage_name,status,attempt_count,max_attempts,
+                      available_at,last_error,updated_at
+               FROM stage WHERE run_id=? ORDER BY document_id,stage_name""",
+            (run_id,),
+        ).fetchall()
+        state.finish_run(run_id, "failed", error="publication failed")
+        unrelated = state.start_run(run_id="unrelated-running")
+
+        state.assert_publication_resumable(run_id)
+
+        # Simulate SIGKILL immediately after the first claim. Once a new
+        # process owns worker.lock, the leftover running row is stale and the
+        # same sealed-publication operation must be reclaimable.
+        state.assert_publication_resumable(run_id)
+
+        after = state.connection.execute(
+            """SELECT document_id,stage_name,status,attempt_count,max_attempts,
+                      available_at,last_error,updated_at
+               FROM stage WHERE run_id=? ORDER BY document_id,stage_name""",
+            (run_id,),
+        ).fetchall()
+        status = state.connection.execute(
+            "SELECT status,error FROM run WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        assert [tuple(row) for row in after] == [tuple(row) for row in before]
+        assert tuple(status) == ("running", None)
+        assert (
+            state.connection.execute(
+                "SELECT status FROM run WHERE run_id=?",
+                (unrelated,),
+            ).fetchone()[0]
+            == "running"
+        )
+
+
+@pytest.mark.parametrize("status", ["succeeded", "no_change"])
+def test_publication_resume_claim_rejects_complete_run(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(run_id="run-publication")
+        state.finish_run(run_id, status)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="not a resumable publication candidate"):
+            state.assert_publication_resumable(run_id)
+
+
 def test_worker_lock_is_nonblocking_and_recoverable(tmp_path: Path) -> None:
     lock = tmp_path / "worker.lock"
     with worker_lock(lock), pytest.raises(AlreadyRunning), worker_lock(lock):
         pass
     with worker_lock(lock):
         pass
+
+
+def test_existing_state_open_never_creates_a_missing_database(tmp_path: Path) -> None:
+    database = tmp_path / "missing.sqlite3"
+    with pytest.raises(FileNotFoundError), WorkerState(database, create=False):
+        pass
+    assert not database.exists()
 
 
 def test_discovery_baseline_ignores_failed_runs(tmp_path: Path) -> None:

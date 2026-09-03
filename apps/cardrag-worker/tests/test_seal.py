@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,9 +25,17 @@ from cardrag_core import (
 
 from cardrag_worker.contracts import DocumentRecord, EvidenceRecord, IssuerSpec, PageRecord
 from cardrag_worker.exporter import ServingDatabaseExporter
-from cardrag_worker.pipeline import WorkerPipeline, WorkerUnexpectedFailureError
-from cardrag_worker.state import WorkerState
+from cardrag_worker.pipeline import (
+    PipelineResult,
+    SealedPublicationResumer,
+    WorkerPipeline,
+    WorkerUnexpectedFailureError,
+    resume_sealed_publication,
+)
+from cardrag_worker.state import AlreadyRunning, WorkerState, worker_lock
 from cardrag_worker.webdav import PublishedBundle, RemoteGenerationIdentity
+
+PUBLICATION_RUN_ID = "a" * 32
 
 
 class DummyOCR:
@@ -131,9 +141,13 @@ def build_seal(root: Path, run_id: str = "run-sealed") -> dict[str, Any]:
         source_end=len(page_text),
         embedding=[1.0] + [0.0] * 1535,
     )
-    generation_id = "g-sealed"
     corpus_sha = "c" * 64
     contract_sha = "d" * 64
+    generation_id = (
+        f"g-{run_id[:24]}-{corpus_sha[:12]}"
+        if len(run_id) == 32 and all(character in "0123456789abcdef" for character in run_id)
+        else "g-sealed"
+    )
     database_path = sealed_root / "index.sqlite3"
     export = ServingDatabaseExporter().export(
         database_path,
@@ -593,3 +607,305 @@ async def test_publication_failure_preserves_safe_phase_and_errno_for_resume(
         assert raw_sentinel not in report
         assert raw_sentinel not in str(run_error)
         assert (tmp_path / "runs" / "run-sealed" / "sealed" / "publish.json").is_file()
+
+
+def publication_resumer(
+    root: Path,
+    state: WorkerState,
+    webdav: NoWriteWebDAV,
+) -> SealedPublicationResumer:
+    webdav.channel = "candidate-v1.0.11"
+    webdav.pointer_path = "v1/channels/candidate-v1.0.11.json"
+    return SealedPublicationResumer(
+        state=state,
+        state_dir=root,
+        webdav=webdav,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["excluded-null", "implicit-default", "offset-time"])
+async def test_publication_only_rejects_manifest_that_reencodes_differently(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    seal = build_seal(tmp_path, PUBLICATION_RUN_ID)
+    manifest = seal["manifest"]
+    assert isinstance(manifest, dict)
+    if mutation == "excluded-null":
+        manifest["vector_sidecar"] = None
+    elif mutation == "implicit-default":
+        del manifest["previous_generation_id"]
+    else:
+        manifest["created_at"] = "2026-08-25T09:00:00+09:00"
+    seal_path = tmp_path / "runs" / PUBLICATION_RUN_ID / "sealed" / "publish.json"
+    seal_path.write_bytes(canonical_json_bytes(seal))
+    (tmp_path / "pdf-cache" / "objects" / "sha256").mkdir(parents=True)
+    webdav = NoWriteWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id=PUBLICATION_RUN_ID)
+        state.finish_run(PUBLICATION_RUN_ID, "failed", error="prior publication failed")
+        worker = publication_resumer(tmp_path, state, webdav)
+        with (
+            pytest.raises(WorkerUnexpectedFailureError) as captured,
+            worker_lock(tmp_path / "worker.lock"),
+        ):
+            await worker._resume_publication_locked(PUBLICATION_RUN_ID)
+
+    assert captured.value.failure.phase == "local_seal_validation"
+    assert captured.value.failure.error_class_category == "runtime"
+    assert webdav.put_calls == 0
+
+
+def test_publication_only_seal_fifo_is_rejected_without_blocking(tmp_path: Path) -> None:
+    build_seal(tmp_path, PUBLICATION_RUN_ID)
+    seal_path = tmp_path / "runs" / PUBLICATION_RUN_ID / "sealed" / "publish.json"
+    seal_path.unlink()
+    os.mkfifo(seal_path, mode=0o600)
+    webdav = NoWriteWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        worker = publication_resumer(tmp_path, state, webdav)
+        with pytest.raises(RuntimeError, match="bounded regular file"):
+            worker._load_seal(PUBLICATION_RUN_ID)
+
+
+@pytest.mark.asyncio
+async def test_seal_artifacts_are_bound_to_the_declared_run_directory(tmp_path: Path) -> None:
+    seal = build_seal(tmp_path, PUBLICATION_RUN_ID)
+    original_database = Path(str(seal["database_path"]))
+    other_database = tmp_path / "runs" / ("b" * 32) / "sealed" / "index.sqlite3"
+    other_database.parent.mkdir(parents=True)
+    other_database.write_bytes(original_database.read_bytes())
+    seal["database_path"] = str(other_database)
+    pipeline = object.__new__(WorkerPipeline)
+    pipeline.state_dir = tmp_path
+    pipeline.pdf_cache = SimpleNamespace(objects_root=tmp_path / "pdf-cache" / "objects" / "sha256")
+    pipeline.document_aggregation = None
+    pipeline.pdf_cache.objects_root.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="escapes approved worker storage"):
+        await pipeline._validate_local_seal(seal)
+
+
+@pytest.mark.asyncio
+async def test_publication_api_holds_lock_while_existing_state_is_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with WorkerState(tmp_path / "worker-state.sqlite3"):
+        pass
+    webdav = NoWriteWebDAV()
+    webdav.channel = "candidate-v1.0.11"
+    webdav.pointer_path = "v1/channels/candidate-v1.0.11.json"
+
+    async def observe_lock(
+        self: SealedPublicationResumer,
+        run_id: str,
+    ) -> PipelineResult:
+        assert run_id == PUBLICATION_RUN_ID
+        with pytest.raises(AlreadyRunning), worker_lock(tmp_path / "worker.lock"):
+            pass
+        return PipelineResult(
+            run_id=run_id,
+            status="succeeded",
+            corpus_sha256="c" * 64,
+            contract_sha256="d" * 64,
+            generation_id="g-sealed",
+            document_count=1,
+            evidence_count=1,
+        )
+
+    monkeypatch.setattr(SealedPublicationResumer, "_resume_publication_locked", observe_lock)
+    result = await resume_sealed_publication(
+        run_id=PUBLICATION_RUN_ID,
+        state_dir=tmp_path,
+        webdav=webdav,  # type: ignore[arg-type]
+    )
+
+    assert result.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_publication_only_resume_uses_one_seal_validation_and_no_providers(
+    tmp_path: Path,
+) -> None:
+    seal = build_seal(tmp_path, PUBLICATION_RUN_ID)
+    (tmp_path / "pdf-cache" / "objects" / "sha256").mkdir(parents=True)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = NoWriteWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id=PUBLICATION_RUN_ID)
+        state.finish_run(PUBLICATION_RUN_ID, "failed", error="prior remote publication failed")
+        worker = publication_resumer(tmp_path, state, webdav)
+        validation_calls = 0
+        validate = worker._validate_local_seal
+
+        async def count_validation(current_seal: dict[str, Any]) -> Any:
+            nonlocal validation_calls
+            validation_calls += 1
+            return await validate(current_seal)
+
+        async def publish_exact(
+            _sealed: object,
+            *,
+            validated: Any | None = None,
+        ) -> tuple[PublishedBundle, Any]:
+            assert validated is not None
+            return (
+                PublishedBundle(
+                    generation_id=manifest.generation_id,
+                    index_sha256=manifest.serving_database.sha256,
+                    manifest_sha256=manifest.manifest_sha256,
+                ),
+                validated,
+            )
+
+        worker._validate_local_seal = count_validation  # type: ignore[method-assign]
+        worker._publish_remote_only = publish_exact  # type: ignore[method-assign]
+        with worker_lock(tmp_path / "worker.lock"):
+            result = await worker._resume_publication_locked(PUBLICATION_RUN_ID)
+        row = state.connection.execute(
+            "SELECT status,error,corpus_sha256,contract_sha256 FROM run WHERE run_id=?",
+            (PUBLICATION_RUN_ID,),
+        ).fetchone()
+
+    assert validation_calls == 1
+    assert result.status == "succeeded"
+    assert tuple(row) == ("succeeded", None, manifest.corpus_sha256, manifest.contract_sha256)
+    assert not hasattr(worker, "adapters")
+    assert not hasattr(worker, "ocr")
+    assert not hasattr(worker, "embeddings")
+
+
+@pytest.mark.asyncio
+async def test_publication_only_resume_reconciles_exact_commit_without_revalidation(
+    tmp_path: Path,
+) -> None:
+    seal = build_seal(tmp_path, PUBLICATION_RUN_ID)
+    (tmp_path / "pdf-cache" / "objects" / "sha256").mkdir(parents=True)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = CancelReconciliationWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id=PUBLICATION_RUN_ID)
+        state.finish_run(PUBLICATION_RUN_ID, "failed", error="prior remote publication failed")
+        worker = publication_resumer(tmp_path, state, webdav)
+        validation_calls = 0
+        validate = worker._validate_local_seal
+
+        async def count_validation(current_seal: dict[str, Any]) -> Any:
+            nonlocal validation_calls
+            validation_calls += 1
+            return await validate(current_seal)
+
+        async def commit_then_fail(
+            _sealed: object,
+            *,
+            validated: Any | None = None,
+        ) -> Any:
+            assert validated is not None
+            webdav.current = RemoteGenerationIdentity(
+                generation_id=manifest.generation_id,
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+            )
+            webdav.remote_manifest = manifest.canonical_bytes()
+            raise RuntimeError("untrusted pointer readback detail")
+
+        worker._validate_local_seal = count_validation  # type: ignore[method-assign]
+        worker._publish_remote_only = commit_then_fail  # type: ignore[method-assign]
+        with worker_lock(tmp_path / "worker.lock"):
+            result = await worker._resume_publication_locked(PUBLICATION_RUN_ID)
+
+        assert validation_calls == 1
+        assert result.status == "succeeded"
+        assert state.ready_publish(manifest.corpus_sha256, manifest.contract_sha256) is not None
+
+
+@pytest.mark.asyncio
+async def test_publication_only_resume_recovers_running_row_after_pointer_commit(
+    tmp_path: Path,
+) -> None:
+    """A hard kill after remote commit must not strand the sealed run forever."""
+
+    seal = build_seal(tmp_path, PUBLICATION_RUN_ID)
+    (tmp_path / "pdf-cache" / "objects" / "sha256").mkdir(parents=True)
+    manifest = GenerationManifest.model_validate_json(canonical_json_bytes(seal["manifest"]))
+    webdav = CancelReconciliationWebDAV()
+    webdav.current = RemoteGenerationIdentity(
+        generation_id=manifest.generation_id,
+        corpus_sha256=manifest.corpus_sha256,
+        contract_sha256=manifest.contract_sha256,
+    )
+    webdav.remote_manifest = manifest.canonical_bytes()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id=PUBLICATION_RUN_ID)
+        # The row remains running exactly as it would after SIGKILL between a
+        # successful pointer MOVE and local terminal bookkeeping.
+        worker = publication_resumer(tmp_path, state, webdav)
+        with worker_lock(tmp_path / "worker.lock"):
+            result = await worker._resume_publication_locked(PUBLICATION_RUN_ID)
+
+        row = state.connection.execute(
+            "SELECT status,error FROM run WHERE run_id=?",
+            (PUBLICATION_RUN_ID,),
+        ).fetchone()
+
+    assert result.status == "succeeded"
+    assert result.generation_id == manifest.generation_id
+    assert tuple(row) == ("succeeded", None)
+
+
+@pytest.mark.asyncio
+async def test_publication_only_failure_is_terminal_and_secret_safe(tmp_path: Path) -> None:
+    raw_sentinel = "RAW_PUBLICATION_ONLY_PATH_TOKEN_SECRET"
+    build_seal(tmp_path, PUBLICATION_RUN_ID)
+    (tmp_path / "pdf-cache" / "objects" / "sha256").mkdir(parents=True)
+    webdav = NoWriteWebDAV()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.start_run(run_id=PUBLICATION_RUN_ID)
+        state.finish_run(PUBLICATION_RUN_ID, "failed", error="prior remote publication failed")
+        worker = publication_resumer(tmp_path, state, webdav)
+        validation_calls = 0
+        validate = worker._validate_local_seal
+
+        async def count_validation(current_seal: dict[str, Any]) -> Any:
+            nonlocal validation_calls
+            validation_calls += 1
+            return await validate(current_seal)
+
+        async def fail_publication(
+            _sealed: object,
+            *,
+            validated: Any | None = None,
+        ) -> Any:
+            assert validated is not None
+            raise OSError(28, raw_sentinel)
+
+        async def not_committed(_manifest: object) -> None:
+            return None
+
+        worker._validate_local_seal = count_validation  # type: ignore[method-assign]
+        worker._publish_remote_only = fail_publication  # type: ignore[method-assign]
+        worker._reconcile_remote_bundle = not_committed  # type: ignore[method-assign]
+
+        with (
+            pytest.raises(WorkerUnexpectedFailureError) as captured,
+            worker_lock(tmp_path / "worker.lock"),
+        ):
+            await worker._resume_publication_locked(PUBLICATION_RUN_ID)
+
+        row = state.connection.execute(
+            "SELECT status,error FROM run WHERE run_id=?",
+            (PUBLICATION_RUN_ID,),
+        ).fetchone()
+        report = captured.value.report_path.read_text(encoding="utf-8")
+
+    assert validation_calls == 1
+    assert captured.value.failure.phase == "remote_publication"
+    assert captured.value.failure.error_class_category == "local_io"
+    assert captured.value.failure.errno == 28
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert tuple(row)[0] == "failed"
+    assert raw_sentinel not in str(tuple(row)[1])
+    assert raw_sentinel not in report

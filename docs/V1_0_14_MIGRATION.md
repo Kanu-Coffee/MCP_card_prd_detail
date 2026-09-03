@@ -374,6 +374,8 @@ set -euo pipefail
 : "${source_codex:?offline v1.0.13 Codex volume is required}"
 : "${destination_state:?fresh v1.0.14 state volume is required}"
 : "${destination_codex:?fresh v1.0.14 Codex volume is required}"
+incident_image=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@sha256:9703eddeb5e4b1f3423b250fd13978121b24ec4a5a2c3e8064db4a76bdbe0be9
+docker_root=$(docker info --format '{{.DockerRootDir}}')
 [[ "$repository_root" = /* && "$repository_root" != */ ]]
 [[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 test "$(git -C "$repository_root" rev-parse HEAD)" = "$CANDIDATE_SOURCE_COMMIT"
@@ -548,7 +550,7 @@ seal_path = root / "runs" / run_id / "sealed" / "publish.json"
 sealed = json.loads(seal_path.read_bytes())
 pipeline = object.__new__(WorkerPipeline)
 pipeline.state_dir = root
-pipeline.pdf_cache = SimpleNamespace(objects_root=root / "pdf-cache" / "objects")
+pipeline.pdf_cache = SimpleNamespace(objects_root=root / "pdf-cache" / "objects" / "sha256")
 pipeline.document_aggregation = None
 validated = asyncio.run(pipeline._validate_local_seal(sealed))
 if (
@@ -580,13 +582,16 @@ printf '%s\n' "$destination_validation"
 Validator 실패 시 destination을 수정해 맞추지 않습니다. 해당 v114 volume과 receipt를
 격리하고 source read-only copy부터 새 destination 이름으로 다시 수행합니다.
 
-## 4. Same-run detached resume와 candidate 배치
+## 4. Same-run sealed-publication resume와 candidate 배치
 
 Candidate digest와 loopback MCP 값은 `/etc/cardrag/*.env`를 수정하지 않고 build receipt와
 같은 caller shell에서 export합니다. Compose render에 local `build`가 없고 exact digest,
 v114 project/volume, `candidate-v1.0.11` channel과 모든 destructive approval false가
-확인된 뒤 동일 run을 detached resume합니다. 인자 없는 새 `worker run`으로 대체하지
-않습니다.
+확인된 뒤 동일 run을 provider-free `resume-publication`으로 detached resume합니다. 일반
+`resume`은 latest-only 보장을 위해 live issuer discovery와 endpoint metadata preflight를
+다시 수행합니다. 사고 뒤 live embedding endpoint metadata가 바뀌면 유효한 local seal의
+fast path에 도달하지 못하고 OCR/embedding 경로로 재진입할 수 있으므로 이 복구에는
+사용하지 않습니다. 인자 없는 새 `worker run`으로도 대체하지 않습니다.
 
 ```bash
 set -euo pipefail
@@ -639,7 +644,7 @@ jq -e --arg image "$candidate_worker_image" '
 
 worker_container_id=$("${worker_compose[@]}" run --detach --no-deps --pull never \
   --name cardrag-v114-candidate-worker-acceptance \
-  worker resume "$preserved_run_id")
+  worker resume-publication "$preserved_run_id")
 test "$(docker inspect --format '{{.Id}}' \
   cardrag-v114-candidate-worker-acceptance)" = "$worker_container_id"
 worker_runtime=$(docker inspect cardrag-v114-candidate-worker-acceptance)
@@ -669,8 +674,12 @@ jq -e --arg image "$candidate_worker_image" \
 
 Worker가 실행 중인 동안 `docker logs cardrag-v114-candidate-worker-acceptance`와 Docker
 state만 관측합니다. Live SQLite를 열거나 source/destination volume에 별도 reader를
-붙이지 않습니다. Resume는 local seal을 한 번 검증한 뒤 preserved DB/vector를 그대로
-stream-verify/publish하므로 embedding provider 호출이 없어야 합니다.
+붙이지 않습니다. `resume-publication`은 failed/interrupted run 또는 worker lock을 새로
+점유한 뒤의 stale-running run, canonical `publish.json`,
+전체 local seal을 fail-closed 검증한 뒤 preserved DB/vector를 그대로
+stream-verify/publish합니다. Provider, issuer discovery, OCR, embedding, cache healing,
+retention cleanup과 remote GC는 구성하거나 호출하지 않으며 full local seal 검증은 한
+번뿐입니다.
 
 ### 4.1 Worker terminal 및 WebDAV activation gate
 
@@ -682,6 +691,17 @@ credential은 Compose secret file로만 주입되며 shell 변수, command argum
 
 ```bash
 set -euo pipefail
+: "${CANDIDATE_SOURCE_COMMIT:?exact v1.0.14 PR-head commit is required}"
+: "${CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST:?sealed Worker index digest is required}"
+: "${CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST:?sealed Worker config digest is required}"
+candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+candidate_worker_image="$candidate_repository@$CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST"
+destination_state=cardrag-worker-v114-candidate-state
+preserved_run_id=1f1763a9cd474a81952a6eb6ffb6e397
+worker_compose=(docker compose --env-file /etc/cardrag/worker.env
+  -f deploy/worker/compose.yaml
+  -f deploy/worker/compose.candidate.yaml
+  -f deploy/worker/compose.secrets.yaml)
 test "$(docker inspect --format \
   '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.RestartCount}}' \
   cardrag-v114-candidate-worker-acceptance)" = "exited 0 false 0"
@@ -794,6 +814,14 @@ printf '%s\n' "$remote_receipt"
 
 ```bash
 set -euo pipefail
+: "${CANDIDATE_SOURCE_COMMIT:?exact v1.0.14 PR-head commit is required}"
+: "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?sealed MCP index digest is required}"
+: "${CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST:?sealed MCP config digest is required}"
+candidate_repository=ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+candidate_mcp_image="$candidate_repository@$CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST"
+export CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=http://127.0.0.1:18014
+export CARDRAG_CANDIDATE_MCP_BIND_ADDRESS=127.0.0.1
+export CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT=18014
 test -z "$(docker ps --quiet --filter publish=18014)"
 mcp_compose=(docker compose --env-file /etc/cardrag/mcp.env
   -f deploy/mcp/compose.yaml
@@ -864,6 +892,10 @@ prune, remote DELETE와 source container start는 사용하지 않습니다.
 
 ```bash
 set -euo pipefail
+: "${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?sealed MCP index digest is required}"
+export CARDRAG_CANDIDATE_MCP_PUBLIC_BASE_URL=http://127.0.0.1:18014
+export CARDRAG_CANDIDATE_MCP_BIND_ADDRESS=127.0.0.1
+export CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT=18014
 mcp_compose=(docker compose --env-file /etc/cardrag/mcp.env
   -f deploy/mcp/compose.yaml
   -f deploy/mcp/compose.candidate.yaml

@@ -15,6 +15,7 @@ import stat
 import struct
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -56,6 +57,7 @@ from cardrag_core import (
     sealed_v5_retrieval_policy,
     sha256_bytes,
     sha256_file,
+    validate_identifier,
 )
 from cardrag_core import (
     IssuerParserProfile as ManifestIssuerParserProfile,
@@ -168,6 +170,7 @@ GENERATION_SCHEMA_ID_V5 = "cardrag.generation.v5"
 SERVING_SCHEMA_ID_V5 = "cardrag.serving-db.v5"
 V5_VIEW_MAXIMUM_CHARACTERS = 131_072
 MAX_GENERATION_MANIFEST_BYTES = 32 * 1024 * 1024
+MAX_WORKER_SEAL_BYTES = 64 * 1024 * 1024
 STRUCTURE_FALLBACK_LEDGER_SCHEMA = "cardrag.structure-fallback-ledger.v1"
 STRUCTURE_FAILED_LEDGER_SCHEMA = "cardrag.structure-failed-ledger.v1"
 V5_RETRIEVAL_POLICY = {
@@ -1956,6 +1959,10 @@ class WorkerPipeline:
             self.document_aggregation.profile,
             self.document_aggregation.profile_sha256,
         )
+
+    @property
+    def _seal_pdf_cache_objects_root(self) -> Path:
+        return self.pdf_cache.objects_root
 
     async def _validated_document_aggregation_head(self) -> GenerationManifest:
         """Rebind the preflighted provider contract to the current M0/M1 head."""
@@ -4991,8 +4998,9 @@ class WorkerPipeline:
         if sealed.get("schema_version") != "cardrag.worker-seal.v1":
             raise RuntimeError("unknown worker publication seal schema")
         seal_sha256 = canonical_sha256(sealed)
-        local_root = (self.state_dir / "runs").resolve(strict=True)
-        pdf_cache_root = self.pdf_cache.objects_root.resolve(strict=True)
+        sealed_run_id = validate_identifier(str(sealed.get("run_id") or ""), label="seal run ID")
+        local_root = (self.state_dir / "runs" / sealed_run_id).resolve(strict=True)
+        pdf_cache_root = self._seal_pdf_cache_objects_root.resolve(strict=True)
 
         def sealed_file(
             raw_path: object,
@@ -5012,7 +5020,10 @@ class WorkerPipeline:
         database_path = sealed_file(sealed.get("database_path"), label="serving database")
         if not isinstance(sealed.get("manifest"), Mapping):
             raise RuntimeError("sealed generation manifest is not an object")
-        manifest = GenerationManifest.model_validate_json(canonical_json_bytes(sealed["manifest"]))
+        raw_manifest = canonical_json_bytes(sealed["manifest"])
+        manifest = GenerationManifest.model_validate_json(raw_manifest)
+        if manifest.canonical_bytes() != raw_manifest:
+            raise RuntimeError("sealed generation manifest is not canonical JSON")
         available_document_count = sum(
             document.availability == "available" for document in manifest.documents
         )
@@ -5041,7 +5052,7 @@ class WorkerPipeline:
             raise RuntimeError("sealed generation manifest schema is not a worker v4/v5 bundle")
         if manifest.serving_database.path != generation_database_path(generation_id).as_posix():
             raise RuntimeError("sealed serving database has the wrong generation path")
-        database_sha, database_size = await asyncio.to_thread(sha256_file, database_path)
+        database_sha, database_size = await to_thread_fenced(sha256_file, database_path)
         if (
             database_sha != sealed.get("database_sha256")
             or database_sha != manifest.serving_database.sha256
@@ -5056,7 +5067,7 @@ class WorkerPipeline:
             if manifest.vector_sidecar is None:
                 raise RuntimeError("sealed v5 generation has no vector sidecar")
             vector_path = sealed_file(sealed.get("vector_path"), label="vector sidecar")
-            vector_sha, vector_size = await asyncio.to_thread(sha256_file, vector_path)
+            vector_sha, vector_size = await to_thread_fenced(sha256_file, vector_path)
             vector_artifact = manifest.vector_sidecar.artifact
             if (
                 vector_sha != sealed.get("vector_sha256")
@@ -5356,7 +5367,7 @@ class WorkerPipeline:
             finally:
                 connection.close()
 
-        await asyncio.to_thread(verify_database_binding)
+        await to_thread_fenced(verify_database_binding)
         rows = sealed.get("objects")
         if not isinstance(rows, list):
             raise RuntimeError("sealed CAS object list is invalid")
@@ -5382,7 +5393,7 @@ class WorkerPipeline:
                 label="CAS object",
                 allow_pdf_cache=media_type == "application/pdf",
             )
-            digest, size = await asyncio.to_thread(sha256_file, path)
+            digest, size = await to_thread_fenced(sha256_file, path)
             declared_sha = str(raw_row.get("sha256") or "")
             declared_size = raw_row.get("size_bytes")
             if digest != declared_sha or size != declared_size or not media_type:
@@ -5570,3 +5581,269 @@ class WorkerPipeline:
             ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
             v5_metrics=published_seal.v5_metrics,
         )
+
+
+class SealedPublicationResumer(WorkerPipeline):
+    """Resume only an already sealed generation, without constructing providers.
+
+    This deliberately reuses the production seal validator, predecessor fence,
+    constant-space publisher, and exact remote reconciliation from
+    :class:`WorkerPipeline`.  Its constructor does not call ``WorkerPipeline``'s
+    provider-bearing constructor and exposes no discovery/OCR/embedding path.
+    """
+
+    def __init__(
+        self,
+        *,
+        state: WorkerState,
+        state_dir: Path,
+        webdav: WebDAVClient,
+        stable_publication_approved: bool = False,
+        document_aggregation: VerifiedAggregationProfileV5 | None = None,
+    ) -> None:
+        self._guard_publication_channel(webdav, stable_publication_approved)
+        self.state = state
+        self.state_dir = state_dir
+        self.webdav = webdav
+        self.document_aggregation = document_aggregation
+        self.stable_publication_approved = stable_publication_approved
+
+    @staticmethod
+    def _guard_publication_channel(
+        webdav: WebDAVClient,
+        stable_publication_approved: bool,
+    ) -> None:
+        if type(stable_publication_approved) is not bool:
+            raise ValueError("stable publication approval must be boolean")
+        if webdav.channel == "stable":
+            if not stable_publication_approved or not webdav.stable_publication_approved:
+                raise ValueError("stable v1.0.14 publication requires explicit approval")
+        elif webdav.channel != "candidate-v1.0.11":
+            raise ValueError("v1.0.14 Worker publication channel must be candidate-v1.0.11 or stable")
+
+    @property
+    def _seal_pdf_cache_objects_root(self) -> Path:
+        # Publication-only recovery must not create or mutate cache directories.
+        return self.state_dir / "pdf-cache" / "objects" / "sha256"
+
+    @staticmethod
+    def _validate_run_id(run_id: str) -> None:
+        if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+            raise ValueError("publication resume run ID is invalid")
+
+    def _load_seal(self, run_id: str) -> tuple[bytes, dict[str, Any]]:
+        """Read the exact run seal through a no-follow descriptor chain."""
+
+        self._validate_run_id(run_id)
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        nonblock = getattr(os, "O_NONBLOCK", None)
+        if nofollow is None or nonblock is None:
+            raise RuntimeError("publication resume requires safe file descriptors")
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow | getattr(os, "O_CLOEXEC", 0)
+        file_flags = os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0)
+        descriptors: list[int] = []
+        try:
+            state_descriptor = os.open(self.state_dir, directory_flags)
+            descriptors.append(state_descriptor)
+            runs_descriptor = os.open("runs", directory_flags, dir_fd=state_descriptor)
+            descriptors.append(runs_descriptor)
+            run_descriptor = os.open(run_id, directory_flags, dir_fd=runs_descriptor)
+            descriptors.append(run_descriptor)
+            sealed_descriptor = os.open("sealed", directory_flags, dir_fd=run_descriptor)
+            descriptors.append(sealed_descriptor)
+            seal_descriptor = os.open("publish.json", file_flags, dir_fd=sealed_descriptor)
+            descriptors.append(seal_descriptor)
+            initial = os.fstat(seal_descriptor)
+            if (
+                not stat.S_ISREG(initial.st_mode)
+                or initial.st_nlink != 1
+                or initial.st_size < 2
+                or initial.st_size > MAX_WORKER_SEAL_BYTES
+            ):
+                raise RuntimeError("resume publication seal is not a bounded regular file")
+            body = bytearray()
+            while len(body) <= MAX_WORKER_SEAL_BYTES:
+                chunk = os.read(
+                    seal_descriptor,
+                    min(1024 * 1024, MAX_WORKER_SEAL_BYTES + 1 - len(body)),
+                )
+                if not chunk:
+                    break
+                body.extend(chunk)
+            final = os.fstat(seal_descriptor)
+            if (
+                len(body) != initial.st_size
+                or len(body) > MAX_WORKER_SEAL_BYTES
+                or (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns, final.st_ctime_ns)
+                != (
+                    initial.st_dev,
+                    initial.st_ino,
+                    initial.st_size,
+                    initial.st_mtime_ns,
+                    initial.st_ctime_ns,
+                )
+            ):
+                raise RuntimeError("resume publication seal changed while reading")
+        except OSError:
+            raise RuntimeError("resume publication seal is unavailable or unsafe") from None
+        finally:
+            for descriptor in reversed(descriptors):
+                with suppress(OSError):
+                    os.close(descriptor)
+        raw = bytes(body)
+        try:
+            sealed = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError("resume publication seal is not canonical JSON") from None
+        if not isinstance(sealed, dict) or canonical_json_bytes(sealed) != raw:
+            raise RuntimeError("resume publication seal is not a canonical JSON object")
+        if str(sealed.get("run_id") or "") != run_id:
+            raise RuntimeError("resume publication seal belongs to a different run")
+        return raw, sealed
+
+    @staticmethod
+    def _phase_failure(phase: str, exc: Exception) -> _WorkerPhaseFailure:
+        if isinstance(exc, _WorkerPhaseFailure):
+            return exc
+        category, status_code, error_number = _classify_worker_failure(exc)
+        return _WorkerPhaseFailure(
+            phase=phase,
+            error_class_category=category,
+            status_code=status_code,
+            errno=error_number,
+        )
+
+    async def _reconcile_validated_publication(
+        self,
+        run_id: str,
+        validated: _ValidatedSeal,
+    ) -> bool:
+        """Reconcile cancellation without repeating the full local seal scan."""
+
+        try:
+            manifest = validated.manifest
+            if await self._reconcile_remote_bundle(manifest) is None:
+                return False
+            self.state.record_publish(
+                generation_id=manifest.generation_id,
+                run_id=run_id,
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+                serving_sha256=manifest.serving_database.sha256,
+                status="ready",
+                details={"manifest_sha256": manifest.manifest_sha256},
+            )
+            self.state.finish_run_if_running(
+                run_id,
+                "succeeded",
+                corpus_sha256=manifest.corpus_sha256,
+                contract_sha256=manifest.contract_sha256,
+            )
+            return True
+        except Exception:
+            LOGGER.error("Cancelled sealed publication could not be reconciled exactly")
+            return False
+
+    async def _resume_publication_locked(self, run_id: str) -> PipelineResult:
+        """Validate and publish one failed run's exact immutable local seal."""
+
+        self._validate_run_id(run_id)
+        self.state.assert_publication_resumable(run_id)
+        validated: _ValidatedSeal | None = None
+        unexpected_failure: WorkerUnexpectedFailureError | None = None
+        try:
+            try:
+                seal_body, sealed = self._load_seal(run_id)
+                validated = await self._validate_local_seal(sealed)
+                expected_generation_id = f"g-{run_id[:24]}-{validated.manifest.corpus_sha256[:12]}"
+                if validated.manifest.generation_id != expected_generation_id:
+                    raise RuntimeError("sealed generation identity is not bound to its run and corpus")
+                if self._load_seal(run_id)[0] != seal_body:
+                    raise RuntimeError("resume publication seal changed after validation")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise self._phase_failure("local_seal_validation", exc) from None
+            try:
+                return await self._publish_sealed(run_id, sealed, validated=validated)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise self._phase_failure("sealed_publication", exc) from None
+        except asyncio.CancelledError:
+            published = False
+            if validated is not None:
+                reconciliation = asyncio.create_task(self._reconcile_validated_publication(run_id, validated))
+                while not reconciliation.done():
+                    try:
+                        await asyncio.shield(reconciliation)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                try:
+                    published = reconciliation.result()
+                except BaseException:
+                    published = False
+                    LOGGER.error("Cancelled sealed publication reconciliation failed")
+            if not published:
+                self.state.finish_run_if_running(
+                    run_id,
+                    "interrupted",
+                    error="worker_cancelled: Pipeline execution was interrupted.",
+                )
+            raise asyncio.CancelledError() from None
+        except Exception as exc:
+            category, status_code, error_number = _classify_worker_failure(exc)
+            failure = WorkerUnexpectedFailureRecord(
+                run_id=run_id,
+                occurred_at=datetime.now(UTC),
+                error_class_category=category,
+                phase=exc.phase if isinstance(exc, _WorkerPhaseFailure) else None,
+                status_code=status_code,
+                errno=error_number,
+            )
+            report_path = self.state_dir / "runs" / run_id / "reports" / "worker-failure.json"
+            error = WorkerUnexpectedFailureError(
+                run_id=run_id,
+                report_path=report_path,
+                failure=failure,
+            )
+            try:
+                _write_worker_failure_report(report_path, failure=failure)
+            except Exception:
+                LOGGER.error("Worker failure report could not be written")
+            self.state.finish_run_if_running(run_id, "failed", error=error.stored_error)
+            unexpected_failure = error
+        if unexpected_failure is None:
+            raise RuntimeError("sealed publication did not reach terminal state")
+        raise unexpected_failure from None
+
+    async def run(self, *, resume_run_id: str | None = None) -> PipelineResult:
+        del resume_run_id
+        raise RuntimeError("sealed publication resumer cannot execute the general pipeline")
+
+
+async def resume_sealed_publication(
+    *,
+    run_id: str,
+    state_dir: Path,
+    webdav: WebDAVClient,
+    stable_publication_approved: bool = False,
+    document_aggregation: VerifiedAggregationProfileV5 | None = None,
+) -> PipelineResult:
+    """Lock, open existing state, and run the provider-free publication API."""
+
+    SealedPublicationResumer._validate_run_id(run_id)
+    SealedPublicationResumer._guard_publication_channel(webdav, stable_publication_approved)
+    with (
+        worker_lock(state_dir / "worker.lock"),
+        WorkerState(state_dir / "worker-state.sqlite3", create=False) as state,
+    ):
+        return await SealedPublicationResumer(
+            state=state,
+            state_dir=state_dir,
+            webdav=webdav,
+            stable_publication_approved=stable_publication_approved,
+            document_aggregation=document_aggregation,
+        )._resume_publication_locked(run_id)

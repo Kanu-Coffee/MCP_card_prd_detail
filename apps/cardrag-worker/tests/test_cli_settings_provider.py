@@ -14,6 +14,7 @@ import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -40,7 +41,7 @@ from cardrag_worker.providers import (
     ProviderError,
     ProviderSystemicError,
 )
-from cardrag_worker.settings import WorkerSettings, _read_secret
+from cardrag_worker.settings import PublicationResumeSettings, WorkerSettings, _read_secret
 from cardrag_worker.state import AlreadyRunning
 
 
@@ -181,6 +182,117 @@ def test_signal_shutdown_cli_rejects_mutated_signal_without_secret_output(
         )
     )
     assert raw_sentinel not in rendered
+
+
+def test_resume_publication_cli_path_constructs_no_provider_or_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "a" * 32
+    state_database = tmp_path / "worker-state.sqlite3"
+    state_database.write_bytes(b"existing-state-placeholder")
+    settings = SimpleNamespace(
+        state_dir=tmp_path,
+        state_database=state_database,
+        channel="candidate-v1.0.11",
+        stable_publication_approved=False,
+        document_aggregation_profile_path=None,
+        document_aggregation_profile_artifact_sha256=None,
+        minimum_start_free_bytes=0,
+    )
+    settings_calls: list[dict[str, Any]] = []
+
+    def settings_from_env(**kwargs: Any) -> Any:
+        settings_calls.append(kwargs)
+        return settings
+
+    def forbidden_provider(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("publication-only resume constructed a provider or discovery dependency")
+
+    class FakeWebDAV:
+        channel = "candidate-v1.0.11"
+        stable_publication_approved = False
+
+        async def close(self) -> None:
+            return None
+
+    webdav = FakeWebDAV()
+
+    class FakeWebDAVFactory:
+        @classmethod
+        def from_env(cls, *, stable_publication_approved: bool = False) -> FakeWebDAV:
+            assert stable_publication_approved is False
+            return webdav
+
+    async def resume_exact(**kwargs: Any) -> PipelineResult:
+        assert kwargs == {
+            "run_id": run_id,
+            "state_dir": tmp_path,
+            "webdav": webdav,
+            "stable_publication_approved": False,
+            "document_aggregation": None,
+        }
+        return PipelineResult(
+            run_id=run_id,
+            status="succeeded",
+            corpus_sha256="c" * 64,
+            contract_sha256="d" * 64,
+            generation_id="g-sealed",
+            document_count=1,
+            evidence_count=2,
+        )
+
+    monkeypatch.setattr(cli_module.PublicationResumeSettings, "from_env", staticmethod(settings_from_env))
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+    monkeypatch.setattr(cli_module, "preflight_worker_start_capacity", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", lambda _snapshot: None)
+    monkeypatch.setattr(cli_module, "WebDAVClient", FakeWebDAVFactory)
+    monkeypatch.setattr(cli_module, "resume_sealed_publication", resume_exact)
+    monkeypatch.setattr(cli_module, "_provider", forbidden_provider)
+    monkeypatch.setattr(cli_module, "_qwen_embedding_provider", forbidden_provider)
+    monkeypatch.setattr(cli_module, "enabled_adapters", forbidden_provider)
+    monkeypatch.setattr(cli_module, "OCRResolver", forbidden_provider)
+    monkeypatch.setattr(cli_module, "FailoverOCRResolver", forbidden_provider)
+
+    payload = asyncio.run(cli_module._resume_publication(run_id))
+
+    assert settings_calls == [{}]
+    assert payload["status"] == "succeeded"
+    assert payload["generation_id"] == "g-sealed"
+
+
+def test_resume_publication_busy_is_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def busy(_run_id: str) -> dict[str, Any]:
+        raise AlreadyRunning("held")
+
+    monkeypatch.setattr(cli_module, "_resume_publication_with_signal_shutdown", busy)
+    result = CliRunner().invoke(cli_module.app, ["resume-publication", "a" * 32])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "reason": "Worker did not start because the worker lock is held.",
+        "reason_code": "worker_busy",
+        "status": "already_running",
+    }
+
+
+def test_publication_resume_settings_ignore_unrelated_provider_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
+    monkeypatch.setenv("CARDRAG_EMBEDDING_DIMENSION", "invalid")
+    monkeypatch.setenv("CARDRAG_EMBEDDING_MODEL", "another-model")
+    monkeypatch.setenv("CARDRAG_EMBEDDING_PROVIDER_ID", "invalid")
+    monkeypatch.setenv("CARDRAG_OPENROUTER_API_KEY_FILE", "relative-secret")
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_MODE", "invalid")
+
+    settings = PublicationResumeSettings.from_env()
+
+    assert settings.state_dir == tmp_path
+    assert settings.channel == "candidate-v1.0.11"
+    assert settings.stable_publication_approved is False
 
 
 def test_worker_progress_logging_is_info_and_idempotent() -> None:

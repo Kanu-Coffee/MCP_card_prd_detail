@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import signal
+import stat
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -58,10 +60,11 @@ from .pipeline import (
     PipelineResult,
     WorkerPipeline,
     WorkerUnexpectedFailureError,
+    resume_sealed_publication,
     validate_document_aggregation_head,
 )
 from .providers import OCRProvider, make_ocr_provider
-from .settings import WorkerSettings
+from .settings import PublicationResumeSettings, WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
 from .tokenizer_v5 import ensure_qwen_tokenizer
 from .webdav import WebDAVClient
@@ -271,7 +274,7 @@ async def _qwen_embedding_provider(
     )
 
 
-def _guard_v114_publication_channel(settings: WorkerSettings) -> None:
+def _guard_v114_publication_channel(settings: WorkerSettings | PublicationResumeSettings) -> None:
     if settings.channel == "candidate-v1.0.11":
         return
     if settings.channel == "stable":
@@ -388,7 +391,11 @@ async def _run(resume: str | None) -> dict[str, Any]:
         await webdav.close()
 
 
-async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
+async def _operation_with_signal_shutdown(
+    operation: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+    *,
+    task_name: str,
+) -> dict[str, Any]:
     """Translate SIGTERM/SIGINT into one drained pipeline cancellation.
 
     A second signal is deliberately coalesced with the first one. Repeated
@@ -428,7 +435,7 @@ async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
             signal.signal(signal_number, previous)
         raise RuntimeError("worker signal handlers are unavailable") from None
 
-    task = asyncio.create_task(_run(resume), name="cardrag-worker-pipeline")
+    task = asyncio.create_task(operation(), name=task_name)
     # A signal may be delivered after its loop handler is installed but before
     # the task reference becomes visible to that handler. Close that narrow
     # startup race instead of silently running after a stop was requested.
@@ -454,6 +461,13 @@ async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
     if result is None:
         raise RuntimeError("worker pipeline returned no terminal result")
     return result
+
+
+async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
+    return await _operation_with_signal_shutdown(
+        lambda: _run(resume),
+        task_name="cardrag-worker-pipeline",
+    )
 
 
 def _echo_signal_shutdown(exc: WorkerSignalShutdown) -> int:
@@ -524,6 +538,87 @@ def resume_command(run_id: str = typer.Argument(..., help="Failed finite run ID.
         raise typer.Exit(code=1) from None
     except AlreadyRunning:
         _echo_worker_busy()
+    except WorkerUnexpectedFailureError as exc:
+        _echo_worker_unexpected_failure(exc)
+        raise typer.Exit(code=1) from None
+    except Exception:
+        _echo_worker_unexpected_failure()
+        raise typer.Exit(code=1) from None
+
+
+def _require_existing_publication_state(settings: PublicationResumeSettings) -> None:
+    """Reject missing or replaceable state before the read/write state open."""
+
+    try:
+        root = settings.state_dir.lstat()
+        database = settings.state_database.lstat()
+    except OSError:
+        raise RuntimeError("sealed publication resume state is unavailable") from None
+    if (
+        stat.S_ISLNK(root.st_mode)
+        or not stat.S_ISDIR(root.st_mode)
+        or stat.S_ISLNK(database.st_mode)
+        or not stat.S_ISREG(database.st_mode)
+        or database.st_nlink != 1
+    ):
+        raise RuntimeError("sealed publication resume state is unavailable or unsafe")
+
+
+async def _resume_publication(run_id: str) -> dict[str, Any]:
+    """Publish one exact local seal without provider/discovery construction."""
+
+    _configure_worker_logging()
+    settings = PublicationResumeSettings.from_env()
+    _guard_v114_publication_channel(settings)
+    _require_existing_publication_state(settings)
+    startup_capacity = preflight_worker_start_capacity(
+        settings.state_dir,
+        minimum_free_bytes=settings.minimum_start_free_bytes,
+    )
+    document_aggregation = None
+    if settings.document_aggregation_profile_path is not None:
+        expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
+        if expected_artifact_sha256 is None:
+            raise ValueError("document aggregation profile artifact SHA-256 is absent")
+        document_aggregation = load_verified_aggregation_profile_v5(
+            settings.document_aggregation_profile_path,
+            expected_artifact_sha256=expected_artifact_sha256,
+        )
+    webdav = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
+    try:
+        revalidate_worker_start_capacity(startup_capacity)
+        result = await resume_sealed_publication(
+            run_id=run_id,
+            state_dir=settings.state_dir,
+            webdav=webdav,
+            stable_publication_approved=settings.stable_publication_approved,
+            document_aggregation=document_aggregation,
+        )
+        return _pipeline_result_payload(result)
+    finally:
+        await webdav.close()
+
+
+async def _resume_publication_with_signal_shutdown(run_id: str) -> dict[str, Any]:
+    return await _operation_with_signal_shutdown(
+        lambda: _resume_publication(run_id),
+        task_name="cardrag-worker-sealed-publication",
+    )
+
+
+@app.command("resume-publication")
+def resume_publication_command(
+    run_id: str = typer.Argument(..., help="Failed run ID with an exact local publication seal."),
+) -> None:
+    """Resume only sealed WebDAV publication; never run providers or discovery."""
+
+    try:
+        _echo(asyncio.run(_resume_publication_with_signal_shutdown(run_id)))
+    except WorkerSignalShutdown as exc:
+        raise typer.Exit(code=_echo_signal_shutdown(exc)) from None
+    except AlreadyRunning:
+        _echo_worker_busy()
+        raise typer.Exit(code=1) from None
     except WorkerUnexpectedFailureError as exc:
         _echo_worker_unexpected_failure(exc)
         raise typer.Exit(code=1) from None

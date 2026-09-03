@@ -11,7 +11,7 @@ tmpfs를 초과했습니다. 검증 구현이 방금 업로드한 2,647,711,744-
 이 사고는 OOM, `SIGBUS`, kernel I/O fault 또는 embedding 실패가 아닙니다. 고비용
 embedding cache와 완성된 local DB/vector/seal은 원본 v1.0.13 volume에 보존되어 있으며,
 v1.0.14는 그 원본을 변경하지 않고 새 전용 volume에 offline copy한 뒤 동일 run을
-resume합니다.
+`resume-publication`으로 게시 단계만 resume합니다.
 
 ## 10:54 KST read-only 관측
 
@@ -86,6 +86,15 @@ v1.0.13의 immutable publication은 다음 순서였습니다.
 종료까지 불필요한 지연이 커졌습니다. 이것은 `ENOSPC`의 원인은 아니지만 복구 시간과
 운영 관측을 악화시킨 요인입니다.
 
+첫 v1.0.14 격리 복구 리허설은 source `6ea33ed4f71526763a351eddf573f5b686afef43`
+이미지에서 일반 `resume`을 사용했습니다. 이 경로가 live endpoint metadata preflight와
+issuer discovery를 다시 수행해 3,094개 source를 열거하고 OCR cache 순회로 재진입한 것이
+로그에서 확인되어 즉시 `SIGTERM`으로 중단했습니다. 당시 seal contract와 live contract가
+달라진 직접 메타데이터 snapshot을 함께 봉인하지는 않았으므로, endpoint metadata drift에
+의한 contract mismatch라는 설명은 이 실행 결과와 코드 경로에 근거한 추론입니다. 중단된
+리허설의 v114 container/volume만 제거했으며 v1.0.13 원본과 WebDAV stable 채널은 변경하지
+않았습니다. 이 리허설 receipt는 아래 최종 복구 증거로 재사용하지 않습니다.
+
 ## v1.0.14 수정과 회귀 방지
 
 v1.0.14는 data/publication channel `candidate-v1.0.11`을 바꾸지 않는 runtime reliability
@@ -106,6 +115,12 @@ patch이며 다음을 적용합니다.
 - 작은 tmpfs에서 legacy download 경로가 호출되면 강제로 실패하도록 한 회귀 시험,
   streamed size/SHA mismatch 시험, current-generation tempfile 금지 시험과 seal 검증
   단일 실행 시험을 추가합니다.
+- 전용 `resume-publication RUN_ID`는 기존 실패/interrupted run 또는 잠금 해제 뒤의
+  stale-running run과 canonical local seal을 검증한 뒤
+  WebDAV 게시/조정만 수행합니다. 일반 `resume`처럼 live issuer discovery나 embedding
+  endpoint metadata preflight를 다시 하지 않으므로, 격리 리허설에서 관측 결과로부터
+  metadata drift로 추론한 contract mismatch가 있더라도 OCR/embedding으로 재진입하지
+  않습니다.
 
 ## 복구 및 release 경계
 
