@@ -290,9 +290,7 @@ def build_mcp_server(
         '배달의민족'), returning matching benefit excerpts per card without vector search omissions.
         """
 
-        result = await repository.find_cards_by_merchant(
-            merchant_name=merchant_name, issuer=issuer
-        )
+        result = await repository.find_cards_by_merchant(merchant_name=merchant_name, issuer=issuer)
         return result.model_dump(mode="json")
 
     @server.tool()
@@ -310,7 +308,6 @@ def build_mcp_server(
         if result is None:
             raise ValueError("product not found")
         return result.model_dump(mode="json")
-
 
     if experimental_map_reduce is not None:
 

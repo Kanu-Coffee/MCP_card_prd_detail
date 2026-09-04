@@ -1229,9 +1229,7 @@ class ServingRepository:
         identifier: str,
     ) -> ProductSummary | None:
         with self.store.pin() as handle:
-            return await asyncio.to_thread(
-                self._get_product_summary, handle, issuer, identifier
-            )
+            return await asyncio.to_thread(self._get_product_summary, handle, issuer, identifier)
 
     @staticmethod
     def _get_product_summary(
@@ -1259,9 +1257,7 @@ class ServingRepository:
                 ).fetchone()
 
                 if row is None:
-                    norm_id = " ".join(
-                        unicodedata.normalize("NFKC", cleaned_id).casefold().split()
-                    )
+                    norm_id = " ".join(unicodedata.normalize("NFKC", cleaned_id).casefold().split())
                     candidates = connection.execute(
                         """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
                                   cr.contract_revision_id, cr.effective_date
@@ -1368,4 +1364,3 @@ class ServingRepository:
                     benefit_summary_texts=tuple(benefit_summaries[:5]),
                 )
             return None
-

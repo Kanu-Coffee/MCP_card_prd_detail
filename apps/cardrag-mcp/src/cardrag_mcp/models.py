@@ -718,4 +718,3 @@ class ProductSummary(StrictModel):
     annual_fee_text: str | None = None
     benefit_headings: tuple[str, ...] = ()
     benefit_summary_texts: tuple[str, ...] = ()
-
