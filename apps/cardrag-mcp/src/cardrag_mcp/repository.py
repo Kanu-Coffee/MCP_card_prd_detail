@@ -9,8 +9,10 @@ import hmac
 import json
 import math
 import sqlite3
+import unicodedata
 from collections.abc import Iterable
-from typing import Literal, cast
+from datetime import date
+from typing import Any, Literal, cast
 
 import numpy as np
 from cardrag_core import EMBEDDING_DIMENSION
@@ -18,6 +20,7 @@ from numpy.typing import NDArray
 
 from cardrag_mcp.embeddings import EmbeddingUnavailable, OpenRouterEmbedder
 from cardrag_mcp.exact import V5ExactRepository
+from cardrag_mcp.launch_date import parse_launch_date
 from cardrag_mcp.models import (
     ContractBundle,
     ContractSearchPage,
@@ -26,13 +29,19 @@ from cardrag_mcp.models import (
     Evidence,
     EvidencePage,
     Issuer,
+    MerchantSearchHit,
+    MerchantSearchPage,
     OCRFailedProduct,
     Product,
+    ProductCatalogEntry,
+    ProductCatalogPage,
     ProductRevisionList,
+    ProductSummary,
     SearchFilters,
     SearchPage,
     SearchRequest,
     SourcePage,
+    TemporalStatus,
     UnsupportedProduct,
 )
 from cardrag_mcp.reranker import RerankerShadowLane
@@ -962,3 +971,401 @@ class ServingRepository:
                     (document_id,),
                 ).fetchall()
         return tuple(SourcePage(**dict(row)) for row in rows)
+
+    async def list_recent_products(
+        self,
+        months: int = 3,
+        issuer: str | None = None,
+    ) -> ProductCatalogPage:
+        with self.store.pin() as handle:
+            return await asyncio.to_thread(self._list_recent_products, handle, months, issuer)
+
+    @staticmethod
+    def _list_recent_products(
+        handle: GenerationHandle,
+        months: int,
+        issuer: str | None,
+    ) -> ProductCatalogPage:
+        today = date.today()
+        year = today.year
+        month = today.month - months
+        while month <= 0:
+            year -= 1
+            month += 12
+        cutoff_date = date(year, month, 1)
+
+        with handle.connect() as connection:
+            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+                launch_rows = connection.execute(
+                    """SELECT contract_revision_id, display_text
+                         FROM structure_nodes
+                        WHERE display_text LIKE '%출시%'"""
+                ).fetchall()
+                rev_launch_dates: dict[str, date] = {}
+                for row in launch_rows:
+                    ld = parse_launch_date(str(row["display_text"]))
+                    if ld is not None:
+                        cr_id = str(row["contract_revision_id"])
+                        if cr_id not in rev_launch_dates or ld > rev_launch_dates[cr_id]:
+                            rev_launch_dates[cr_id] = ld
+
+                sql = """SELECT pl.issuer, pl.product_code, pl.product_lineage_id,
+                                pl.name AS product_name, pl.document_type,
+                                cr.contract_revision_id, cr.effective_date, cr.temporal_status
+                           FROM contract_revisions AS cr
+                           JOIN product_lineages AS pl
+                             ON pl.product_lineage_id = cr.product_lineage_id
+                          WHERE cr.temporal_status = 'current'"""
+                params: list[Any] = []
+                if issuer is not None:
+                    sql += " AND pl.issuer = ?"
+                    params.append(issuer)
+
+                products = connection.execute(sql, params).fetchall()
+                items: list[ProductCatalogEntry] = []
+                for p in products:
+                    eff_raw = p["effective_date"]
+                    eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
+                    cr_id = str(p["contract_revision_id"])
+                    launch_d = rev_launch_dates.get(cr_id)
+                    if (launch_d is not None and launch_d >= cutoff_date) or (
+                        eff_date is not None and eff_date >= cutoff_date
+                    ):
+                        items.append(
+                            ProductCatalogEntry(
+                                issuer=str(p["issuer"]),
+                                product_code=str(p["product_code"]),
+                                product_lineage_id=str(p["product_lineage_id"]),
+                                product_name=str(p["product_name"]),
+                                document_type=str(p["document_type"]),
+                                effective_date=eff_date,
+                                launch_date=launch_d,
+                                temporal_status=cast(TemporalStatus, str(p["temporal_status"])),
+                            )
+                        )
+                items.sort(
+                    key=lambda x: (
+                        x.launch_date or x.effective_date or date.min,
+                        x.effective_date or date.min,
+                        x.product_name,
+                    ),
+                    reverse=True,
+                )
+                return ProductCatalogPage(
+                    generation_id=handle.generation_id,
+                    items=tuple(items),
+                    total_count=len(items),
+                )
+            return ProductCatalogPage(
+                generation_id=handle.generation_id,
+                items=(),
+                total_count=0,
+            )
+
+    async def find_products(
+        self,
+        keyword: str,
+        issuer: str | None = None,
+    ) -> ProductCatalogPage:
+        with self.store.pin() as handle:
+            return await asyncio.to_thread(self._find_products, handle, keyword, issuer)
+
+    @staticmethod
+    def _find_products(
+        handle: GenerationHandle,
+        keyword: str,
+        issuer: str | None,
+    ) -> ProductCatalogPage:
+        norm_keyword = " ".join(unicodedata.normalize("NFKC", keyword).casefold().split())
+        if not norm_keyword:
+            raise ValueError("keyword must not be blank")
+
+        with handle.connect() as connection:
+            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+                sql = """SELECT pl.issuer, pl.product_code, pl.product_lineage_id,
+                                pl.name AS product_name, pl.document_type,
+                                cr.contract_revision_id, cr.effective_date, cr.temporal_status
+                           FROM contract_revisions AS cr
+                           JOIN product_lineages AS pl
+                             ON pl.product_lineage_id = cr.product_lineage_id
+                          WHERE cr.temporal_status = 'current'"""
+                params: list[Any] = []
+                if issuer is not None:
+                    sql += " AND pl.issuer = ?"
+                    params.append(issuer)
+
+                rows = connection.execute(sql, params).fetchall()
+                matched_rows: list[sqlite3.Row] = []
+                matched_cr_ids: list[str] = []
+                for row in rows:
+                    name_norm = " ".join(
+                        unicodedata.normalize("NFKC", str(row["product_name"])).casefold().split()
+                    )
+                    if norm_keyword in name_norm:
+                        matched_rows.append(row)
+                        matched_cr_ids.append(str(row["contract_revision_id"]))
+
+                rev_launch_dates: dict[str, date] = {}
+                if matched_cr_ids:
+                    placeholders = ",".join("?" for _ in matched_cr_ids)
+                    launch_rows = connection.execute(
+                        f"""SELECT contract_revision_id, display_text
+                              FROM structure_nodes
+                             WHERE contract_revision_id IN ({placeholders})
+                               AND display_text LIKE '%출시%'""",  # noqa: S608 - placeholders only
+                        matched_cr_ids,
+                    ).fetchall()
+                    for r in launch_rows:
+                        ld = parse_launch_date(str(r["display_text"]))
+                        if ld is not None:
+                            c_id = str(r["contract_revision_id"])
+                            if c_id not in rev_launch_dates or ld > rev_launch_dates[c_id]:
+                                rev_launch_dates[c_id] = ld
+
+                items: list[ProductCatalogEntry] = []
+                for p in matched_rows:
+                    eff_raw = p["effective_date"]
+                    eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
+                    cr_id = str(p["contract_revision_id"])
+                    items.append(
+                        ProductCatalogEntry(
+                            issuer=str(p["issuer"]),
+                            product_code=str(p["product_code"]),
+                            product_lineage_id=str(p["product_lineage_id"]),
+                            product_name=str(p["product_name"]),
+                            document_type=str(p["document_type"]),
+                            effective_date=eff_date,
+                            launch_date=rev_launch_dates.get(cr_id),
+                            temporal_status=cast(TemporalStatus, str(p["temporal_status"])),
+                        )
+                    )
+                items.sort(key=lambda x: (x.issuer, x.product_name))
+                return ProductCatalogPage(
+                    generation_id=handle.generation_id,
+                    items=tuple(items),
+                    total_count=len(items),
+                )
+            return ProductCatalogPage(
+                generation_id=handle.generation_id,
+                items=(),
+                total_count=0,
+            )
+
+    async def find_cards_by_merchant(
+        self,
+        merchant_name: str,
+        issuer: str | None = None,
+    ) -> MerchantSearchPage:
+        with self.store.pin() as handle:
+            return await asyncio.to_thread(
+                self._find_cards_by_merchant, handle, merchant_name, issuer
+            )
+
+    @staticmethod
+    def _find_cards_by_merchant(
+        handle: GenerationHandle,
+        merchant_name: str,
+        issuer: str | None,
+    ) -> MerchantSearchPage:
+        cleaned_query = merchant_name.strip()
+        if not cleaned_query:
+            raise ValueError("merchant_name must not be blank")
+
+        with handle.connect() as connection:
+            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+                sql = """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
+                                sn.display_text
+                           FROM structure_nodes AS sn
+                           JOIN contract_revisions AS cr
+                             ON cr.contract_revision_id = sn.contract_revision_id
+                           JOIN product_lineages AS pl
+                             ON pl.product_lineage_id = cr.product_lineage_id
+                          WHERE cr.temporal_status = 'current'
+                            AND sn.major_class IN ('BENEFIT', 'MIXED')
+                            AND sn.display_text LIKE ?"""
+                params: list[Any] = [f"%{cleaned_query}%"]
+                if issuer is not None:
+                    sql += " AND pl.issuer = ?"
+                    params.append(issuer)
+                sql += " ORDER BY pl.issuer, pl.product_code, sn.ordinal"
+
+                rows = connection.execute(sql, params).fetchall()
+                card_texts: dict[tuple[str, str, str], list[str]] = {}
+                for r in rows:
+                    key = (str(r["issuer"]), str(r["product_code"]), str(r["product_name"]))
+                    txt = " ".join(str(r["display_text"]).split())
+                    if len(txt) > 300:
+                        txt = txt[:297] + "..."
+                    if key not in card_texts:
+                        card_texts[key] = []
+                    if txt not in card_texts[key]:
+                        card_texts[key].append(txt)
+
+                hits = [
+                    MerchantSearchHit(
+                        issuer=k[0],
+                        product_code=k[1],
+                        product_name=k[2],
+                        matched_texts=tuple(texts[:5]),
+                    )
+                    for k, texts in card_texts.items()
+                ]
+                return MerchantSearchPage(
+                    generation_id=handle.generation_id,
+                    merchant_query=cleaned_query,
+                    items=tuple(hits),
+                    total_count=len(hits),
+                )
+            return MerchantSearchPage(
+                generation_id=handle.generation_id,
+                merchant_query=cleaned_query,
+                items=(),
+                total_count=0,
+            )
+
+    async def get_product_summary(
+        self,
+        issuer: str,
+        identifier: str,
+    ) -> ProductSummary | None:
+        with self.store.pin() as handle:
+            return await asyncio.to_thread(
+                self._get_product_summary, handle, issuer, identifier
+            )
+
+    @staticmethod
+    def _get_product_summary(
+        handle: GenerationHandle,
+        issuer: str,
+        identifier: str,
+    ) -> ProductSummary | None:
+        cleaned_id = identifier.strip()
+        if not cleaned_id:
+            raise ValueError("identifier must not be blank")
+
+        with handle.connect() as connection:
+            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+                row = connection.execute(
+                    """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
+                              cr.contract_revision_id, cr.effective_date
+                         FROM product_lineages AS pl
+                         JOIN contract_revisions AS cr
+                           ON cr.product_lineage_id = pl.product_lineage_id
+                        WHERE pl.issuer = ? AND pl.product_code = ?
+                          AND cr.temporal_status = 'current'
+                        ORDER BY cr.contract_revision_id
+                        LIMIT 1""",
+                    (issuer, cleaned_id),
+                ).fetchone()
+
+                if row is None:
+                    norm_id = " ".join(
+                        unicodedata.normalize("NFKC", cleaned_id).casefold().split()
+                    )
+                    candidates = connection.execute(
+                        """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
+                                  cr.contract_revision_id, cr.effective_date
+                             FROM product_lineages AS pl
+                             JOIN contract_revisions AS cr
+                               ON cr.product_lineage_id = pl.product_lineage_id
+                            WHERE pl.issuer = ?
+                              AND cr.temporal_status = 'current'""",
+                        (issuer,),
+                    ).fetchall()
+                    for cand in candidates:
+                        cand_name = " ".join(
+                            unicodedata.normalize("NFKC", str(cand["product_name"]))
+                            .casefold()
+                            .split()
+                        )
+                        if norm_id in cand_name:
+                            row = cand
+                            break
+
+                if row is None:
+                    return None
+
+                cr_id = str(row["contract_revision_id"])
+                p_issuer = str(row["issuer"])
+                p_code = str(row["product_code"])
+                p_name = str(row["product_name"])
+                eff_raw = row["effective_date"]
+                eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
+
+                nodes = connection.execute(
+                    """SELECT node_type, major_class, raw_heading, display_text, ordinal
+                         FROM structure_nodes
+                        WHERE contract_revision_id = ?
+                        ORDER BY ordinal""",
+                    (cr_id,),
+                ).fetchall()
+
+                launch_d: date | None = None
+                annual_fee: str | None = None
+                benefit_headings: list[str] = []
+                benefit_summaries: list[str] = []
+
+                for n in nodes:
+                    txt = str(n["display_text"]).strip()
+                    mclass = str(n["major_class"])
+                    ntype = str(n["node_type"])
+                    heading = str(n["raw_heading"] or "").strip()
+
+                    if launch_d is None and "출시" in txt:
+                        launch_d = parse_launch_date(txt)
+
+                    if annual_fee is None and "연회비" in txt:
+                        cleaned_fee = " ".join(txt.split())
+                        if len(cleaned_fee) > 10 and not any(
+                            k in cleaned_fee for k in ["반환", "기준", "산정", "중도해지"]
+                        ):
+                            annual_fee = cleaned_fee[:250]
+
+                    if mclass == "BENEFIT":
+                        if heading and ntype in ("MAJOR_SECTION", "ITEM"):
+                            h_clean = heading.replace("#", "").strip()
+                            if h_clean and h_clean not in benefit_headings and len(h_clean) > 2:
+                                if not any(
+                                    k in h_clean
+                                    for k in ["유의사항", "이용안내", "공통", "기준", "기타"]
+                                ):
+                                    benefit_headings.append(h_clean)
+                        if (
+                            ntype in ("ITEM", "PARAGRAPH", "TABLE_ROW")
+                            and len(benefit_summaries) < 5
+                        ):
+                            b_clean = " ".join(txt.split())
+                            benefit_keywords = (
+                                "할인",
+                                "적립",
+                                "캐시백",
+                                "면제",
+                                "무료",
+                                "제공",
+                                "포인트",
+                            )
+                            ignore_keywords = (
+                                "유의사항",
+                                "연회비",
+                                "금융소비자",
+                                "기준",
+                                "실적제외",
+                            )
+                            if any(w in b_clean for w in benefit_keywords):
+                                if not any(k in b_clean for k in ignore_keywords):
+                                    if len(b_clean) > 10 and b_clean not in benefit_summaries:
+                                        benefit_summaries.append(b_clean[:180])
+
+                return ProductSummary(
+                    generation_id=handle.generation_id,
+                    issuer=p_issuer,
+                    product_code=p_code,
+                    product_name=p_name,
+                    effective_date=eff_date,
+                    launch_date=launch_d,
+                    annual_fee_text=annual_fee,
+                    benefit_headings=tuple(benefit_headings[:5]),
+                    benefit_summary_texts=tuple(benefit_summaries[:5]),
+                )
+            return None
+

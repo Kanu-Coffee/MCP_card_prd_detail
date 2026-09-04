@@ -1142,7 +1142,7 @@ async def test_default_runtime_constructs_no_reasoner_and_enabled_tool_is_separa
         store,
         disabled_settings,
     ).list_tools()
-    assert len(disabled_tools) == 8
+    assert len(disabled_tools) == 12
     assert all(tool.name != "experimental_long_context_audit" for tool in disabled_tools)
     lane = ExperimentalMapReduceLane(store, _FakeReasoner(), _profile())
     settings = Settings(
@@ -1158,7 +1158,7 @@ async def test_default_runtime_constructs_no_reasoner_and_enabled_tool_is_separa
     tools = await build_mcp_server(serving, store, settings, lane).list_tools()
     names = {tool.name for tool in tools}
     assert "experimental_long_context_audit" in names
-    assert len(names) == 9
+    assert len(names) == 13
     schema = next(
         tool.input_schema for tool in tools if tool.name == "experimental_long_context_audit"
     )
