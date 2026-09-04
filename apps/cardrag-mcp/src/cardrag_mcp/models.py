@@ -665,3 +665,56 @@ class SearchRequest(StrictModel):
         if not value:
             raise ValueError("query must not be blank")
         return value
+
+
+class ProductCatalogEntry(StrictModel):
+    """Card product catalog entry with launch and revision dates."""
+
+    issuer: Identifier
+    product_code: Identifier
+    product_lineage_id: Identifier
+    product_name: str = Field(min_length=1, max_length=1_000)
+    document_type: Identifier
+    effective_date: date | None = None
+    launch_date: date | None = None
+    temporal_status: TemporalStatus
+
+
+class ProductCatalogPage(StrictModel):
+    """Card product catalog page response."""
+
+    generation_id: Identifier
+    items: tuple[ProductCatalogEntry, ...]
+    total_count: int = Field(ge=0)
+
+
+class MerchantSearchHit(StrictModel):
+    """Matched card product with benefit text excerpts."""
+
+    issuer: Identifier
+    product_code: Identifier
+    product_name: str = Field(min_length=1, max_length=1_000)
+    matched_texts: tuple[str, ...] = Field(min_length=1)
+
+
+class MerchantSearchPage(StrictModel):
+    """Merchant benefit search response."""
+
+    generation_id: Identifier
+    merchant_query: str
+    items: tuple[MerchantSearchHit, ...]
+    total_count: int = Field(ge=0)
+
+
+class ProductSummary(StrictModel):
+    """Compact summary of a card product."""
+
+    generation_id: Identifier
+    issuer: Identifier
+    product_code: Identifier
+    product_name: str = Field(min_length=1, max_length=1_000)
+    effective_date: date | None = None
+    launch_date: date | None = None
+    annual_fee_text: str | None = None
+    benefit_headings: tuple[str, ...] = ()
+    benefit_summary_texts: tuple[str, ...] = ()

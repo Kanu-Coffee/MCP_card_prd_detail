@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.14"}
+    assert versions == {"1.0.15"}
     assert worker_runtime_version == versions.pop()
 
 

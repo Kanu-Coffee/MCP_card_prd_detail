@@ -1,4 +1,4 @@
-"""FastAPI edge with eight default MCP tools and one optional experimental tool."""
+"""FastAPI edge with twelve default MCP tools and one optional experimental tool."""
 
 from __future__ import annotations
 
@@ -248,6 +248,66 @@ def build_mcp_server(
         if value is None:
             raise ValueError("source page not found")
         return value.model_dump(mode="json")
+
+    @server.tool()
+    async def list_recent_products(
+        months: int = 3,
+        issuer: str | None = None,
+    ) -> dict[str, Any]:
+        """List card products launched or revised within the specified number of months.
+
+        Returns both the official launch date (parsed from disclosure text) and the contract
+        effective date. Results are sorted newest-first. Use this tool for time-based queries
+        like 'recently released cards' or 'cards launched in the last 3 months'.
+        """
+
+        result = await repository.list_recent_products(months=months, issuer=issuer)
+        return result.model_dump(mode="json")
+
+    @server.tool()
+    async def find_products(
+        keyword: str,
+        issuer: str | None = None,
+    ) -> dict[str, Any]:
+        """Search card products by partial name keyword (fuzzy).
+
+        Matches are case-insensitive and width-normalized (NFKC). Use this instead of
+        get_product when you only know a partial name (e.g. '원더라이프', 'SUPER', '가온')
+        rather than a 6-digit product code.
+        """
+
+        result = await repository.find_products(keyword=keyword, issuer=issuer)
+        return result.model_dump(mode="json")
+
+    @server.tool()
+    async def find_cards_by_merchant(
+        merchant_name: str,
+        issuer: str | None = None,
+    ) -> dict[str, Any]:
+        """Find every card product whose BENEFIT nodes mention the given merchant or brand.
+
+        Performs an exhaustive text scan over benefit clauses (e.g. '스타벅스', '티몬', '넷플릭스',
+        '배달의민족'), returning matching benefit excerpts per card without vector search omissions.
+        """
+
+        result = await repository.find_cards_by_merchant(merchant_name=merchant_name, issuer=issuer)
+        return result.model_dump(mode="json")
+
+    @server.tool()
+    async def get_product_summary(
+        issuer: str,
+        identifier: str,
+    ) -> dict[str, Any]:
+        """Return a compact summary of one card product: name, dates, annual fee, and top benefits.
+
+        'identifier' can be a 6-digit product_code OR a product name substring.
+        Produces a lightweight 1-2KB summary instead of the massive full contract bundle.
+        """
+
+        result = await repository.get_product_summary(issuer=issuer, identifier=identifier)
+        if result is None:
+            raise ValueError("product not found")
+        return result.model_dump(mode="json")
 
     if experimental_map_reduce is not None:
 

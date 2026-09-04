@@ -19,7 +19,7 @@ def settings_for(state) -> Settings:
     )
 
 
-def test_exactly_eight_approved_dual_read_mcp_tools(active_runtime) -> None:
+def test_approved_mcp_tools(active_runtime) -> None:
     store, repository, _, _ = active_runtime
     app = build_app(repository, store, settings_for(store.root))
     tools = asyncio.run(app.state.mcp_server.list_tools())
@@ -32,6 +32,10 @@ def test_exactly_eight_approved_dual_read_mcp_tools(active_runtime) -> None:
         "get_product",
         "get_source_pdf",
         "get_source_page",
+        "list_recent_products",
+        "find_products",
+        "find_cards_by_merchant",
+        "get_product_summary",
     }
     by_name = {tool.name: tool for tool in tools}
     assert "document_id" not in by_name["search_evidence"].input_schema["properties"]
@@ -57,6 +61,22 @@ def test_exactly_eight_approved_dual_read_mcp_tools(active_runtime) -> None:
     assert set(by_name["list_product_revisions"].input_schema["properties"]) == {
         "issuer",
         "product_lineage_id",
+    }
+    assert set(by_name["list_recent_products"].input_schema["properties"]) == {
+        "months",
+        "issuer",
+    }
+    assert set(by_name["find_products"].input_schema["properties"]) == {
+        "keyword",
+        "issuer",
+    }
+    assert set(by_name["find_cards_by_merchant"].input_schema["properties"]) == {
+        "merchant_name",
+        "issuer",
+    }
+    assert set(by_name["get_product_summary"].input_schema["properties"]) == {
+        "issuer",
+        "identifier",
     }
     assert "unsupported_drm" in (by_name["get_product"].description or "")
 
