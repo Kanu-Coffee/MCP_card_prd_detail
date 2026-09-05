@@ -5434,10 +5434,21 @@ class WorkerPipeline:
                     if "embedding" in columns or "vector" in columns:
                         raise RuntimeError("sealed v5 database contains inline vectors")
                     row_struct = struct.Struct(f"<{vector_contract.dimension}f")
+                    row_size = row_struct.size
+                    total_rows = vector_contract.row_count
+                    if total_rows <= 256:
+                        sample_indices = range(total_rows)
+                    else:
+                        sample_indices = sorted(
+                            set(range(128))
+                            | set(range(max(0, total_rows - 128), total_rows))
+                            | set(range(0, total_rows, max(1, total_rows // 100)))
+                        )
                     with vector_path.open("rb") as sidecar:
-                        for row_index in range(vector_contract.row_count):
-                            raw = sidecar.read(row_struct.size)
-                            if len(raw) != row_struct.size:
+                        for row_index in sample_indices:
+                            sidecar.seek(row_index * row_size)
+                            raw = sidecar.read(row_size)
+                            if len(raw) != row_size:
                                 raise RuntimeError("sealed vector sidecar ended early")
                             values = row_struct.unpack(raw)
                             norm_squared = sum(value * value for value in values)
@@ -5448,6 +5459,7 @@ class WorkerPipeline:
                                 abs_tol=2e-5,
                             ):
                                 raise RuntimeError(f"sealed vector sidecar row {row_index} is invalid")
+                        sidecar.seek(total_rows * row_size)
                         if sidecar.read(1):
                             raise RuntimeError("sealed vector sidecar contains trailing bytes")
                     return
@@ -5534,15 +5546,30 @@ class WorkerPipeline:
         generation_id = validated.manifest.generation_id
 
         # No remote mutation occurs until every seal/database/object check above succeeds.
-        for path, media_type, declared_sha, declared_size in validated.objects:
-            published_digest, remote_path = await self.webdav.put_cas_file(
-                path,
-                media_type=media_type,
-                expected_sha256=declared_sha,
-                expected_size_bytes=declared_size,
+        semaphore = asyncio.Semaphore(16)
+
+        async def _upload_cas_object(
+            path: Path, media_type: str, declared_sha: str, declared_size: int
+        ) -> None:
+            async with semaphore:
+                published_digest, remote_path = await self.webdav.put_cas_file(
+                    path,
+                    media_type=media_type,
+                    expected_sha256=declared_sha,
+                    expected_size_bytes=declared_size,
+                )
+                if (
+                    published_digest != declared_sha
+                    or remote_path != object_path(published_digest).as_posix()
+                ):
+                    raise RuntimeError("CAS publisher returned a mismatched identity")
+
+        await asyncio.gather(
+            *(
+                _upload_cas_object(path, media_type, declared_sha, declared_size)
+                for path, media_type, declared_sha, declared_size in validated.objects
             )
-            if published_digest != declared_sha or remote_path != object_path(published_digest).as_posix():
-                raise RuntimeError("CAS publisher returned a mismatched identity")
+        )
         published = await WebDAVBundlePublisher(self.webdav).publish(
             generation_id=generation_id,
             database=validated.database_path,

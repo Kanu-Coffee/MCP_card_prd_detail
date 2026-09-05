@@ -394,7 +394,7 @@ class WorkerSettings:
             pdf_cache_refresh_hours=_positive_float("CARDRAG_PDF_CACHE_REFRESH_HOURS", 168),
             retain_generations=_bounded_int("CARDRAG_RETAIN_GENERATIONS", 2, minimum=2, maximum=20),
             retained_incomplete_runs=_bounded_int("CARDRAG_RETAIN_INCOMPLETE_RUNS", 2, minimum=1, maximum=20),
-            garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 30, minimum=1, maximum=365),
+            garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 1, minimum=1, maximum=365),
             collect_remote_garbage=collect_remote_garbage,
         )
 
