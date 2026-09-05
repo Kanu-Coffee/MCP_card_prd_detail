@@ -27,8 +27,6 @@ from numbers import Real
 from pathlib import Path
 from typing import Final, Literal, final
 
-LOGGER: Final = logging.getLogger(__name__)
-
 from cardrag_core import canonical_json_bytes, canonical_sha256, v5_exact_row_corpus_sha256
 from cardrag_core.embedding import (
     QWEN3_DOCUMENT_POLICY,
@@ -40,6 +38,8 @@ from cardrag_core.embedding import (
     QWEN3_QUERY_POLICY,
     qwen3_embedding_profile_id,
 )
+
+LOGGER: Final = logging.getLogger(__name__)
 
 SERVING_SCHEMA_ID_V5: Final = "cardrag.serving-db.v5"
 VECTOR_SIDECAR_NAME: Final = "vectors.f32"

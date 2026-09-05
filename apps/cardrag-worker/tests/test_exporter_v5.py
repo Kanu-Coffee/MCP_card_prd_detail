@@ -1348,4 +1348,3 @@ def test_v5_verify_database_optimized_detection(tmp_path: Path) -> None:
                 is_vacuumed_verify=False,
             )
         conn.execute("ROLLBACK TO test_sp")
-

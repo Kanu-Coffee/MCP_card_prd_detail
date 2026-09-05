@@ -3041,16 +3041,12 @@ class WorkerPipeline:
         unbound_doc_ids = set(acquired_by_doc_id.keys()) - set(prior_local_native_sources.keys())
         if unbound_doc_ids:
             candidate_run_ids: list[str] = []
-            try:
+            with suppress(Exception):
                 candidate_run_ids.extend(
                     self.state.retained_publication_run_ids(limit=max(self.retained_generations, 5))
                 )
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 candidate_run_ids.extend(reversed(self.state.completed_run_ids()))
-            except Exception:
-                pass
 
             seen_runs: set[str] = set()
             runs_root = self.state_dir / "runs"
@@ -3068,7 +3064,8 @@ class WorkerPipeline:
                 try:
                     candidate_seal = json.loads(candidate_seal_path.read_text(encoding="utf-8"))
                     validated_seal = await self._validate_local_seal(candidate_seal)
-                except Exception:
+                except Exception as seal_err:
+                    LOGGER.debug("Skipping unreadable candidate seal %s: %s", candidate_seal_path, seal_err)
                     continue
 
                 c_manifest = validated_seal.manifest
@@ -3097,9 +3094,7 @@ class WorkerPipeline:
                     ):
                         continue
 
-                    prior_ocr_path = (
-                        runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
-                    )
+                    prior_ocr_path = runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
                     prior_manifest_path = (
                         runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "native-manifest.json"
                     )

@@ -1563,4 +1563,3 @@ async def test_v5_pipeline_cross_run_local_ocr_cache_lookup_on_corpus_change(
         assert ocr.prior_hits == 1
         # only card-b triggered the provider call in run 2
         assert ocr.provider_calls == 2
-
