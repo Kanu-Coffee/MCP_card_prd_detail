@@ -3033,6 +3033,111 @@ class WorkerPipeline:
                     ocr_size_bytes=document.ocr.size_bytes,
                 )
 
+        # Cross-run local OCR cache lookup:
+        # If corpus changed or documents are unbound from the healing generation,
+        # lookup validated OCR artifacts from retained previous runs so we do not
+        # re-run expensive OCR across thousands of existing unchanged documents.
+        acquired_by_doc_id = {item.source.document_id(item.pdf.sha256): item for item in acquired}
+        unbound_doc_ids = set(acquired_by_doc_id.keys()) - set(prior_local_native_sources.keys())
+        if unbound_doc_ids:
+            candidate_run_ids: list[str] = []
+            with suppress(Exception):
+                candidate_run_ids.extend(
+                    self.state.retained_publication_run_ids(limit=max(self.retained_generations, 5))
+                )
+            with suppress(Exception):
+                candidate_run_ids.extend(reversed(self.state.completed_run_ids()))
+
+            seen_runs: set[str] = set()
+            runs_root = self.state_dir / "runs"
+            for candidate_run_id in candidate_run_ids:
+                if not unbound_doc_ids:
+                    break
+                if candidate_run_id in seen_runs or candidate_run_id == run_id:
+                    continue
+                seen_runs.add(candidate_run_id)
+
+                candidate_seal_path = runs_root / candidate_run_id / "sealed" / "publish.json"
+                if not candidate_seal_path.is_file() or candidate_seal_path.is_symlink():
+                    continue
+
+                try:
+                    candidate_seal = json.loads(candidate_seal_path.read_text(encoding="utf-8"))
+                    validated_seal = await self._validate_local_seal(candidate_seal)
+                except Exception as seal_err:
+                    LOGGER.debug("Skipping unreadable candidate seal %s: %s", candidate_seal_path, seal_err)
+                    continue
+
+                c_manifest = validated_seal.manifest
+                sealed_ocr_objects = {
+                    (path, digest)
+                    for path, media_type, digest, _size in validated_seal.objects
+                    if media_type == "text/markdown; charset=utf-8"
+                }
+
+                c_docs_by_id = {d.document_id: d for d in c_manifest.documents}
+                matched_in_this_run = 0
+                for doc_id in list(unbound_doc_ids):
+                    c_doc = c_docs_by_id.get(doc_id)
+                    if c_doc is None:
+                        continue
+                    acquired_item = acquired_by_doc_id[doc_id]
+                    pdf = acquired_item.pdf
+                    source = acquired_item.source
+                    if (
+                        c_doc.availability != "available"
+                        or c_doc.ocr is None
+                        or c_doc.issuer != source.issuer
+                        or c_doc.pdf.sha256 != pdf.sha256
+                        or c_doc.pdf.size_bytes != pdf.size_bytes
+                        or c_doc.page_count != pdf.page_count
+                    ):
+                        continue
+
+                    prior_ocr_path = runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
+                    prior_manifest_path = (
+                        runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "native-manifest.json"
+                    )
+                    if (
+                        not prior_manifest_path.is_file()
+                        or prior_manifest_path.is_symlink()
+                        or not prior_ocr_path.is_file()
+                        or prior_ocr_path.is_symlink()
+                    ):
+                        continue
+
+                    try:
+                        resolved_prior_ocr = prior_ocr_path.resolve(strict=True)
+                    except (OSError, RuntimeError):
+                        continue
+
+                    if (resolved_prior_ocr, c_doc.ocr.sha256) not in sealed_ocr_objects:
+                        continue
+
+                    prior_local_native_sources[doc_id] = PriorLocalNativeSource(
+                        runs_root=runs_root,
+                        run_id=candidate_run_id,
+                        generation_id=c_manifest.generation_id,
+                        corpus_sha256=c_manifest.corpus_sha256,
+                        contract_sha256=c_manifest.contract_sha256,
+                        document_id=doc_id,
+                        pdf_sha256=c_doc.pdf.sha256,
+                        pdf_size_bytes=c_doc.pdf.size_bytes,
+                        page_count=c_doc.page_count,
+                        ocr_sha256=c_doc.ocr.sha256,
+                        ocr_size_bytes=c_doc.ocr.size_bytes,
+                    )
+                    unbound_doc_ids.remove(doc_id)
+                    matched_in_this_run += 1
+
+                if matched_in_this_run > 0:
+                    LOGGER.info(
+                        "Discovered %d reusable local OCR artifacts from prior run %s (remaining unbound: %d)",
+                        matched_in_this_run,
+                        candidate_run_id,
+                        len(unbound_doc_ids),
+                    )
+
         processed: list[_ProcessedDocument] = []
         ocr_failures: list[OCRFailureRecord] = []
         failed_documents: list[_OCRFailedDocument] = []

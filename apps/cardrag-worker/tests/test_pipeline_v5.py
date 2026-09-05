@@ -17,6 +17,7 @@ from cardrag_core import (
     GenerationManifest,
     GenerationReady,
     MaxChildAggregationDefinition,
+    canonical_json_bytes,
     canonical_sha256,
     channel_pointer_path,
     generation_database_path,
@@ -1396,3 +1397,169 @@ async def test_v5_pipeline_promotes_verified_m0_profile_into_sealed_m1(
         assert await m1_pipeline._validated_document_aggregation_head() == m1_manifest  # noqa: SLF001
 
     assert pdf_requests == [source.source_url]
+
+
+class _ReusingOCR:
+    contract = {"schema_version": "test-ocr.v1"}
+    adoption_policy_version = "cardrag.legacy-ocr-adoption.v1"
+    cache_mode = "read-only"
+
+    def __init__(self) -> None:
+        self.provider_calls = 0
+        self.prior_hits = 0
+
+    async def resolve(self, **kwargs: Any) -> OCRResult:
+        prior = kwargs.get("prior_local_native")
+        output_dir: Path = kwargs["output_dir"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        page = """테스트카드 상품설명서
+## 주요 혜택
+### 대중교통 할인
+- 전월 이용금액 30만원 이상이면 대중교통 이용금액의 10%를 할인합니다.
+## 이용 전 확인사항
+상품권 구매금액은 전월 이용실적에서 제외됩니다.
+""".strip()
+        body = f"## Page 1\n\n{page}\n".encode()
+        body_sha256 = hashlib.sha256(body).hexdigest()
+
+        manifest_path = output_dir / "native-manifest.json"
+        if not manifest_path.exists():
+            manifest_data = {
+                "schema_version": "cardrag.ocr-artifact-manifest.v1",
+                "source": {
+                    "pdf_sha256": kwargs["pdf_sha256"],
+                    "pdf_size_bytes": kwargs["pdf_size_bytes"],
+                    "page_count": kwargs["page_count"],
+                },
+                "contract": {
+                    "schema_version": "cardrag.gemini-ocr-contract.v2",
+                    "provider": "test",
+                    "model": "test",
+                    "prompt_sha256": "0" * 64,
+                    "prompt_version": "v1",
+                    "system_instruction_sha256": "0" * 64,
+                    "system_instruction_version": "v1",
+                    "generation_policy_sha256": "0" * 64,
+                    "generation_policy_version": "v1",
+                },
+                "reuse_key": "a" * 64,
+                "output": {
+                    "sha256": body_sha256,
+                    "size_bytes": len(body),
+                    "media_type": "text/markdown; charset=utf-8",
+                    "path": f"cas/{body_sha256[:2]}/{body_sha256}",
+                },
+                "ocr_chars": len(page),
+                "page_output_sha256": [hashlib.sha256(page.encode()).hexdigest()],
+            }
+            manifest_path.write_bytes(canonical_json_bytes(manifest_data))
+
+        ocr_md_path = output_dir / "ocr.md"
+        if not ocr_md_path.exists():
+            ocr_md_path.write_bytes(body)
+
+        if prior is not None:
+            self.prior_hits += 1
+            return OCRResult(
+                pages=(page,),
+                ocr_bytes=body,
+                ocr_text=body.decode(),
+                ocr_sha256=body_sha256,
+                size_bytes=len(body),
+                provenance="native-local",
+                provider="test",
+                model="test",
+                reuse_key="a" * 64,
+                cache_reused=True,
+            )
+        self.provider_calls += 1
+        return OCRResult(
+            pages=(page,),
+            ocr_bytes=body,
+            ocr_text=body.decode(),
+            ocr_sha256=body_sha256,
+            size_bytes=len(body),
+            provenance="native",
+            provider="test",
+            model="test",
+            reuse_key="a" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_v5_pipeline_cross_run_local_ocr_cache_lookup_on_corpus_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [pdf_bytes(), pdf_bytes(width=612)]
+    pdf_requests: list[str] = []
+    _install_pdf_http(monkeypatch, payload, pdf_requests)
+    embedding_requests: list[dict[str, Any]] = []
+    embeddings = _test_qwen_embeddings(embedding_requests)
+    source_a = _test_source("card-a")
+    source_b = SourceRecord(
+        issuer="testbank",
+        product_code="card-b",
+        product_name="두번째 테스트 카드",
+        effective_date=date(2026, 8, 1),
+        source_version="v1",
+        source_url="https://cards.example/card-b.pdf",
+        source_post_id="post-b",
+        file_name="card-b.pdf",
+        category="credit",
+        discovered_at=datetime(2026, 8, 29, tzinfo=UTC),
+    )
+    ocr = _ReusingOCR()
+    webdav = _FakeCandidateWebDAV()
+    webdav.fail_pointer_once = False
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        # Run 1: initial corpus with only card-a
+        pipeline_1 = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_Adapter(source_a)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        res1 = await pipeline_1.run()
+        assert res1.status == "succeeded"
+        assert res1.generation_id is not None
+        assert ocr.provider_calls == 1
+        assert ocr.prior_hits == 0
+
+        # Update webdav.current to generation 1
+        webdav.current = RemoteGenerationIdentity(
+            generation_id=res1.generation_id,
+            corpus_sha256=res1.corpus_sha256,
+            contract_sha256=res1.contract_sha256,
+            generation_schema="cardrag.generation.v5",
+            serving_schema="cardrag.serving-db.v5",
+        )
+
+        # Run 2: corpus expands with card-b (corpus_sha256 changes)
+        pipeline_2 = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[_MultiAdapter((source_a, source_b))],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        assert pipeline_2.contract_sha256 == pipeline_1.contract_sha256
+        res2 = await pipeline_2.run()
+        assert res2.status == "succeeded"
+        assert res2.generation_id is not None
+        assert res2.generation_id != res1.generation_id
+        assert res2.document_count == 2
+        # card-a was looked up and reused from run 1 without calling provider
+        assert ocr.prior_hits == 1
+        # only card-b triggered the provider call in run 2
+        assert ocr.provider_calls == 2
