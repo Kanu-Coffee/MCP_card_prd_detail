@@ -1284,3 +1284,68 @@ def test_v5_export_preserves_nonzero_bounded_dispositions_and_hashes(tmp_path: P
         assert connection.execute(
             "SELECT issuer,product_code,reason_code,attempts FROM ocr_failed_products"
         ).fetchone() == ("kb", "CARD-OCR-FAILED", "provider_document_rejected", 3)
+
+
+def test_v5_verify_database_optimized_detection(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    exporter = ServingDatabaseExporterV5()
+    records = _records()
+    exporter.export(database, vectors, **records)
+
+    with sqlite3.connect(database) as conn:
+        metadata = dict(conn.execute("SELECT key,value FROM metadata"))
+        expected_counts = {
+            "issuers": len(records.get("issuers", ())),
+            "product_lineages": len(records.get("product_lineages", ())),
+            "unsupported_products": len(records.get("unsupported_products", ())),
+            "ocr_failed_products": len(records.get("ocr_failed_products", ())),
+            "contract_revisions": len(records.get("contract_revisions", ())),
+            "document_pages": len(records.get("document_pages", ())),
+            "structure_nodes": len(records.get("structure_nodes", ())),
+            "node_spans": len(records.get("node_spans", ())),
+            "node_links": len(records.get("node_links", ())),
+            "embedding_profiles": len(records.get("embedding_profiles", ())),
+            "embedding_views": len(records.get("embedding_views", ())),
+            "embedding_view_spans": sum(len(v.source_spans) for v in records.get("embedding_views", ())),
+            "embedding_views_fts": len(records.get("embedding_views", ())),
+            "revision_coverage": len(records.get("contract_revisions", ())),
+        }
+
+        # 1. Full verify passes
+        exporter_module._verify_database(  # noqa: SLF001
+            conn,
+            expected_metadata=metadata,
+            expected_counts=expected_counts,
+            run_fts_integrity_check=True,
+            is_vacuumed_verify=False,
+        )
+
+        # 2. Fast vacuumed verify passes
+        exporter_module._verify_database(  # noqa: SLF001
+            conn,
+            expected_metadata=metadata,
+            expected_counts=expected_counts,
+            is_vacuumed_verify=True,
+        )
+
+        # 3. Gap detection in canonical spans
+        conn.execute("SAVEPOINT test_sp")
+        # Shrink canonical span source_end to create a gap
+        conn.execute(
+            """UPDATE node_spans
+               SET source_end = source_start + 1
+               WHERE is_canonical = 1"""
+        )
+        with pytest.raises(
+            ServingDatabaseV5Error,
+            match="stored node span hash does not match|stored node display_text differs|reconstruct the OCR source",
+        ):
+            exporter_module._verify_database(  # noqa: SLF001
+                conn,
+                expected_metadata=metadata,
+                expected_counts=expected_counts,
+                is_vacuumed_verify=False,
+            )
+        conn.execute("ROLLBACK TO test_sp")
+

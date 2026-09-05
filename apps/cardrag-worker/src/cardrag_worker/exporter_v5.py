@@ -8,7 +8,9 @@ to evolve independently while this exporter revalidates every binding.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +26,8 @@ from datetime import date
 from numbers import Real
 from pathlib import Path
 from typing import Final, Literal, final
+
+LOGGER: Final = logging.getLogger(__name__)
 
 from cardrag_core import canonical_json_bytes, canonical_sha256, v5_exact_row_corpus_sha256
 from cardrag_core.embedding import (
@@ -1289,6 +1293,7 @@ def _verify_database(
     expected_metadata: Mapping[str, str],
     expected_counts: Mapping[str, int],
     run_fts_integrity_check: bool = False,
+    is_vacuumed_verify: bool = False,
 ) -> None:
     integrity = connection.execute("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":
@@ -1338,6 +1343,25 @@ def _verify_database(
         or int(view_pk_max) != expected_counts["embedding_views"]
     ):
         raise ServingDatabaseV5Error("embedding view primary keys are not contiguous and 1-based")
+
+    if is_vacuumed_verify:
+        sample = connection.execute(
+            "SELECT row_index,display_text FROM embedding_views ORDER BY row_index LIMIT 1"
+        ).fetchone()
+        if sample is not None:
+            token = re.search(r"[0-9A-Za-z가-힣]{2,}", str(sample[1]))
+            if token is not None:
+                matched = {
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT row_index FROM embedding_views_fts WHERE embedding_views_fts MATCH ?",
+                        ('"' + token.group(0).replace('"', '""') + '"',),
+                    )
+                }
+                if int(sample[0]) not in matched:
+                    raise ServingDatabaseV5Error("FTS shadow smoke query did not find its source view")
+        return
+
     unbound = int(
         connection.execute(
             """SELECT count(*) FROM embedding_views v
@@ -1349,29 +1373,53 @@ def _verify_database(
     )
     if unbound:
         raise ServingDatabaseV5Error("embedding view has an unbound profile or structure node")
-    for row_index, revision_id, display_text in connection.execute(
-        """SELECT row_index,contract_revision_id,display_text
-             FROM embedding_views ORDER BY row_index"""
+
+    total_views = expected_counts["embedding_views"]
+    verified_views = 0
+    views_stream = connection.execute(
+        """SELECT v.row_index, v.contract_revision_id, v.display_text,
+                  s.page, s.source_start, s.source_end, s.text_sha256, s.span_ordinal, p.text
+             FROM embedding_views AS v
+             LEFT JOIN embedding_view_spans AS s
+               ON s.row_index=v.row_index AND s.contract_revision_id=v.contract_revision_id
+             LEFT JOIN document_pages AS p
+               ON p.contract_revision_id=s.contract_revision_id AND p.page=s.page
+            ORDER BY v.row_index, s.span_ordinal"""
+    )
+    for (row_idx, _rev_id, display_txt), spans_iter in itertools.groupby(
+        views_stream, key=lambda row: (int(row[0]), str(row[1]), str(row[2]))
     ):
-        view_spans = connection.execute(
-            """SELECT s.page,s.source_start,s.source_end,s.text_sha256,s.span_ordinal,p.text
-                 FROM embedding_view_spans AS s
-                 JOIN document_pages AS p
-                   ON p.contract_revision_id=s.contract_revision_id AND p.page=s.page
-                WHERE s.row_index=? AND s.contract_revision_id=?
-                ORDER BY s.span_ordinal""",
-            (row_index, revision_id),
-        ).fetchall()
-        if [int(span[4]) for span in view_spans] != list(range(len(view_spans))):
-            raise ServingDatabaseV5Error("stored embedding view spans are not contiguous")
+        if row_idx != verified_views:
+            raise ServingDatabaseV5Error("embedding view row_index is not contiguous and 0-based")
         stored_view_display_parts: list[str] = []
-        for _page, start, end, text_sha256, _ordinal, page_text in view_spans:
+        span_ordinals: list[int] = []
+        for span_row in spans_iter:
+            _r_idx, _r_rev, _r_disp, _page, start, end, text_sha256, span_ordinal, page_text = span_row
+            if span_ordinal is None or page_text is None:
+                break
+            span_ordinals.append(int(span_ordinal))
             text = str(page_text)[int(start) : int(end)]
             if hashlib.sha256(text.encode("utf-8")).hexdigest() != str(text_sha256):
                 raise ServingDatabaseV5Error("stored embedding view span hash is invalid")
             stored_view_display_parts.append(text)
-        if not stored_view_display_parts or "".join(stored_view_display_parts) != str(display_text):
+
+        if span_ordinals != list(range(len(span_ordinals))):
+            raise ServingDatabaseV5Error("stored embedding view spans are not contiguous")
+        if not stored_view_display_parts or "".join(stored_view_display_parts) != display_txt:
             raise ServingDatabaseV5Error("stored embedding view display text is not source-bound")
+
+        verified_views += 1
+        if verified_views % 50000 == 0 or verified_views == total_views:
+            LOGGER.info(
+                "Verified embedding views: %d/%d (%.1f%%)",
+                verified_views,
+                total_views,
+                (verified_views / total_views * 100.0) if total_views else 100.0,
+            )
+
+    if verified_views != total_views:
+        raise ServingDatabaseV5Error("embedding view row count does not match expected")
+
     invalid_current = int(
         connection.execute(
             """SELECT count(*) FROM (
@@ -1409,6 +1457,7 @@ def _verify_database(
         pages_by_revision[page_row.contract_revision_id].append(page_row)
 
     stored_spans: dict[tuple[str, str], list[tuple[int, int, int, str, int]]] = defaultdict(list)
+    canonical_spans_by_revision: dict[str, list[tuple[int, int, int]]] = defaultdict(list)
     for (
         node_id,
         revision_id,
@@ -1441,6 +1490,10 @@ def _verify_database(
         )
         if int(span_ordinal) != len(stored_spans[identity]) - 1:
             raise ServingDatabaseV5Error("stored node span ordinals are not contiguous")
+        if is_canonical:
+            canonical_spans_by_revision[str(revision_id)].append(
+                (int(page_number), int(source_start), int(source_end))
+            )
 
     for node_id, revision_id, display_text in connection.execute(
         """SELECT node_id,contract_revision_id,display_text FROM structure_nodes
@@ -1451,20 +1504,34 @@ def _verify_database(
         if exact_display != str(display_text):
             raise ServingDatabaseV5Error("stored node display_text differs from its source spans")
 
-    for revision_id, revision_pages in sorted(pages_by_revision.items()):
-        markers = {page.page: [False] * len(page.text) for page in revision_pages}
-        for (_node_id, span_revision_id), node_span_rows in stored_spans.items():
-            if span_revision_id != revision_id:
+    total_revisions = len(pages_by_revision)
+    for rev_idx, (revision_id, revision_pages) in enumerate(sorted(pages_by_revision.items()), start=1):
+        canonical_by_page: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for page_num, s_start, s_end in canonical_spans_by_revision.get(revision_id, []):
+            canonical_by_page[page_num].append((s_start, s_end))
+
+        for page in revision_pages:
+            intervals = canonical_by_page.get(page.page, [])
+            intervals.sort(key=lambda item: (item[0], item[1]))
+            page_len = len(page.text)
+            if page_len == 0:
+                if intervals:
+                    raise ServingDatabaseV5Error("stored canonical spans do not reconstruct the OCR source")
                 continue
-            for page_number, source_start, source_end, _source_text, is_canonical in node_span_rows:
-                if not is_canonical:
-                    continue
-                for offset in range(source_start, source_end):
-                    if markers[page_number][offset]:
-                        raise ServingDatabaseV5Error("stored canonical source spans overlap")
-                    markers[page_number][offset] = True
-        if any(not marker for page_markers in markers.values() for marker in page_markers):
-            raise ServingDatabaseV5Error("stored canonical spans do not reconstruct the OCR source")
+            if not intervals or intervals[0][0] != 0:
+                raise ServingDatabaseV5Error("stored canonical spans do not reconstruct the OCR source")
+            current_end = 0
+            for start, end in intervals:
+                if start < current_end:
+                    raise ServingDatabaseV5Error("stored canonical source spans overlap")
+                if start > current_end:
+                    raise ServingDatabaseV5Error("stored canonical spans do not reconstruct the OCR source")
+                if end <= start:
+                    raise ServingDatabaseV5Error("stored canonical source spans overlap")
+                current_end = end
+            if current_end != page_len:
+                raise ServingDatabaseV5Error("stored canonical spans do not reconstruct the OCR source")
+
         source_non_whitespace = sum(not char.isspace() for page in revision_pages for char in page.text)
         coverage = RevisionCoverage(
             contract_revision_id=revision_id,
@@ -1486,6 +1553,15 @@ def _verify_database(
             coverage.coverage_sha256,
         ):
             raise ServingDatabaseV5Error("stored revision coverage metadata is not source-bound")
+
+        if rev_idx % 500 == 0 or rev_idx == total_revisions:
+            LOGGER.info(
+                "Verified revision coverage: %d/%d (%.1f%%)",
+                rev_idx,
+                total_revisions,
+                (rev_idx / total_revisions * 100.0) if total_revisions else 100.0,
+            )
+
     aggregate_coverage_sha256 = _aggregate_source_coverage_sha256(
         tuple(page for revision_pages in pages_by_revision.values() for page in revision_pages)
     )
@@ -2214,6 +2290,7 @@ class ServingDatabaseExporterV5:
                     verify,
                     expected_metadata=metadata,
                     expected_counts=expected_counts,
+                    is_vacuumed_verify=True,
                 )
             finally:
                 verify.close()
