@@ -1,5 +1,9 @@
 # cardrag-worker
 
+v1.0.18 adds bounded PDF acquisition with a completion barrier, serial OCR
+requests with parallel local processing, and single-pass vector export.
+See [configuration, diagnostics, and acceptance](../../docs/V1_0_18_WORKER_EFFICIENCY.md).
+
 Finite CardRAG batch worker. It discovers disclosure PDFs for each explicitly
 enabled issuer, downloads and verifies PDFs through one SSRF-safe downloader,
 resumes OCR checkpoints, builds contract-local structure views, embeds them with

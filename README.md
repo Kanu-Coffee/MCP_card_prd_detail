@@ -1,4 +1,9 @@
-# CardRAG v1.0.14 streaming publication-verification patch candidate
+# CardRAG v1.0.18 Worker 효율화
+
+v1.0.18은 PDF 수집 완료 장벽, 제한된 수집·로컬 후처리 병렬화, 단일 패스 벡터 Export와
+반복 캐시·토큰 검증 최적화를 추가합니다. 실제 OCR 요청은 순차 처리하며 기존 MCP 데이터
+형식을 유지합니다. [구현·설정·검증 및 롤백](docs/V1_0_18_WORKER_EFFICIENCY.md)을 참고하십시오.
+아래 v1.0.14 설명과 문서는 이전 데이터 계약 및 recovery 기준 기록입니다.
 
 CardRAG는 카드사 상품안내장 PDF를 구조 보존형 검색 generation으로 만드는 두
 프로세스 서비스입니다.

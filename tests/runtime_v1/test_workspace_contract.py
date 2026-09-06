@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.16"}
+    assert versions == {"1.0.18"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -114,7 +114,9 @@ def test_v114_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
     assert "/var/lib/cardrag-worker/codex" not in root_env_example
     assert "CARDRAG_COLLECT_REMOTE_GARBAGE:-false" in worker_base
     assert "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED:-false" in worker_base
-    assert "CARDRAG_REMOTE_GC_APPROVED:-false" in worker_base
+    # v1.0.17 enabled the base capability; collection stays off by default,
+    # and the historical candidate overlay explicitly denies it above.
+    assert "CARDRAG_REMOTE_GC_APPROVED:-true" in worker_base
     assert "CARDRAG_OCR_CACHE_MODE:-read-only" in worker_base
     for name in (
         "CARDRAG_WORKER_MAX_STATE_BYTES",

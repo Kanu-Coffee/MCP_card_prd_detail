@@ -595,7 +595,10 @@ def test_v5_export_rejects_product_lineage_without_revision(tmp_path: Path) -> N
     assert not tuple(tmp_path.iterdir())
 
 
-def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(tmp_path: Path) -> None:
+def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     records = _records()
     original = records["embedding_views"][0]
     encoded = struct.pack("<4096f", 1.0, *([0.0] * 4095))
@@ -630,6 +633,13 @@ def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(tmp_pat
         replace(original, row_index=1, view_type="RAW_ITEM", vector=lazy_vector(1)),
     )
     vectors = tmp_path / "vectors.f32"
+    original_write = exporter_module._write_vector_sidecar
+
+    def write(path: Path, views: Any) -> tuple[str, int]:
+        assert calls == [], "metadata preflight must not invoke any vector loaders"
+        return original_write(path, views)
+
+    monkeypatch.setattr(exporter_module, "_write_vector_sidecar", write)
 
     ServingDatabaseExporterV5().export(
         tmp_path / "index.sqlite3",
@@ -637,9 +647,9 @@ def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(tmp_pat
         **records,
     )
 
-    # Each row is independently proved before artifact creation and again as
-    # it is streamed into the sidecar.
-    assert calls == [0, 1, 0, 1]
+    # Numeric validation happens once per row as it is streamed into the
+    # sidecar; preflight validates only the sealed metadata.
+    assert calls == [0, 1]
     assert tracker == {"live": 0, "maximum": 1}
     assert vectors.read_bytes() == encoded + encoded
 
@@ -649,6 +659,8 @@ def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(tmp_pat
     [
         (b"\0" * (VECTOR_ROW_BYTES - 4), "byte length"),
         (struct.pack("<4096f", *([0.0] * 4096)), "not L2 normalized"),
+        (struct.pack("<4096f", math.nan, *([0.0] * 4095)), "non-finite"),
+        (struct.pack("<4096f", math.inf, *([0.0] * 4095)), "non-finite"),
     ],
 )
 def test_v5_export_rejects_invalid_lazy_rows(
@@ -678,6 +690,8 @@ def test_v5_export_rejects_invalid_lazy_rows(
             **records,
         )
 
+    assert not tuple(tmp_path.iterdir())
+
 
 @pytest.mark.parametrize("failure", ("cache row missing", "cache row tampered"))
 def test_v5_export_propagates_lazy_cache_failures_during_sidecar_write(
@@ -692,9 +706,7 @@ def test_v5_export_propagates_lazy_cache_failures_during_sidecar_write(
     def load() -> bytes:
         nonlocal calls
         calls += 1
-        if calls == 2:
-            raise RuntimeError(failure)
-        return encoded
+        raise RuntimeError(failure)
 
     records["embedding_views"] = (
         replace(
@@ -716,13 +728,13 @@ def test_v5_export_propagates_lazy_cache_failures_during_sidecar_write(
             **records,
         )
 
-    assert calls == 2
+    assert calls == 1
     assert not (tmp_path / "index.sqlite3").exists()
     assert not (tmp_path / "vectors.f32").exists()
     assert not tuple(tmp_path.glob(".*.build"))
 
 
-def test_v5_export_rejects_valid_vector_bytes_changed_between_lazy_loads(
+def test_v5_export_rejects_valid_vector_bytes_changed_after_cache_identity_sealed(
     tmp_path: Path,
 ) -> None:
     records = _records()
@@ -734,7 +746,7 @@ def test_v5_export_rejects_valid_vector_bytes_changed_between_lazy_loads(
     def load() -> bytes:
         nonlocal calls
         calls += 1
-        return first if calls == 1 else second
+        return second
 
     records["embedding_views"] = (
         replace(
@@ -756,12 +768,27 @@ def test_v5_export_rejects_valid_vector_bytes_changed_between_lazy_loads(
             **records,
         )
 
-    assert calls == 2
+    assert calls == 1
     assert not (tmp_path / "index.sqlite3").exists()
     assert not (tmp_path / "vectors.f32").exists()
 
 
-def test_v5_export_validates_lazy_cache_binding_before_invoking_loader(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "changes,match",
+    (
+        ({"profile_id": "other-profile"}, "profile_id"),
+        ({"input_sha256": "e" * 64}, "input_sha256"),
+        ({"cache_identity": "invalid-digest"}, "cache_identity"),
+        ({"expected_vector_sha256": "invalid-digest"}, "expected_vector_sha256"),
+        ({"dimension": 3}, "dimension"),
+        ({"dtype": "float16"}, "dtype"),
+        ({"normalization": "none"}, "normalization"),
+        ({"loader": None}, "loader"),
+    ),
+)
+def test_v5_export_validates_lazy_cache_binding_before_invoking_loader(
+    tmp_path: Path, changes: dict[str, Any], match: str
+) -> None:
     records = _records()
     original = records["embedding_views"][0]
     calls = 0
@@ -774,23 +801,27 @@ def test_v5_export_validates_lazy_cache_binding_before_invoking_loader(tmp_path:
     records["embedding_views"] = (
         replace(
             original,
-            vector=LazyEmbeddingVector(
-                cache_identity="d" * 64,
-                profile_id=original.profile_id,
-                input_sha256="e" * 64,
-                expected_vector_sha256="f" * 64,
-                loader=must_not_load,
+            vector=replace(
+                LazyEmbeddingVector(
+                    cache_identity="d" * 64,
+                    profile_id=original.profile_id,
+                    input_sha256=original.input_sha256,
+                    expected_vector_sha256="f" * 64,
+                    loader=must_not_load,
+                ),
+                **changes,
             ),
         ),
     )
 
-    with pytest.raises(ServingDatabaseV5Error, match="input_sha256"):
+    with pytest.raises(ServingDatabaseV5Error, match=match):
         ServingDatabaseExporterV5().export(
             tmp_path / "index.sqlite3",
             tmp_path / "vectors.f32",
             **records,
         )
     assert calls == 0
+    assert not tuple(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(

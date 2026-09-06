@@ -109,7 +109,13 @@ def test_v5_embedding_cache_sql_check_binds_blob_length_to_dimension(tmp_path: P
         )
 
 
-def test_v5_embedding_cache_detects_non_normalized_persisted_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "values,match",
+    (([2.0, 0.0], "non-normalized"), ([math.inf, 0.0], "non-finite"), ([math.nan, 0.0], "non-finite")),
+)
+def test_v5_embedding_cache_detects_invalid_persisted_bytes(
+    tmp_path: Path, values: list[float], match: str
+) -> None:
     with WorkerState(tmp_path / "state.sqlite3") as state:
         state.connection.execute(
             """INSERT INTO embedding_cache_v5
@@ -122,14 +128,88 @@ def test_v5_embedding_cache_detects_non_normalized_persisted_bytes(tmp_path: Pat
                 2,
                 "float32",
                 "l2",
-                struct.pack("<2f", 2.0, 0.0),
+                struct.pack("<2f", *values),
                 "2026-01-01T00:00:00+00:00",
             ),
         )
-        with pytest.raises(RuntimeError, match="non-normalized"):
+        with pytest.raises(RuntimeError, match=match):
             state.get_embedding_v5(
                 "e" * 64,
                 profile_id="profile",
                 input_sha256="f" * 64,
                 dimension=2,
             )
+        # The explicit fast path defers these numeric checks to the exporter.
+        cached = state.get_embedding_v5(
+            "e" * 64,
+            profile_id="profile",
+            input_sha256="f" * 64,
+            dimension=2,
+            validate_norm=False,
+        )
+        assert cached is not None
+        assert cached.embedding == struct.pack("<2f", *values)
+
+
+@pytest.mark.parametrize("validate_norm", (True, False))
+def test_v5_embedding_cache_always_validates_identity_and_length(tmp_path: Path, validate_norm: bool) -> None:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        state.put_embedding_v5(
+            cache_key="a" * 64,
+            profile_id="profile",
+            input_sha256="b" * 64,
+            dimension=2,
+            values=[1.0, 0.0],
+        )
+        with pytest.raises(RuntimeError, match="different profile or input"):
+            state.get_embedding_v5(
+                "a" * 64,
+                profile_id="other-profile",
+                input_sha256="b" * 64,
+                dimension=2,
+                validate_norm=validate_norm,
+            )
+        # Simulate an externally corrupted row, bypassing the normal SQL
+        # constraint only inside this fixture.
+        state.connection.execute("PRAGMA ignore_check_constraints=ON")
+        state.connection.execute(
+            "UPDATE embedding_cache_v5 SET embedding=? WHERE cache_key=?", (b"bad", "a" * 64)
+        )
+        state.connection.execute("PRAGMA ignore_check_constraints=OFF")
+        with pytest.raises(RuntimeError, match="blob length"):
+            state.get_embedding_v5(
+                "a" * 64,
+                profile_id="profile",
+                input_sha256="b" * 64,
+                dimension=2,
+                validate_norm=validate_norm,
+            )
+
+
+@pytest.mark.parametrize("cache_mib,mmap_mib", ((256, 2048), (1, 0), (1024, 4096)))
+def test_worker_state_observes_actual_sqlite_tuning(tmp_path: Path, cache_mib: int, mmap_mib: int) -> None:
+    with WorkerState(
+        tmp_path / "state.sqlite3", sqlite_cache_mib=cache_mib, sqlite_mmap_mib=mmap_mib
+    ) as state:
+        settings = state.sqlite_settings
+        assert settings["cache_size"] == -cache_mib * 1024
+        assert 0 <= settings["mmap_size"] <= mmap_mib * 1024 * 1024
+        observed_mmap = state.connection.execute("PRAGMA mmap_size").fetchone()
+        assert settings["mmap_size"] == (0 if observed_mmap is None else int(observed_mmap[0]))
+        assert settings["temp_store"] == 0
+        assert state.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert state.connection.execute("PRAGMA synchronous").fetchone()[0] == 2
+        assert state.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
+@pytest.mark.parametrize(
+    "cache_mib,mmap_mib",
+    ((0, 2048), (1025, 2048), (True, 2048), (256, -1), (256, 4097), (256, False)),
+)
+def test_worker_state_rejects_invalid_tuning_before_creating_database(
+    tmp_path: Path, cache_mib: int, mmap_mib: int
+) -> None:
+    path = tmp_path / "nested" / "state.sqlite3"
+    with pytest.raises(ValueError, match="sqlite_(cache|mmap)_mib"):
+        WorkerState(path, sqlite_cache_mib=cache_mib, sqlite_mmap_mib=mmap_mib)
+    assert not path.parent.exists()

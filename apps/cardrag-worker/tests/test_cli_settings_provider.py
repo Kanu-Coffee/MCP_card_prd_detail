@@ -45,6 +45,15 @@ from cardrag_worker.settings import PublicationResumeSettings, WorkerSettings, _
 from cardrag_worker.state import AlreadyRunning
 
 
+class _PerformanceSettings:
+    pdf_concurrency = 8
+    pdf_concurrency_per_issuer = 2
+    local_processing_workers = 4
+    sqlite_cache_mib = 256
+    sqlite_mmap_mib = 2048
+    webdav_upload_chunk_mib = 8
+
+
 def _repeated_test_token(prefix: str, fragment: str, count: int) -> str:
     """Build detector fixtures at runtime so scanners never see a token literal."""
 
@@ -199,6 +208,9 @@ def test_resume_publication_cli_path_constructs_no_provider_or_discovery(
         document_aggregation_profile_path=None,
         document_aggregation_profile_artifact_sha256=None,
         minimum_start_free_bytes=0,
+        sqlite_cache_mib=32,
+        sqlite_mmap_mib=0,
+        webdav_upload_chunk_mib=3,
     )
     settings_calls: list[dict[str, Any]] = []
 
@@ -220,8 +232,11 @@ def test_resume_publication_cli_path_constructs_no_provider_or_discovery(
 
     class FakeWebDAVFactory:
         @classmethod
-        def from_env(cls, *, stable_publication_approved: bool = False) -> FakeWebDAV:
+        def from_env(
+            cls, *, stable_publication_approved: bool = False, upload_chunk_size_bytes: int
+        ) -> FakeWebDAV:
             assert stable_publication_approved is False
+            assert upload_chunk_size_bytes == 3 * 1024 * 1024
             return webdav
 
     async def resume_exact(**kwargs: Any) -> PipelineResult:
@@ -231,6 +246,8 @@ def test_resume_publication_cli_path_constructs_no_provider_or_discovery(
             "webdav": webdav,
             "stable_publication_approved": False,
             "document_aggregation": None,
+            "sqlite_cache_mib": 32,
+            "sqlite_mmap_mib": 0,
         }
         return PipelineResult(
             run_id=run_id,
@@ -446,7 +463,7 @@ def test_gc_runner_close_failure_does_not_replace_partial_count(
 ) -> None:
     raw_sentinel = "RAW_CLOSE_URL_TOKEN_SECRET"
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         state_dir = tmp_path
         state_database = tmp_path / "state.sqlite3"
         lock_file = tmp_path / "worker.lock"
@@ -518,7 +535,7 @@ def test_run_verifies_supplied_aggregation_profile_before_state_mutation(
     state_root = tmp_path / "state"
     observed: dict[str, object] = {}
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = profile_path
@@ -551,7 +568,7 @@ def test_run_rejects_startup_capacity_before_state_provider_or_webdav_mutation(
     state_root = tmp_path / "missing-state"
     events: list[str] = []
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         state_dir = state_root
@@ -593,7 +610,7 @@ def test_run_rejects_nested_state_database_symlink_before_any_runtime_client(
     (state_root / "worker-state.sqlite3").symlink_to(victim)
     events: list[str] = []
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
@@ -625,7 +642,7 @@ def test_run_revalidation_failure_precedes_webdav_state_and_provider(
     state_root = tmp_path / "state"
     events: list[str] = []
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
@@ -672,7 +689,7 @@ def test_run_rejects_aggregation_head_before_provider_or_state_creation(
     selected = object()
     events: list[str] = []
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = profile_path
@@ -730,7 +747,7 @@ def test_run_without_aggregation_profile_preserves_m0_state_then_webdav_order(
 ) -> None:
     state_root = tmp_path / "state"
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
@@ -758,7 +775,7 @@ def test_run_revalidates_a_new_m0_state_root_twice_before_state_open(
     events: list[str] = []
     original_revalidate = cli_module.revalidate_worker_start_capacity
 
-    class Settings:
+    class Settings(_PerformanceSettings):
         channel = "candidate-v1.0.11"
         stable_publication_approved = False
         document_aggregation_profile_path = None
@@ -779,7 +796,8 @@ def test_run_revalidates_a_new_m0_state_root_twice_before_state_open(
         events.append("webdav_constructed")
         return Client()
 
-    def stop_at_state(path: Path) -> None:
+    def stop_at_state(path: Path, **kwargs: int) -> None:
+        assert kwargs == {"sqlite_cache_mib": 256, "sqlite_mmap_mib": 2048}
         assert path == state_root / "worker-state.sqlite3"
         events.append("worker_state_open")
         raise RuntimeError("state_open_after_double_revalidation")

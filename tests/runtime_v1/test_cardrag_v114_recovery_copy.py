@@ -173,6 +173,8 @@ def _state_source(tmp_path: Path) -> tuple[Path, Path, bytes, bytes]:
 
     shm_bytes = b"stale-shm-wal-index"
     (source / "worker-state.sqlite3-shm").write_bytes(shm_bytes)
+    # The incident fixture has a fixed mode, independent of the caller's umask.
+    (source / "worker-state.sqlite3-shm").chmod(0o644)
     return source, payload, database.read_bytes(), shm_bytes
 
 
@@ -251,6 +253,7 @@ def test_state_copy_rejects_wal_even_when_otherwise_valid(tmp_path: Path) -> Non
     source, _payload, _database_bytes, _shm_bytes = _state_source(tmp_path)
     destination = _empty_state_destination(tmp_path)
     (source / "worker-state.sqlite3-wal").write_bytes(b"unexpected-wal")
+    (source / "worker-state.sqlite3-wal").chmod(0o644)
 
     with pytest.raises(RecoveryCopyError, match="incident_wal_present"):
         _copy_state(source, destination)

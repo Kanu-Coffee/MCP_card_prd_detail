@@ -10,7 +10,10 @@ import re
 import secrets
 import shutil
 import stat
+import sys
+import threading
 import warnings
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -72,6 +75,8 @@ OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS = (0.25, 1.0)
 OCR_CACHE_PUBLICATION_DIAGNOSTIC = "native-cache-publication-diagnostic.json"
 OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES = 4096
 LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES = 1024 * 1024
+LOCAL_OCR_PREFETCH_MAX_ENTRIES = 8
+LOCAL_OCR_PREFETCH_MAX_BYTES = 64 * 1024 * 1024
 
 OCRCacheMode = Literal["read-only", "read-write"]
 OCRCachePublicationPhase = Literal["cas", "manifest", "ready"]
@@ -568,6 +573,122 @@ class PriorLocalNativeSource:
     resolver_subdir: Literal["primary", "fallback"] | None = None
 
 
+_NativeSealKey = tuple[str, str, str, str, str]
+_NativeSealSnapshot = tuple[tuple[int, int, int, int, int], ...]
+_NativeSealValue = tuple[OCRResult, OCRArtifactManifest, bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeSealMemoEntry:
+    snapshot: _NativeSealSnapshot
+    value: _NativeSealValue
+    size_bytes: int
+
+
+class _NativeSealMemo:
+    """One bounded memo, shared by both failover branches when configured."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.entries: OrderedDict[_NativeSealKey, _NativeSealMemoEntry] = OrderedDict()
+        self.size_bytes = 0
+        self.reserved_bytes = 0
+        self.epoch = 0
+
+    def get(self, key: _NativeSealKey) -> tuple[int, _NativeSealMemoEntry | None]:
+        with self.lock:
+            entry = self.entries.get(key)
+            if entry is not None:
+                self.entries.move_to_end(key)
+            return self.epoch, entry
+
+    def discard(self, key: _NativeSealKey) -> None:
+        with self.lock:
+            entry = self.entries.pop(key, None)
+            if entry is not None:
+                self.size_bytes -= entry.size_bytes
+
+    def reserve(self, previous_bytes: int, requested_bytes: int) -> bool:
+        """Acquire or expand a prefetch budget without waiting or evicting hits."""
+
+        with self.lock:
+            growth = requested_bytes - previous_bytes
+            if self.size_bytes + self.reserved_bytes + growth > LOCAL_OCR_PREFETCH_MAX_BYTES:
+                return False
+            self.reserved_bytes += growth
+            return True
+
+    def release(self, reserved_bytes: int) -> None:
+        with self.lock:
+            self.reserved_bytes -= reserved_bytes
+
+    def put(
+        self, key: _NativeSealKey, entry: _NativeSealMemoEntry, epoch: int, *, reserved_bytes: int = 0
+    ) -> bool:
+        """Atomically consume a reservation and retain the validated result."""
+
+        with self.lock:
+            self.reserved_bytes -= reserved_bytes
+            if epoch != self.epoch or entry.size_bytes > LOCAL_OCR_PREFETCH_MAX_BYTES:
+                return False
+            previous = self.entries.pop(key, None)
+            if previous is not None:
+                self.size_bytes -= previous.size_bytes
+            self.entries[key] = entry
+            self.size_bytes += entry.size_bytes
+            while (
+                len(self.entries) > LOCAL_OCR_PREFETCH_MAX_ENTRIES
+                or self.size_bytes + self.reserved_bytes > LOCAL_OCR_PREFETCH_MAX_BYTES
+            ):
+                _, oldest = self.entries.popitem(last=False)
+                self.size_bytes -= oldest.size_bytes
+            return key in self.entries
+
+    def clear(self) -> None:
+        with self.lock:
+            self.entries.clear()
+            self.size_bytes = 0
+            # Active readers retain their reservations until their finally
+            # blocks run, even if a run boundary invalidates their epoch.
+            self.epoch += 1
+
+
+def _native_seal_snapshot(output_dir: Path, *, state_root: Path) -> _NativeSealSnapshot:
+    """Snapshot the complete no-follow directory chain and both regular leaves."""
+
+    candidate = Path(os.path.abspath(os.fspath(output_dir)))
+    try:
+        relative = candidate.relative_to(state_root)
+    except ValueError:
+        raise OCRValidationError("local OCR cache path escapes worker state") from None
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    snapshots: list[tuple[int, int, int, int, int]] = []
+
+    def record(current: os.stat_result, *, directory: bool) -> None:
+        expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_kind(current.st_mode) or current.st_uid != os.geteuid():
+            raise OCRValidationError("local OCR prefetch identity is unsafe")
+        if not directory and (current.st_nlink != 1 or current.st_size < 1):
+            raise OCRValidationError("local OCR prefetch leaf identity is unsafe")
+        snapshots.append(
+            (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+        )
+
+    try:
+        descriptors.append(os.open(state_root, flags))
+        record(os.fstat(descriptors[-1]), directory=True)
+        for part in relative.parts:
+            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+            record(os.fstat(descriptors[-1]), directory=True)
+        for name in ("native-manifest.json", "ocr.md"):
+            record(os.stat(name, dir_fd=descriptors[-1], follow_symlinks=False), directory=False)
+        return tuple(snapshots)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 @dataclass(frozen=True, slots=True)
 class OCRCall:
     """One provider call with target output pages and read-only visual context."""
@@ -652,6 +773,7 @@ class OCRResolver:
         self.adoption_policy_version = adoption_policy_version
         self._cache_mode = cache_mode
         self._state_root = Path(os.path.abspath(os.fspath(state.path.parent)))
+        self._local_prefetch = _NativeSealMemo()
         self._native_run_locks: dict[tuple[str, str], asyncio.Lock] = state._ocr_native_run_locks
         self._run_local_manifest_indexes: dict[tuple[str, str], dict[str, tuple[Path, ...]]] = (
             state._ocr_run_local_manifest_indexes
@@ -694,12 +816,174 @@ class OCRResolver:
         source: OCRInput,
         reuse_key: str,
         provenance: str,
+        prefetch_only: bool = False,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
+        key = self._native_seal_key(
+            output_dir=output_dir, source=source, reuse_key=reuse_key, provenance=provenance
+        )
+
+        def snapshot() -> _NativeSealSnapshot | None:
+            try:
+                return _native_seal_snapshot(output_dir, state_root=self._state_root)
+            except (OSError, OCRValidationError):
+                # The strict reader below owns the original error/miss policy.
+                return None
+
+        before = snapshot()
+        epoch, entry = self._local_prefetch.get(key)
+        if entry is not None and before == entry.snapshot and snapshot() == before:
+            return entry.value
+        self._local_prefetch.discard(key)
+        del entry
+        reserved_bytes = 0
+        admitted_manifest: OCRArtifactManifest | None = None
+        try:
+            if prefetch_only:
+                if before is None:
+                    return None
+                # Bound metadata decoding first, using the same pinned file
+                # size that the manifest reader must subsequently observe.
+                manifest_size = before[-2][2]
+                metadata_budget = manifest_size * 16 + 65536
+                if not self._local_prefetch.reserve(0, metadata_budget):
+                    return None
+                reserved_bytes = metadata_budget
+                admitted_manifest = self._read_native_manifest(
+                    output_dir=output_dir,
+                    source=source,
+                    reuse_key=reuse_key,
+                    expected_size_bytes=manifest_size,
+                )
+                if admitted_manifest is None:
+                    return None
+                # Include body bytes, UTF-8 decoding, two strict validation
+                # passes, page strings/hashes and temporary canonical joins.
+                decode_budget = (
+                    metadata_budget + admitted_manifest.output.size_bytes * 32 + source.page_count * 4096
+                )
+                if not self._local_prefetch.reserve(reserved_bytes, decode_budget):
+                    return None
+                reserved_bytes = decode_budget
+            loaded = self._read_native_seal(
+                output_dir=output_dir,
+                source=source,
+                reuse_key=reuse_key,
+                provenance=provenance,
+                admitted_manifest=admitted_manifest,
+            )
+            if loaded is not None and before is not None and snapshot() == before:
+                result, manifest, body = loaded
+                # Charge retained strings plus conservative manifest overhead;
+                # the bytes payload is shared by the result and return tuple.
+                size_bytes = (
+                    sys.getsizeof(body)
+                    + sys.getsizeof(result.ocr_text)
+                    + sys.getsizeof(result.pages)
+                    + sum(sys.getsizeof(page) for page in result.pages)
+                    + len(manifest.canonical_bytes()) * 4
+                    + 4096
+                    + sum(sys.getsizeof(part) for part in key)
+                )
+                retained = self._local_prefetch.put(
+                    key,
+                    _NativeSealMemoEntry(before, loaded, size_bytes),
+                    epoch,
+                    reserved_bytes=reserved_bytes,
+                )
+                reserved_bytes = 0
+                if prefetch_only and not retained:
+                    return None
+            elif prefetch_only:
+                return None
+            return loaded
+        finally:
+            self._local_prefetch.release(reserved_bytes)
+
+    def _native_seal_key(
+        self, *, output_dir: Path, source: OCRInput, reuse_key: str, provenance: str
+    ) -> _NativeSealKey:
+        return (
+            os.path.abspath(os.fspath(output_dir)),
+            source.model_dump_json(),
+            reuse_key,
+            self.contract.contract_sha256,
+            provenance,
+        )
+
+    def clear_local_prefetch(self) -> None:
+        """Release all cached native OCR values at the run boundary."""
+
+        self._local_prefetch.clear()
+
+    def prefetch_local_native(
+        self,
+        *,
+        document_id: str,
+        pdf_sha256: str,
+        pdf_size_bytes: int,
+        page_count: int,
+        output_dir: Path,
+        prior_local_native: PriorLocalNativeSource | None = None,
+    ) -> None:
+        """Warm strict local reads only; resolution retains its original priority.
+
+        Safe in a worker thread: this reads filesystem data and immutable
+        contracts only, without consulting SQLite, providers or WebDAV.
+        """
+
+        try:
+            source = OCRInput(pdf_sha256=pdf_sha256, pdf_size_bytes=pdf_size_bytes, page_count=page_count)
+            reuse_key = native_ocr_reuse_key(self.contract, source)
+        except ValueError:
+            return
+        with suppress(Exception):
+            self._load_local_native(
+                output_dir=output_dir, source=source, reuse_key=reuse_key, prefetch_only=True
+            )
+        if prior_local_native is not None:
+            prior = prior_local_native
+            prior_dir = prior.runs_root / prior.run_id / "documents" / document_id / "ocr"
+            if prior.resolver_subdir is not None:
+                prior_dir = prior_dir / prior.resolver_subdir
+            # Passing the identical retained path takes the existing strict
+            # generation-seal validation branch without materializing files.
+            try:
+                prior_loaded = self._materialize_prior_local_native(
+                    prior=prior,
+                    source=source,
+                    reuse_key=reuse_key,
+                    document_id=document_id,
+                    output_dir=prior_dir,
+                    prefetch_only=True,
+                )
+            except Exception:
+                prior_loaded = None
+            if prior_loaded is None:
+                self._local_prefetch.discard(
+                    self._native_seal_key(
+                        output_dir=prior_dir,
+                        source=source,
+                        reuse_key=reuse_key,
+                        provenance="native-local",
+                    )
+                )
+
+    def _read_native_manifest(
+        self,
+        *,
+        output_dir: Path,
+        source: OCRInput,
+        reuse_key: str,
+        expected_size_bytes: int | None = None,
+    ) -> OCRArtifactManifest | None:
         manifest_path = output_dir / "native-manifest.json"
         try:
             manifest_body = _read_nofollow_regular(
                 manifest_path,
-                maximum_bytes=LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES,
+                maximum_bytes=min(LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES, expected_size_bytes)
+                if expected_size_bytes is not None
+                else LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES,
+                expected_size_bytes=expected_size_bytes,
                 state_root=self._state_root,
             )
         except FileNotFoundError:
@@ -711,6 +995,22 @@ class OCRResolver:
         if manifest.canonical_bytes() != manifest_body:
             raise OCRValidationError("local native OCR manifest is not canonical")
         if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
+            return None
+        return manifest
+
+    def _read_native_seal(
+        self,
+        *,
+        output_dir: Path,
+        source: OCRInput,
+        reuse_key: str,
+        provenance: str,
+        admitted_manifest: OCRArtifactManifest | None = None,
+    ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
+        manifest = admitted_manifest or self._read_native_manifest(
+            output_dir=output_dir, source=source, reuse_key=reuse_key
+        )
+        if manifest is None:
             return None
         ocr_path = output_dir / "ocr.md"
         try:
@@ -1111,12 +1411,14 @@ class OCRResolver:
         output_dir: Path,
         source: OCRInput,
         reuse_key: str,
+        prefetch_only: bool = False,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
         return self._load_native_seal(
             output_dir=output_dir,
             source=source,
             reuse_key=reuse_key,
             provenance="native-local",
+            prefetch_only=prefetch_only,
         )
 
     def _materialize_prior_local_native(
@@ -1127,6 +1429,7 @@ class OCRResolver:
         reuse_key: str,
         document_id: str,
         output_dir: Path,
+        prefetch_only: bool = False,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
         """Strictly verify and atomically seed a new run from a retained run."""
 
@@ -1153,6 +1456,8 @@ class OCRResolver:
             if prior.resolver_subdir is not None
             else outer_output_dir
         )
+        if prefetch_only and output_dir != prior_output_dir:
+            raise OCRValidationError("local OCR prefetch cannot materialize retained files")
         directory_chain = [
             prior.runs_root,
             run_root,
@@ -1205,6 +1510,7 @@ class OCRResolver:
             output_dir=prior_output_dir,
             source=source,
             reuse_key=reuse_key,
+            prefetch_only=prefetch_only,
         )
         if local is None:
             return None
@@ -1824,6 +2130,10 @@ class FailoverOCRResolver:
             raise ValueError("OCR resolvers must share one cache mode")
         self.primary = primary
         self.fallback = fallback
+        self._local_prefetch = _NativeSealMemo()
+        for child in (primary, fallback):
+            if isinstance(child, OCRResolver):
+                child._local_prefetch = self._local_prefetch
         self.adoption_policy_version = primary.adoption_policy_version
         self.contract = {
             "schema_version": "cardrag.ocr-failover.v1",
@@ -1838,6 +2148,41 @@ class FailoverOCRResolver:
         if self.primary.cache_mode != self.fallback.cache_mode:
             raise ValueError("OCR resolvers no longer share one cache mode")
         return self.primary.cache_mode
+
+    def clear_local_prefetch(self) -> None:
+        self._local_prefetch.clear()
+
+    def prefetch_local_native(
+        self,
+        *,
+        document_id: str,
+        pdf_sha256: str,
+        pdf_size_bytes: int,
+        page_count: int,
+        output_dir: Path,
+        prior_local_native: PriorLocalNativeSource | None = None,
+    ) -> None:
+        branches: tuple[tuple[OCRResolver, Literal["primary", "fallback"]], ...] = (
+            (self.primary, "primary"),
+            (self.fallback, "fallback"),
+        )
+        for resolver, subdir in branches:
+            prefetch = getattr(resolver, "prefetch_local_native", None)
+            if not callable(prefetch):
+                continue
+            prior = (
+                replace(prior_local_native, resolver_subdir=subdir)
+                if prior_local_native is not None
+                else None
+            )
+            prefetch(
+                document_id=document_id,
+                pdf_sha256=pdf_sha256,
+                pdf_size_bytes=pdf_size_bytes,
+                page_count=page_count,
+                output_dir=output_dir / subdir,
+                prior_local_native=prior,
+            )
 
     async def resolve(self, **kwargs: Any) -> OCRResult:
         output_dir = Path(kwargs.pop("output_dir"))

@@ -241,11 +241,11 @@ class EmbeddingProfileInput:
 class LazyEmbeddingVector:
     """A sealed, cache-bound source for one canonical vector row.
 
-    The no-argument loader must independently resolve and validate the named
-    cache row on every call, returning its little-endian float32 bytes.  The
-    exporter deliberately calls it during both input validation and sidecar
-    writing so a missing or changed cache entry fails closed without retaining
-    a corpus of vector blobs.
+    The no-argument loader must resolve the named cache row and return its
+    little-endian float32 bytes. Input preflight validates metadata only. The
+    exporter loads each row once during sidecar writing and checks its sealed
+    digest, byte length, finite values and L2 norm before publication, without
+    retaining a corpus of vector blobs.
     """
 
     cache_identity: str
@@ -791,6 +791,30 @@ def _encode_view_vector(view: EmbeddingViewInput) -> bytes:
     source = view.vector
     if not isinstance(source, LazyEmbeddingVector):
         return _encode_vector(source, row_index=view.row_index)
+    _validate_view_vector(view)
+
+    # Loader exceptions deliberately propagate.  A cache miss, identity
+    # collision, or integrity failure must abort the export rather than be
+    # translated into an apparently valid serving artifact.
+    loaded = source.loader()
+    if not isinstance(loaded, bytes):
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} loader did not return canonical bytes"
+        )
+    if hashlib.sha256(loaded).hexdigest() != source.expected_vector_sha256:
+        raise ServingDatabaseV5Error(
+            f"lazy vector row {view.row_index} changed after its cache identity was sealed"
+        )
+    return _encode_vector(loaded, row_index=view.row_index)
+
+
+def _validate_view_vector(view: EmbeddingViewInput) -> None:
+    """Validate embedding view vector metadata without evaluating lazy loaders."""
+
+    source = view.vector
+    if not isinstance(source, LazyEmbeddingVector):
+        _encode_vector(source, row_index=view.row_index)
+        return
     if source.profile_id != view.profile_id:
         raise ServingDatabaseV5Error(
             f"lazy vector row {view.row_index} profile_id does not match its embedding view"
@@ -822,22 +846,6 @@ def _encode_view_vector(view: EmbeddingViewInput) -> bytes:
         )
     if not callable(source.loader):
         raise ServingDatabaseV5Error(f"lazy vector row {view.row_index} loader is not callable")
-
-    # Loader exceptions deliberately propagate.  A cache miss, identity
-    # collision, or integrity failure must abort the export rather than be
-    # translated into an apparently valid serving artifact.
-    loaded = source.loader()
-    if not isinstance(loaded, bytes):
-        raise ServingDatabaseV5Error(
-            f"lazy vector row {view.row_index} loader did not return canonical bytes"
-        )
-    if hashlib.sha256(loaded).hexdigest() != source.expected_vector_sha256:
-        raise ServingDatabaseV5Error(
-            f"lazy vector row {view.row_index} changed after its cache identity was sealed"
-        )
-    encoded = _encode_vector(loaded, row_index=view.row_index)
-    del loaded
-    return encoded
 
 
 def _validate_inputs(
@@ -1230,7 +1238,7 @@ def _validate_inputs(
             exact_display_parts.append(text)
         if "".join(exact_display_parts) != view.display_text:
             raise ServingDatabaseV5Error("embedding view display_text is not exact OCR source")
-        _encode_view_vector(view)
+        _validate_view_vector(view)
     if used_profiles != set(profile_by_id):
         raise ServingDatabaseV5Error("every sealed embedding profile must own at least one view")
     return tuple(sorted(coverage_rows, key=lambda row: row.contract_revision_id))

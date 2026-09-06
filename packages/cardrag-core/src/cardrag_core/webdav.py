@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-from collections.abc import Iterable, Mapping
+import threading
+import time
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -57,6 +60,13 @@ class WebDAVObjectStat:
     last_modified: str | None
 
 
+@dataclass(slots=True)
+class _TransferMetrics:
+    requests: int = 0
+    payload_bytes: int = 0
+    elapsed_seconds: float = 0.0
+
+
 class WebDAVClient:
     """Small RFC 4918 client. It follows no redirects and logs no credentials."""
 
@@ -67,6 +77,8 @@ class WebDAVClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.settings = settings
+        self._performance_lock = threading.Lock()
+        self._performance = {name: _TransferMetrics() for name in ("put", "verification_get")}
         self._client = httpx.Client(
             auth=httpx.BasicAuth(settings.username, settings.password.get_secret_value()),
             timeout=httpx.Timeout(
@@ -92,6 +104,36 @@ class WebDAVClient:
 
     def read_only(self) -> ReadOnlyWebDAVClient:
         return ReadOnlyWebDAVClient(self)
+
+    def performance_snapshot(self) -> dict[str, int | float]:
+        """Return completed attempt totals, excluding HTTP framing and headers.
+
+        PUT bytes are payload supplied to the transport, including failed
+        attempts; verification GET bytes are decoded response bytes consumed.
+        Elapsed time includes hashing performed during verification. Concurrent
+        operation durations are summed, so they can exceed wall-clock time.
+        """
+
+        with self._performance_lock:
+            return {
+                f"{name}_{field}": getattr(metrics, field)
+                for name, metrics in self._performance.items()
+                for field in ("requests", "payload_bytes", "elapsed_seconds")
+            }
+
+    @contextmanager
+    def _measure_transfer(self, name: str) -> Iterator[_TransferMetrics]:
+        current = _TransferMetrics()
+        started = time.perf_counter()
+        try:
+            yield current
+        finally:
+            elapsed = time.perf_counter() - started
+            with self._performance_lock:
+                total = self._performance[name]
+                total.requests += 1
+                total.payload_bytes += current.payload_bytes
+                total.elapsed_seconds += elapsed
 
     def _url(self, path: str | PurePosixPath) -> str:
         relative = validate_relative_path(path)
@@ -208,27 +250,29 @@ class WebDAVClient:
         ):
             raise ValueError("max_bytes must be a non-negative integer")
         hard_cap = expected_size_bytes if max_bytes is None else min(expected_size_bytes, max_bytes)
-        digest = hashlib.sha256()
-        size_bytes = 0
-        try:
-            with self._client.stream("GET", self._url(relative)) as response:
-                if response.status_code != 200:
-                    raise WebDAVHTTPError("GET", relative, response.status_code)
-                raw_length = response.headers.get("content-length")
-                if raw_length is not None and raw_length.isdigit() and int(raw_length) > hard_cap:
-                    raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
-                for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
-                    size_bytes += len(chunk)
-                    if size_bytes > hard_cap:
+        with self._measure_transfer("verification_get") as metrics:
+            digest = hashlib.sha256()
+            size_bytes = 0
+            try:
+                with self._client.stream("GET", self._url(relative)) as response:
+                    if response.status_code != 200:
+                        raise WebDAVHTTPError("GET", relative, response.status_code)
+                    raw_length = response.headers.get("content-length")
+                    if raw_length is not None and raw_length.isdigit() and int(raw_length) > hard_cap:
                         raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
-                    digest.update(chunk)
-        except httpx.HTTPError as exc:
-            raise WebDAVError(f"WebDAV GET {relative.as_posix()} failed") from exc
-        if size_bytes != expected_size_bytes:
-            raise WebDAVIntegrityError("remote byte size does not match the sealed identity")
-        if digest.hexdigest() != trusted_digest:
-            raise WebDAVIntegrityError("remote SHA-256 does not match the sealed identity")
-        return VerifiedArtifact(relative, trusted_digest, size_bytes)
+                    for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
+                        size_bytes += len(chunk)
+                        metrics.payload_bytes += len(chunk)
+                        if size_bytes > hard_cap:
+                            raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
+                        digest.update(chunk)
+            except httpx.HTTPError as exc:
+                raise WebDAVError(f"WebDAV GET {relative.as_posix()} failed") from exc
+            if size_bytes != expected_size_bytes:
+                raise WebDAVIntegrityError("remote byte size does not match the sealed identity")
+            if digest.hexdigest() != trusted_digest:
+                raise WebDAVIntegrityError("remote SHA-256 does not match the sealed identity")
+            return VerifiedArtifact(relative, trusted_digest, size_bytes)
 
     def propfind(
         self,
@@ -272,13 +316,25 @@ class WebDAVClient:
         headers = {"Content-Type": content_type}
         if if_none_match:
             headers["If-None-Match"] = "*"
-        response = self._request(
-            "PUT",
-            relative,
-            expected_statuses={200, 201, 204},
-            headers=headers,
-            content=content,
-        )
+        with self._measure_transfer("put") as metrics:
+            if isinstance(content, bytes):
+                metrics.payload_bytes = len(content)
+                measured_content: bytes | Iterable[bytes] = content
+            else:
+
+                def measured_chunks() -> Iterator[bytes]:
+                    for chunk in content:
+                        metrics.payload_bytes += len(chunk)
+                        yield chunk
+
+                measured_content = measured_chunks()
+            response = self._request(
+                "PUT",
+                relative,
+                expected_statuses={200, 201, 204},
+                headers=headers,
+                content=measured_content,
+            )
         raw_size = response.headers.get("content-length")
         size = int(raw_size) if raw_size and raw_size.isdigit() else None
         return WebDAVObjectStat(
