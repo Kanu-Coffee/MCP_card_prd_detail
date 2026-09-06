@@ -107,6 +107,8 @@ class WebDAVClient:
         self.immutable = ImmutablePublisher(client)
         self.cas = CASPublisher(client)
         self.stable = StablePointerPublisher(client, channel=channel)
+        self._cached_current_generation: RemoteGenerationIdentity | None = None
+        self._cached_pointer_bytes: bytes | None = None
 
     @classmethod
     def from_env(cls, *, stable_publication_approved: bool = False) -> WebDAVClient:
@@ -289,8 +291,25 @@ class WebDAVClient:
 
         return await to_thread_fenced(probe)
 
-    async def validated_current_generation(self) -> RemoteGenerationIdentity | None:
+    async def validated_current_generation(
+        self, *, force_refresh: bool = False
+    ) -> RemoteGenerationIdentity | None:
         """Stream-hash the DB and every referenced CAS object before no-change."""
+
+        pointer_bytes: bytes | None = None
+        if hasattr(self.core, "get"):
+            try:
+                pointer_bytes = await self.get_bytes(self.pointer_path)
+            except Exception:
+                pointer_bytes = None
+
+        if (
+            not force_refresh
+            and pointer_bytes is not None
+            and self._cached_current_generation is not None
+            and self._cached_pointer_bytes == pointer_bytes
+        ):
+            return self._cached_current_generation
 
         def verify() -> RemoteGenerationIdentity:
             reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
@@ -323,8 +342,14 @@ class WebDAVClient:
             )
 
         try:
-            return await to_thread_fenced(verify)
+            result = await to_thread_fenced(verify)
+            if pointer_bytes is not None:
+                self._cached_current_generation = result
+                self._cached_pointer_bytes = pointer_bytes
+            return result
         except Exception:
+            self._cached_current_generation = None
+            self._cached_pointer_bytes = None
             return None
 
     async def current_generation_matches(

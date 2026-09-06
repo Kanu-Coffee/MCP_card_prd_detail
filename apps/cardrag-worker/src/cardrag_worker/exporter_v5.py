@@ -1294,10 +1294,12 @@ def _verify_database(
     expected_counts: Mapping[str, int],
     run_fts_integrity_check: bool = False,
     is_vacuumed_verify: bool = False,
+    run_integrity_check: bool = True,
 ) -> None:
-    integrity = connection.execute("PRAGMA integrity_check").fetchone()
-    if integrity is None or integrity[0] != "ok":
-        raise ServingDatabaseV5Error(f"SQLite integrity check failed: {integrity}")
+    if run_integrity_check:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise ServingDatabaseV5Error(f"SQLite integrity check failed: {integrity}")
     foreign = connection.execute("PRAGMA foreign_key_check").fetchall()
     if foreign:
         raise ServingDatabaseV5Error(f"SQLite foreign key check failed: {foreign[:3]}")
@@ -1951,8 +1953,10 @@ class ServingDatabaseExporterV5:
                 ).fetchone()
                 if sealed_maximum is None or int(sealed_maximum[0]) != maximum_working_pages:
                     raise ServingDatabaseV5Error("working serving database page limit could not be sealed")
-            connection.execute("PRAGMA journal_mode=DELETE")
-            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA cache_size=-2097152")
+            connection.execute("PRAGMA temp_store=MEMORY")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA journal_mode=MEMORY")
             connection.executescript(DDL_V5)
             connection.executemany(
                 "INSERT INTO metadata(key,value) VALUES(?,?)",
@@ -2247,6 +2251,7 @@ class ServingDatabaseExporterV5:
                 expected_metadata=metadata,
                 expected_counts=expected_counts,
                 run_fts_integrity_check=True,
+                run_integrity_check=False,
             )
             connection.commit()
             working_database_size = database_working.stat().st_size

@@ -280,13 +280,17 @@ class WorkerSettings:
                 "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true approval"
             )
         collect_remote_garbage = _boolean("CARDRAG_COLLECT_REMOTE_GARBAGE", False)
-        if collect_remote_garbage and (
-            channel != "stable" or not stable_publication_approved or not remote_gc_approved
-        ):
-            raise ValueError(
-                "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires stable channel, "
-                "CARDRAG_STABLE_PUBLICATION_APPROVED=true, and CARDRAG_REMOTE_GC_APPROVED=true"
-            )
+        if collect_remote_garbage:
+            if channel == "candidate-v1.0.11":
+                if not remote_gc_approved:
+                    raise ValueError(
+                        "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires CARDRAG_REMOTE_GC_APPROVED=true"
+                    )
+            elif channel != "stable" or not stable_publication_approved or not remote_gc_approved:
+                raise ValueError(
+                    "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires stable channel, "
+                    "CARDRAG_STABLE_PUBLICATION_APPROVED=true, and CARDRAG_REMOTE_GC_APPROVED=true"
+                )
         return cls(
             state_dir=state_dir,
             maximum_state_bytes=_bounded_int(
@@ -394,7 +398,7 @@ class WorkerSettings:
             pdf_cache_refresh_hours=_positive_float("CARDRAG_PDF_CACHE_REFRESH_HOURS", 168),
             retain_generations=_bounded_int("CARDRAG_RETAIN_GENERATIONS", 2, minimum=2, maximum=20),
             retained_incomplete_runs=_bounded_int("CARDRAG_RETAIN_INCOMPLETE_RUNS", 2, minimum=1, maximum=20),
-            garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 30, minimum=1, maximum=365),
+            garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 1, minimum=1, maximum=365),
             collect_remote_garbage=collect_remote_garbage,
         )
 

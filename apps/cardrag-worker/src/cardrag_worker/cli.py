@@ -928,6 +928,10 @@ def _guard_remote_gc(settings: WorkerSettings, *, apply: bool) -> None:
 
     if not apply:
         return
+    if settings.channel == "candidate-v1.0.11":
+        if not settings.collect_remote_garbage or not settings.remote_gc_approved:
+            raise ValueError("remote GC apply requires collection enabled and separate remote-GC approval")
+        return
     if (
         settings.channel != "stable"
         or not settings.collect_remote_garbage

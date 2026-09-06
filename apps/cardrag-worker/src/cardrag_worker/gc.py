@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from collections.abc import Mapping
@@ -18,6 +19,7 @@ from cardrag_core import (
     OCRArtifactManifest,
     OCRReady,
     WebDAVHTTPError,
+    channel_pointer_path,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -159,14 +161,26 @@ async def _list_generation_ids(webdav: WebDAVClient) -> tuple[str, ...]:
 async def _list_cas_objects(webdav: WebDAVClient) -> tuple[PurePosixPath, ...]:
     root = PurePosixPath("v1", "objects", "sha256")
     prefixes = await webdav.list_children(root)
-    objects: list[PurePosixPath] = []
     for prefix in prefixes:
         if prefix.parent != root or _HEX_PREFIX.fullmatch(prefix.name) is None:
             raise GCError("unexpected CAS prefix in PROPFIND")
-        for path in await webdav.list_children(prefix):
-            if path.parent != prefix or _SHA256.fullmatch(path.name) is None or path.name[:2] != prefix.name:
-                raise GCError("unexpected CAS object in PROPFIND")
-            objects.append(path)
+
+    sem = asyncio.Semaphore(16)
+
+    async def list_prefix(prefix: PurePosixPath) -> list[PurePosixPath]:
+        async with sem:
+            children = await webdav.list_children(prefix)
+            for path in children:
+                if (
+                    path.parent != prefix
+                    or _SHA256.fullmatch(path.name) is None
+                    or path.name[:2] != prefix.name
+                ):
+                    raise GCError("unexpected CAS object in PROPFIND")
+            return list(children)
+
+    results = await asyncio.gather(*(list_prefix(p) for p in prefixes))
+    objects = [path for group in results for path in group]
     return tuple(sorted(objects, key=lambda item: item.as_posix()))
 
 
@@ -359,8 +373,8 @@ async def collect_garbage(
 ) -> GCResult:
     if retain_generations < 1 or grace_days < 1:
         raise ValueError("retention and grace must be positive")
-    if pointer_path != STABLE_POINTER_PATH:
-        raise GCError("remote garbage collection is restricted to the stable channel")
+    if pointer_path not in {STABLE_POINTER_PATH, channel_pointer_path("candidate-v1.0.11")}:
+        raise GCError("remote garbage collection is restricted to the stable or candidate-v1.0.11 channel")
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
 
     # Complete every parse/list/hash decision before considering DELETE.
