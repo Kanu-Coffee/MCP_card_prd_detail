@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import tempfile
+from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -39,6 +41,7 @@ from cardrag_core import (
     WebDAVClient,
     WebDAVHTTPError,
     WebDAVIntegrityError,
+    WebDAVObjectStat,
     WebDAVSettings,
     generation_database_path,
     generation_manifest_path,
@@ -284,6 +287,115 @@ def test_file_publication_readback_does_not_allocate_temporary_files(
     assert ".incoming/publish/" in readbacks[0]
     assert readbacks[1] == reference.path
     assert not any(".incoming" in path for path in backend.files)
+
+
+@pytest.mark.parametrize("publisher_type", [CASPublisher, ImmutablePublisher])
+@pytest.mark.parametrize("chunk_size", [1024 * 1024, 8 * 1024 * 1024])
+def test_configured_file_upload_chunks_preserve_sealed_identity_and_readback(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publisher_type: type[CASPublisher] | type[ImmutablePublisher],
+    chunk_size: int,
+) -> None:
+    backend, client = webdav
+    payload = b"x" * (8 * 1024 * 1024 + 17)
+    source = tmp_path / "sealed.bin"
+    source.write_bytes(payload)
+    original_put = client.put
+    lengths: list[int] = []
+
+    def observe_put(
+        path: str | PurePosixPath, content: bytes | Iterable[bytes], **kwargs: Any
+    ) -> WebDAVObjectStat:
+        assert not isinstance(content, bytes)
+
+        def observed_chunks() -> Iterator[bytes]:
+            for chunk in content:
+                lengths.append(len(chunk))
+                yield chunk
+
+        return original_put(path, observed_chunks(), **kwargs)
+
+    monkeypatch.setattr(client, "put", observe_put)
+    publisher = publisher_type(client, upload_chunk_size_bytes=chunk_size)
+    sealed = {"expected_sha256": sha256_bytes(payload), "expected_size_bytes": len(payload)}
+    if isinstance(publisher, CASPublisher):
+        reference = publisher.publish_file(source, **sealed)
+    else:
+        reference = publisher.publish_file("v1/generations/chunk-test/index.sqlite3", source, **sealed)
+
+    assert lengths == [chunk_size] * (len(payload) // chunk_size) + [len(payload) % chunk_size]
+    assert backend.files[reference.path] == payload
+    assert reference.sha256 == sealed["expected_sha256"]
+    assert reference.size_bytes == len(payload)
+    metrics = client.performance_snapshot()
+    assert metrics["put_requests"] == 1
+    assert metrics["put_payload_bytes"] == len(payload)
+    assert metrics["verification_get_requests"] == 2
+    assert metrics["verification_get_payload_bytes"] == 2 * len(payload)
+    assert [method for method, _ in backend.requests].count("MOVE") == 1
+
+
+@pytest.mark.parametrize("publisher_type", [CASPublisher, ImmutablePublisher])
+@pytest.mark.parametrize("invalid", [True, False, 0, -1, 16 * 1024 * 1024 + 1, "8192", 8192.0])
+def test_invalid_upload_chunk_size_fails_before_remote_operations(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    publisher_type: type[CASPublisher] | type[ImmutablePublisher],
+    invalid: Any,
+) -> None:
+    backend, client = webdav
+    with pytest.raises(ValueError, match="upload chunk size"):
+        publisher_type(client, upload_chunk_size_bytes=invalid)
+    assert backend.requests == []
+
+
+def test_transfer_metrics_include_failures_and_snapshot_is_independent(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+) -> None:
+    backend, client = webdav
+    client.ensure_collection("v1/example")
+
+    def interrupted_payload() -> Iterator[bytes]:
+        yield b"partial"
+        raise RuntimeError("source interrupted")
+
+    with pytest.raises(RuntimeError, match="source interrupted"):
+        client.put("v1/example/partial.bin", interrupted_payload())
+    assert client.performance_snapshot()["put_payload_bytes"] == len(b"partial")
+    client.put("v1/example/complete.bin", b"complete")
+    with pytest.raises(WebDAVIntegrityError, match="SHA-256"):
+        client.verify("v1/example/complete.bin", expected_sha256="a" * 64, expected_size_bytes=8)
+    with pytest.raises(WebDAVHTTPError):
+        client.verify("v1/example/missing.bin", expected_sha256="a" * 64, expected_size_bytes=8)
+    snapshot = client.performance_snapshot()
+    assert snapshot["put_requests"] == 2
+    assert snapshot["put_payload_bytes"] == 15
+    assert snapshot["verification_get_requests"] == 2
+    assert snapshot["verification_get_payload_bytes"] == 8
+    assert snapshot["put_elapsed_seconds"] >= 0
+    assert snapshot["verification_get_elapsed_seconds"] >= 0
+    snapshot["put_requests"] = 999
+    assert client.performance_snapshot()["put_requests"] == 2
+    assert backend.files["v1/example/complete.bin"] == b"complete"
+
+
+def test_transfer_metrics_accumulate_concurrent_verifications_without_lost_updates(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+) -> None:
+    backend, client = webdav
+    payload = b"shared read-only payload"
+    backend.files["v1/shared.bin"] = payload
+
+    def verify(_index: int) -> None:
+        client.verify(
+            "v1/shared.bin", expected_sha256=sha256_bytes(payload), expected_size_bytes=len(payload)
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(verify, range(64)))
+    assert client.performance_snapshot()["verification_get_requests"] == 64
+    assert client.performance_snapshot()["verification_get_payload_bytes"] == 64 * len(payload)
 
 
 def test_file_publication_rejects_symlinks_before_remote_mutation(

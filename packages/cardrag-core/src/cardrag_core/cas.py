@@ -42,8 +42,11 @@ def _validate_expected_size(value: int | None) -> int | None:
 class ImmutablePublisher:
     """Publish to a create-once path through temp PUT, readback, and MOVE."""
 
-    def __init__(self, client: WebDAVClient) -> None:
+    def __init__(self, client: WebDAVClient, *, upload_chunk_size_bytes: int = _UPLOAD_CHUNK_SIZE) -> None:
+        if type(upload_chunk_size_bytes) is not int or not 1 <= upload_chunk_size_bytes <= 16 * 1024 * 1024:
+            raise ValueError("upload chunk size must be an integer between 1 and 16777216 bytes")
         self._client = client
+        self._upload_chunk_size_bytes = upload_chunk_size_bytes
 
     def _verify_remote(self, path: PurePosixPath, *, digest: str, size_bytes: int) -> VerifiedArtifact:
         return self._client.verify(
@@ -153,7 +156,7 @@ class ImmutablePublisher:
             hashed_size = 0
             try:
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                while chunk := os.read(descriptor, _UPLOAD_CHUNK_SIZE):
+                while chunk := os.read(descriptor, self._upload_chunk_size_bytes):
                     digest_builder.update(chunk)
                     hashed_size += len(chunk)
                 os.lseek(descriptor, 0, os.SEEK_SET)
@@ -189,7 +192,7 @@ class ImmutablePublisher:
                 verify_source_identity()
                 try:
                     os.lseek(descriptor, 0, os.SEEK_SET)
-                    while chunk := os.read(descriptor, _UPLOAD_CHUNK_SIZE):
+                    while chunk := os.read(descriptor, self._upload_chunk_size_bytes):
                         yield chunk
                 except OSError:
                     raise WebDAVIntegrityError("publication source could not be read safely") from None
@@ -246,8 +249,8 @@ class ImmutablePublisher:
 class CASPublisher:
     """Publish bytes under their fixed ``v1/objects/sha256`` identity."""
 
-    def __init__(self, client: WebDAVClient) -> None:
-        self._publisher = ImmutablePublisher(client)
+    def __init__(self, client: WebDAVClient, *, upload_chunk_size_bytes: int = _UPLOAD_CHUNK_SIZE) -> None:
+        self._publisher = ImmutablePublisher(client, upload_chunk_size_bytes=upload_chunk_size_bytes)
 
     def publish_bytes(
         self,

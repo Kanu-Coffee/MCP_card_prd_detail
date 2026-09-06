@@ -7,6 +7,7 @@ import json
 import logging
 import signal
 import stat
+import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from pathlib import Path
@@ -287,6 +288,7 @@ def _guard_v114_publication_channel(settings: WorkerSettings | PublicationResume
 
 
 async def _run(resume: str | None) -> dict[str, Any]:
+    started = time.monotonic()
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
     _guard_v114_publication_channel(settings)
@@ -313,7 +315,10 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # candidate state precedes construction of its WebDAV client.
         settings.state_dir.mkdir(parents=True, exist_ok=True)
         startup_capacity = revalidate_worker_start_capacity(startup_capacity)
-    webdav = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
+    webdav = WebDAVClient.from_env(
+        stable_publication_approved=settings.stable_publication_approved,
+        upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+    )
     try:
         if document_aggregation is not None:
             # No provider/tokenizer call or candidate-state mutation is allowed
@@ -324,7 +329,11 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # remains immediately before SQLite opens the path, after any allowed
         # WebDAV construction/GET-only aggregation validation.
         startup_capacity = revalidate_worker_start_capacity(startup_capacity)
-        with WorkerState(settings.state_database) as state:
+        with WorkerState(
+            settings.state_database,
+            sqlite_cache_mib=settings.sqlite_cache_mib,
+            sqlite_mmap_mib=settings.sqlite_mmap_mib,
+        ) as state:
             primary = OCRResolver(
                 provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
                 state=state,
@@ -361,6 +370,9 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 "Remote OCR cache access mode=%s", settings.ocr_cache_mode
             )
             embeddings = await _qwen_embedding_provider(settings)
+            logging.getLogger("cardrag_worker.cli").info(
+                "Worker startup completed elapsed_seconds=%.3f", time.monotonic() - started
+            )
             result = await WorkerPipeline(
                 state=state,
                 state_dir=settings.state_dir,
@@ -368,6 +380,9 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 ocr=resolver,  # type: ignore[arg-type]
                 embeddings=embeddings,
                 webdav=webdav,
+                pdf_concurrency=settings.pdf_concurrency,
+                pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
+                local_processing_workers=settings.local_processing_workers,
                 maximum_attempts=settings.stage_max_attempts,
                 retry_cap_seconds=settings.retry_cap_seconds,
                 collect_remote_garbage=settings.collect_remote_garbage,
@@ -389,6 +404,9 @@ async def _run(resume: str | None) -> dict[str, Any]:
             return _pipeline_result_payload(result)
     finally:
         await webdav.close()
+        logging.getLogger("cardrag_worker.cli").info(
+            "Worker execution finished elapsed_seconds=%.3f", time.monotonic() - started
+        )
 
 
 async def _operation_with_signal_shutdown(
@@ -584,13 +602,18 @@ async def _resume_publication(run_id: str) -> dict[str, Any]:
             settings.document_aggregation_profile_path,
             expected_artifact_sha256=expected_artifact_sha256,
         )
-    webdav = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
+    webdav = WebDAVClient.from_env(
+        stable_publication_approved=settings.stable_publication_approved,
+        upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+    )
     try:
         revalidate_worker_start_capacity(startup_capacity)
         result = await resume_sealed_publication(
             run_id=run_id,
             state_dir=settings.state_dir,
             webdav=webdav,
+            sqlite_cache_mib=settings.sqlite_cache_mib,
+            sqlite_mmap_mib=settings.sqlite_mmap_mib,
             stable_publication_approved=settings.stable_publication_approved,
             document_aggregation=document_aggregation,
         )
@@ -659,7 +682,14 @@ def _seed_legacy_pdf_cache(legacy_root: Path, *, apply: bool) -> dict[str, Any]:
         raise CacheSeedError("destination_overlaps_legacy_root")
     settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
+        with (
+            worker_lock(settings.lock_file),
+            WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state,
+        ):
             return apply_cache_seed(plan, PDFCache(settings.state_dir, state))
     except AlreadyRunning as exc:
         raise CacheSeedError("destination_busy") from exc
@@ -705,7 +735,14 @@ def _seed_v109_pdf_cache(source_state_root: Path, *, apply: bool) -> dict[str, A
         raise V109CacheSeedError("source_destination_overlap")
     settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
+        with (
+            worker_lock(settings.lock_file),
+            WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state,
+        ):
             cache = PDFCache(settings.state_dir, state)
             first = apply_v109_cache_seed(plan, cache)
             second = apply_v109_cache_seed(plan, cache)
@@ -894,9 +931,19 @@ async def _run_gc(*, apply: bool, retain: int, grace_days: int) -> dict[str, Any
     settings = WorkerSettings.from_env(require_webdav=True)
     _guard_remote_gc(settings, apply=apply)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    client = WebDAVClient.from_env(stable_publication_approved=settings.stable_publication_approved)
+    client = WebDAVClient.from_env(
+        stable_publication_approved=settings.stable_publication_approved,
+        upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+    )
     try:
-        with worker_lock(settings.lock_file), WorkerState(settings.state_database) as state:
+        with (
+            worker_lock(settings.lock_file),
+            WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state,
+        ):
             result = await collect_garbage(
                 webdav=client,
                 state=state,

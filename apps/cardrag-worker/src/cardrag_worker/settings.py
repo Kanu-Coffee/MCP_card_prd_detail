@@ -136,6 +136,9 @@ class PublicationResumeSettings:
     stable_publication_approved: bool
     document_aggregation_profile_path: Path | None
     document_aggregation_profile_artifact_sha256: str | None
+    sqlite_cache_mib: int
+    sqlite_mmap_mib: int
+    webdav_upload_chunk_mib: int
 
     @classmethod
     def from_env(cls) -> PublicationResumeSettings:
@@ -154,6 +157,9 @@ class PublicationResumeSettings:
             stable_publication_approved=_boolean("CARDRAG_STABLE_PUBLICATION_APPROVED", False),
             document_aggregation_profile_path=aggregation_path,
             document_aggregation_profile_artifact_sha256=aggregation_sha256,
+            sqlite_cache_mib=_bounded_int("CARDRAG_STATE_SQLITE_CACHE_MIB", 256, minimum=1, maximum=1024),
+            sqlite_mmap_mib=_bounded_int("CARDRAG_STATE_SQLITE_MMAP_MIB", 2048, minimum=0, maximum=4096),
+            webdav_upload_chunk_mib=_bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16),
         )
 
     @property
@@ -217,6 +223,12 @@ class WorkerSettings:
     retained_incomplete_runs: int
     garbage_grace_days: int
     collect_remote_garbage: bool
+    pdf_concurrency: int
+    pdf_concurrency_per_issuer: int
+    local_processing_workers: int
+    sqlite_cache_mib: int
+    sqlite_mmap_mib: int
+    webdav_upload_chunk_mib: int
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
@@ -400,6 +412,16 @@ class WorkerSettings:
             retained_incomplete_runs=_bounded_int("CARDRAG_RETAIN_INCOMPLETE_RUNS", 2, minimum=1, maximum=20),
             garbage_grace_days=_bounded_int("CARDRAG_GARBAGE_GRACE_DAYS", 1, minimum=1, maximum=365),
             collect_remote_garbage=collect_remote_garbage,
+            pdf_concurrency=_bounded_int("CARDRAG_PDF_CONCURRENCY", 8, minimum=1, maximum=32),
+            pdf_concurrency_per_issuer=_bounded_int(
+                "CARDRAG_PDF_CONCURRENCY_PER_ISSUER", 2, minimum=1, maximum=8
+            ),
+            local_processing_workers=_bounded_int(
+                "CARDRAG_LOCAL_PROCESSING_WORKERS", 4, minimum=1, maximum=8
+            ),
+            sqlite_cache_mib=_bounded_int("CARDRAG_STATE_SQLITE_CACHE_MIB", 256, minimum=1, maximum=1024),
+            sqlite_mmap_mib=_bounded_int("CARDRAG_STATE_SQLITE_MMAP_MIB", 2048, minimum=0, maximum=4096),
+            webdav_upload_chunk_mib=_bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16),
         )
 
     @property

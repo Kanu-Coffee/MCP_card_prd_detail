@@ -3385,3 +3385,265 @@ def test_serving_affecting_issuer_catalog_fields_change_worker_contract(tmp_path
             collect_remote_garbage=False,
         ).contract_sha256
     assert first != second
+
+
+def install_concurrent_pdf_http(monkeypatch: pytest.MonkeyPatch, handler: Any) -> list[httpx.AsyncClient]:
+    real_client = httpx.AsyncClient
+    clients: list[httpx.AsyncClient] = []
+
+    def factory(**kwargs: Any) -> httpx.AsyncClient:
+        client = real_client(transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(pipeline_module.httpx, "AsyncClient", factory)
+    monkeypatch.setattr(
+        pipeline_module,
+        "SecurePDFDownloader",
+        lambda policy: RealDownloader(policy, resolver=lambda _host: ("93.184.216.34",)),
+    )
+    return clients
+
+
+async def test_pdf_acquisition_barrier_waits_for_delayed_pdf_and_retry_then_seals_input_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = pdf_bytes()
+    records = tuple(
+        source(product_code=f"p{index}", source_url=f"https://cards.example/{index}.pdf")
+        for index in range(3)
+    )
+    slow_release = asyncio.Event()
+    fast_committed = asyncio.Event()
+    requests: dict[str, int] = {}
+    committed: list[str] = []
+    boundary_seen = False
+    main_thread = threading.get_ident()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        requests[path] = requests.get(path, 0) + 1
+        if path == "/0.pdf":
+            await slow_release.wait()
+        if path == "/2.pdf" and requests[path] == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, content=payload, headers={"content-type": "application/pdf"})
+
+    clients = install_concurrent_pdf_http(monkeypatch, handler)
+    ocr = FakeOCR()
+
+    class BarrierWebDAV(FakeWebDAV):
+        async def validated_current_generation(self) -> RemoteGenerationIdentity | None:
+            nonlocal boundary_seen
+            boundary_seen = True
+            assert len(committed) == len(records)
+            raise StopAfterNoChangeCheck
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[Adapter(records)],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=BarrierWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            retry_cap_seconds=0,
+        )
+        ingest = pipeline.pdf_cache.ingest_download
+
+        def observed_ingest(identity: Any, downloaded: Any, **kwargs: Any) -> Any:
+            assert threading.get_ident() == main_thread
+            result = ingest(identity, downloaded, **kwargs)
+            committed.append(identity.source_id)
+            if len(committed) == 2:
+                fast_committed.set()
+            return result
+
+        monkeypatch.setattr(pipeline.pdf_cache, "ingest_download", observed_ingest)
+        run_id = state.start_run()
+        checkpoint = tmp_path / "runs" / run_id / "checkpoints" / "acquisition.v1.json"
+        task = asyncio.create_task(pipeline._run_locked(run_id))
+        await asyncio.wait_for(fast_committed.wait(), timeout=3)
+        assert not boundary_seen
+        assert ocr.calls == 0
+        assert not checkpoint.exists()
+        assert not task.done()
+        slow_release.set()
+        with pytest.raises(StopAfterNoChangeCheck):
+            await asyncio.wait_for(task, timeout=3)
+        assert boundary_seen
+        assert committed[-1] == records[0].source_id
+        assert requests == {"/0.pdf": 1, "/1.pdf": 1, "/2.pdf": 2}
+        receipt = json.loads(checkpoint.read_bytes())
+        checksum = receipt.pop("payload_sha256")
+        assert pipeline_module.canonical_sha256(receipt) == checksum
+        assert receipt["schema_version"] == "cardrag.pdf-acquisition.v1"
+        assert [item["source_id"] for item in receipt["inputs"]] == [r.source_id for r in records]
+        assert all(item["status"] == "succeeded" for item in receipt["inputs"])
+        assert [item["source_id"] for item in receipt["documents"]] == [r.source_id for r in records]
+        for record in records:
+            stage = state.get_stage(run_id, record.source_id, "download")
+            assert stage is not None and stage.status == "succeeded"
+        retried = state.get_stage(run_id, records[2].source_id, "download")
+        assert retried is not None and retried.attempt_count == 2
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_pdf_acquisition_failure_or_cancel_drains_requests_without_checkpoint_or_ocr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: bool,
+) -> None:
+    records = tuple(
+        source(product_code=f"p{index}", source_url=f"https://cards.example/{index}.pdf")
+        for index in range(2)
+    )
+    both_started = asyncio.Event()
+    starts = 0
+    active = 0
+    drained = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal starts, active, drained
+        starts += 1
+        active += 1
+        if starts == 2:
+            both_started.set()
+        try:
+            await both_started.wait()
+            if not cancel and request.url.path == "/0.pdf":
+                raise httpx.ConnectError("failed", request=request)
+            await asyncio.Event().wait()
+        finally:
+            active -= 1
+            drained += 1
+        raise AssertionError("blocked request unexpectedly completed")
+
+    clients = install_concurrent_pdf_http(monkeypatch, handler)
+    ocr = FakeOCR()
+    adapter = Adapter(records)
+    adapter.spec = replace(adapter.spec, maximum_retries=1)
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[adapter],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        )
+        run_id = state.start_run()
+        task = asyncio.create_task(pipeline._run_locked(run_id))
+        await asyncio.wait_for(both_started.wait(), timeout=3)
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else httpx.ConnectError):
+            await asyncio.wait_for(task, timeout=3)
+        assert (active, drained) == (0, 2)
+        assert ocr.calls == 0
+        assert not (tmp_path / "runs" / run_id / "checkpoints" / "acquisition.v1.json").exists()
+    assert all(client.is_closed for client in clients)
+
+
+async def test_pdf_prepare_download_sessions_are_isolated_between_concurrent_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = pdf_bytes()
+    records = tuple(
+        source(product_code=f"p{index}", source_url=f"https://cards.example/p{index}.pdf")
+        for index in range(2)
+    )
+    both_prepared = asyncio.Event()
+    prepared = 0
+    download_cookies: dict[str, str] = {}
+
+    class SessionAdapter(Adapter):
+        async def prepare_download(self, client: httpx.AsyncClient, source: SourceRecord) -> DownloadRequest:
+            nonlocal prepared
+            response = await client.get(f"https://cards.example/session/{source.product_code}")
+            response.raise_for_status()
+            prepared += 1
+            if prepared == 2:
+                both_prepared.set()
+            await both_prepared.wait()
+            return DownloadRequest(url=source.source_url)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/session/"):
+            product = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, headers={"set-cookie": f"session={product}; Path=/"})
+        product = request.url.path.removeprefix("/").removesuffix(".pdf")
+        download_cookies[product] = request.headers.get("cookie", "")
+        return httpx.Response(200, content=payload, headers={"content-type": "application/pdf"})
+
+    clients = install_concurrent_pdf_http(monkeypatch, handler)
+
+    class BarrierWebDAV(FakeWebDAV):
+        async def validated_current_generation(self) -> RemoteGenerationIdentity | None:
+            raise StopAfterNoChangeCheck
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[SessionAdapter(records)],
+            ocr=FakeOCR(),  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=BarrierWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        )
+        with pytest.raises(StopAfterNoChangeCheck):
+            await asyncio.wait_for(pipeline._run_locked(state.start_run()), timeout=3)
+    assert download_cookies == {"p0": "session=p0", "p1": "session=p1"}
+    assert all(client.is_closed for client in clients)
+
+
+async def test_pdf_concurrency_rollback_keeps_acquisition_identity_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = pdf_bytes()
+    records = tuple(
+        source(product_code=f"p{index}", source_url=f"https://cards.example/{index}.pdf")
+        for index in range(5)
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0)
+        return httpx.Response(200, content=payload, headers={"content-type": "application/pdf"})
+
+    install_concurrent_pdf_http(monkeypatch, handler)
+
+    class BarrierWebDAV(FakeWebDAV):
+        async def validated_current_generation(self) -> RemoteGenerationIdentity | None:
+            raise StopAfterNoChangeCheck
+
+    receipts: list[dict[str, Any]] = []
+    for concurrency in (1, 8):
+        directory = tmp_path / str(concurrency)
+        with WorkerState(directory / "state.sqlite3") as state:
+            pipeline = WorkerPipeline(
+                state=state,
+                state_dir=directory,
+                adapters=[Adapter(records)],
+                ocr=FakeOCR(),  # type: ignore[arg-type]
+                embeddings=FakeEmbeddings(),
+                webdav=BarrierWebDAV(None),  # type: ignore[arg-type]
+                collect_remote_garbage=False,
+                pdf_concurrency=concurrency,
+            )
+            run_id = state.start_run()
+            with pytest.raises(StopAfterNoChangeCheck):
+                await pipeline._run_locked(run_id)
+            receipt = json.loads(
+                (directory / "runs" / run_id / "checkpoints" / "acquisition.v1.json").read_bytes()
+            )
+            receipt.pop("payload_sha256")
+            receipt.pop("run_id")
+            receipts.append(receipt)
+    assert receipts[0] == receipts[1]

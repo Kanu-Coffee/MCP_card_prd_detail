@@ -15,7 +15,7 @@ import stat
 import struct
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -65,6 +65,7 @@ from cardrag_core import (
 
 from .aggregation_profile_v5 import VerifiedAggregationProfileV5
 from .async_utils import to_thread_fenced
+from .bounded import bounded_ordered_map
 from .cache_seed_v109 import load_v109_seed_pins
 from .capacity_v5 import (
     V5CapacityError,
@@ -131,13 +132,14 @@ from .ocr import (
     page_records,
 )
 from .pdf_cache import PDFCache, PDFCachePruneError, PDFSourceIdentity
+from .performance import ExactTokenMemo, WorkerPerformance
 from .providers import (
     EmbeddingProvider,
     ProviderDocumentError,
     ProviderError,
     ProviderSystemicError,
 )
-from .rate_limit import IssuerRateLimiter, RateLimitedClient
+from .rate_limit import HostConcurrencyLimiter, IssuerRateLimiter, RateLimitedClient
 from .revision_history_v5 import (
     REVISION_HISTORY_POLICY_VERSION,
     UNRESOLVED_REVISION_LEDGER_SCHEMA,
@@ -1762,9 +1764,24 @@ class WorkerPipeline:
         retained_incomplete_runs: int = 2,
         document_aggregation: VerifiedAggregationProfileV5 | None = None,
         capacity_policy_v5: V5CapacityPolicy | None = None,
+        pdf_concurrency: int = 8,
+        pdf_concurrency_per_issuer: int = 2,
+        local_processing_workers: int = 4,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
+        for name, value, maximum in (
+            ("pdf_concurrency", pdf_concurrency, 32),
+            ("pdf_concurrency_per_issuer", pdf_concurrency_per_issuer, 8),
+            ("local_processing_workers", local_processing_workers, 8),
+        ):
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError(f"{name} must be an integer between 1 and {maximum}")
+        self.pdf_concurrency = pdf_concurrency
+        self.pdf_concurrency_per_issuer = pdf_concurrency_per_issuer
+        self.local_processing_workers = local_processing_workers
+        self.performance = WorkerPerformance()
+        self._token_memo: ExactTokenMemo | None = None
         if embeddings.dimension == EMBEDDING_DIMENSION:
             v5_profile: QwenEmbeddingProfileV5 | None = None
         elif isinstance(embeddings, OpenRouterQwenEmbeddingProviderV5):
@@ -1995,12 +2012,14 @@ class WorkerPipeline:
         self.state.ensure_stage(run_id, document_id, name, max_attempts=maximum)
         row = self.state.get_stage(run_id, document_id, name)
         if row is not None and row.status == "succeeded":
-            return await operation()
+            with self.performance.measure(f"stage.{name}"):
+                return await operation()
         while True:
             attempt = self.state.stage_started(run_id, document_id, name)
             retry_after: float | None = None
             try:
-                result = await operation()
+                with self.performance.measure(f"stage.{name}"):
+                    result = await operation()
             except Exception as exc:
                 if non_retryable_predicate is not None and non_retryable_predicate(exc):
                     if non_retryable_error_formatter is not None:
@@ -2045,6 +2064,66 @@ class WorkerPipeline:
             await asyncio.sleep(retry_after)
 
     async def run(self, *, resume_run_id: str | None = None) -> PipelineResult:
+        self.performance = WorkerPerformance()
+        self.performance.set(
+            "settings",
+            {
+                "pdf_concurrency": self.pdf_concurrency,
+                "pdf_concurrency_per_issuer": self.pdf_concurrency_per_issuer,
+                "local_processing_workers": self.local_processing_workers,
+                "sqlite": self.state.sqlite_settings,
+            },
+        )
+        self._token_memo = (
+            ExactTokenMemo(self.embeddings.token_counter, self.performance)
+            if isinstance(self.embeddings, OpenRouterQwenEmbeddingProviderV5)
+            else None
+        )
+        clear_prefetch = getattr(self.ocr, "clear_local_prefetch", None)
+        if callable(clear_prefetch):
+            clear_prefetch()
+        snapshot = getattr(self.webdav, "performance_snapshot", None)
+        try:
+            network_before = snapshot() if callable(snapshot) else {}
+        except Exception:
+            snapshot = None
+            network_before = {}
+            LOGGER.warning("Worker network performance snapshot is unavailable")
+        try:
+            result = await self._run_measured(resume_run_id=resume_run_id)
+            self.performance.set("status", result.status)
+            return result
+        except asyncio.CancelledError:
+            self.performance.set("status", "interrupted")
+            raise
+        except Exception:
+            self.performance.set("status", "failed")
+            raise
+        finally:
+            self._token_memo = None
+            if callable(clear_prefetch):
+                clear_prefetch()
+            try:
+                report = self.performance.snapshot()
+                if callable(snapshot):
+                    try:
+                        report["webdav"] = {
+                            name: value - network_before.get(name, 0) for name, value in snapshot().items()
+                        }
+                    except Exception:
+                        report["webdav_metrics_unavailable"] = True
+                measured_run_id = report["metrics"].get("run_id")
+                if isinstance(measured_run_id, str) and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", measured_run_id
+                ):
+                    _atomic_write(
+                        self.state_dir / "runs" / measured_run_id / "reports" / "performance.json",
+                        canonical_json_bytes(report),
+                    )
+            except Exception:
+                LOGGER.warning("Worker performance report could not be written")
+
+    async def _run_measured(self, *, resume_run_id: str | None = None) -> PipelineResult:
         with worker_lock(self.state_dir / "worker.lock"):
             if self.document_aggregation is not None:
                 # Rebind the complete live-provider Worker contract before a
@@ -2054,6 +2133,7 @@ class WorkerPipeline:
             self.state.mark_stale_running_runs_interrupted(exclude_run_id=run_id)
             if resume_run_id:
                 self.state.assert_resumable(run_id)
+            self.performance.set("run_id", run_id)
             self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="before_run")
             cancellation_requested = False
             unexpected_failure: WorkerUnexpectedFailureError | None = None
@@ -2356,7 +2436,7 @@ class WorkerPipeline:
 
         # Current PDF bytes are part of corpus identity. Discovery-only hashes are
         # insufficient because issuer URLs are sometimes reused for changed files.
-        acquired: list[_AcquiredDocument] = []
+        acquired: tuple[_AcquiredDocument, ...] = ()
         unsupported: list[UnsupportedProductRecord] = []
         pdf_cache_hits: set[str] = set()
         pdf_cache_misses: set[str] = set()
@@ -2474,10 +2554,26 @@ class WorkerPipeline:
                     len(unsupported),
                 )
 
-        async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
-            for pdf_index, source in enumerate(records, start=1):
+        if len({source.source_id for source in records}) != len(records):
+            raise RuntimeError("PDF acquisition input contains duplicate source identities")
+        completed = 0
+        host_limiter = HostConcurrencyLimiter(2)
+        async with AsyncExitStack() as client_stack:
+            clients = [
+                await client_stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, timeout=60))
+                for _ in range(min(self.pdf_concurrency, len(records)))
+            ]
+
+            async def acquire_source(
+                source: SourceRecord, slot: int
+            ) -> _AcquiredDocument | UnsupportedProductRecord:
+                nonlocal completed
                 adapter = next(item for item in self.adapters if item.spec.code == source.issuer)
-                limited = RateLimitedClient(client, self.limiters[adapter.spec.code])
+                client = clients[slot]
+                # Each document's prepare/download handshake owns its cookie jar.
+                # Worker-local clients preserve pooled connections between documents.
+                client.cookies.clear()
+                limited = RateLimitedClient(client, self.limiters[adapter.spec.code], host_limiter)
                 source_key = source.source_id
                 cache_identity = PDFSourceIdentity.from_source_record(source)
 
@@ -2487,7 +2583,9 @@ class WorkerPipeline:
                     identity: PDFSourceIdentity = cache_identity,
                     current_client: RateLimitedClient = limited,
                 ) -> DownloadedPDF:
-                    cached = self.pdf_cache.lookup(identity)
+                    with self.performance.measure("pdf_cache_lookup_seconds"):
+                        cached = self.pdf_cache.lookup(identity)
+                    self.performance.increment("pdf_cache_lookup_count")
                     checked_at = datetime.now(UTC)
                     cache_age = None if cached is None else checked_at - cached.origin_checked_at
                     if (
@@ -2518,7 +2616,8 @@ class WorkerPipeline:
                         source.product_code,
                         source.source_id,
                     )
-                    request = await adapter.prepare_download(current_client, source)  # type: ignore[arg-type]
+                    with self.performance.measure("pdf_prepare_seconds"):
+                        request = await adapter.prepare_download(current_client, source)  # type: ignore[arg-type]
                     if cached is not None and (cached.etag is not None or cached.last_modified is not None):
                         headers = {
                             key: value
@@ -2533,24 +2632,26 @@ class WorkerPipeline:
                     downloader = SecurePDFDownloader(DownloadPolicy(allowed_hosts=adapter.spec.allowed_hosts))
                     with self.pdf_cache.temporary_download_path() as destination:
                         try:
-                            downloaded = await downloader.download(
-                                current_client,  # type: ignore[arg-type]
-                                request,
-                                destination,
-                            )
+                            with self.performance.measure("pdf_download_seconds"):
+                                downloaded = await downloader.download(
+                                    current_client,  # type: ignore[arg-type]
+                                    request,
+                                    destination,
+                                )
                         except PDFNotModified as not_modified:
                             if cached is None:  # pragma: no cover - downloader guards this too
                                 raise RuntimeError("origin returned not-modified for a cache miss") from None
                             observed_at = datetime.now(UTC)
-                            ingested = self.pdf_cache.observe_not_modified(
-                                identity,
-                                cached,
-                                final_url=not_modified.final_url,
-                                etag=not_modified.etag,
-                                last_modified=not_modified.last_modified,
-                                observed_at=observed_at,
-                                verified_at=observed_at,
-                            )
+                            with self.performance.measure("pdf_cache_write_seconds"):
+                                ingested = self.pdf_cache.observe_not_modified(
+                                    identity,
+                                    cached,
+                                    final_url=not_modified.final_url,
+                                    etag=not_modified.etag,
+                                    last_modified=not_modified.last_modified,
+                                    observed_at=observed_at,
+                                    verified_at=observed_at,
+                                )
                             pdf_cache_not_modified.add(source.source_id)
                             LOGGER.debug(
                                 "PDF cache origin not modified issuer=%s product_code=%s "
@@ -2562,12 +2663,13 @@ class WorkerPipeline:
                             )
                             return ingested.as_downloaded_pdf()
                         observed_at = datetime.now(UTC)
-                        ingested = self.pdf_cache.ingest_download(
-                            identity,
-                            downloaded,
-                            observed_at=observed_at,
-                            verified_at=observed_at,
-                        )
+                        with self.performance.measure("pdf_cache_write_seconds"):
+                            ingested = self.pdf_cache.ingest_download(
+                                identity,
+                                downloaded,
+                                observed_at=observed_at,
+                                verified_at=observed_at,
+                            )
                     pdf_downloads.add(source.source_id)
                     if previous is not None and previous.pdf_sha256 != ingested.sha256:
                         pdf_revisions.add(source.source_id)
@@ -2634,123 +2736,189 @@ class WorkerPipeline:
                         "download",
                         f"unsupported_drm {source.issuer}/{source.product_code}: {exc}",
                     )
-                    unsupported.append(
-                        UnsupportedProductRecord(
-                            source=source,
-                            protected_sha256=exc.sha256,
-                            protected_size_bytes=exc.size_bytes,
-                            protected_magic=exc.magic,
-                        )
+                    unsupported_result = UnsupportedProductRecord(
+                        source=source,
+                        protected_sha256=exc.sha256,
+                        protected_size_bytes=exc.size_bytes,
+                        protected_magic=exc.magic,
                     )
-                    log_pdf_progress(pdf_index)
-                    continue
-                acquired.append(_AcquiredDocument(source, pdf))
-                log_pdf_progress(pdf_index)
+                    unsupported.append(unsupported_result)
+                    outcome: _AcquiredDocument | UnsupportedProductRecord = unsupported_result
+                else:
+                    outcome = _AcquiredDocument(source, pdf)
+                completed += 1
+                log_pdf_progress(completed)
+                return outcome
+
+            with self.performance.measure("pdf_acquisition_seconds"):
+                acquisition_results = await bounded_ordered_map(
+                    records,
+                    acquire_source,
+                    concurrency=self.pdf_concurrency,
+                    group_key=lambda source: source.issuer,
+                    per_group=self.pdf_concurrency_per_issuer,
+                )
+        # The scheduler and client exits drain every operation before corpus/OCR
+        # work may observe results. Stage success alone never skips cache validation.
+        if len(acquisition_results) != len(records) or completed != len(records):
+            raise RuntimeError("PDF acquisition did not complete every source")
+        for source, outcome in zip(records, acquisition_results, strict=True):
+            if outcome.source.source_id != source.source_id:
+                raise RuntimeError("PDF acquisition result changed its source identity")
+            stage = self.state.get_stage(run_id, source.source_id, "download")
+            expected_status = "skipped" if isinstance(outcome, UnsupportedProductRecord) else "succeeded"
+            if stage is None or stage.status != expected_status:
+                raise RuntimeError("PDF acquisition result has no matching terminal stage")
+        acquired = tuple(outcome for outcome in acquisition_results if isinstance(outcome, _AcquiredDocument))
+        unsupported = [
+            outcome for outcome in acquisition_results if isinstance(outcome, UnsupportedProductRecord)
+        ]
+        self.performance.set("pdf_acquired_count", len(acquired))
+        self.performance.set("pdf_unsupported_count", len(unsupported))
 
         unresolved_revision_entries: list[UnresolvedRevisionIdentityV5] = []
         historical_pdf_cache_hits = 0
-        if self.v5_profile is not None:
-            current_acquired = tuple(acquired)
-            known_sources = _known_snapshot_sources(
-                self.state,
-                self.adapters,
-                tuple(item.source for item in current_acquired),
-            )
-            materialized_by_document: dict[str, _AcquiredDocument] = {}
-            for current_document in current_acquired:
-                history = self.state.pdf_cache_lineage_history(
-                    issuer=current_document.source.issuer,
-                    product_code=current_document.source.product_code,
-                    document_type=current_document.source.document_type,
+        with self.performance.measure("pdf_revision_expansion_seconds"):
+            if self.v5_profile is not None:
+                current_acquired = tuple(acquired)
+                known_sources = _known_snapshot_sources(
+                    self.state,
+                    self.adapters,
+                    tuple(item.source for item in current_acquired),
                 )
-                history_plan = plan_revision_history_v5(
-                    current_source=current_document.source,
-                    current_pdf_sha256=current_document.pdf.sha256,
-                    rows=history,
-                    known_sources=known_sources,
-                )
-                unresolved_revision_entries.extend(history_plan.unresolved_revisions)
-                for candidate in history_plan.candidates:
-                    is_current = (
-                        candidate.source.source_id == current_document.source.source_id
-                        and candidate.revision.pdf_sha256 == current_document.pdf.sha256
+                materialized_by_document: dict[str, _AcquiredDocument] = {}
+                for current_document in current_acquired:
+                    history = self.state.pdf_cache_lineage_history(
+                        issuer=current_document.source.issuer,
+                        product_code=current_document.source.product_code,
+                        document_type=current_document.source.document_type,
                     )
-                    if is_current:
-                        downloaded = current_document.pdf
-                    else:
-                        cached = self.pdf_cache.lookup_revision(candidate.revision)
-                        if cached is None:
+                    history_plan = plan_revision_history_v5(
+                        current_source=current_document.source,
+                        current_pdf_sha256=current_document.pdf.sha256,
+                        rows=history,
+                        known_sources=known_sources,
+                    )
+                    unresolved_revision_entries.extend(history_plan.unresolved_revisions)
+                    for candidate in history_plan.candidates:
+                        is_current = (
+                            candidate.source.source_id == current_document.source.source_id
+                            and candidate.revision.pdf_sha256 == current_document.pdf.sha256
+                        )
+                        if is_current:
+                            downloaded = current_document.pdf
+                        else:
+                            with self.performance.measure("pdf_cache_lookup_seconds"):
+                                cached = self.pdf_cache.lookup_revision(candidate.revision)
+                            self.performance.increment("pdf_cache_lookup_count")
+                            if cached is None:
+                                unresolved_revision_entries.append(
+                                    UnresolvedRevisionIdentityV5(
+                                        source_id=candidate.source.source_id,
+                                        pdf_sha256=candidate.revision.pdf_sha256,
+                                        reason_code="pdf_cache_object_unavailable",
+                                    )
+                                )
+                                continue
+                            downloaded = cached.as_downloaded_pdf()
+                            historical_pdf_cache_hits += 1
+                        planned = _AcquiredDocument(
+                            source=candidate.source,
+                            pdf=downloaded,
+                            temporal_status=candidate.temporal_status,
+                            supersedes_document_id=candidate.supersedes_document_id,
+                            is_historical=not is_current,
+                        )
+                        document_id = candidate.document_id
+                        existing_document = materialized_by_document.get(document_id)
+                        if existing_document is not None:
+                            # The legacy document_id omits metadata-only source
+                            # differences. Keep the proven current revision and
+                            # report the historical identity as unresolved rather
+                            # than mixing two contracts in one run directory.
+                            existing_identity = (
+                                existing_document.source.source_id,
+                                existing_document.pdf.sha256,
+                            )
+                            planned_identity = (planned.source.source_id, planned.pdf.sha256)
+                            if existing_identity == planned_identity:
+                                if (
+                                    existing_document.temporal_status != planned.temporal_status
+                                    or existing_document.supersedes_document_id
+                                    != planned.supersedes_document_id
+                                ):
+                                    raise RuntimeError(
+                                        "duplicate revision identity has conflicting temporal truth"
+                                    )
+                                continue
+                            dropped = existing_document if planned.temporal_status == "current" else planned
                             unresolved_revision_entries.append(
                                 UnresolvedRevisionIdentityV5(
-                                    source_id=candidate.source.source_id,
-                                    pdf_sha256=candidate.revision.pdf_sha256,
-                                    reason_code="pdf_cache_object_unavailable",
+                                    source_id=dropped.source.source_id,
+                                    pdf_sha256=dropped.pdf.sha256,
+                                    reason_code="document_identity_collision",
                                 )
                             )
+                            if planned.temporal_status == "current":
+                                materialized_by_document[document_id] = planned
                             continue
-                        downloaded = cached.as_downloaded_pdf()
-                        historical_pdf_cache_hits += 1
-                    planned = _AcquiredDocument(
-                        source=candidate.source,
-                        pdf=downloaded,
-                        temporal_status=candidate.temporal_status,
-                        supersedes_document_id=candidate.supersedes_document_id,
-                        is_historical=not is_current,
+                        materialized_by_document[document_id] = planned
+                materialized_ids = set(materialized_by_document)
+                acquired = tuple(
+                    replace(
+                        item,
+                        supersedes_document_id=(
+                            item.supersedes_document_id
+                            if item.supersedes_document_id in materialized_ids
+                            else None
+                        ),
                     )
-                    document_id = candidate.document_id
-                    existing_document = materialized_by_document.get(document_id)
-                    if existing_document is not None:
-                        # The legacy document_id omits metadata-only source
-                        # differences. Keep the proven current revision and
-                        # report the historical identity as unresolved rather
-                        # than mixing two contracts in one run directory.
-                        existing_identity = (
-                            existing_document.source.source_id,
-                            existing_document.pdf.sha256,
-                        )
-                        planned_identity = (planned.source.source_id, planned.pdf.sha256)
-                        if existing_identity == planned_identity:
-                            if (
-                                existing_document.temporal_status != planned.temporal_status
-                                or existing_document.supersedes_document_id != planned.supersedes_document_id
-                            ):
-                                raise RuntimeError(
-                                    "duplicate revision identity has conflicting temporal truth"
-                                )
-                            continue
-                        dropped = existing_document if planned.temporal_status == "current" else planned
-                        unresolved_revision_entries.append(
-                            UnresolvedRevisionIdentityV5(
-                                source_id=dropped.source.source_id,
-                                pdf_sha256=dropped.pdf.sha256,
-                                reason_code="document_identity_collision",
-                            )
-                        )
-                        if planned.temporal_status == "current":
-                            materialized_by_document[document_id] = planned
-                        continue
-                    materialized_by_document[document_id] = planned
-            materialized_ids = set(materialized_by_document)
-            acquired = [
-                replace(
-                    item,
-                    supersedes_document_id=(
-                        item.supersedes_document_id
-                        if item.supersedes_document_id in materialized_ids
-                        else None
-                    ),
+                    for item in sorted(
+                        materialized_by_document.values(),
+                        key=lambda row: (
+                            row.source.issuer,
+                            row.source.product_code,
+                            row.source.effective_date,
+                            row.source.source_version,
+                            row.pdf.sha256,
+                        ),
+                    )
                 )
-                for item in sorted(
-                    materialized_by_document.values(),
-                    key=lambda row: (
-                        row.source.issuer,
-                        row.source.product_code,
-                        row.source.effective_date,
-                        row.source.source_version,
-                        row.pdf.sha256,
+        document_ids = tuple(item.source.document_id(item.pdf.sha256) for item in acquired)
+        if len(document_ids) != len(set(document_ids)):
+            raise RuntimeError("PDF acquisition produced duplicate document identities")
+        # This receipt records the completed acquisition barrier, never a promise
+        # that resumed runs can skip revalidating the underlying PDF cache.
+        acquisition_payload = {
+            "schema_version": "cardrag.pdf-acquisition.v1",
+            "run_id": run_id,
+            "contract_sha256": contract_sha256,
+            "inputs": [
+                {
+                    "source_id": source.source_id,
+                    "status": "unsupported_drm"
+                    if isinstance(outcome, UnsupportedProductRecord)
+                    else "succeeded",
+                    "pdf_sha256": (
+                        outcome.protected_sha256
+                        if isinstance(outcome, UnsupportedProductRecord)
+                        else outcome.pdf.sha256
                     ),
-                )
-            ]
+                }
+                for source, outcome in zip(records, acquisition_results, strict=True)
+            ],
+            "documents": [
+                {
+                    "document_id": document_id,
+                    "source_id": item.source.source_id,
+                    "pdf_sha256": item.pdf.sha256,
+                    "pdf_size_bytes": item.pdf.size_bytes,
+                    "page_count": item.pdf.page_count,
+                    "is_historical": item.is_historical,
+                }
+                for document_id, item in zip(document_ids, acquired, strict=True)
+            ],
+        }
         unresolved_revision_ledger = canonical_unresolved_revision_ledger_v5(unresolved_revision_entries)
         unresolved_revision_sha256 = unresolved_revision_ledger_sha256_v5(unresolved_revision_ledger)
         unsupported_payload = sorted(
@@ -2780,6 +2948,18 @@ class WorkerPipeline:
                 "unsupported_documents": unsupported_payload,
             }
         corpus_sha256 = canonical_sha256(corpus_payload)
+        acquisition_payload["corpus_sha256"] = corpus_sha256
+        self.performance.set("corpus_sha256", corpus_sha256)
+        self.performance.set("contract_sha256", contract_sha256)
+        _atomic_write(
+            run_dir / "checkpoints" / "acquisition.v1.json",
+            canonical_json_bytes(
+                {
+                    **acquisition_payload,
+                    "payload_sha256": canonical_sha256(acquisition_payload),
+                }
+            ),
+        )
         current_remote = await self.webdav.validated_current_generation()
         stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
         cache_healing_generation_id: str | None = None
@@ -3150,11 +3330,38 @@ class WorkerPipeline:
         ocr_failure_report = run_dir / "reports" / "ocr-failures.json"
         ocr_systemic_failure_report = run_dir / "reports" / "ocr-systemic-failure.json"
         structure_failure_report = run_dir / "reports" / "structure-failures.json"
-        for ocr_index, acquired_document in enumerate(acquired, start=1):
+        ocr_lock = asyncio.Lock()
+        ocr_stopped = False
+        completed_document_ids: set[str] = set()
+        ocr_order = {item.source.document_id(item.pdf.sha256): index for index, item in enumerate(acquired)}
+        if len(ocr_order) != len(acquired):
+            raise RuntimeError("OCR input contains duplicate document identities")
+        self.performance.set("ocr_expected", len(acquired))
+        self.performance.set("ocr_missing", len(acquired))
+
+        async def process_document(acquired_document: _AcquiredDocument, _slot: int) -> None:
+            nonlocal \
+                ocr_cache_publication_deferred, \
+                ocr_cache_reused_count, \
+                ocr_provider_called_count, \
+                ocr_stopped
             source = acquired_document.source
             pdf = acquired_document.pdf
             document_id = source.document_id(pdf.sha256)
             ocr_output_dir = run_dir / "documents" / document_id / "ocr"
+
+            prefetch = getattr(self.ocr, "prefetch_local_native", None)
+            if self.v5_profile is not None and callable(prefetch):
+                with self.performance.measure("ocr_local_prefetch"):
+                    await to_thread_fenced(
+                        prefetch,
+                        document_id=document_id,
+                        pdf_sha256=pdf.sha256,
+                        pdf_size_bytes=pdf.size_bytes,
+                        page_count=pdf.page_count,
+                        output_dir=ocr_output_dir,
+                        prior_local_native=prior_local_native_sources.get(document_id),
+                    )
 
             async def recognize(
                 current_document_id: str = document_id,
@@ -3254,15 +3461,25 @@ class WorkerPipeline:
                 return stage is None or stage.status != "running" or stage.attempt_count >= stage.max_attempts
 
             try:
-                ocr_result = await self._finite_stage(
-                    run_id=run_id,
-                    document_id=document_id,
-                    name="ocr",
-                    operation=recognize,
-                    non_retryable_predicate=stop_ocr_stage_retry,
-                    non_retryable_error_formatter=record_systemic_failure,
-                    error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
-                )
+                async with ocr_lock:
+                    if ocr_stopped:
+                        raise asyncio.CancelledError()
+                    try:
+                        ocr_result = await self._finite_stage(
+                            run_id=run_id,
+                            document_id=document_id,
+                            name="ocr",
+                            operation=recognize,
+                            non_retryable_predicate=stop_ocr_stage_retry,
+                            non_retryable_error_formatter=record_systemic_failure,
+                            error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
+                        )
+                    except BaseException as exc:
+                        # Set the gate before releasing the lock. TaskGroup
+                        # cancellation is delivered later than lock wakeups.
+                        if not isinstance(exc, Exception) or not is_isolatable_document_ocr_failure(exc):
+                            ocr_stopped = True
+                        raise
             except Exception as exc:
                 if not is_isolatable_document_ocr_failure(exc):
                     if systemic_error is None or exc is not systemic_source_exception:
@@ -3340,17 +3557,7 @@ class WorkerPipeline:
                     failure_reason.reason_code,
                     failure_reason.reason,
                 )
-                if ocr_index % 25 == 0 or ocr_index == len(acquired):
-                    LOGGER.info(
-                        "OCR progress completed=%d total=%d succeeded=%d failed=%d "
-                        "cache_publication_deferred=%d",
-                        ocr_index,
-                        len(acquired),
-                        len(processed),
-                        len(failed_documents),
-                        ocr_cache_publication_deferred,
-                    )
-                continue
+                return
             if ocr_result is None:
                 raise RuntimeError("OCR stage returned no result")
             ocr_cache_reused_count += int(ocr_result.cache_reused)
@@ -3415,26 +3622,31 @@ class WorkerPipeline:
                     destination: Path = structure_path,
                 ) -> tuple[StructureArtifact, StructureFallbackReasonCode | None]:
                     del destination
-                    try:
-                        artifact = parse_structure_artifact(
-                            current_pages,
-                            issuer=current_source.issuer,
-                            product_code=current_source.product_code,
-                            product_name=current_source.product_name,
-                            source_version=current_source.source_version,
-                            effective_date=current_source.effective_date.isoformat(),
-                            document_type=current_source.document_type,
-                            source_id=current_source.source_id,
-                            pdf_sha256=current_pdf_sha256,
-                        )
-                        validate_structure_artifact(artifact)
-                        fallback_reason: StructureFallbackReasonCode | None = None
-                    except Exception:
+
+                    def parse() -> tuple[StructureArtifact, StructureFallbackReasonCode | None]:
                         try:
-                            artifact = unclassified_fallback_v5()
+                            artifact = parse_structure_artifact(
+                                current_pages,
+                                issuer=current_source.issuer,
+                                product_code=current_source.product_code,
+                                product_name=current_source.product_name,
+                                source_version=current_source.source_version,
+                                effective_date=current_source.effective_date.isoformat(),
+                                document_type=current_source.document_type,
+                                source_id=current_source.source_id,
+                                pdf_sha256=current_pdf_sha256,
+                            )
+                            validate_structure_artifact(artifact)
+                            fallback_reason: StructureFallbackReasonCode | None = None
                         except Exception:
-                            raise _StructureFallbackFailed("parser") from None
-                        fallback_reason = "parser_failed"
+                            try:
+                                artifact = unclassified_fallback_v5()
+                            except Exception:
+                                raise _StructureFallbackFailed("parser") from None
+                            fallback_reason = "parser_failed"
+                        return artifact, fallback_reason
+
+                    artifact, fallback_reason = await to_thread_fenced(parse)
                     write_structure_v5(artifact)
                     return artifact, fallback_reason
 
@@ -3472,7 +3684,7 @@ class WorkerPipeline:
                         document_id,
                         exc.failure_stage,
                     )
-                    continue
+                    return
                 assert structure_artifact is not None
                 verified_structure_artifact: StructureArtifact = structure_artifact
                 views_path = run_dir / "documents" / document_id / "structure" / "views.v1.json"
@@ -3494,25 +3706,31 @@ class WorkerPipeline:
                             candidate,
                             maximum_chars=V5_VIEW_MAXIMUM_CHARACTERS,
                             maximum_tokens=self.v5_profile.maximum_tokens,
-                            token_counter=self.embeddings.token_counter,  # type: ignore[union-attr]
+                            token_counter=self._token_memo or self.embeddings.token_counter,  # type: ignore[union-attr]
                         )
                         if not generated:
                             raise ValueError("structure artifact produced no searchable derived view")
                         return generated
 
-                    final_artifact = artifact
-                    final_fallback_reason = fallback_reason
-                    try:
-                        rows = build_rows(final_artifact)
-                    except Exception:
-                        if fallback_reason is not None:
-                            raise _StructureFallbackFailed("derived_views") from None
+                    def derive() -> tuple[
+                        StructureArtifact, tuple[DerivedView, ...], StructureFallbackReasonCode | None
+                    ]:
+                        final_artifact = artifact
+                        final_fallback_reason = fallback_reason
                         try:
-                            final_artifact = unclassified_fallback_v5()
                             rows = build_rows(final_artifact)
                         except Exception:
-                            raise _StructureFallbackFailed("derived_views") from None
-                        final_fallback_reason = "derived_view_failed"
+                            if fallback_reason is not None:
+                                raise _StructureFallbackFailed("derived_views") from None
+                            try:
+                                final_artifact = unclassified_fallback_v5()
+                                rows = build_rows(final_artifact)
+                            except Exception:
+                                raise _StructureFallbackFailed("derived_views") from None
+                            final_fallback_reason = "derived_view_failed"
+                        return final_artifact, rows, final_fallback_reason
+
+                    final_artifact, rows, final_fallback_reason = await to_thread_fenced(derive)
                     write_structure_v5(final_artifact)
                     body = canonical_json_bytes(
                         {
@@ -3567,7 +3785,7 @@ class WorkerPipeline:
                         "Structure fallback views failed document_id=%s; continuing",
                         document_id,
                     )
-                    continue
+                    return
                 structured_pages = pages
                 chunks: tuple[dict[str, Any], ...] = ()
             else:
@@ -3672,15 +3890,49 @@ class WorkerPipeline:
                 )
             )
 
-            if ocr_index % 25 == 0 or ocr_index == len(acquired):
+        async def process_and_record(item: _AcquiredDocument, slot: int) -> None:
+            await process_document(item, slot)
+            completed_document_ids.add(item.source.document_id(item.pdf.sha256))
+            completed = len(completed_document_ids)
+            self.performance.set("ocr_completed", completed)
+            self.performance.set("ocr_missing", len(acquired) - completed)
+            self.performance.set("ocr_succeeded", len(processed))
+            self.performance.set("ocr_failed", len(failed_documents))
+            self.performance.set("structure_failed", len(structure_failures))
+            if completed % 25 == 0 or completed == len(acquired):
                 LOGGER.info(
-                    "OCR progress completed=%d total=%d succeeded=%d failed=%d cache_publication_deferred=%d",
-                    ocr_index,
+                    "OCR progress completed=%d total=%d succeeded=%d failed=%d "
+                    "structure_failed=%d cache_publication_deferred=%d",
+                    completed,
                     len(acquired),
                     len(processed),
                     len(failed_documents),
+                    len(structure_failures),
                     ocr_cache_publication_deferred,
                 )
+
+        with self.performance.measure("ocr_and_local_processing"):
+            await bounded_ordered_map(
+                acquired,
+                process_and_record,
+                concurrency=self.local_processing_workers if self.v5_profile is not None else 1,
+            )
+        processed.sort(key=lambda item: ocr_order[item.record.document_id])
+        failed_documents.sort(key=lambda item: ocr_order[item.record.document_id])
+        ocr_failures.sort(key=lambda item: ocr_order[item.document_id])
+        structure_failures.sort(key=lambda item: ocr_order[item.document_id])
+        completed_ids = [item.record.document_id for item in processed]
+        completed_ids.extend(item.record.document_id for item in failed_documents)
+        completed_ids.extend(item.document_id for item in structure_failures)
+        missing_ids = set(ocr_order) - set(completed_ids)
+        self.performance.set("ocr_missing", len(missing_ids))
+        self.performance.set("ocr_succeeded", len(processed))
+        self.performance.set("ocr_failed", len(failed_documents))
+        self.performance.set("structure_failed", len(structure_failures))
+        self.performance.set("ocr_cache_reused", ocr_cache_reused_count)
+        self.performance.set("ocr_provider_documents", ocr_provider_called_count)
+        if len(completed_ids) != len(set(completed_ids)) or set(completed_ids) != set(ocr_order):
+            raise RuntimeError("OCR completion barrier found missing, duplicate, or unexpected documents")
 
         raw_issuer_ocr_counts = tuple(
             (
@@ -4400,7 +4652,7 @@ class WorkerPipeline:
             indices_by_cache_key: dict[str, list[int]] = {}
             for index, (_document, view) in enumerate(ordered_view_pairs):
                 formatted = format_embedding_input("document", view.embedding_input)
-                token_count = provider.token_counter(formatted)
+                token_count = (self._token_memo or provider.token_counter)(formatted)
                 if (
                     isinstance(token_count, bool)
                     or not isinstance(token_count, int)
@@ -4428,6 +4680,7 @@ class WorkerPipeline:
             for cache_key, bound_indices in indices_by_cache_key.items():
                 representative = bound_indices[0]
                 input_sha256 = cache_bindings[representative][1]
+                self.performance.increment("embedding_cache_lookups")
                 cached = self.state.get_embedding_v5(
                     cache_key,
                     profile_id=profile.profile_id,
@@ -4435,6 +4688,7 @@ class WorkerPipeline:
                     dimension=profile.dimension,
                     dtype=profile.dtype,
                     normalization=profile.normalization,
+                    validate_norm=False,
                 )
                 if cached is None:
                     unique_misses.append(representative)
@@ -4636,6 +4890,7 @@ class WorkerPipeline:
             expected_vector_sha256: str,
         ) -> LazyEmbeddingVector:
             def load() -> bytes:
+                self.performance.increment("export_cache_lookups")
                 cached = self.state.get_embedding_v5(
                     cache_key,
                     profile_id=profile.profile_id,
@@ -4643,6 +4898,7 @@ class WorkerPipeline:
                     dimension=profile.dimension,
                     dtype=profile.dtype,
                     normalization=profile.normalization,
+                    validate_norm=False,
                 )
                 if cached is None:
                     raise RuntimeError("sealed v5 embedding cache row disappeared before export")
@@ -4728,44 +4984,47 @@ class WorkerPipeline:
             or os.path.lexists(publication_seal)
         ):
             raise RuntimeError("v5 incomplete-target replacement requires an unsealed running run")
-        export = self.exporter_v5.export(
-            database_path,
-            vector_path,
-            generation_id=generation_id,
-            corpus_sha256=corpus_sha256,
-            contract_sha256=contract_sha256,
-            primary_embedding_profile_id=profile.profile_id,
-            issuers=issuer_rows,
-            product_lineages=lineage_rows,
-            unsupported_products=unsupported_rows,
-            ocr_failed_products=failed_rows,
-            contract_revisions=revision_rows,
-            document_pages=page_rows,
-            structure_nodes=node_rows,
-            node_spans=span_rows,
-            node_links=link_rows,
-            embedding_profiles=(exported_profile,),
-            embedding_views=view_rows,
-            document_aggregation_policy=(
-                self.document_aggregation.profile.aggregation_policy
-                if self.document_aggregation is not None
-                else None
-            ),
-            sealed_profile_sha256=(
-                self.document_aggregation.profile_sha256 if self.document_aggregation is not None else None
-            ),
-            expected_exact_row_corpus_sha256=(
-                self.document_aggregation.profile.exact_row_corpus_sha256
-                if self.document_aggregation is not None
-                else None
-            ),
-            predicted_serving_database_bytes=predicted_database_bytes,
-            maximum_serving_database_bytes=capacity_policy.maximum_serving_database_bytes,
-            maximum_vector_sidecar_bytes=capacity_policy.maximum_vector_sidecar_bytes,
-            reserved_free_space_bytes=capacity_policy.reserved_free_space_bytes,
-            replace_incomplete_owned_targets=True,
-            extra_metadata=extra_metadata,
-        )
+        with self.performance.measure("export"):
+            export = self.exporter_v5.export(
+                database_path,
+                vector_path,
+                generation_id=generation_id,
+                corpus_sha256=corpus_sha256,
+                contract_sha256=contract_sha256,
+                primary_embedding_profile_id=profile.profile_id,
+                issuers=issuer_rows,
+                product_lineages=lineage_rows,
+                unsupported_products=unsupported_rows,
+                ocr_failed_products=failed_rows,
+                contract_revisions=revision_rows,
+                document_pages=page_rows,
+                structure_nodes=node_rows,
+                node_spans=span_rows,
+                node_links=link_rows,
+                embedding_profiles=(exported_profile,),
+                embedding_views=view_rows,
+                document_aggregation_policy=(
+                    self.document_aggregation.profile.aggregation_policy
+                    if self.document_aggregation is not None
+                    else None
+                ),
+                sealed_profile_sha256=(
+                    self.document_aggregation.profile_sha256
+                    if self.document_aggregation is not None
+                    else None
+                ),
+                expected_exact_row_corpus_sha256=(
+                    self.document_aggregation.profile.exact_row_corpus_sha256
+                    if self.document_aggregation is not None
+                    else None
+                ),
+                predicted_serving_database_bytes=predicted_database_bytes,
+                maximum_serving_database_bytes=capacity_policy.maximum_serving_database_bytes,
+                maximum_vector_sidecar_bytes=capacity_policy.maximum_vector_sidecar_bytes,
+                reserved_free_space_bytes=capacity_policy.reserved_free_space_bytes,
+                replace_incomplete_owned_targets=True,
+                extra_metadata=extra_metadata,
+            )
         previous_id: str | None
         if self.document_aggregation is not None:
             current_aggregation_head = await self._validated_document_aggregation_head()
@@ -5438,6 +5697,7 @@ class WorkerPipeline:
                     row_struct = struct.Struct(f"<{vector_contract.dimension}f")
                     row_size = row_struct.size
                     total_rows = vector_contract.row_count
+                    sample_indices: Sequence[int]
                     if total_rows <= 256:
                         sample_indices = range(total_rows)
                     else:
@@ -5965,6 +6225,8 @@ async def resume_sealed_publication(
     webdav: WebDAVClient,
     stable_publication_approved: bool = False,
     document_aggregation: VerifiedAggregationProfileV5 | None = None,
+    sqlite_cache_mib: int = 256,
+    sqlite_mmap_mib: int = 2048,
 ) -> PipelineResult:
     """Lock, open existing state, and run the provider-free publication API."""
 
@@ -5972,7 +6234,12 @@ async def resume_sealed_publication(
     SealedPublicationResumer._guard_publication_channel(webdav, stable_publication_approved)
     with (
         worker_lock(state_dir / "worker.lock"),
-        WorkerState(state_dir / "worker-state.sqlite3", create=False) as state,
+        WorkerState(
+            state_dir / "worker-state.sqlite3",
+            create=False,
+            sqlite_cache_mib=sqlite_cache_mib,
+            sqlite_mmap_mib=sqlite_mmap_mib,
+        ) as state,
     ):
         return await SealedPublicationResumer(
             state=state,

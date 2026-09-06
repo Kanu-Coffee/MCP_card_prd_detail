@@ -1,5 +1,9 @@
 # CardRAG 문서
 
+- [v1.0.18 Worker 효율화·PDF/OCR 완료 장벽·설정·성능 인수 기준](V1_0_18_WORKER_EFFICIENCY.md)
+
+아래 운영 기준과 읽는 순서는 v1.0.14 recovery 당시 기록입니다.
+
 현재 보호해야 할 운영 기준은 v1.0.9이며 v1.0.14는 v1.0.11 데이터 계약을 유지하는
 별도 recovery candidate에서만 개발·검증합니다. 운영 컨테이너, volume, stable pointer,
 `/opt/cardrag/current`와 LibreChat 경로는 명시적 cutover 승인 전까지 변경하지 않습니다.

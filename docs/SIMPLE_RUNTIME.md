@@ -570,6 +570,25 @@ Persistent=true
 실행을 보충합니다. 로컬 파일 잠금은 동시에 두 Worker가 게시하는 것을
 방지합니다.
 
+v1.0.18의 처리량 조정은 `/etc/cardrag/worker.env`에서 다음 범위로 설정합니다.
+`CARDRAG_PDF_CONCURRENCY=8`은 전체 PDF 요청 상한(1–32),
+`CARDRAG_PDF_CONCURRENCY_PER_ISSUER=2`는 카드사별 상한(1–8)입니다.
+`CARDRAG_LOCAL_PROCESSING_WORKERS=4`는 로컬 파싱 작업 수(1–8)입니다.
+`CARDRAG_STATE_SQLITE_CACHE_MIB=256`은 SQLite 캐시(1–1024 MiB),
+`CARDRAG_STATE_SQLITE_MMAP_MIB=2048`은 메모리 매핑 상한(0–4096 MiB)이며
+0으로 매핑을 끌 수 있습니다. `CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB=8`은 파일
+업로드 청크(1–16 MiB)이며 1로 기존 청크 크기를 복원합니다. 업로드 후
+임시 객체와 최종 객체의 전체 해시 검증은 유지합니다. PUT 계측은 전송에
+제공한 본문 바이트, 검증 GET 계측은 읽은 응답 바이트와 해시 검증 시간을
+포함하며 실패한 시도도 집계합니다. 동시 작업의 누적 시간은 실제 경과 시간과
+다를 수 있습니다.
+
+GC 기본값은 `CARDRAG_COLLECT_REMOTE_GARBAGE=false`,
+`CARDRAG_GARBAGE_GRACE_DAYS=30`입니다. 명시적 환경변수 설정을 적용할 수
+있습니다. GC를 활성화한 경우 배치가 끝난 뒤 최초 미참조 관측 시각부터
+유예 기간이 지난 객체만 삭제 대상으로 평가하므로 03:00은 삭제 시각을
+보장하지 않습니다.
+
 ## 10. MCP 시작
 
 MCP는 첫 Worker 게시가 끝난 뒤 시작합니다. 먼저 시작하면 검증할 검색 세대가

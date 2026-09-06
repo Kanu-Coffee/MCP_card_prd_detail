@@ -462,6 +462,7 @@ def _encode_embedding_cache_v5(values: Sequence[float], *, dimension: int) -> by
 def _validate_embedding_cache_v5_blob(blob: bytes, *, dimension: int) -> None:
     if len(blob) != dimension * 4:
         raise RuntimeError("v5 embedding cache blob length does not match its dimension")
+    # Cache storage is explicitly little-endian, regardless of host byte order.
     values = struct.unpack(f"<{dimension}f", blob)
     if not all(math.isfinite(value) for value in values):
         raise RuntimeError("v5 embedding cache contains a non-finite value")
@@ -529,9 +530,20 @@ JOIN pdf_cache_object o ON o.pdf_sha256=r.pdf_sha256
 
 
 class WorkerState:
-    def __init__(self, path: Path, *, create: bool = True) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        create: bool = True,
+        sqlite_cache_mib: int = 256,
+        sqlite_mmap_mib: int = 2048,
+    ) -> None:
         if type(create) is not bool:
             raise ValueError("Worker state create policy must be boolean")
+        if type(sqlite_cache_mib) is not int or not 1 <= sqlite_cache_mib <= 1024:
+            raise ValueError("Worker state sqlite_cache_mib must be an integer from 1 to 1024")
+        if type(sqlite_mmap_mib) is not int or not 0 <= sqlite_mmap_mib <= 4096:
+            raise ValueError("Worker state sqlite_mmap_mib must be an integer from 0 to 4096")
         if create:
             path.parent.mkdir(parents=True, exist_ok=True)
         elif not path.parent.is_dir() or path.parent.is_symlink():
@@ -617,6 +629,15 @@ class WorkerState:
                 raise RuntimeError("Worker state WAL checkpoint policy could not be sealed")
             self.connection.execute("PRAGMA synchronous=FULL")
             self.connection.execute("PRAGMA busy_timeout=30000")
+            self.connection.execute(f"PRAGMA cache_size={-sqlite_cache_mib * 1024}")
+            self.connection.execute(f"PRAGMA mmap_size={sqlite_mmap_mib * 1024 * 1024}")
+            self._sqlite_settings: dict[str, int] = {}
+            for pragma in ("cache_size", "mmap_size", "temp_store"):
+                applied = self.connection.execute(f"PRAGMA {pragma}").fetchone()
+                # SQLite builds can omit mmap support or cap its size. Keep
+                # the observed value so performance reports never claim the
+                # requested allocation was necessarily made.
+                self._sqlite_settings[pragma] = 0 if applied is None else int(applied[0])
             # Keep foreign-key rewriting disabled while upgrading the v1.0.8 run
             # CHECK constraint.  ``legacy_alter_table`` preserves every existing
             # child table's reference to ``run`` during the table replacement.
@@ -656,6 +677,12 @@ class WorkerState:
             # Preserve the initialization failure.  close() only releases
             # verification descriptors after SQLite has closed safely.
             raise
+
+    @property
+    def sqlite_settings(self) -> dict[str, int]:
+        """Actual startup PRAGMAs: signed cache KiB, mmap bytes, temp-store policy."""
+
+        return dict(self._sqlite_settings)
 
     def _migrate_run_status_constraint(self) -> None:
         row = self.connection.execute(
@@ -1552,9 +1579,17 @@ class WorkerState:
         dimension: int,
         dtype: str = "float32",
         normalization: str = "l2",
+        validate_norm: bool = True,
     ) -> EmbeddingCacheV5Row | None:
-        """Read only the profile-bound v5 cache; the legacy table is never consulted."""
+        """Read the profile-bound v5 cache; strict norm validation is the default.
 
+        ``validate_norm=False`` defers numeric validation to the exporter, which
+        verifies the sealed digest, length, finite values and L2 norm before
+        writing each row. Identity and byte-length checks always run here.
+        """
+
+        if type(validate_norm) is not bool:
+            raise ValueError("v5 embedding cache validate_norm must be boolean")
         if not _SHA256.fullmatch(cache_key) or not _SHA256.fullmatch(input_sha256):
             raise ValueError("v5 embedding cache identities must be lowercase sha256 values")
         _required_text(profile_id, field="profile_id", maximum=512)
@@ -1581,7 +1616,10 @@ class WorkerState:
         )
         if actual != expected:
             raise RuntimeError("v5 embedding cache key is bound to a different profile or input")
-        _validate_embedding_cache_v5_blob(cached.embedding, dimension=cached.dimension)
+        if validate_norm:
+            _validate_embedding_cache_v5_blob(cached.embedding, dimension=cached.dimension)
+        elif len(cached.embedding) != cached.dimension * 4:
+            raise RuntimeError("v5 embedding cache blob length does not match its dimension")
         return cached
 
     def observe_embedding_cache_v5_wal(self) -> WorkerStateWALObservation:

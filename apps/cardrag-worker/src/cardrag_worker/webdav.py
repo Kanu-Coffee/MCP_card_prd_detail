@@ -37,6 +37,7 @@ from cardrag_core import (
 from defusedxml import ElementTree  # type: ignore[import-untyped]
 
 from .async_utils import to_thread_fenced
+from .settings import _bounded_int
 
 
 class WebDAVError(RuntimeError):
@@ -97,6 +98,7 @@ class WebDAVClient:
         *,
         channel: str = "stable",
         stable_publication_approved: bool = False,
+        upload_chunk_size_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         if type(stable_publication_approved) is not bool:
             raise ValueError("stable publication approval must be boolean")
@@ -104,19 +106,32 @@ class WebDAVClient:
         self.channel = channel
         self.stable_publication_approved = stable_publication_approved
         self.pointer_path = channel_pointer_path(channel)
-        self.immutable = ImmutablePublisher(client)
-        self.cas = CASPublisher(client)
+        self.immutable = ImmutablePublisher(client, upload_chunk_size_bytes=upload_chunk_size_bytes)
+        self.cas = CASPublisher(client, upload_chunk_size_bytes=upload_chunk_size_bytes)
         self.stable = StablePointerPublisher(client, channel=channel)
         self._cached_current_generation: RemoteGenerationIdentity | None = None
         self._cached_pointer_bytes: bytes | None = None
 
     @classmethod
-    def from_env(cls, *, stable_publication_approved: bool = False) -> WebDAVClient:
+    def from_env(
+        cls,
+        *,
+        stable_publication_approved: bool = False,
+        upload_chunk_size_bytes: int | None = None,
+    ) -> WebDAVClient:
+        if upload_chunk_size_bytes is None:
+            upload_chunk_size_bytes = (
+                _bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16) * 1024 * 1024
+            )
         return cls(
             CoreWebDAVClient(WebDAVSettings.from_env()),
             channel=os.environ.get("CARDRAG_CHANNEL", "stable"),
             stable_publication_approved=stable_publication_approved,
+            upload_chunk_size_bytes=upload_chunk_size_bytes,
         )
+
+    def performance_snapshot(self) -> dict[str, int | float]:
+        return self.core.performance_snapshot()
 
     async def close(self) -> None:
         await to_thread_fenced(self.core.close)

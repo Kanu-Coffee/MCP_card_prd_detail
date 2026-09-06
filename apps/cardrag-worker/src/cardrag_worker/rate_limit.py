@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import httpx
@@ -37,6 +38,23 @@ class IssuerRateLimiter:
             self._last_request = now
 
 
+class HostConcurrencyLimiter:
+    """Share request-lifetime limits by actual host across session-isolated clients."""
+
+    def __init__(self, concurrency: int = 2) -> None:
+        if type(concurrency) is not int or concurrency < 1:
+            raise ValueError("host concurrency must be a positive integer")
+        self.concurrency = concurrency
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
+
+    @asynccontextmanager
+    async def slot(self, url: str) -> AsyncIterator[None]:
+        host = httpx.URL(url).host.casefold()
+        semaphore = self._semaphores.setdefault(host, asyncio.Semaphore(self.concurrency))
+        async with semaphore:
+            yield
+
+
 class _LimitedStream:
     def __init__(
         self,
@@ -45,6 +63,7 @@ class _LimitedStream:
         method: str,
         url: str,
         kwargs: Mapping[str, Any],
+        host_limiter: HostConcurrencyLimiter | None = None,
     ) -> None:
         self.client = client
         self.limiter = limiter
@@ -52,30 +71,56 @@ class _LimitedStream:
         self.url = url
         self.kwargs = dict(kwargs)
         self.context: Any = None
+        self.host_context: Any = None if host_limiter is None else host_limiter.slot(url)
 
     async def __aenter__(self) -> httpx.Response:
-        await self.limiter.wait()
-        self.context = self.client.stream(self.method, self.url, **self.kwargs)
-        return cast(httpx.Response, await self.context.__aenter__())
+        if self.host_context is not None:
+            await self.host_context.__aenter__()
+        try:
+            await self.limiter.wait()
+            self.context = self.client.stream(self.method, self.url, **self.kwargs)
+            return cast(httpx.Response, await self.context.__aenter__())
+        except BaseException:
+            if self.host_context is not None:
+                await self.host_context.__aexit__(None, None, None)
+            raise
 
     async def __aexit__(self, *args: object) -> None:
-        await self.context.__aexit__(*args)
+        try:
+            await self.context.__aexit__(*args)
+        finally:
+            if self.host_context is not None:
+                await self.host_context.__aexit__(*args)
 
 
 class RateLimitedClient:
     """The small AsyncClient surface issuer adapters/downloader are allowed to use."""
 
-    def __init__(self, client: httpx.AsyncClient, limiter: IssuerRateLimiter) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        limiter: IssuerRateLimiter,
+        host_limiter: HostConcurrencyLimiter | None = None,
+    ) -> None:
         self.client = client
         self.limiter = limiter
+        self.host_limiter = host_limiter
 
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        if self.host_limiter is not None:
+            async with self.host_limiter.slot(url):
+                await self.limiter.wait()
+                return await self.client.get(url, **kwargs)
         await self.limiter.wait()
         return await self.client.get(url, **kwargs)
 
     async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        if self.host_limiter is not None:
+            async with self.host_limiter.slot(url):
+                await self.limiter.wait()
+                return await self.client.post(url, **kwargs)
         await self.limiter.wait()
         return await self.client.post(url, **kwargs)
 
     def stream(self, method: str, url: str, **kwargs: Any) -> _LimitedStream:
-        return _LimitedStream(self.client, self.limiter, method, url, kwargs)
+        return _LimitedStream(self.client, self.limiter, method, url, kwargs, self.host_limiter)

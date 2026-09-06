@@ -53,6 +53,9 @@ def _state_source(tmp_path: Path) -> tuple[Path, Path, bytes, bytes]:
     wal_bytes = b"incident-wal-frame-data"
     (source / "worker-state.sqlite3-wal").write_bytes(wal_bytes)
     (source / "worker-state.sqlite3-shm").write_bytes(b"incident-shm-wal-index")
+    # The incident fixture has fixed modes, independent of the caller's umask.
+    (source / "worker-state.sqlite3-wal").chmod(0o644)
+    (source / "worker-state.sqlite3-shm").chmod(0o644)
     return source, payload, database.read_bytes(), wal_bytes
 
 
