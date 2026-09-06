@@ -3332,6 +3332,42 @@ async def test_run_marks_preexisting_running_state_interrupted_under_worker_lock
 
 
 @pytest.mark.asyncio
+async def test_discovery_exclusions_are_logged_and_durable_before_download_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    warning = "source_unavailable issuer=testbank product_code=missing status=404"
+
+    class WarningAdapter(Adapter):
+        async def discover_current(self, client: httpx.AsyncClient) -> Any:
+            return replace(await super().discover_current(client), warnings=(warning,))
+
+    async def fail_download(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("fixture stops after discovery")
+
+    monkeypatch.setattr(pipeline_module.SecurePDFDownloader, "download", fail_download)
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[WarningAdapter((source(),))],
+            ocr=FakeOCR(),  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        )
+        with pytest.raises(WorkerUnexpectedFailureError):
+            await pipeline.run()
+        run_id = str(state.connection.execute("SELECT run_id FROM run").fetchone()[0])
+        report = json.loads((tmp_path / "runs" / run_id / "discovery" / "testbank.warnings.json").read_text())
+        assert report["warnings"] == [warning]
+        stored = state.run_snapshot(run_id, "testbank")
+        assert stored is not None
+        assert pipeline_module.canonical_sha256(stored[0]) == report["snapshot_id"]
+        assert "warnings" not in stored[0]
+    assert warning in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_discovery_drop_fails_before_download_and_pointer_update(tmp_path: Path) -> None:
     record = source()
     adapter = Adapter((record,))

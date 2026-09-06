@@ -72,7 +72,7 @@ DB audit remains authoritative for its database-bound corpus counts.
 Issuer activation is explicit:
 
 ```console
-export CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung
+export CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung,hyundai,hana,lotte,bc
 ```
 
 The Shinhan adapter refreshes its rotating token just in time through the

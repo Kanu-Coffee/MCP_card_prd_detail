@@ -1,4 +1,4 @@
-"""Fail-closed verifier for the v1.0.14 real-candidate acceptance receipt.
+"""Fail-closed verifier for the v1.0.20 real-candidate acceptance receipt.
 
 The receipt is a canonical technical trust root.  It does not manufacture
 runtime evidence or imply a separate human approval: it binds exact canonical
@@ -29,7 +29,7 @@ from .paths import validate_identifier, validate_relative_path
 
 RECEIPT_SCHEMA: Final = "cardrag.candidate-acceptance-receipt.v1"
 VALIDATION_SCHEMA: Final = "cardrag.candidate-acceptance-validation.v1"
-CANDIDATE_ISSUERS: Final = ("kb", "samsung", "shinhan", "woori")
+CANDIDATE_ISSUERS: Final = ("bc", "hana", "hyundai", "kb", "lotte", "samsung", "shinhan", "woori")
 MCP_TOOLS: Final = (
     "search_contracts",
     "get_contract_bundle",
@@ -113,7 +113,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.14"]
+    version: Literal["1.0.20"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -146,7 +146,7 @@ class CandidateImageIdentity(_CanonicalModel):
 class EffectiveConfigEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-effective-config.v3"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.14"]
+    release_version: Literal["1.0.20"]
     compose_project: Literal["cardrag-v114-candidate"]
     channel: Literal["candidate-v1.0.11"]
     worker_volume: Literal["cardrag-worker-v114-candidate-state"]
@@ -216,7 +216,7 @@ class EffectiveConfigEvidence(_CanonicalModel):
     @model_validator(mode="after")
     def exact_candidate_contract(self) -> Self:
         if self.issuers != CANDIDATE_ISSUERS:
-            raise ValueError("candidate config must contain exactly the four canonical issuers")
+            raise ValueError("candidate config must contain exactly the eight canonical issuers")
         if (self.worker_image.role, self.mcp_image.role) != ("worker", "mcp"):
             raise ValueError("candidate images do not match their roles")
         if self.worker_image.revision != self.source_commit or self.mcp_image.revision != self.source_commit:
@@ -335,7 +335,7 @@ class WorkerMetricsEvidence(_CanonicalModel):
     @model_validator(mode="after")
     def metrics_cover_the_full_run(self) -> Self:
         if tuple(row.issuer for row in self.issuer_metrics) != CANDIDATE_ISSUERS:
-            raise ValueError("Worker metrics must cover exactly four issuers")
+            raise ValueError("Worker metrics must cover exactly eight issuers")
         if self.documents != sum(row.acquired for row in self.issuer_metrics):
             raise ValueError("Worker document metrics differ from issuer totals")
         if (
@@ -718,7 +718,7 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v1"]
-    release_version: Literal["1.0.14"]
+    release_version: Literal["1.0.20"]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v114-candidate"]
     channel: Literal["candidate-v1.0.11"]
@@ -735,7 +735,7 @@ class CandidateAcceptanceReceipt(_CanonicalModel):
     @model_validator(mode="after")
     def exact_issuers_are_present(self) -> Self:
         if self.issuers != CANDIDATE_ISSUERS:
-            raise ValueError("candidate receipt must contain exactly four canonical issuers")
+            raise ValueError("candidate receipt must contain exactly eight canonical issuers")
         return self
 
 

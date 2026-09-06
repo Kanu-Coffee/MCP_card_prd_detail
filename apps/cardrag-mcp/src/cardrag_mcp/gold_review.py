@@ -37,6 +37,7 @@ from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
 from cardrag_core import canonical_json_bytes, canonical_sha256
+from cardrag_core.candidate_acceptance import CANDIDATE_ISSUERS
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -68,7 +69,7 @@ from cardrag_mcp.evaluation import (
 )
 from cardrag_mcp.schema_v5 import ServingDatabaseV5Error, validate_schema_v5
 
-ISSUERS: tuple[str, ...] = ("kb", "samsung", "shinhan", "woori")
+ISSUERS: tuple[str, ...] = CANDIDATE_ISSUERS
 DEFAULT_QUERY_COUNT = 300
 DEFAULT_NO_ANSWER_COUNT = 24
 DEFAULT_SEED = 1010
@@ -174,7 +175,7 @@ class DraftManifest(_StrictModel):
     @model_validator(mode="after")
     def counts_and_contract_are_exact(self) -> Self:
         if tuple(sorted(self.issuer_counts)) != ISSUERS:
-            raise ValueError("draft must contain exactly the four release issuers")
+            raise ValueError("draft must contain exactly the eight release issuers")
         if sum(self.issuer_counts.values()) != self.query_count:
             raise ValueError("draft issuer counts must sum to query count")
         if self.no_answer_count > self.query_count:
@@ -187,7 +188,7 @@ class DraftManifest(_StrictModel):
 class DraftEvidence(_StrictModel):
     span_id: Identifier
     contract_revision_id: Identifier
-    issuer: Literal["kb", "samsung", "shinhan", "woori"]
+    issuer: Literal["bc", "hana", "hyundai", "kb", "lotte", "samsung", "shinhan", "woori"]
     product_name: str = Field(min_length=1, max_length=1024)
     product_lineage_id: Identifier
     temporal_status: Literal["current", "superseded", "ambiguous"]
@@ -226,7 +227,7 @@ class GoldDraftRecord(_StrictModel):
     schema_version: Literal["cardrag.gold-draft-query.v1"]
     ordinal: int = Field(ge=1, le=MAX_RELEASE_QUERIES)
     query_id: Identifier
-    issuer: Literal["kb", "samsung", "shinhan", "woori"]
+    issuer: Literal["bc", "hana", "hyundai", "kb", "lotte", "samsung", "shinhan", "woori"]
     primary_slice: SliceName
     selection_basis: Literal["corpus_inventory_only"]
     proposed_gold: GoldQuery

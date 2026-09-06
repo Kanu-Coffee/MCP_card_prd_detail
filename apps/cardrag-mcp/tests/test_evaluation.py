@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -679,6 +680,30 @@ def test_v109_baseline_requires_an_exact_dense_raw_trace(
 
     with pytest.raises(EvaluationError, match="run_schema_invalid"):
         load_run_jsonl(invalid, lane="v109_baseline")
+
+
+@pytest.mark.parametrize(
+    "missing_issuers",
+    (("bc",), ("hana",), ("hyundai",), ("lotte",), ("bc", "hana", "hyundai", "lotte")),
+)
+def test_release_gold_requires_the_new_issuer_slices(
+    tmp_path: Path,
+    missing_issuers: tuple[str, ...],
+) -> None:
+    examples = _gold_records()
+    records = [copy.deepcopy(examples[index % len(examples)]) for index in range(300)]
+    for index, record in enumerate(records):
+        record["query_id"] = f"release-{index:03d}"
+    records[0]["slices"] = sorted(evaluation_module.REQUIRED_RELEASE_SLICES - {"no_answer"})
+    gold_path = _write_jsonl(tmp_path / "release-gold.jsonl", records)
+    assert len(load_gold_jsonl(gold_path, release_gate=True).queries) == 300
+
+    missing_slices = {f"issuer:{issuer}" for issuer in missing_issuers}
+    for record in records:
+        record["slices"] = sorted(set(record["slices"]) - missing_slices)
+    _write_jsonl(gold_path, records)
+    with pytest.raises(EvaluationError, match="gold_required_slice_missing"):
+        load_gold_jsonl(gold_path, release_gate=True)
 
 
 def test_gold_schema_rejects_unsorted_slices_and_duplicate_query_ids(tmp_path: Path) -> None:

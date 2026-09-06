@@ -34,6 +34,7 @@ def absolute_https_url(base: str, candidate: str, allowed_hosts: frozenset[str])
         or parsed.username
         or parsed.password
         or parsed.fragment
+        or parsed.port not in {None, 443}
     ):
         raise ValueError("source URL is outside the issuer HTTPS allowlist")
     return value

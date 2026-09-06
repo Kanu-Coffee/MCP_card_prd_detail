@@ -157,9 +157,9 @@ def _manifest() -> GenerationManifest:
         ),
         issuer_codes=CANDIDATE_ISSUERS,
         counts=GenerationCounts(
-            documents=4,
-            pdf_objects=4,
-            ocr_objects=4,
+            documents=len(CANDIDATE_ISSUERS),
+            pdf_objects=len(CANDIDATE_ISSUERS),
+            ocr_objects=len(CANDIDATE_ISSUERS),
             chunks=ROWS,
         ),
         documents=documents,
@@ -175,11 +175,11 @@ def _manifest() -> GenerationManifest:
                 for issuer in CANDIDATE_ISSUERS
             ),
             node_counts=StructureNodeCounts(
-                total=16,
-                root=4,
-                major_section=4,
-                item=4,
-                paragraph=4,
+                total=4 * len(CANDIDATE_ISSUERS),
+                root=len(CANDIDATE_ISSUERS),
+                major_section=len(CANDIDATE_ISSUERS),
+                item=len(CANDIDATE_ISSUERS),
+                paragraph=len(CANDIDATE_ISSUERS),
                 list_item=0,
                 table=0,
                 table_row=0,
@@ -188,11 +188,11 @@ def _manifest() -> GenerationManifest:
                 unclassified=0,
             ),
             major_class_counts=StructureMajorClassCounts(
-                total=4,
-                benefit=1,
-                notice=1,
-                mixed=1,
-                unknown=1,
+                total=len(CANDIDATE_ISSUERS),
+                benefit=2,
+                notice=2,
+                mixed=2,
+                unknown=2,
             ),
             source_coverage=StructureSourceCoverage(
                 source_non_whitespace_characters=400,
@@ -201,8 +201,8 @@ def _manifest() -> GenerationManifest:
                 covered_non_whitespace_sha256=source_hash,
             ),
             revision_counts=StructureRevisionCounts(
-                total=4,
-                current=4,
+                total=len(CANDIDATE_ISSUERS),
+                current=len(CANDIDATE_ISSUERS),
                 superseded=0,
                 ambiguous=0,
             ),
@@ -292,7 +292,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
     config = EffectiveConfigEvidence(
         schema_version="cardrag.candidate-effective-config.v3",
         source_commit=SOURCE_COMMIT,
-        release_version="1.0.14",
+        release_version="1.0.20",
         compose_project="cardrag-v114-candidate",
         channel="candidate-v1.0.11",
         worker_volume="cardrag-worker-v114-candidate-state",
@@ -351,7 +351,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'c' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.14",
+            version="1.0.20",
             platform="linux/amd64",
             entrypoint="cardrag-worker",
             user="10001:10001",
@@ -375,7 +375,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'e' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.14",
+            version="1.0.20",
             platform="linux/amd64",
             entrypoint="cardrag-mcp",
             user="10001:10001",
@@ -414,7 +414,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         )
         for row in manifest.issuer_ocr_counts
     )
-    generation_write_requests = 13
+    generation_write_requests = len(generation_objects) + 5
     worker = WorkerMetricsEvidence(
         schema_version="cardrag.candidate-worker-metrics.v3",
         source_commit=SOURCE_COMMIT,
@@ -494,8 +494,8 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         embedding_dimension=4096,
         retrieval_mode="exact",
         approximate=False,
-        expected_active_contracts=4,
-        scored_contracts=4,
+        expected_active_contracts=len(CANDIDATE_ISSUERS),
+        scored_contracts=len(CANDIDATE_ISSUERS),
         expected_embedding_rows=ROWS,
         scored_embedding_rows=ROWS,
         exact_blocks=2,
@@ -723,7 +723,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         bindings[field] = _file_binding(names[field], raw)
     receipt = CandidateAcceptanceReceipt(
         schema_version=RECEIPT_SCHEMA,
-        release_version="1.0.14",
+        release_version="1.0.20",
         source_commit=SOURCE_COMMIT,
         compose_project="cardrag-v114-candidate",
         channel="candidate-v1.0.11",
@@ -767,6 +767,48 @@ def test_acceptance_verifier_cross_binds_the_complete_candidate_evidence(tmp_pat
     bundle = _write_valid_bundle(tmp_path)
 
     _verify(bundle)
+
+
+@pytest.mark.parametrize(
+    "issuers",
+    (
+        ("kb", "samsung", "shinhan", "woori"),
+        CANDIDATE_ISSUERS[:-1],
+        tuple(reversed(CANDIDATE_ISSUERS)),
+    ),
+)
+def test_candidate_evidence_requires_all_eight_canonical_issuers(
+    tmp_path: Path,
+    issuers: tuple[str, ...],
+) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    for model in (bundle.receipt, bundle.models["effective_config"]):
+        payload = model.model_dump(mode="python")
+        payload["issuers"] = issuers
+        with pytest.raises(ValidationError, match="eight canonical issuers"):
+            type(model).model_validate(payload)
+
+    metrics = bundle.models["worker_metrics"].model_dump(mode="python")
+    rows = {row["issuer"]: row for row in metrics["issuer_metrics"]}
+    metrics["issuer_metrics"] = tuple(rows[issuer] for issuer in issuers)
+    with pytest.raises(ValidationError, match="eight issuers"):
+        WorkerMetricsEvidence.model_validate(metrics)
+
+
+def test_candidate_evidence_rejects_historical_release_versions(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    for model in (bundle.receipt, bundle.models["effective_config"]):
+        payload = model.model_dump(mode="python")
+        payload["release_version"] = "1.0.14"
+        with pytest.raises(ValidationError):
+            type(model).model_validate(payload)
+
+    config = bundle.models["effective_config"]
+    for image in (config.worker_image, config.mcp_image):
+        payload = image.model_dump(mode="python")
+        payload["version"] = "1.0.14"
+        with pytest.raises(ValidationError):
+            CandidateImageIdentity.model_validate(payload)
 
 
 def test_acceptance_allows_an_all_hit_embedding_run_and_independent_native_counts(

@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.19"}
+    assert versions == {"1.0.20"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -128,7 +128,7 @@ def test_v114_patch_candidate_deployment_isolated_from_stable_runtime() -> None:
         assert name in worker
     assert "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-2147483648" in worker_base
     assert 'CARDRAG_WORKER_MINIMUM_START_FREE_BYTES: "34359738368"' in worker
-    assert "CARDRAG_ENABLED_ISSUERS: kb,samsung,shinhan,woori" in worker
+    assert "CARDRAG_ENABLED_ISSUERS: bc,hana,hyundai,kb,lotte,samsung,shinhan,woori" in worker
     assert "CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-34359738368" not in worker
     assert "CARDRAG_MCP_STATE_VOLUME" in mcp_base
     assert "CARDRAG_MCP_MAX_VECTOR_SIDECAR_BYTES" in mcp_base
@@ -663,7 +663,7 @@ def test_candidate_capacity_and_issuer_contract_reject_ambient_overrides() -> No
     assert "systempaths=unconfined" not in worker_service["security_opt"]
     assert "cap_add" not in worker_service
     assert worker_service.get("privileged", False) is False
-    assert worker_environment["CARDRAG_ENABLED_ISSUERS"] == "kb,samsung,shinhan,woori"
+    assert worker_environment["CARDRAG_ENABLED_ISSUERS"] == "bc,hana,hyundai,kb,lotte,samsung,shinhan,woori"
     assert worker_environment["CARDRAG_STABLE_PUBLICATION_APPROVED"] == "false"
     assert worker_environment["CARDRAG_OCR_CACHE_PUBLICATION_APPROVED"] == "false"
     assert worker_environment["CARDRAG_REMOTE_GC_APPROVED"] == "false"

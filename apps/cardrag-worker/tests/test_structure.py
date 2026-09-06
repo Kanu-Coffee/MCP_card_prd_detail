@@ -130,7 +130,14 @@ def _artifact(
     pdf_seed: str = "pdf",
 ) -> StructureArtifact:
     selected = texts or ISSUER_PAGES[issuer]
-    source_metadata = ISSUER_SOURCE_METADATA[issuer]
+    source_metadata = ISSUER_SOURCE_METADATA.get(
+        issuer,
+        {
+            "product_name": f"{issuer} 테스트 카드",
+            "source_version": "20260829",
+            "effective_date": "2026-08-29",
+        },
+    )
     resolved_source_version = source_version or source_metadata["source_version"]
     document_id = f"doc_{issuer}_{product_code or 'card'}"
     pages = tuple(
@@ -260,20 +267,22 @@ def test_unclassified_fallback_fails_closed_when_one_source_line_exceeds_view_li
         build_derived_views(artifact, maximum_chars=128)
 
 
-@pytest.mark.parametrize("issuer", ["kb", "samsung", "shinhan", "woori"])
+@pytest.mark.parametrize("issuer", ["kb", "samsung", "shinhan", "woori", "hyundai", "hana", "lotte", "bc"])
 def test_issuer_profiles_are_deterministic_and_lossless(issuer: str) -> None:
-    artifact = _artifact(issuer)
-    repeated = _artifact(issuer)
+    texts = ISSUER_PAGES.get(issuer, tuple(text.replace("KB국민카드", issuer) for text in ISSUER_PAGES["kb"]))
+    artifact = _artifact(issuer, texts)
+    repeated = _artifact(issuer, texts)
     coverage = validate_structure_artifact(artifact)
 
     assert artifact.schema_version == "cardrag.structure.v2"
-    assert artifact.issuer_profile_id == f"cardrag.issuer-profile.{issuer}.v1"
+    suffix = "generic.v1" if issuer in {"hyundai", "hana", "lotte", "bc"} else "v1"
+    assert artifact.issuer_profile_id == f"cardrag.issuer-profile.{issuer}.{suffix}"
     assert len(artifact.issuer_profile_sha256) == 64
     assert artifact.canonical_bytes == repeated.canonical_bytes
     assert artifact.artifact_sha256 == repeated.artifact_sha256
     assert coverage.coverage_percent == 100.0
     assert coverage.covered_non_whitespace_characters == sum(
-        not character.isspace() for text in ISSUER_PAGES[issuer] for character in text
+        not character.isspace() for text in texts for character in text
     )
     assert all(_leaf_reconstruction(artifact, page.page) == page.text for page in artifact.pages)
     assert any(node.node_type == "ROOT" for node in artifact.nodes)

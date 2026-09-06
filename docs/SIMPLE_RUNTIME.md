@@ -91,7 +91,7 @@ SCDSA004)을 승인 목록으로 제한합니다. 이 항목을 표현하기 위
 검색 인덱스가 정확한 문서를 찾지 못할 때만 범위가 제한된 현재 카테고리 목록을
 조회합니다. 어느 경로든 desktop identity 전체가 정확히 한 건 일치해야 합니다.
 신용·체크 샘플은 PDF signature와 전체 page tree 검증을 통과했으며, 운영 활성값은
-`CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan`입니다. 어느 결속이나 PDF 검증이
+`CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung,hyundai,hana,lotte,bc`입니다. 어느 결속이나 PDF 검증이
 실패해도 generation을 게시하지 않습니다.
 
 ## 2. 시작 전 준비물
@@ -252,7 +252,7 @@ sudoedit /etc/cardrag/worker.env
 ```dotenv
 CARDRAG_ENVIRONMENT=production
 CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.8-worker
-CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
+CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung,hyundai,hana,lotte,bc
 
 CARDRAG_WEBDAV_BASE_URL=https://YOUR_WEBDAV_HOST/cardrag
 CARDRAG_WEBDAV_USERNAME_SECRET_FILE=/etc/cardrag/secrets/webdav_username
@@ -836,7 +836,7 @@ v1.0.6에서 도입한 공식 모바일 상품공시 경로를 유지하므로 �
 
 ```dotenv
 CARDRAG_WORKER_IMAGE=ymtop59/mcp-card-prd-detail:1.0.8-worker
-CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan
+CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung,hyundai,hana,lotte,bc
 ```
 
 새 배포 파일의 systemd unit도 다시 설치합니다.

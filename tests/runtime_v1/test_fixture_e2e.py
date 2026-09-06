@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import threading
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -27,6 +28,7 @@ from cardrag_worker.contracts import (
     snapshot_from_records,
 )
 from cardrag_worker.downloader import DownloadedPDF, SecurePDFDownloader, validate_pdf
+from cardrag_worker.issuers.registry import DEFAULT_ENABLED_ISSUERS
 from cardrag_worker.ocr import OCRResolver
 from cardrag_worker.pipeline import WorkerPipeline
 from cardrag_worker.state import WorkerState
@@ -119,6 +121,7 @@ class FixtureAdapter:
 
     def __init__(self, record: SourceRecord) -> None:
         self.record = record
+        self.spec = replace(type(self).spec, code=record.issuer, display_name=record.issuer)
 
     async def discover_current(self, client: httpx.AsyncClient) -> SourceSnapshot:
         del client
@@ -198,9 +201,11 @@ def _pdf(path: Path) -> bytes:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("issuers", [("fixture",), DEFAULT_ENABLED_ISSUERS], ids=["single", "eight-issuers"])
 async def test_worker_webdav_mcp_search_and_pdf_range(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    issuers: tuple[str, ...],
 ) -> None:
     source_pdf = tmp_path / "source.pdf"
     pdf_body = _pdf(source_pdf)
@@ -216,6 +221,7 @@ async def test_worker_webdav_mcp_search_and_pdf_range(
         category="current",
         discovered_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
+    adapters = tuple(FixtureAdapter(replace(record, issuer=issuer)) for issuer in issuers)
 
     async def fixture_download(
         downloader: SecurePDFDownloader,
@@ -257,7 +263,7 @@ async def test_worker_webdav_mcp_search_and_pdf_range(
         pipeline = WorkerPipeline(
             state=state,
             state_dir=worker_root,
-            adapters=(FixtureAdapter(record),),
+            adapters=adapters,
             ocr=resolver,
             embeddings=embeddings,
             webdav=worker_webdav,
@@ -267,14 +273,19 @@ async def test_worker_webdav_mcp_search_and_pdf_range(
         stable_path = "/cardrag/v1/channels/stable.json"
         first_pointer = memory.objects[stable_path]
         assert first.status == "succeeded"
-        assert ocr_provider.calls == 1
-        assert embeddings.calls == 1
+        first_ocr_calls = ocr_provider.calls
+        first_embedding_calls = embeddings.calls
+        assert first_ocr_calls > 0
+        assert first_embedding_calls > 0
+        if issuers == ("fixture",):
+            assert first_ocr_calls == 1
+            assert first_embedding_calls == 1
 
         second = await pipeline.run()
         assert second.status == "no_change"
         assert memory.objects[stable_path] == first_pointer
-        assert ocr_provider.calls == 1
-        assert embeddings.calls == 1
+        assert ocr_provider.calls == first_ocr_calls
+        assert embeddings.calls == first_embedding_calls
 
     # WebDAV is the published source of truth: losing disposable Worker state
     # must not make an identical verified corpus invoke OCR/embedding again.
@@ -289,7 +300,7 @@ async def test_worker_webdav_mcp_search_and_pdf_range(
         recovered = await WorkerPipeline(
             state=recovered_state,
             state_dir=recovered_root,
-            adapters=(FixtureAdapter(record),),
+            adapters=adapters,
             ocr=recovered_resolver,
             embeddings=embeddings,
             webdav=worker_webdav,
@@ -297,8 +308,8 @@ async def test_worker_webdav_mcp_search_and_pdf_range(
         ).run()
         assert recovered.status == "no_change"
         assert memory.objects[stable_path] == first_pointer
-        assert ocr_provider.calls == 1
-        assert embeddings.calls == 1
+        assert ocr_provider.calls == first_ocr_calls
+        assert embeddings.calls == first_embedding_calls
 
     read_only = core_client.read_only()
     reader = CoreArtifactReader(MCPArtifactReader(read_only), read_only)
@@ -315,7 +326,7 @@ async def test_worker_webdav_mcp_search_and_pdf_range(
 
     results = await repository.search(SearchRequest(query="Airport lounge"))
     assert results.items
-    assert results.items[0].issuer == "fixture"
+    assert {item.issuer for item in results.items} == set(issuers)
 
     token = hashlib.sha256(b"fixture bearer credential").hexdigest()
     settings = Settings(
