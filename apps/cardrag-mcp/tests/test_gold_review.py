@@ -321,7 +321,9 @@ def test_sampler_is_deterministic_stratified_and_performance_independent(
     manifest, records = first
     assert manifest.query_count == 300
     assert manifest.no_answer_count == 24
-    assert manifest.issuer_counts == {issuer: 75 for issuer in review.ISSUERS}
+    assert manifest.issuer_counts == {
+        issuer: 38 if index < 4 else 37 for index, issuer in enumerate(review.ISSUERS)
+    }
     assert manifest.candidate_performance_selection is False
     assert manifest.provider_calls is False
     assert not hasattr(manifest, "score")
@@ -329,6 +331,9 @@ def test_sampler_is_deterministic_stratified_and_performance_independent(
         {slice_name for record in records for slice_name in record.proposed_gold.slices}
     )
     assert sum(record.proposed_gold.no_answer for record in records) == 24
+    assert Counter(
+        record.issuer for record in records if record.proposed_gold.no_answer
+    ) == dict.fromkeys(review.ISSUERS, 3)
     assert any(record.proposed_gold.condition_groups for record in records)
     assert any(record.proposed_gold.expected_revision_ids for record in records)
     assert any(
@@ -354,6 +359,22 @@ def test_sampler_is_deterministic_stratified_and_performance_independent(
                 source.text_sha256,
             )
             assert hashlib.sha256(source.text.encode()).hexdigest() == source.text_sha256
+
+
+@pytest.mark.parametrize("missing_issuer", review.ISSUERS)
+def test_sampler_requires_inventory_for_every_release_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_issuer: str,
+) -> None:
+    inventory = tuple(row for row in _inventory() if row.issuer != missing_issuer)
+    monkeypatch.setattr(
+        review,
+        "_inventory_rows",
+        lambda _path: ("generation-test", "b" * 64, "c" * 64, 4096, "d" * 64, inventory),
+    )
+
+    with pytest.raises(GoldReviewError, match="issuer_inventory_empty"):
+        review.build_draft(Path("unused.sqlite3"))
 
 
 def _source(
@@ -390,9 +411,9 @@ def _release_draft(tmp_path: Path) -> tuple[Path, Path, Path]:
     decisions: list[GoldReviewDecision] = []
     no_answer_count = 0
     for index in range(300):
-        issuer = review.ISSUERS[index // 75]
+        issuer = review.ISSUERS[index % len(review.ISSUERS)]
         query_id = f"gold-{index + 1:03d}"
-        no_answer = index % 75 >= 69
+        no_answer = index >= 276
         if no_answer:
             no_answer_count += 1
             gold_payload: dict[str, Any] = {
@@ -423,7 +444,7 @@ def _release_draft(tmp_path: Path) -> tuple[Path, Path, Path]:
                 for item in REQUIRED_RELEASE_SLICES
                 if item != "no_answer" and not item.startswith("issuer:")
             }
-            slices.add("issuer:kb")
+            slices.add(f"issuer:{issuer}")
             gold_payload = {
                 "schema_version": "cardrag.gold-query.v1",
                 "query_id": query_id,
@@ -513,7 +534,7 @@ def _release_draft(tmp_path: Path) -> tuple[Path, Path, Path]:
         seed=1010,
         query_count=300,
         no_answer_count=no_answer_count,
-        issuer_counts={issuer: 75 for issuer in review.ISSUERS},
+        issuer_counts=dict(Counter(record.issuer for record in records)),
         required_slices=tuple(sorted(REQUIRED_RELEASE_SLICES)),
         candidate_performance_selection=False,
         provider_calls=False,

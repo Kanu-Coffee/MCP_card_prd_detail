@@ -1,5 +1,9 @@
 # CardRAG 배포 파일
 
+v1.0.20의 기본 활성 대상은 8사입니다. [현재 버전의 수집·candidate 계약](../docs/V1_0_20_ISSUERS.md)에
+따라 새 run과 v1.0.20 이미지·증빙을 사용합니다. 아래 v1.0.14 사고 복구·same-run 절차는
+과거 실행의 복구 기록이며 신규 8사 run에 적용하지 않습니다. 채널과 볼륨 이름은 유지합니다.
+
 현재 보호 대상 운영은 v1.0.9이며, v1.0.14 streaming publication-verification patch는
 v1.0.11의 데이터·채널
 계약을 유지한 별도 후보 overlay로 검증합니다. 두
@@ -72,7 +76,7 @@ CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_WORKER_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
 CARDRAG_CANDIDATE_MCP_CONFIG_DIGEST=sha256:REPLACE_WITH_64_LOWERCASE_HEX
-CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung
+CARDRAG_ENABLED_ISSUERS=woori,kb,shinhan,samsung,hyundai,hana,lotte,bc
 CARDRAG_EMBEDDING_PROVIDER_ID=deepinfra
 CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS=12
 CARDRAG_EMBEDDING_RETRY_BASE_SECONDS=1

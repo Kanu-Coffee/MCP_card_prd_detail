@@ -21,7 +21,7 @@ services:
       # Release candidate launch is intentionally non-overridable: same-host
       # Worker/MCP duplication requires an audited 32 GiB startup floor.
       CARDRAG_WORKER_MINIMUM_START_FREE_BYTES: "34359738368"
-      CARDRAG_ENABLED_ISSUERS: kb,samsung,shinhan,woori
+      CARDRAG_ENABLED_ISSUERS: bc,hana,hyundai,kb,lotte,samsung,shinhan,woori
       CARDRAG_OCR_CACHE_MODE: "read-only"
       CARDRAG_EMBEDDING_MODEL: qwen/qwen3-embedding-8b
       CARDRAG_EMBEDDING_DIMENSION: "4096"

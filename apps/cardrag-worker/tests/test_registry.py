@@ -16,15 +16,15 @@ from cardrag_worker.issuers.registry import (
 
 
 @dataclass
-class LotteAdapter:
+class FutureAdapter:
     spec = IssuerSpec(
-        code="lotte",
-        display_name="롯데카드",
-        sort_order=40,
-        allowed_hosts=frozenset({"lotte.example"}),
+        code="future",
+        display_name="미래카드",
+        sort_order=90,
+        allowed_hosts=frozenset({"future.example"}),
         categories=("credit",),
     )
-    parser_version = "lotte.v1"
+    parser_version = "future.v1"
 
     async def discover_current(self, client: httpx.AsyncClient) -> SourceSnapshot:
         raise NotImplementedError
@@ -33,14 +33,23 @@ class LotteAdapter:
         raise NotImplementedError
 
 
-def test_default_activation_is_fixed_and_does_not_expand_with_registry() -> None:
+def test_default_activation_is_fixed_and_does_not_expand_with_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CARDRAG_ENABLED_ISSUERS", raising=False)
     registry = {
         **REGISTERED_ISSUERS,
-        "lotte": Registration(LotteAdapter.spec, LotteAdapter),
+        "future": Registration(FutureAdapter.spec, FutureAdapter),
     }
-    assert DEFAULT_ENABLED_ISSUERS == ("woori", "kb", "shinhan", "samsung")
+    assert DEFAULT_ENABLED_ISSUERS == ("woori", "kb", "shinhan", "samsung", "hyundai", "hana", "lotte", "bc")
     assert enabled_issuer_codes(None, registry=registry) == DEFAULT_ENABLED_ISSUERS
-    assert [adapter.spec.code for adapter in enabled_adapters("lotte", registry=registry)] == ["lotte"]
+    assert [adapter.spec.code for adapter in enabled_adapters("future", registry=registry)] == ["future"]
+
+
+def test_explicit_environment_preserves_selected_issuers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARDRAG_ENABLED_ISSUERS", "bc,hana,woori")
+    assert enabled_issuer_codes() == ("woori", "hana", "bc")
+    assert [adapter.spec.code for adapter in enabled_adapters()] == ["woori", "hana", "bc"]
 
 
 def test_samsung_is_registered_and_default_enabled_after_shinhan() -> None:

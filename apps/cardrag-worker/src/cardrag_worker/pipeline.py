@@ -123,6 +123,7 @@ from .exporter_v5 import (
     UnsupportedProductInput,
     ViewSourceSpanInput,
 )
+from .issuer_http import create_issuer_client
 from .ocr import (
     OCRCachePublicationError,
     OCRResolver,
@@ -2383,7 +2384,9 @@ class WorkerPipeline:
             deferred_seal = sealed
 
         snapshots = []
-        async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
+        async with create_issuer_client(
+            hyundai_legacy_tls=any(adapter.spec.code == "hyundai" for adapter in self.adapters)
+        ) as client:
             for adapter in self.adapters:
                 limited = RateLimitedClient(client, self.limiters[adapter.spec.code])
 
@@ -2437,6 +2440,21 @@ class WorkerPipeline:
                     len(snapshot.records),
                     len(snapshot.warnings),
                 )
+                if snapshot.warnings:
+                    # Keep operator-visible exclusions outside the immutable
+                    # source snapshot identity, including across resumed runs.
+                    _atomic_write(
+                        run_dir / "discovery" / f"{snapshot.issuer}.warnings.json",
+                        canonical_json_bytes(
+                            {
+                                "issuer": snapshot.issuer,
+                                "snapshot_id": snapshot.snapshot_id,
+                                "warnings": list(snapshot.warnings),
+                            }
+                        ),
+                    )
+                    for warning in snapshot.warnings:
+                        LOGGER.warning("discovery warning issuer=%s: %s", snapshot.issuer, warning)
                 self.state.record_snapshot(
                     run_id=run_id,
                     snapshot_id=snapshot.snapshot_id,
@@ -2574,7 +2592,11 @@ class WorkerPipeline:
         host_limiter = HostConcurrencyLimiter(2)
         async with AsyncExitStack() as client_stack:
             clients = [
-                await client_stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, timeout=60))
+                await client_stack.enter_async_context(
+                    create_issuer_client(
+                        hyundai_legacy_tls=any(adapter.spec.code == "hyundai" for adapter in self.adapters)
+                    )
+                )
                 for _ in range(min(self.pdf_concurrency, len(records)))
             ]
 

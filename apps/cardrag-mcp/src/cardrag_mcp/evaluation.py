@@ -1,4 +1,4 @@
-"""Deterministic offline evaluation for the CardRAG v1.0.11 gold set.
+"""Deterministic offline evaluation for the CardRAG release gold set.
 
 This module deliberately has no dependency on the production repository or
 search path.  It consumes sealed JSONL labels, already-captured lane results,
@@ -23,6 +23,7 @@ from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
+from cardrag_core.candidate_acceptance import CANDIDATE_ISSUERS
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -100,10 +101,7 @@ REQUIRED_RELEASE_SLICES = frozenset(
         "long",
         "major:benefit",
         "major:notice",
-        "issuer:kb",
-        "issuer:samsung",
-        "issuer:shinhan",
-        "issuer:woori",
+        *(f"issuer:{issuer}" for issuer in CANDIDATE_ISSUERS),
     }
 )
 

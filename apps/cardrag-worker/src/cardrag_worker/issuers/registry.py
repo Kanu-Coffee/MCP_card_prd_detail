@@ -8,7 +8,11 @@ from dataclasses import dataclass
 
 from cardrag_worker.contracts import IssuerAdapter, IssuerSpec
 
+from .bc import BCAdapter
+from .hana import HanaAdapter
+from .hyundai import HyundaiAdapter
 from .kb import KBAdapter
+from .lotte import LotteAdapter
 from .samsung import SamsungAdapter
 from .shinhan import ShinhanAdapter
 from .woori import WooriAdapter
@@ -27,6 +31,10 @@ _REGISTRATIONS = tuple(
             Registration(KBAdapter.spec, KBAdapter),
             Registration(ShinhanAdapter.spec, ShinhanAdapter),
             Registration(SamsungAdapter.spec, SamsungAdapter),
+            Registration(HyundaiAdapter.spec, HyundaiAdapter),
+            Registration(HanaAdapter.spec, HanaAdapter),
+            Registration(LotteAdapter.spec, LotteAdapter),
+            Registration(BCAdapter.spec, BCAdapter),
         ),
         key=lambda item: item.spec.sort_order,
     )
@@ -34,10 +42,8 @@ _REGISTRATIONS = tuple(
 
 REGISTERED_ISSUERS: Mapping[str, Registration] = {row.spec.code: row for row in _REGISTRATIONS}
 # Keep the fail-safe CLI default aligned with the production Compose default.
-# Since v1.0.6, Shinhan downloads use its verified official mobile disclosure
-# endpoint, with bounded search and current-category fallback while retaining
-# the complete stable desktop discovery identity.
-DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan", "samsung")
+# Adding a future registration must not silently expand this release default.
+DEFAULT_ENABLED_ISSUERS = ("woori", "kb", "shinhan", "samsung", "hyundai", "hana", "lotte", "bc")
 
 
 def enabled_issuer_codes(
