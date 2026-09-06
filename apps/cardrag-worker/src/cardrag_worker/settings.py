@@ -127,6 +127,48 @@ def _aggregation_profile_from_env() -> tuple[Path | None, str | None]:
 
 
 @dataclass(frozen=True, slots=True)
+class WebDAVVerificationSettings:
+    mode: Literal["periodic", "strict"] = "periodic"
+    every_runs: int = 14
+    max_age_days: int = 7
+    new_cas_gib: int = 10
+    generation_readback: Literal["final", "double"] = "final"
+    force_full: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"periodic", "strict"} or self.generation_readback not in {"final", "double"}:
+            raise ValueError("invalid WebDAV verification mode")
+        for value in (self.every_runs, self.max_age_days, self.new_cas_gib):
+            if type(value) is not int or not 1 <= value <= 1_000_000:
+                raise ValueError("WebDAV verification thresholds must be positive bounded integers")
+        if type(self.force_full) is not bool:
+            raise ValueError("WebDAV force-full verification must be boolean")
+
+    @classmethod
+    def from_env(cls) -> WebDAVVerificationSettings:
+        mode = os.environ.get("CARDRAG_WEBDAV_VERIFICATION_MODE", "periodic")
+        readback = os.environ.get("CARDRAG_WEBDAV_GENERATION_READBACK_MODE", "final")
+        if mode not in {"periodic", "strict"}:
+            raise ValueError("CARDRAG_WEBDAV_VERIFICATION_MODE must be periodic or strict")
+        if readback not in {"final", "double"}:
+            raise ValueError("CARDRAG_WEBDAV_GENERATION_READBACK_MODE must be final or double")
+        return cls(
+            mode=cast(Literal["periodic", "strict"], mode),
+            every_runs=_bounded_int(
+                "CARDRAG_WEBDAV_FULL_VERIFY_EVERY_RUNS", 14, minimum=1, maximum=1_000_000
+            ),
+            max_age_days=_bounded_int(
+                "CARDRAG_WEBDAV_FULL_VERIFY_MAX_AGE_DAYS", 7, minimum=1, maximum=1_000_000
+            ),
+            new_cas_gib=_bounded_int(
+                "CARDRAG_WEBDAV_FULL_VERIFY_NEW_CAS_GIB", 10, minimum=1, maximum=1_000_000
+            ),
+            generation_readback=cast(Literal["final", "double"], readback),
+            force_full=_boolean("CARDRAG_WEBDAV_FORCE_FULL_VERIFY", False),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PublicationResumeSettings:
     """Only the local/publication controls needed to resume an exact seal."""
 
@@ -139,6 +181,7 @@ class PublicationResumeSettings:
     sqlite_cache_mib: int
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
+    webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
 
     @classmethod
     def from_env(cls) -> PublicationResumeSettings:
@@ -160,6 +203,7 @@ class PublicationResumeSettings:
             sqlite_cache_mib=_bounded_int("CARDRAG_STATE_SQLITE_CACHE_MIB", 256, minimum=1, maximum=1024),
             sqlite_mmap_mib=_bounded_int("CARDRAG_STATE_SQLITE_MMAP_MIB", 2048, minimum=0, maximum=4096),
             webdav_upload_chunk_mib=_bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16),
+            webdav_verification=WebDAVVerificationSettings.from_env(),
         )
 
     @property
@@ -229,6 +273,7 @@ class WorkerSettings:
     sqlite_cache_mib: int
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
+    webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
@@ -422,6 +467,7 @@ class WorkerSettings:
             sqlite_cache_mib=_bounded_int("CARDRAG_STATE_SQLITE_CACHE_MIB", 256, minimum=1, maximum=1024),
             sqlite_mmap_mib=_bounded_int("CARDRAG_STATE_SQLITE_MMAP_MIB", 2048, minimum=0, maximum=4096),
             webdav_upload_chunk_mib=_bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16),
+            webdav_verification=WebDAVVerificationSettings.from_env(),
         )
 
     @property

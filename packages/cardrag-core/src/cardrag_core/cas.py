@@ -14,8 +14,14 @@ from typing import Any
 
 from .canonical import canonical_json_bytes, sha256_bytes
 from .domain import ArtifactRef, VerifiedArtifact
-from .paths import channel_pointer_path, object_path, validate_relative_path, validate_sha256
-from .webdav import WebDAVClient, WebDAVHTTPError, WebDAVIntegrityError
+from .paths import (
+    channel_pointer_path,
+    object_path,
+    validate_identifier,
+    validate_relative_path,
+    validate_sha256,
+)
+from .webdav import WebDAVClient, WebDAVHTTPError, WebDAVIntegrityError, WebDAVObjectStat
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
 LOGGER = logging.getLogger(__name__)
@@ -55,6 +61,21 @@ class ImmutablePublisher:
             expected_size_bytes=size_bytes,
         )
 
+    def _verify_existing(self, path: PurePosixPath, *, digest: str, size_bytes: int) -> VerifiedArtifact:
+        return self._verify_remote(path, digest=digest, size_bytes=size_bytes)
+
+    def _verify_collision(self, path: PurePosixPath, *, digest: str, size_bytes: int) -> None:
+        self._verify_remote(path, digest=digest, size_bytes=size_bytes)
+
+    def _verify_temporary(self, path: PurePosixPath, *, digest: str, size_bytes: int) -> None:
+        self._verify_remote(path, digest=digest, size_bytes=size_bytes)
+
+    def _before_upload(self, destination: PurePosixPath, *, digest: str, size_bytes: int) -> None:
+        """Optional durable intent hook, called only after proving destination absence."""
+
+    def _move_completed(self, destination: PurePosixPath, result: WebDAVObjectStat) -> None:
+        """Optional durable ownership hook before destination readback."""
+
     def _publish(
         self,
         destination: PurePosixPath,
@@ -67,7 +88,7 @@ class ImmutablePublisher:
     ) -> ArtifactRef:
         destination = validate_relative_path(destination)
         if self._client.exists(destination):
-            self._verify_remote(destination, digest=digest, size_bytes=size_bytes)
+            self._verify_existing(destination, digest=digest, size_bytes=size_bytes)
             return ArtifactRef(
                 sha256=digest,
                 size_bytes=size_bytes,
@@ -75,6 +96,7 @@ class ImmutablePublisher:
                 path=destination.as_posix(),
             )
 
+        self._before_upload(destination, digest=digest, size_bytes=size_bytes)
         self._client.ensure_collection(destination.parent)
         temporary = PurePosixPath("v1", ".incoming", "publish", f"{uuid.uuid4().hex}.tmp")
         self._client.ensure_collection(temporary.parent)
@@ -85,11 +107,13 @@ class ImmutablePublisher:
                 content_type=media_type,
                 if_none_match=True,
             )
-            self._verify_remote(temporary, digest=digest, size_bytes=size_bytes)
+            self._verify_temporary(temporary, digest=digest, size_bytes=size_bytes)
             if pre_commit is not None:
                 pre_commit()
+            collision = False
             try:
-                self._client.move(temporary, destination, overwrite=False)
+                moved = self._client.move(temporary, destination, overwrite=False)
+                self._move_completed(destination, moved)
             except WebDAVHTTPError as exc:
                 # RFC 4918 specifies 412 for an Overwrite:F destination
                 # collision, while some otherwise-compatible servers report
@@ -98,7 +122,11 @@ class ImmutablePublisher:
                 # immediately below.
                 if exc.status_code not in {409, 412} or not self._client.exists(destination):
                     raise
-            self._verify_remote(destination, digest=digest, size_bytes=size_bytes)
+                collision = True
+            if collision:
+                self._verify_collision(destination, digest=digest, size_bytes=size_bytes)
+            else:
+                self._verify_remote(destination, digest=digest, size_bytes=size_bytes)
         except BaseException:
             # Cleanup is best effort after a publication failure.  A second
             # WebDAV error while deleting the temporary object must not erase
@@ -244,6 +272,41 @@ class ImmutablePublisher:
             expected_sha256=expected_sha256,
             expected_size_bytes=expected_size_bytes,
         )
+
+
+class GenerationFilePublisher(ImmutablePublisher):
+    """Final-only readback for unsealed generation database/vector members."""
+
+    def _publish(
+        self,
+        destination: PurePosixPath,
+        *,
+        digest: str,
+        size_bytes: int,
+        media_type: str,
+        content_factory: Callable[[], bytes | Iterable[bytes]],
+        pre_commit: Callable[[], None] | None = None,
+    ) -> ArtifactRef:
+        destination = validate_relative_path(destination)
+        if (
+            len(destination.parts) != 4
+            or destination.parts[:2] != ("v1", "generations")
+            or destination.name not in {"index.sqlite3", "vectors.f32"}
+        ):
+            raise ValueError("final-only publication is restricted to generation data members")
+        validate_identifier(destination.parts[2], label="generation_id")
+        return super()._publish(
+            destination,
+            digest=digest,
+            size_bytes=size_bytes,
+            media_type=media_type,
+            content_factory=content_factory,
+            pre_commit=pre_commit,
+        )
+
+    def _verify_temporary(self, path: PurePosixPath, *, digest: str, size_bytes: int) -> None:
+        # Final bytes must pass readback before READY/pointer can be published.
+        pass
 
 
 class CASPublisher:

@@ -23,6 +23,12 @@ def test_worker_compose_preserves_gc_defaults_and_explicit_performance_overrides
         "CARDRAG_STATE_SQLITE_CACHE_MIB": "256",
         "CARDRAG_STATE_SQLITE_MMAP_MIB": "2048",
         "CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB": "8",
+        "CARDRAG_WEBDAV_VERIFICATION_MODE": "periodic",
+        "CARDRAG_WEBDAV_FULL_VERIFY_EVERY_RUNS": "14",
+        "CARDRAG_WEBDAV_FULL_VERIFY_MAX_AGE_DAYS": "7",
+        "CARDRAG_WEBDAV_FULL_VERIFY_NEW_CAS_GIB": "10",
+        "CARDRAG_WEBDAV_GENERATION_READBACK_MODE": "final",
+        "CARDRAG_WEBDAV_FORCE_FULL_VERIFY": "false",
     }
     source = (ROOT / "deploy/worker/compose.yaml").read_text()
     for name in defaults:
@@ -38,6 +44,12 @@ def test_worker_compose_preserves_gc_defaults_and_explicit_performance_overrides
         "CARDRAG_STATE_SQLITE_CACHE_MIB": "16",
         "CARDRAG_STATE_SQLITE_MMAP_MIB": "0",
         "CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB": "1",
+        "CARDRAG_WEBDAV_VERIFICATION_MODE": "strict",
+        "CARDRAG_WEBDAV_FULL_VERIFY_EVERY_RUNS": "2",
+        "CARDRAG_WEBDAV_FULL_VERIFY_MAX_AGE_DAYS": "1",
+        "CARDRAG_WEBDAV_FULL_VERIFY_NEW_CAS_GIB": "3",
+        "CARDRAG_WEBDAV_GENERATION_READBACK_MODE": "double",
+        "CARDRAG_WEBDAV_FORCE_FULL_VERIFY": "true",
     }
     for supplied, expected in (({}, defaults), (overrides, overrides)):
         result = subprocess.run(  # noqa: S603 - configuration only; no daemon or real environment

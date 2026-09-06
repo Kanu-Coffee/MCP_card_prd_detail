@@ -3,6 +3,7 @@
 from .canonical import canonical_json_bytes, canonical_sha256, sha256_bytes, sha256_chunks, sha256_file
 from .cas import (
     CASPublisher,
+    GenerationFilePublisher,
     ImmutablePublisher,
     StablePointerPublisher,
     atomic_replace_bytes,
@@ -154,6 +155,7 @@ __all__ = [
     "GenerationPaths",
     "GenerationPointer",
     "GenerationReady",
+    "GenerationFilePublisher",
     "ImmutablePublisher",
     "IssuerCode",
     "IssuerOCRCounts",

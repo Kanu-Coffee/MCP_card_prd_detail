@@ -1,6 +1,9 @@
 # CardRAG 문서
 
+- [v1.0.19 WebDAV 14회·7일·10GiB 주기 검증·대용량 단일 검증·복구](V1_0_19_WEBDAV_VERIFICATION.md)
+
 - [v1.0.18 Worker 효율화·PDF/OCR 완료 장벽·설정·성능 인수 기준](V1_0_18_WORKER_EFFICIENCY.md)
+- [WebDAV 반복 검증 비용·주기화·업로드 간소화 검토안](WEBDAV_VERIFICATION_OPTIMIZATION_REVIEW.md)
 
 아래 운영 기준과 읽는 순서는 v1.0.14 recovery 당시 기록입니다.
 

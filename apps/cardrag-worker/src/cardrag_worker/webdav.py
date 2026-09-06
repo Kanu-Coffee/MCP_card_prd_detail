@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -34,10 +36,18 @@ from cardrag_core import (
 from cardrag_core import (
     WebDAVClient as CoreWebDAVClient,
 )
+from cardrag_core.webdav import WebDAVReadbackIntegrityError
 from defusedxml import ElementTree  # type: ignore[import-untyped]
 
 from .async_utils import to_thread_fenced
-from .settings import _bounded_int
+from .settings import WebDAVVerificationSettings, _bounded_int
+from .state import WorkerState
+from .webdav_verification import (
+    ObservedCASPublisher,
+    ObservedGenerationPublisher,
+    ObservedPublisher,
+    VerificationPolicy,
+)
 
 
 class WebDAVError(RuntimeError):
@@ -103,6 +113,10 @@ class WebDAVClient:
         if type(stable_publication_approved) is not bool:
             raise ValueError("stable publication approval must be boolean")
         self.core = client
+        self._upload_chunk_size = upload_chunk_size_bytes
+        self._verification_state: WorkerState | None = None
+        self.verification_settings = WebDAVVerificationSettings()
+        self.verification: VerificationPolicy | None = None
         self.channel = channel
         self.stable_publication_approved = stable_publication_approved
         self.pointer_path = channel_pointer_path(channel)
@@ -111,6 +125,246 @@ class WebDAVClient:
         self.stable = StablePointerPublisher(client, channel=channel)
         self._cached_current_generation: RemoteGenerationIdentity | None = None
         self._cached_pointer_bytes: bytes | None = None
+
+    def configure_verification(self, state: WorkerState, settings: WebDAVVerificationSettings) -> None:
+        # Attaching settings does not weaken preflight/acceptance reads. The policy
+        # is activated only once the pipeline owns its Worker lock and run ID.
+        self._verification_state = state
+        self.verification_settings = settings
+
+    def begin_verification_run(self, run_id: str) -> None:
+        if self._verification_state is None:
+            return
+        self.verification = VerificationPolicy(
+            self.core,
+            self._verification_state,
+            self.verification_settings,
+            channel=self.channel,
+            run_id=run_id,
+        )
+        self.cas = ObservedCASPublisher(self.verification, chunk_size=self._upload_chunk_size)
+        self._cached_current_generation = None
+        self._cached_pointer_bytes = None
+
+    def finish_verification_run(self) -> None:
+        if self.verification is not None:
+            self.verification.finish_run()
+
+    def bind_publication_seal(self, seal_id: str, generation_id: str) -> None:
+        if self.verification is not None:
+            self.verification.seal_id = seal_id
+            self.verification.generation_id = generation_id
+
+    async def _verify_manifest_members(
+        self, manifest: GenerationManifest, *, force: bool, reason: str
+    ) -> None:
+        policy = self.verification
+        assert policy is not None
+        references = {manifest.serving_database.path: manifest.serving_database}
+        if manifest.vector_sidecar is not None:
+            references[manifest.vector_sidecar.artifact.path] = manifest.vector_sidecar.artifact
+        for document in manifest.documents:
+            for reference in (document.pdf, document.ocr):
+                if reference is None:
+                    continue
+                previous = references.setdefault(reference.path, reference)
+                if previous.sha256 != reference.sha256 or previous.size_bytes != reference.size_bytes:
+                    raise WebDAVError("generation has conflicting remote object identities")
+        queue = iter(references.values())
+
+        async def worker() -> None:
+            for reference in queue:
+                await to_thread_fenced(
+                    policy.verify_sync,
+                    PurePosixPath(reference.path),
+                    reference.sha256,
+                    reference.size_bytes,
+                    force=force,
+                    reason=reason,
+                )
+
+        # TaskGroup drains all operations before the lock/state can be released.
+        async with asyncio.TaskGroup() as group:
+            for _ in range(4):
+                group.create_task(worker())
+
+    async def _validated_with_policy(self, *, force_full: bool) -> RemoteGenerationIdentity | None:
+        policy = self.verification
+        assert policy is not None
+        started = time.monotonic()
+        try:
+            if await self.get_bytes(self.pointer_path) is None:
+                if not policy.pointer_checked or policy.observed_pointer is not None:
+                    policy.audit["pending"] = True
+                    policy.put("audit", policy.channel, policy.audit)
+                    if policy.observed_pointer is not None:
+                        policy.memo.clear()
+                policy.pointer_checked = True
+                policy.observed_pointer = None
+                return None
+            reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
+            current = await to_thread_fenced(reader.read_current_generation)
+            due = bool(policy.due())
+            if due:
+                policy.start_audit()
+            await self._verify_manifest_members(
+                current.manifest, force=force_full or due, reason="full_audit" if due else "current"
+            )
+            if await self.get_bytes(self.pointer_path) != current.pointer.canonical_bytes():
+                raise WebDAVError("channel pointer changed during verification")
+            policy.pointer_checked = True
+            policy.observed_pointer = current.pointer.canonical_bytes()
+            if due:
+                policy.complete_audit(
+                    generation_id=current.manifest.generation_id,
+                    manifest_sha256=current.manifest.manifest_sha256,
+                )
+            return RemoteGenerationIdentity(
+                generation_id=current.manifest.generation_id,
+                corpus_sha256=current.manifest.corpus_sha256,
+                contract_sha256=current.manifest.contract_sha256,
+                generation_schema=current.manifest.schema_version,
+                serving_schema=current.manifest.serving_schema,
+                ocr_failed_document_count=sum(
+                    d.availability == "ocr_failed" for d in current.manifest.documents
+                ),
+            )
+        finally:
+            policy.increment("current_wall_seconds", time.monotonic() - started)
+
+    async def verification_gate(self, candidate: GenerationManifest | None = None) -> None:
+        policy = self.verification
+        if policy is None:
+            return
+        started = time.monotonic()
+        due = bool(policy.due())
+        pointer_before = await self.get_bytes(self.pointer_path)
+        if policy.pointer_checked and pointer_before != policy.observed_pointer:
+            policy.audit["pending"] = True
+            policy.put("audit", policy.channel, policy.audit)
+            policy.memo.clear()
+            raise WebDAVError("channel pointer changed before completion gate")
+        current = await self._validated_with_policy(force_full=False)
+        if candidate is None and current is None:
+            raise WebDAVError("channel pointer is absent at completion gate")
+        due = due or bool(policy.due())
+        if candidate is not None and due:
+            policy.start_audit()
+            await self._verify_manifest_members(candidate, force=True, reason="full_audit")
+            if await self.get_bytes(self.pointer_path) != pointer_before:
+                raise WebDAVError("channel pointer changed before generation sealing")
+            policy.complete_audit(
+                generation_id=candidate.generation_id, manifest_sha256=candidate.manifest_sha256
+            )
+        policy.increment("gate_wall_seconds", time.monotonic() - started)
+
+    async def _unsealed_generation(self, generation_id: str) -> bool:
+        if await self.exists(generation_manifest_path(generation_id)) or await self.exists(
+            generation_ready_path(generation_id)
+        ):
+            return False
+        # Closed direct-child enumeration: incomplete/invalid controls fail closed.
+        try:
+            channels = await self.list_children(PurePosixPath("v1", "channels"))
+        except WebDAVHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            channels = ()
+        for path in channels:
+            if path.parent != PurePosixPath("v1", "channels") or path.suffix != ".json":
+                raise WebDAVError("unexpected channel pointer during generation recovery")
+            body = await self.get_bytes(path)
+            if body is None:
+                raise WebDAVError("channel pointer disappeared during generation recovery")
+            if GenerationPointer.model_validate_json(body).generation_id == generation_id:
+                return False
+        return True
+
+    async def publish_generation_file(self, reference: ArtifactRef, source: Path) -> ArtifactRef:
+        policy = self.verification
+        if policy is None:
+            return await to_thread_fenced(
+                self.immutable.publish_file,
+                reference.path,
+                source,
+                media_type=reference.media_type,
+                expected_sha256=reference.sha256,
+                expected_size_bytes=reference.size_bytes,
+            )
+        path = PurePosixPath(reference.path)
+        if (
+            len(path.parts) != 4
+            or path.parts[:2] != ("v1", "generations")
+            or path.name not in {"index.sqlite3", "vectors.f32"}
+        ):
+            raise WebDAVError("generation publication is restricted to database/vector members")
+        if policy.seal_id is None or path.parent.name != policy.generation_id:
+            raise WebDAVError("generation file is not bound to the active local seal")
+        publisher: ObservedPublisher = (
+            ObservedGenerationPublisher(policy, chunk_size=self._upload_chunk_size)
+            if policy.settings.generation_readback == "final"
+            else ObservedPublisher(policy, chunk_size=self._upload_chunk_size)
+        )
+        while True:
+            journal = policy.journal(path)
+            if journal.get("phase") == "quarantining":
+                await self._quarantine_generation_member(path, journal)
+            if journal.get("exhausted"):
+                raise WebDAVError("generation member exhausted its retry budget")
+            try:
+                artifact = await to_thread_fenced(
+                    publisher.publish_file,
+                    path,
+                    source,
+                    media_type=reference.media_type,
+                    expected_sha256=reference.sha256,
+                    expected_size_bytes=reference.size_bytes,
+                )
+                journal = policy.journal(path)
+                journal.update({"phase": "verified"})
+                policy.save_journal(path, journal)
+                return artifact
+            except WebDAVReadbackIntegrityError:
+                journal = policy.journal(path)
+                if (
+                    not journal.get("created")
+                    or journal.get("phase") != "moved"
+                    or not await self._unsealed_generation(path.parent.name)
+                ):
+                    raise
+                if int(journal.get("attempts", 0)) >= 2:
+                    journal["exhausted"] = True
+                journal.update(
+                    {"phase": "quarantining", "quarantine": f"v1/.incoming/publish/{uuid.uuid4().hex}.tmp"}
+                )
+                policy.save_journal(path, journal)
+                await self._quarantine_generation_member(path, journal)
+                if journal.get("exhausted"):
+                    raise
+                policy.increment("generation_retries")
+
+    async def _quarantine_generation_member(self, path: PurePosixPath, journal: dict[str, Any]) -> None:
+        policy = self.verification
+        assert policy is not None
+        if not journal.get("created") or not await self._unsealed_generation(path.parent.name):
+            raise WebDAVError("cannot quarantine an unowned or sealed generation member")
+        quarantine = validate_relative_path(str(journal["quarantine"]))
+        if (
+            quarantine.parent != PurePosixPath("v1", ".incoming", "publish")
+            or len(quarantine.stem) != 32
+            or quarantine.suffix != ".tmp"
+            or any(c not in "0123456789abcdef" for c in quarantine.stem)
+        ):
+            raise WebDAVError("invalid generation quarantine journal")
+        source_exists, target_exists = await self.exists(path), await self.exists(quarantine)
+        if source_exists and not target_exists:
+            await to_thread_fenced(self.core.move, path, quarantine, overwrite=False)
+        elif source_exists or not target_exists:
+            raise WebDAVError("ambiguous generation quarantine state")
+        policy.invalidate(path)
+        journal.update({"phase": "quarantined", "created": False})
+        policy.save_journal(path, journal)
+        policy.increment("generation_quarantined")
 
     @classmethod
     def from_env(
@@ -131,7 +385,10 @@ class WebDAVClient:
         )
 
     def performance_snapshot(self) -> dict[str, int | float]:
-        return self.core.performance_snapshot()
+        result = self.core.performance_snapshot()
+        if self.verification is not None:
+            result.update({f"policy_{key}": value for key, value in self.verification.snapshot().items()})
+        return result
 
     async def close(self) -> None:
         await to_thread_fenced(self.core.close)
@@ -200,7 +457,19 @@ class WebDAVClient:
         return await to_thread_fenced(propfind)
 
     async def delete(self, path: str | PurePosixPath, *, missing_ok: bool = False) -> None:
-        await to_thread_fenced(self.core.delete, path, missing_ok=missing_ok)
+        try:
+            await to_thread_fenced(self.core.delete, path, missing_ok=missing_ok)
+        finally:
+            if self.verification is not None:
+                relative = validate_relative_path(path)
+                self.verification.invalidate(
+                    relative,
+                    recursive=relative.parts[:2]
+                    in {
+                        ("v1", "generations"),
+                        ("v1", "ocr-cache"),
+                    },
+                )
 
     async def put_bytes(
         self,
@@ -309,7 +578,12 @@ class WebDAVClient:
     async def validated_current_generation(
         self, *, force_refresh: bool = False
     ) -> RemoteGenerationIdentity | None:
-        """Stream-hash the DB and every referenced CAS object before no-change."""
+        """Validate control bindings and apply the explicitly attached Worker policy."""
+
+        if self.verification is not None:
+            if force_refresh:
+                self.verification.memo.clear()
+            return await self._validated_with_policy(force_full=force_refresh)
 
         pointer_bytes: bytes | None = None
         if hasattr(self.core, "get"):
@@ -467,26 +741,34 @@ class WebDAVBundlePublisher:
         ready_body = ready.canonical_bytes()
 
         # A retry reuses these exact sealed bytes; core read-back verifies existing objects.
-        published_database = await to_thread_fenced(
-            self.client.immutable.publish_file,
-            generation_database_path(generation_id),
-            database,
-            media_type="application/vnd.sqlite3",
-            expected_sha256=database_sha,
-            expected_size_bytes=database_size,
-        )
+        if isinstance(self.client, WebDAVClient):
+            published_database = await self.client.publish_generation_file(database_artifact, database)
+        else:
+            published_database = await to_thread_fenced(
+                self.client.immutable.publish_file,
+                generation_database_path(generation_id),
+                database,
+                media_type="application/vnd.sqlite3",
+                expected_sha256=database_sha,
+                expected_size_bytes=database_size,
+            )
         _require_exact_artifact(published_database, database_artifact, label="serving database")
         if vectors is not None:
             assert vector_artifact is not None
-            published_vectors = await to_thread_fenced(
-                self.client.immutable.publish_file,
-                generation_vectors_path(generation_id),
-                vectors,
-                media_type="application/octet-stream",
-                expected_sha256=vector_artifact.sha256,
-                expected_size_bytes=vector_artifact.size_bytes,
-            )
+            if isinstance(self.client, WebDAVClient):
+                published_vectors = await self.client.publish_generation_file(vector_artifact, vectors)
+            else:
+                published_vectors = await to_thread_fenced(
+                    self.client.immutable.publish_file,
+                    generation_vectors_path(generation_id),
+                    vectors,
+                    media_type="application/octet-stream",
+                    expected_sha256=vector_artifact.sha256,
+                    expected_size_bytes=vector_artifact.size_bytes,
+                )
             _require_exact_artifact(published_vectors, vector_artifact, label="vector sidecar")
+        if isinstance(self.client, WebDAVClient):
+            await self.client.verification_gate(validated_manifest)
         expected_manifest = ArtifactRef(
             sha256=manifest_sha,
             size_bytes=len(manifest_body),
@@ -500,6 +782,8 @@ class WebDAVBundlePublisher:
             media_type="application/json",
         )
         _require_exact_artifact(published_manifest, expected_manifest, label="generation manifest")
+        if isinstance(self.client, WebDAVClient):
+            await self.client.verification_gate(validated_manifest)
         expected_ready = ArtifactRef(
             sha256=hashlib.sha256(ready_body).hexdigest(),
             size_bytes=len(ready_body),

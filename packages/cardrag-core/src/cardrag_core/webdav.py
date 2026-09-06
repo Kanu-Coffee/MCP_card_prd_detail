@@ -7,7 +7,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -43,6 +43,10 @@ class WebDAVIntegrityError(WebDAVError):
     """Downloaded bytes differ from their trusted expected identity."""
 
 
+class WebDAVReadbackIntegrityError(WebDAVIntegrityError):
+    """Remote response bytes failed size/hash validation (not a local source error)."""
+
+
 @dataclass(frozen=True, slots=True)
 class WebDAVResponse:
     path: PurePosixPath
@@ -58,6 +62,12 @@ class WebDAVObjectStat:
     size_bytes: int | None
     etag: str | None
     last_modified: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRemoteObject:
+    artifact: VerifiedArtifact
+    etag: str | None
 
 
 @dataclass(slots=True)
@@ -235,6 +245,22 @@ class WebDAVClient:
         expected_size_bytes: int,
         max_bytes: int | None = None,
     ) -> VerifiedArtifact:
+        return self.verify_with_metadata(
+            path,
+            expected_sha256=expected_sha256,
+            expected_size_bytes=expected_size_bytes,
+            max_bytes=max_bytes,
+        ).artifact
+
+    def verify_with_metadata(
+        self,
+        path: str | PurePosixPath,
+        *,
+        expected_sha256: str,
+        expected_size_bytes: int,
+        max_bytes: int | None = None,
+        payload_observer: Callable[[int], None] | None = None,
+    ) -> VerifiedRemoteObject:
         """Stream-verify a remote object without retaining a local copy."""
 
         relative = validate_relative_path(path)
@@ -259,20 +285,24 @@ class WebDAVClient:
                         raise WebDAVHTTPError("GET", relative, response.status_code)
                     raw_length = response.headers.get("content-length")
                     if raw_length is not None and raw_length.isdigit() and int(raw_length) > hard_cap:
-                        raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
+                        raise WebDAVReadbackIntegrityError("remote object exceeds the allowed byte size")
                     for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_SIZE):
                         size_bytes += len(chunk)
                         metrics.payload_bytes += len(chunk)
+                        if payload_observer is not None:
+                            payload_observer(len(chunk))
                         if size_bytes > hard_cap:
-                            raise WebDAVIntegrityError("remote object exceeds the allowed byte size")
+                            raise WebDAVReadbackIntegrityError("remote object exceeds the allowed byte size")
                         digest.update(chunk)
             except httpx.HTTPError as exc:
                 raise WebDAVError(f"WebDAV GET {relative.as_posix()} failed") from exc
             if size_bytes != expected_size_bytes:
-                raise WebDAVIntegrityError("remote byte size does not match the sealed identity")
+                raise WebDAVReadbackIntegrityError("remote byte size does not match the sealed identity")
             if digest.hexdigest() != trusted_digest:
-                raise WebDAVIntegrityError("remote SHA-256 does not match the sealed identity")
-            return VerifiedArtifact(relative, trusted_digest, size_bytes)
+                raise WebDAVReadbackIntegrityError("remote SHA-256 does not match the sealed identity")
+            return VerifiedRemoteObject(
+                VerifiedArtifact(relative, trusted_digest, size_bytes), response.headers.get("etag")
+            )
 
     def propfind(
         self,
