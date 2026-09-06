@@ -1319,9 +1319,15 @@ def test_remote_gc_requires_stable_channel_and_two_independent_approvals(
     assert approved.remote_gc_approved is True
     cli_module._guard_remote_gc(approved, apply=True)
 
-    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-unapproved")
     with pytest.raises(ValueError, match="requires stable channel"):
         WorkerSettings.from_env()
+
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
+    candidate_approved = WorkerSettings.from_env()
+    assert candidate_approved.collect_remote_garbage is True
+    assert candidate_approved.remote_gc_approved is True
+    cli_module._guard_remote_gc(candidate_approved, apply=True)
 
 
 def test_remote_gc_apply_guard_precedes_mutation(monkeypatch: pytest.MonkeyPatch) -> None:

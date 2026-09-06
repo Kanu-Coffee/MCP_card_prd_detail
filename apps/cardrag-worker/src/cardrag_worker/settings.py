@@ -280,13 +280,17 @@ class WorkerSettings:
                 "CARDRAG_OCR_CACHE_PUBLICATION_APPROVED=true approval"
             )
         collect_remote_garbage = _boolean("CARDRAG_COLLECT_REMOTE_GARBAGE", False)
-        if collect_remote_garbage and (
-            channel != "stable" or not stable_publication_approved or not remote_gc_approved
-        ):
-            raise ValueError(
-                "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires stable channel, "
-                "CARDRAG_STABLE_PUBLICATION_APPROVED=true, and CARDRAG_REMOTE_GC_APPROVED=true"
-            )
+        if collect_remote_garbage:
+            if channel == "candidate-v1.0.11":
+                if not remote_gc_approved:
+                    raise ValueError(
+                        "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires CARDRAG_REMOTE_GC_APPROVED=true"
+                    )
+            elif channel != "stable" or not stable_publication_approved or not remote_gc_approved:
+                raise ValueError(
+                    "CARDRAG_COLLECT_REMOTE_GARBAGE=true requires stable channel, "
+                    "CARDRAG_STABLE_PUBLICATION_APPROVED=true, and CARDRAG_REMOTE_GC_APPROVED=true"
+                )
         return cls(
             state_dir=state_dir,
             maximum_state_bytes=_bounded_int(

@@ -1794,10 +1794,12 @@ class WorkerPipeline:
                 raise ValueError("sealed document aggregation uses another embedding profile")
         if capacity_policy_v5 is not None and not isinstance(capacity_policy_v5, V5CapacityPolicy):
             raise TypeError("capacity_policy_v5 must be a V5CapacityPolicy")
-        if collect_remote_garbage and (
-            webdav.channel != "stable" or not stable_publication_approved or not remote_gc_approved
-        ):
-            raise ValueError("remote GC requires stable channel plus publication and remote-GC approvals")
+        if collect_remote_garbage:
+            if webdav.channel == "candidate-v1.0.11":
+                if not remote_gc_approved:
+                    raise ValueError("remote GC requires remote-GC approval")
+            elif webdav.channel != "stable" or not stable_publication_approved or not remote_gc_approved:
+                raise ValueError("remote GC requires stable channel plus publication and remote-GC approvals")
         if retained_generations < 1 or garbage_grace_days < 1 or retained_incomplete_runs < 1:
             raise ValueError("garbage retention and grace must be positive")
         if not math.isfinite(pdf_cache_refresh_hours) or pdf_cache_refresh_hours <= 0:
@@ -2133,7 +2135,7 @@ class WorkerPipeline:
             gc_status: str | None = None
             gc_deleted = 0
             gc_error: str | None = None
-            if self.collect_remote_garbage and self.webdav.channel == "stable":
+            if self.collect_remote_garbage and self.webdav.channel in {"stable", "candidate-v1.0.11"}:
                 try:
                     from .gc import GCPartialFailure, collect_garbage
 
