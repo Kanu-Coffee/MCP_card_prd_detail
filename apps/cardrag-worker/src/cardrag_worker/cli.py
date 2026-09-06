@@ -334,6 +334,8 @@ async def _run(resume: str | None) -> dict[str, Any]:
             sqlite_cache_mib=settings.sqlite_cache_mib,
             sqlite_mmap_mib=settings.sqlite_mmap_mib,
         ) as state:
+            if isinstance(webdav, WebDAVClient):
+                webdav.configure_verification(state, settings.webdav_verification)
             primary = OCRResolver(
                 provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
                 state=state,
@@ -608,6 +610,8 @@ async def _resume_publication(run_id: str) -> dict[str, Any]:
     )
     try:
         revalidate_worker_start_capacity(startup_capacity)
+        if isinstance(webdav, WebDAVClient):
+            webdav.verification_settings = settings.webdav_verification
         result = await resume_sealed_publication(
             run_id=run_id,
             state_dir=settings.state_dir,

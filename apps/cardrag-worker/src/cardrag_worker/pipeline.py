@@ -16,7 +16,7 @@ import struct
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
@@ -1685,7 +1685,9 @@ async def validate_document_aggregation_head(
     and bind the complete profile-artifact contract.
     """
 
-    current = await webdav.validated_current_generation()
+    current = await webdav.validated_current_generation(
+        **({"force_refresh": True} if isinstance(webdav, WebDAVClient) else {})
+    )
     if current is None:
         raise RuntimeError("sealed document aggregation requires a valid remote M0/M1 head")
     body = await webdav.get_bytes(
@@ -2072,6 +2074,11 @@ class WorkerPipeline:
                 "pdf_concurrency_per_issuer": self.pdf_concurrency_per_issuer,
                 "local_processing_workers": self.local_processing_workers,
                 "sqlite": self.state.sqlite_settings,
+                "webdav_verification": (
+                    asdict(self.webdav.verification_settings)
+                    if isinstance(self.webdav, WebDAVClient)
+                    else None
+                ),
             },
         )
         self._token_memo = (
@@ -2108,7 +2115,8 @@ class WorkerPipeline:
                 if callable(snapshot):
                     try:
                         report["webdav"] = {
-                            name: value - network_before.get(name, 0) for name, value in snapshot().items()
+                            name: value if name.startswith("policy_") else value - network_before.get(name, 0)
+                            for name, value in snapshot().items()
                         }
                     except Exception:
                         report["webdav_metrics_unavailable"] = True
@@ -2134,6 +2142,8 @@ class WorkerPipeline:
             if resume_run_id:
                 self.state.assert_resumable(run_id)
             self.performance.set("run_id", run_id)
+            if isinstance(self.webdav, WebDAVClient):
+                self.webdav.begin_verification_run(run_id)
             self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="before_run")
             cancellation_requested = False
             unexpected_failure: WorkerUnexpectedFailureError | None = None
@@ -2212,6 +2222,8 @@ class WorkerPipeline:
                 # Do not retain the source exception object as implicit context
                 # on the bounded worker error exposed to CLI callers.
                 raise unexpected_failure from None
+            if isinstance(self.webdav, WebDAVClient):
+                self.webdav.finish_verification_run()
             gc_status: str | None = None
             gc_deleted = 0
             gc_error: str | None = None
@@ -2332,7 +2344,9 @@ class WorkerPipeline:
         """Return a bundle only when the stable remote truth exactly matches a local manifest."""
 
         try:
-            current = await self.webdav.validated_current_generation()
+            current = await self.webdav.validated_current_generation(
+                **({"force_refresh": True} if isinstance(self.webdav, WebDAVClient) else {})
+            )
             expected_failed_documents = sum(
                 document.availability == "ocr_failed" for document in manifest.documents
             )
@@ -3070,6 +3084,8 @@ class WorkerPipeline:
                     cache_healing_seal_path = prior_seal_path
                     cache_healing_validated_seal = validated_prior_seal
         if current_remote is not None and current_is_exact_complete and cache_healing_generation_id is None:
+            if isinstance(self.webdav, WebDAVClient):
+                await self.webdav.verification_gate()
             self.state.finish_run(
                 run_id,
                 "no_change",
@@ -3105,6 +3121,8 @@ class WorkerPipeline:
             ):
                 raise RuntimeError("stored publication row does not match its sealed artifact")
             _, validated_prior_seal = await self._publish_remote_only(prior_seal)
+            if isinstance(self.webdav, WebDAVClient):
+                await self.webdav.verification_gate()
             self.state.finish_run(
                 run_id,
                 "no_change",
@@ -4036,6 +4054,8 @@ class WorkerPipeline:
                 if validated_healed_seal.manifest.generation_id != cache_healing_generation_id:
                     raise RuntimeError("OCR cache healing seal changed generation identity")
                 _atomic_write(cache_healing_seal_path, canonical_json_bytes(healed_seal))
+            if isinstance(self.webdav, WebDAVClient):
+                await self.webdav.verification_gate()
             self.state.finish_run(
                 run_id,
                 "no_change",
@@ -5808,6 +5828,11 @@ class WorkerPipeline:
         generation_id = validated.manifest.generation_id
 
         # No remote mutation occurs until every seal/database/object check above succeeds.
+        if isinstance(self.webdav, WebDAVClient):
+            self.webdav.bind_publication_seal(validated.seal_sha256, generation_id)
+        unique_objects: dict[tuple[str, int], tuple[Path, str, str, int]] = {}
+        for row in validated.objects:
+            unique_objects.setdefault((row[2], row[3]), row)
         semaphore = asyncio.Semaphore(16)
 
         async def _upload_cas_object(
@@ -5826,12 +5851,9 @@ class WorkerPipeline:
                 ):
                     raise RuntimeError("CAS publisher returned a mismatched identity")
 
-        await asyncio.gather(
-            *(
-                _upload_cas_object(path, media_type, declared_sha, declared_size)
-                for path, media_type, declared_sha, declared_size in validated.objects
-            )
-        )
+        async with asyncio.TaskGroup() as group:
+            for path, media_type, declared_sha, declared_size in unique_objects.values():
+                group.create_task(_upload_cas_object(path, media_type, declared_sha, declared_size))
         published = await WebDAVBundlePublisher(self.webdav).publish(
             generation_id=generation_id,
             database=validated.database_path,
@@ -5896,6 +5918,8 @@ class WorkerPipeline:
                     v5_metrics=validated.v5_metrics,
                 )
             if current.ocr_failed_document_count == 0:
+                if isinstance(self.webdav, WebDAVClient):
+                    await self.webdav.verification_gate()
                 self.state.finish_run(
                     run_id,
                     "no_change",
@@ -6241,10 +6265,16 @@ async def resume_sealed_publication(
             sqlite_mmap_mib=sqlite_mmap_mib,
         ) as state,
     ):
-        return await SealedPublicationResumer(
+        if isinstance(webdav, WebDAVClient):
+            webdav.configure_verification(state, webdav.verification_settings)
+            webdav.begin_verification_run(run_id)
+        result = await SealedPublicationResumer(
             state=state,
             state_dir=state_dir,
             webdav=webdav,
             stable_publication_approved=stable_publication_approved,
             document_aggregation=document_aggregation,
         )._resume_publication_locked(run_id)
+        if isinstance(webdav, WebDAVClient):
+            webdav.finish_verification_run()
+        return result

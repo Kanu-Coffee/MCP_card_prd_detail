@@ -273,6 +273,14 @@ class EmbeddingCacheV5Row:
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS webdav_verification (
+  scope TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('object','audit','cas','journal','run')),
+  identity TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY(scope, kind, identity)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS run (
   run_id TEXT PRIMARY KEY,
   started_at TEXT NOT NULL,

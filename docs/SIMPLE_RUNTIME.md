@@ -577,11 +577,22 @@ v1.0.18의 처리량 조정은 `/etc/cardrag/worker.env`에서 다음 범위로 
 `CARDRAG_STATE_SQLITE_CACHE_MIB=256`은 SQLite 캐시(1–1024 MiB),
 `CARDRAG_STATE_SQLITE_MMAP_MIB=2048`은 메모리 매핑 상한(0–4096 MiB)이며
 0으로 매핑을 끌 수 있습니다. `CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB=8`은 파일
-업로드 청크(1–16 MiB)이며 1로 기존 청크 크기를 복원합니다. 업로드 후
-임시 객체와 최종 객체의 전체 해시 검증은 유지합니다. PUT 계측은 전송에
+업로드 청크(1–16 MiB)이며 1로 기존 청크 크기를 복원합니다. v1.0.19에서는 신규
+DB/vector의 최종 GET 1회 검증과 기존 객체의 주기 검증을 적용하며 신규 CAS의
+임시·최종 검증은 유지합니다. PUT 계측은 전송에
 제공한 본문 바이트, 검증 GET 계측은 읽은 응답 바이트와 해시 검증 시간을
 포함하며 실패한 시도도 집계합니다. 동시 작업의 누적 시간은 실제 경과 시간과
 다를 수 있습니다.
+
+v1.0.19 검증 기본값은 `CARDRAG_WEBDAV_VERIFICATION_MODE=periodic`,
+`CARDRAG_WEBDAV_FULL_VERIFY_EVERY_RUNS=14`,
+`CARDRAG_WEBDAV_FULL_VERIFY_MAX_AGE_DAYS=7`,
+`CARDRAG_WEBDAV_FULL_VERIFY_NEW_CAS_GIB=10`,
+`CARDRAG_WEBDAV_GENERATION_READBACK_MODE=final`,
+`CARDRAG_WEBDAV_FORCE_FULL_VERIFY=false`입니다. 회수·기간·고유 신규 CAS 용량 중
+먼저 도달하면 전체 검사합니다. `no_change`도 회수에 포함하고 DB/vector 바이트는
+CAS 누적량에서 제외합니다. 자세한 기준은 [v1.0.19 운영 문서](V1_0_19_WEBDAV_VERIFICATION.md)를
+참고하십시오. `strict`와 `double`로 기존 검증 강도를 복원할 수 있습니다.
 
 GC 기본값은 `CARDRAG_COLLECT_REMOTE_GARBAGE=false`,
 `CARDRAG_GARBAGE_GRACE_DAYS=30`입니다. 명시적 환경변수 설정을 적용할 수

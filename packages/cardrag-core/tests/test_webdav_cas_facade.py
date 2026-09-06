@@ -872,3 +872,39 @@ def test_move_refuses_overwrite(webdav: tuple[_MemoryWebDAV, WebDAVClient]) -> N
     with pytest.raises(WebDAVHTTPError) as failure:
         client.move("v1/move/a", "v1/move/b", overwrite=False)
     assert failure.value.status_code == 412
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "v1/objects/sha256/ab/" + "ab" * 32,
+        "v1/generations/g-new/READY.json",
+        "v1/channels/stable.json",
+    ],
+)
+def test_final_only_publisher_cannot_publish_cas_or_controls(
+    webdav: tuple[_MemoryWebDAV, WebDAVClient],
+    destination: str,
+    tmp_path: Path,
+) -> None:
+    from cardrag_core import GenerationFilePublisher
+
+    backend, client = webdav
+    source = tmp_path / "data"
+    source.write_bytes(b"data")
+    with pytest.raises(ValueError, match="restricted"):
+        GenerationFilePublisher(client).publish_file(destination, source)
+    assert not backend.requests
+
+
+def test_verified_metadata_comes_from_get_not_later_head(webdav: tuple[_MemoryWebDAV, WebDAVClient]) -> None:
+    backend, client = webdav
+    backend.files["v1/member"] = b"sealed"
+    observation = client.verify_with_metadata(
+        "v1/member", expected_sha256=sha256_bytes(b"sealed"), expected_size_bytes=6
+    )
+    # This server deliberately returns ETag only for HEAD. It is not evidence
+    # belonging to the already verified GET representation.
+    assert observation.etag is None
+    assert observation.artifact.sha256 == sha256_bytes(b"sealed")
+    assert backend.requests == [("GET", "v1/member")]
