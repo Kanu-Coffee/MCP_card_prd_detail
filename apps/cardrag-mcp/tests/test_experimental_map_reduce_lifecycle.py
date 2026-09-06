@@ -11,7 +11,7 @@ from typing import Literal
 
 import pytest
 from cardrag_core import canonical_json_bytes
-from v5_fixtures import install_v5_fixture
+from v5_fixtures import build_v5_fixture, install_v5_fixture
 
 import cardrag_mcp.quota as quota_module
 from cardrag_mcp.experimental_map_reduce import (
@@ -24,7 +24,7 @@ from cardrag_mcp.experimental_map_reduce import (
     _identity,
     _provider_usage_receipt,
 )
-from cardrag_mcp.store import GenerationHandle, GenerationStore
+from cardrag_mcp.store import GenerationHandle, GenerationStore, load_generation_handle
 
 
 def _profile() -> ExperimentalMapReduceProfile:
@@ -470,6 +470,20 @@ async def test_claim_fsync_precedes_rollover_and_same_query_resumes_one_job(
         retention=2,
     )
     assert store_b.load_current() is True
+    # Fixture construction writes SQLite temporary files outside production locks.
+    # Finish it before racing the real activation path against the durable claim.
+    rollover_handles: list[GenerationHandle] = []
+    for generation_id in ("gen-v5-B", "gen-v5-C"):
+        fixture = build_v5_fixture(store_b.generations / generation_id, generation_id=generation_id)
+        handle = load_generation_handle(
+            fixture.database.parent,
+            store_b.objects,
+            maximum_vector_bytes=store_b.maximum_vector_bytes,
+            expected_generation_id=generation_id,
+        )
+        # These revisions share the already installed fixture PDF objects.
+        store_b.verify_handle_pdfs(handle)
+        rollover_handles.append(handle)
     profile = _profile()
     query = "same sealed query across A to C rollover"
     claim_held = threading.Event()
@@ -498,8 +512,8 @@ async def test_claim_fsync_precedes_rollover_and_same_query_resumes_one_job(
     monkeypatch.setattr(store_b, "activate", signaling_activate)
 
     def roll_generations() -> None:
-        install_v5_fixture(store_b, generation_id="gen-v5-B")
-        install_v5_fixture(store_b, generation_id="gen-v5-C")
+        for handle in rollover_handles:
+            store_b.activate(handle)
 
     rollover = asyncio.create_task(asyncio.to_thread(roll_generations))
     assert await asyncio.to_thread(activation_attempted.wait, 10)

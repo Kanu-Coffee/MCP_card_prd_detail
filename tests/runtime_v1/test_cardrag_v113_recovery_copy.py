@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -23,9 +24,19 @@ def _owner() -> tuple[int, int]:
     return os.getuid(), os.getgid()
 
 
-def _open_descriptor_count() -> int:
-    with os.scandir("/proc/self/fd") as entries:
-        return sum(1 for _entry in entries)
+@pytest.fixture
+def source_root_descriptors(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    opened_sources: list[int] = []
+    open_directory = recovery_copy._open_absolute_directory
+
+    def observe_open(path: Path, *, field: str) -> tuple[int, recovery_copy._Identity]:
+        descriptor, identity = open_directory(path, field=field)
+        if field == "source":
+            opened_sources.append(descriptor)
+        return descriptor, identity
+
+    monkeypatch.setattr(recovery_copy, "_open_absolute_directory", observe_open)
+    return opened_sources
 
 
 def test_recovery_tool_is_readable_by_the_unprivileged_production_container_user() -> None:
@@ -245,13 +256,13 @@ def test_state_exact_incident_path_seals_inventory_receipt(
     assert receipt["shm_excluded_sha256"] == hashlib.sha256(shm_bytes).hexdigest()
 
 
-def test_state_destination_open_failure_does_not_leak_source_root_descriptor(tmp_path: Path) -> None:
+def test_state_destination_open_failure_does_not_leak_source_root_descriptor(
+    tmp_path: Path, source_root_descriptors: list[int]
+) -> None:
     source, _payload, _database_bytes, _wal_bytes = _state_source(tmp_path)
     missing_destination = tmp_path / "missing-state-destination"
     uid, gid = _owner()
-    descriptor_count = _open_descriptor_count()
-
-    for _attempt in range(20):
+    for attempt in range(20):
         with pytest.raises(RecoveryCopyError, match="destination_directory_open_failed"):
             recovery_copy.copy_state(
                 source,
@@ -261,7 +272,10 @@ def test_state_destination_open_failure_does_not_leak_source_root_descriptor(tmp
                 enforce_exact_incident=False,
             )
 
-    assert _open_descriptor_count() == descriptor_count
+        assert len(source_root_descriptors) == attempt + 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(source_root_descriptors[-1])
+        assert closed.value.errno == errno.EBADF
 
 
 def _codex_pair(tmp_path: Path, credential: bytes) -> tuple[Path, Path]:
@@ -345,13 +359,13 @@ def test_codex_copy_rejects_auth_hardlink_without_disclosing_content(tmp_path: P
     assert credential.decode() not in str(captured.value)
 
 
-def test_codex_destination_open_failure_does_not_leak_source_root_descriptor(tmp_path: Path) -> None:
+def test_codex_destination_open_failure_does_not_leak_source_root_descriptor(
+    tmp_path: Path, source_root_descriptors: list[int]
+) -> None:
     source, _unused_destination = _codex_pair(tmp_path, b"bounded-auth")
     missing_destination = tmp_path / "missing-codex-destination"
     uid, gid = _owner()
-    descriptor_count = _open_descriptor_count()
-
-    for _attempt in range(20):
+    for attempt in range(20):
         with pytest.raises(RecoveryCopyError, match="destination_directory_open_failed"):
             recovery_copy.copy_codex_auth(
                 source,
@@ -360,4 +374,7 @@ def test_codex_destination_open_failure_does_not_leak_source_root_descriptor(tmp
                 expected_gid=gid,
             )
 
-    assert _open_descriptor_count() == descriptor_count
+        assert len(source_root_descriptors) == attempt + 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(source_root_descriptors[-1])
+        assert closed.value.errno == errno.EBADF
