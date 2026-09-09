@@ -13,7 +13,6 @@ from calendar import monthrange
 from collections.abc import Iterable
 from datetime import date, datetime
 from typing import Any, Literal, cast
-from zoneinfo import ZoneInfo
 
 import numpy as np
 from cardrag_core import EMBEDDING_DIMENSION
@@ -50,6 +49,7 @@ from cardrag_mcp.models import (
 )
 from cardrag_mcp.reranker import RerankerShadowLane
 from cardrag_mcp.schema import LoadedVectors
+from cardrag_mcp.seoul_time import seoul_today
 from cardrag_mcp.store import GenerationHandle, GenerationStore
 
 RRF_K = 60
@@ -67,7 +67,7 @@ def _recent_product_period(months: int) -> tuple[date, date]:
 
 
 def _seoul_today() -> date:
-    return datetime.now(ZoneInfo("Asia/Seoul")).date()
+    return seoul_today(clock=datetime)
 
 
 def _explicit_period(start_date: date | None, end_date: date | None) -> tuple[date, date]:

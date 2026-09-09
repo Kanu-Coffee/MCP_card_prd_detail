@@ -14,7 +14,6 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal, cast
-from zoneinfo import ZoneInfo
 
 import numpy as np
 from numpy.typing import NDArray
@@ -59,6 +58,7 @@ from cardrag_mcp.reranker import (
     reranker_candidate_id,
 )
 from cardrag_mcp.schema_v5 import LoadedVectorsV5
+from cardrag_mcp.seoul_time import seoul_today
 from cardrag_mcp.store import GenerationHandle, GenerationStore
 
 # Advanced mmap indexing materializes a dense copy, so keep each 4,096D
@@ -638,7 +638,7 @@ class V5ExactRepository:
 
         if request.launch_start_date is None or request.launch_end_date is None:
             raise ValueError("launch date bounds are required")
-        if request.launch_end_date > datetime.now(ZoneInfo("Asia/Seoul")).date():
+        if request.launch_end_date > seoul_today(clock=datetime):
             raise ValueError("launch_end_date must not be in the future (Asia/Seoul)")
         values: dict[str, date | None] = {}
         missing: list[ContractRevisionSummary] = []

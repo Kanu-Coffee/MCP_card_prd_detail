@@ -233,6 +233,10 @@ jobs:
           docker build --target mcp -t cardrag-ci:mcp .
           test "$(docker image inspect cardrag-ci:worker --format '{{index .Config.Entrypoint 0}}')" = cardrag-worker
           test "$(docker image inspect cardrag-ci:mcp --format '{{index .Config.Entrypoint 0}}')" = cardrag-mcp
+          # The shell-free runtime has no system timezone database. Exercise the
+          # launch-window clock in the built image, not only on the CI host.
+          docker run --rm --network none --entrypoint python cardrag-ci:mcp \
+            -c 'from cardrag_mcp.repository import _seoul_today; print(_seoul_today().isoformat())'
           trivy image \
             --scanners vuln,secret \
             --exit-code 1 \
