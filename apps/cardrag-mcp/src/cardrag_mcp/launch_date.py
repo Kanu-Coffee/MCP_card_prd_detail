@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 _LAUNCH_LABEL = r"(?:출시일자?|신규\s*출시)[\s:：（(\-•·]*"
 # Capture complete numeric components before checking their calendar validity.
@@ -25,31 +27,62 @@ _LAUNCH_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-def resolve_launch_date(texts: Iterable[str]) -> date | None:
-    """Return one unambiguous, calendar-valid launch date across disclosure nodes.
+PARSER_VERSION = "launch-date-v1.0.22"
+LaunchDateStatus = Literal["confirmed", "missing", "invalid", "conflicting"]
 
-    Missing dates, conflicting dates and invalid explicit date candidates remain
-    unknown. Repeated mentions of the same valid launch date are accepted.
-    """
+
+@dataclass(frozen=True)
+class LaunchDateResolution:
+    launch_date: date | None
+    status: LaunchDateStatus
+    evidence: tuple[str, ...] = ()
+
+
+def resolve_launch_date_details(texts: Iterable[str]) -> LaunchDateResolution:
+    """Resolve a date and an explicit reason, preserving short source excerpts."""
     dates: set[date] = set()
+    invalid = False
+    evidence: list[str] = []
     for text in texts:
         if "출시" not in text:
             continue
+        matched_spans: list[tuple[int, int]] = []
         for pattern in _LAUNCH_PATTERNS:
             for match in pattern.finditer(text):
+                matched_spans.append(match.span())
+                excerpt = " ".join(text[max(0, match.start() - 40) : match.end() + 80].split())[
+                    :240
+                ]
+                if excerpt not in evidence and len(evidence) < 8:
+                    evidence.append(excerpt)
                 year, month, day = match.groups()
-                if len(month) > 2 or len(day) > 2:
-                    return None
                 try:
                     candidate = date(int(year), int(month), int(day))
+                    if len(month) > 2 or len(day) > 2 or not 1900 <= candidate.year <= 2099:
+                        raise ValueError("invalid launch date")
                 except ValueError:
-                    return None
-                if not 1900 <= candidate.year <= 2099:
-                    return None
-                dates.add(candidate)
-                if len(dates) > 1:
-                    return None
-    return next(iter(dates)) if dates else None
+                    invalid = True
+                else:
+                    dates.add(candidate)
+        # A date-like value adjacent to a launch label that the strict grammar
+        # cannot read is invalid; an explicit "미기재"/"미확인" remains missing.
+        for date_label in re.finditer(_LAUNCH_LABEL + r"[0-9]{4,}[.년/-]", text):
+            if not any(start <= date_label.start() < end for start, end in matched_spans):
+                invalid = True
+                if len(evidence) < 8:
+                    evidence.append(" ".join(text.split())[:240])
+    if len(dates) > 1:
+        return LaunchDateResolution(None, "conflicting", tuple(evidence))
+    if invalid:
+        return LaunchDateResolution(None, "invalid", tuple(evidence))
+    if dates:
+        return LaunchDateResolution(next(iter(dates)), "confirmed", tuple(evidence))
+    return LaunchDateResolution(None, "missing", tuple(evidence))
+
+
+def resolve_launch_date(texts: Iterable[str]) -> date | None:
+    """Return one unambiguous calendar-valid date, preserving the legacy API."""
+    return resolve_launch_date_details(texts).launch_date
 
 
 def parse_launch_date(text: str) -> date | None:

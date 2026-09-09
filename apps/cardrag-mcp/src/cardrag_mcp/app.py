@@ -26,11 +26,12 @@ from cardrag_mcp.experimental_map_reduce import ExperimentalMapReduceLane
 from cardrag_mcp.issuer_input import IssuerInput, normalize_issuer, normalize_optional_issuer
 from cardrag_mcp.models import (
     ContractSearchRequest,
+    ProductSummaryRequest,
     SearchFilters,
     SearchRequest,
     SourcePdfDescriptor,
 )
-from cardrag_mcp.observability import Metrics, log_event
+from cardrag_mcp.observability import Metrics, ObservedMCPServer, log_event
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.store import GenerationStore
 from cardrag_mcp.updater import WebDAVUpdater
@@ -106,9 +107,11 @@ def build_mcp_server(
     store: GenerationStore,
     settings: Settings,
     experimental_map_reduce: ExperimentalMapReduceLane | None = None,
+    metrics: Metrics | None = None,
 ) -> MCPServer:
-    server = MCPServer(
+    server = ObservedMCPServer(
         "CardRAG",
+        metrics=metrics or Metrics.create(),
         instructions=(
             "Read-only search over the currently active card-product snapshot. "
             "A v5 generation exposes exact, structure-preserving contract search, "
@@ -129,10 +132,22 @@ def build_mcp_server(
         product_lineage_id: str | None = None,
         as_of: str | None = None,
         include_history: bool = False,
-        mode: str = "exact",
+        mode: Literal["exact", "exhaustive"] = "exact",
         limit: int = 10,
+        response_mode: Literal["auto", "full", "compact"] = "auto",
+        product_lineage_ids: Annotated[list[str], Field(min_length=1, max_length=100)]
+        | None = None,
+        launch_start_date: str | None = None,
+        launch_end_date: str | None = None,
+        expected_generation_id: str | None = None,
     ) -> dict[str, Any]:
-        """Search v5 views exactly, or poll a durable bounded exhaustive audit."""
+        """Search exact contract evidence, or poll a bounded exhaustive audit.
+
+        Use response_mode=compact for a bounded response of whole linked evidence groups.
+        Resolve comparison targets with find_products, then pass product_lineage_ids.
+        Paired inclusive launch dates filter confirmed launches before scoring.
+        expected_generation_id prevents mixing snapshots across a multi-call investigation.
+        """
 
         parsed_as_of = None if as_of is None else date.fromisoformat(as_of)
         result = await repository.search_contracts(
@@ -142,8 +157,19 @@ def build_mcp_server(
                 product_lineage_id=product_lineage_id,
                 as_of=parsed_as_of,
                 include_history=include_history,
-                mode=mode,  # type: ignore[arg-type]
+                mode=mode,
                 limit=limit,
+                response_mode=response_mode,
+                product_lineage_ids=(
+                    None if product_lineage_ids is None else tuple(product_lineage_ids)
+                ),
+                launch_start_date=(
+                    None if launch_start_date is None else date.fromisoformat(launch_start_date)
+                ),
+                launch_end_date=(
+                    None if launch_end_date is None else date.fromisoformat(launch_end_date)
+                ),
+                expected_generation_id=expected_generation_id,
             )
         )
         return result.model_dump(mode="json")
@@ -255,8 +281,14 @@ def build_mcp_server(
 
     @server.tool()
     async def list_recent_products(
-        months: Annotated[int, Field(ge=1, le=120, strict=True)] = 3,
+        months: Annotated[int, Field(ge=1, le=120, strict=True)] | None = None,
         issuer: IssuerInput | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        issuers: list[IssuerInput] | None = None,
+        limit: Annotated[int, Field(ge=1, le=100, strict=True)] | None = None,
+        cursor: str | None = None,
+        expected_generation_id: str | None = None,
     ) -> dict[str, Any]:
         """List only confirmed card launches in the last 1 to 120 calendar months.
 
@@ -267,27 +299,53 @@ def build_mcp_server(
         unknown_launch_date_count covers all current product revisions in the issuer
         scope whose launch date is missing, invalid, or conflicting. It is not a count
         of recent launches: report those dates as [확인 필요] and never estimate them.
+        No arguments defaults to three months. Instead of months, supply both inclusive
+        start_date/end_date for historical replay. issuer and issuers are exclusive.
+        Paginate with the returned cursor and bind later calls to generation_id.
         """
 
         result = await repository.list_recent_products(
-            months=months, issuer=normalize_optional_issuer(issuer)
+            months=months,
+            issuer=normalize_optional_issuer(issuer),
+            start_date=None if start_date is None else date.fromisoformat(start_date),
+            end_date=None if end_date is None else date.fromisoformat(end_date),
+            issuers=None if issuers is None else [normalize_issuer(value) for value in issuers],
+            limit=limit,
+            cursor=cursor,
+            expected_generation_id=expected_generation_id,
         )
         return result.model_dump(mode="json")
 
     @server.tool()
     async def find_products(
-        keyword: str,
+        keyword: str | None = None,
         issuer: IssuerInput | None = None,
+        mode: Literal["search", "catalog", "coverage"] = "search",
+        issuers: list[IssuerInput] | None = None,
+        sort: Literal["name", "launch_date"] = "name",
+        limit: Annotated[int, Field(ge=1, le=100, strict=True)] | None = None,
+        cursor: str | None = None,
+        expected_generation_id: str | None = None,
     ) -> dict[str, Any]:
         """Search card products by partial name keyword (fuzzy).
 
         Matches are case-insensitive and width-normalized (NFKC). Use this instead of
         get_product when you only know a partial name (e.g. '원더라이프', 'SUPER', '가온')
         rather than a 6-digit product code.
+        mode=catalog lists products without a keyword; mode=coverage reports issuer and
+        launch-date coverage without scanning individual summaries. Use returned lineage
+        IDs for comparisons and generation_id to bind subsequent calls to this snapshot.
         """
 
         result = await repository.find_products(
-            keyword=keyword, issuer=normalize_optional_issuer(issuer)
+            keyword=keyword,
+            issuer=normalize_optional_issuer(issuer),
+            mode=mode,
+            issuers=None if issuers is None else [normalize_issuer(value) for value in issuers],
+            sort=sort,
+            limit=limit,
+            cursor=cursor,
+            expected_generation_id=expected_generation_id,
         )
         return result.model_dump(mode="json")
 
@@ -310,17 +368,29 @@ def build_mcp_server(
 
     @server.tool()
     async def get_product_summary(
-        issuer: IssuerInput,
-        identifier: str,
+        issuer: IssuerInput | None = None,
+        identifier: str | None = None,
+        products: Annotated[list[dict[str, str]], Field(min_length=1, max_length=50)] | None = None,
+        expected_generation_id: str | None = None,
     ) -> dict[str, Any]:
         """Return a compact summary of one card product: name, dates, annual fee, and top benefits.
 
         'identifier' can be a 6-digit product_code OR a product name substring.
-        Produces a lightweight 1-2KB summary instead of the massive full contract bundle.
+        Produces a lightweight structured summary with source and evidence references.
+        For a batch, provide products=[{"issuer":"kb","identifier":"..."}, ...]
+        with at most 50 entries, instead of issuer/identifier. All results share one
+        generation. Ambiguous names require an explicit product code or lineage ID.
         """
 
         result = await repository.get_product_summary(
-            issuer=normalize_issuer(issuer), identifier=identifier
+            issuer=normalize_optional_issuer(issuer),
+            identifier=identifier,
+            products=(
+                None
+                if products is None
+                else [ProductSummaryRequest.model_validate(p) for p in products]
+            ),
+            expected_generation_id=expected_generation_id,
         )
         if result is None:
             raise ValueError("product not found")
@@ -407,6 +477,7 @@ def build_app(
         store,
         settings,
         experimental_map_reduce,
+        metrics,
     )
     public = urlsplit(str(settings.mcp_public_base_url))
     public_origin = urlunsplit((public.scheme, public.netloc, "", "", ""))
@@ -531,6 +602,8 @@ def build_app(
 
     @app.get("/metrics", include_in_schema=False)
     async def prometheus() -> Response:
+        for measure, value in repository.metadata_cache.snapshot().items():
+            metrics.metadata_cache.labels(measure=measure).set(value)
         return Response(metrics.body(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.get("/resources/issuers", include_in_schema=False)

@@ -12,8 +12,9 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Literal, cast
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from numpy.typing import NDArray
@@ -29,7 +30,10 @@ from cardrag_mcp.audit import (
     ExpectedContract,
     LoadedAudit,
 )
+from cardrag_mcp.compact import clause_group, seal_compact_page
 from cardrag_mcp.embeddings import OpenRouterEmbedder
+from cardrag_mcp.launch_date import PARSER_VERSION, resolve_launch_date_details
+from cardrag_mcp.metadata_cache import MetadataCache
 from cardrag_mcp.models import (
     MAX_SEARCH_RESPONSE_CHARACTERS,
     MAX_SEARCH_RESPONSE_NODES,
@@ -91,6 +95,29 @@ def _canonical_catalog_text(value: str) -> str:
     """Match product names across width, case, and whitespace variants."""
 
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _name_is_only_nested(query: str, name: str, longer_names: Sequence[str]) -> bool:
+    """A separate mention of a short product name remains a comparison candidate."""
+
+    offset = 0
+    while (position := query.find(name, offset)) != -1:
+        covered = False
+        for longer in longer_names:
+            longer_offset = 0
+            while (longer_position := query.find(longer, longer_offset)) != -1:
+                if longer_position <= position and position + len(name) <= longer_position + len(
+                    longer
+                ):
+                    covered = True
+                    break
+                longer_offset = longer_position + 1
+            if covered:
+                break
+        if not covered:
+            return False
+        offset = position + 1
+    return True
 
 
 def _graph_context_character_count(nodes: Sequence[StructureNode]) -> int:
@@ -167,7 +194,7 @@ class ExactScoreCapture(ExactScoreCaptureSummary):
 
 @dataclass(frozen=True, slots=True)
 class _CatalogResolution:
-    status: Literal["explicit", "resolved", "unresolved", "ambiguous"]
+    status: Literal["explicit", "explicit_multiple", "resolved", "unresolved", "ambiguous"]
     candidate_count: int
     product_lineage_id: str | None
     product_name: str | None
@@ -215,6 +242,7 @@ class V5ExactRepository:
         self.embedder = embedder
         self.audit_store = ExhaustiveAuditStore(store.root)
         self.reranker_shadow = reranker_shadow
+        self.metadata_cache = MetadataCache()
 
     async def search(
         self,
@@ -225,15 +253,24 @@ class V5ExactRepository:
         if request.mode == "exhaustive" and (
             request.issuer is not None
             or request.product_lineage_id is not None
+            or request.product_lineage_ids is not None
+            or request.launch_start_date is not None
             or request.as_of is not None
             or request.include_history
+            or request.response_mode != "auto"
         ):
             raise ValueError(
                 "exhaustive mode audits the unscoped current corpus; "
-                "issuer, product_lineage_id, as_of, and include_history are unsupported"
+                "issuer, product IDs, launch dates, as_of, include_history, "
+                "and non-default response_mode are unsupported"
             )
         pin = self.store.pin() if handle is None else nullcontext(handle)
         with pin as pinned:
+            if (
+                request.expected_generation_id is not None
+                and request.expected_generation_id != pinned.generation_id
+            ):
+                raise ValueError("generation changed; repeat catalog selection before searching")
             vectors = self._vectors(pinned)
             aggregation_policy = pinned.metadata.document_aggregation_policy
             aggregation_profile_sha256 = pinned.metadata.sealed_profile_sha256
@@ -252,6 +289,8 @@ class V5ExactRepository:
                 else request
             )
             revisions = self._active_revisions(pinned, effective_request)
+            if request.launch_start_date is not None:
+                revisions = self._filter_launch_dates(pinned, revisions, request)
             profile = self._primary_profile(pinned)
             active_ids = {item.contract_revision_id for item in revisions}
             row_indices = [
@@ -260,13 +299,15 @@ class V5ExactRepository:
                 if revision_id in active_ids
             ]
             if request.mode == "exact":
-                query_vector = await self._embed_query(request.query, profile)
                 started = time.perf_counter()
-                scores_by_node, exact_blocks = self._score_rows(
-                    vectors,
-                    row_indices,
-                    query_vector,
-                )
+                if row_indices or request.launch_start_date is None:
+                    query_vector = await self._embed_query(request.query, profile)
+                    started = time.perf_counter()
+                    scores_by_node, exact_blocks = self._score_rows(
+                        vectors, row_indices, query_vector
+                    )
+                else:
+                    scores_by_node, exact_blocks = {}, 0
                 node_scores, contract_scores = self._collapse_scores(
                     scores_by_node,
                     policy=aggregation_policy,
@@ -310,6 +351,8 @@ class V5ExactRepository:
                     item.contract_revision_id
                     for item in self._active_revisions(pinned, lexical_scope_request)
                 }
+                if request.launch_start_date is not None or request.product_lineage_ids is not None:
+                    lexical_active_ids = active_ids
                 lexical = self._lexical_audit(
                     pinned,
                     request.query,
@@ -341,8 +384,13 @@ class V5ExactRepository:
             additional_count = 0
             summaries = {item.contract_revision_id: item for item in revisions}
             bundles: list[ContractEvidenceBundle] = []
-            product_specific_full = (
-                catalog.status in {"explicit", "resolved"} and len(revisions) == 1
+            compact_groups: list[ContractEvidenceBundle] = []
+            compact_coarse_count = 0
+            compact_candidate_limit_count = 0
+            product_specific_full = request.response_mode == "full" or (
+                request.response_mode == "auto"
+                and catalog.status in {"explicit", "resolved"}
+                and len(revisions) == 1
             )
             response_node_count = 0
             response_character_count = 0
@@ -361,6 +409,23 @@ class V5ExactRepository:
                 lexical_hit_ids = sorted(
                     lexical.nodes_by_revision.get(revision_id, set()) - set(dense_hit_ids)
                 )
+                if request.response_mode == "compact":
+                    lexical_hit_ids = lexical_hit_ids[:8]
+                    groups, coarse_count = self._compact_evidence_groups(
+                        pinned,
+                        revision_id,
+                        summaries[revision_id],
+                        dense_hit_ids + lexical_hit_ids,
+                        set(lexical_hit_ids),
+                        node_scores,
+                    )
+                    compact_groups.extend(groups)
+                    compact_coarse_count += coarse_count
+                    compact_candidate_limit_count += len(
+                        set(node_id for node_id, _ in ranked_nodes)
+                        - set(dense_hit_ids + lexical_hit_ids)
+                    )
+                    continue
                 candidate_bundle, used_full_fallback = self._build_evidence_bundle(
                     pinned,
                     revision_id,
@@ -415,7 +480,11 @@ class V5ExactRepository:
                 else "current"
             )
             reranker_diagnostics: RerankerShadowDiagnostics | None = None
-            if self.reranker_shadow is not None and search_complete:
+            if (
+                self.reranker_shadow is not None
+                and search_complete
+                and request.response_mode != "compact"
+            ):
                 reranker_diagnostics = await self.reranker_shadow.observe(
                     generation_id=pinned.generation_id,
                     query=request.query,
@@ -445,6 +514,12 @@ class V5ExactRepository:
                 catalog_candidate_count=catalog.candidate_count,
                 catalog_resolved_product_lineage_id=catalog.product_lineage_id,
                 catalog_resolved_product_name=catalog.product_name,
+                catalog_resolution_hint=(
+                    "Multiple product names match. Resolve candidates with find_products "
+                    "and pass product_lineage_ids before comparing; ranking is not disambiguation."
+                    if catalog.status == "ambiguous"
+                    else None
+                ),
                 response_node_count=response_node_count,
                 response_character_count=response_character_count,
                 response_truncated=response_truncated,
@@ -476,11 +551,151 @@ class V5ExactRepository:
                     None if exhaustive is None else exhaustive.artifact_sha256
                 ),
             )
-            return ContractSearchPage(
+            page = ContractSearchPage(
                 generation_id=pinned.generation_id,
                 bundles=tuple(bundles),
                 coverage=coverage,
             )
+            if request.response_mode == "compact":
+                return self._compact_page(
+                    page,
+                    compact_groups,
+                    ranked_candidate_contracts=len(contract_scores),
+                    coarse_count=compact_coarse_count,
+                    candidate_limit_count=compact_candidate_limit_count,
+                )
+            return page
+
+    _compact_page = staticmethod(seal_compact_page)
+
+    @staticmethod
+    def _compact_evidence_groups(
+        handle: GenerationHandle,
+        revision_id: str,
+        summary: ContractRevisionSummary,
+        initial_ids: Sequence[str],
+        lexical_hit_ids: set[str],
+        node_scores: dict[tuple[str, str], _NodeScore],
+    ) -> tuple[list[ContractEvidenceBundle], int]:
+        graph, _, _ = V5ExactRepository._expanded_graph(
+            handle, revision_id, (), full=True, scope="full", include_links=True
+        )
+        groups: list[ContractEvidenceBundle] = []
+        coarse_count = 0
+        for node_id in initial_ids:
+            selected = clause_group(graph, node_id)
+            score = node_scores.get((revision_id, node_id))
+            if not selected or score is None:
+                coarse_count += 1
+                continue
+            by_id = {node.node_id: node for node in selected}
+            # Never attach a full CONTRACT/MAJOR_SECTION embedding view to a
+            # small clause: its repeated text would recreate the old large response.
+            views = tuple(
+                view
+                for view in V5ExactRepository._matched_views(handle, revision_id, node_id, score)
+                if view.view_type not in {"CONTRACT", "MAJOR_SECTION"}
+            )
+            if not views:
+                coarse_count += 1
+                continue
+            best = max(view.score for view in views)
+            match = ScoredStructureNode(
+                node=by_id[node_id],
+                score=best,
+                matched_views=views,
+                matched_view_types=tuple(
+                    view.view_type for view in views if math.isclose(view.score, best, abs_tol=1e-7)
+                ),
+                lexical_only=node_id in lexical_hit_ids,
+            )
+            linked_notices = {
+                value
+                for node in selected
+                for link in node.links
+                if link.link_type == "APPLIES_TO"
+                for value in (link.from_node_id, link.to_node_id)
+                if by_id[value].major_class in {"NOTICE", "MIXED"}
+            }
+            groups.append(
+                ContractEvidenceBundle(
+                    contract=summary,
+                    matches=(match,),
+                    nodes=selected,
+                    linked_notice_count=len(linked_notices),
+                    parent_expansion_count=max(0, len(selected) - 1),
+                )
+            )
+        return groups, coarse_count
+
+    def _filter_launch_dates(
+        self,
+        handle: GenerationHandle,
+        revisions: Sequence[ContractRevisionSummary],
+        request: ContractSearchRequest,
+    ) -> tuple[ContractRevisionSummary, ...]:
+        """Resolve immutable revision metadata before embedding/scoring candidates."""
+
+        if request.launch_start_date is None or request.launch_end_date is None:
+            raise ValueError("launch date bounds are required")
+        if request.launch_end_date > datetime.now(ZoneInfo("Asia/Seoul")).date():
+            raise ValueError("launch_end_date must not be in the future (Asia/Seoul)")
+        values: dict[str, date | None] = {}
+        missing: list[ContractRevisionSummary] = []
+        for revision in revisions:
+            key = (
+                handle.generation_id,
+                revision.contract_revision_id,
+                revision.pdf_sha256,
+                "launch_date",
+                PARSER_VERSION,
+            )
+            cached = self.metadata_cache.get(key)
+            if isinstance(cached, dict):
+                raw = cached.get("launch_date")
+                values[revision.contract_revision_id] = (
+                    None if raw is None else date.fromisoformat(str(raw))
+                )
+            else:
+                missing.append(revision)
+        for start in range(0, len(missing), 500):
+            batch = missing[start : start + 500]
+            texts: dict[str, list[str]] = defaultdict(list)
+            placeholders = ",".join("?" for _ in batch)
+            with handle.connect() as connection:
+                rows = connection.execute(
+                    "SELECT contract_revision_id,display_text FROM structure_nodes "  # noqa: S608
+                    f"WHERE contract_revision_id IN ({placeholders}) "
+                    "AND instr(display_text,'출시')>0 ORDER BY contract_revision_id,ordinal",
+                    tuple(revision.contract_revision_id for revision in batch),
+                )
+                for row in rows:
+                    texts[str(row[0])].append(str(row[1]))
+            for revision in batch:
+                details = resolve_launch_date_details(texts.get(revision.contract_revision_id, ()))
+                values[revision.contract_revision_id] = details.launch_date
+                self.metadata_cache.set(
+                    (
+                        handle.generation_id,
+                        revision.contract_revision_id,
+                        revision.pdf_sha256,
+                        "launch_date",
+                        PARSER_VERSION,
+                    ),
+                    {
+                        "launch_date": None
+                        if details.launch_date is None
+                        else details.launch_date.isoformat(),
+                        "status": details.status,
+                        "evidence": list(details.evidence),
+                    },
+                )
+        return tuple(
+            revision
+            for revision in revisions
+            if (launch := values[revision.contract_revision_id]) is not None
+            and request.launch_start_date <= launch <= request.launch_end_date
+        )
 
     @staticmethod
     def _build_evidence_bundle(
@@ -1112,6 +1327,10 @@ class V5ExactRepository:
                 request.product_lineage_id is None
                 or item.product_lineage_id == request.product_lineage_id
             )
+            and (
+                request.product_lineage_ids is None
+                or item.product_lineage_id in request.product_lineage_ids
+            )
         ]
         if request.include_history:
             selected = summaries
@@ -1156,6 +1375,19 @@ class V5ExactRepository:
         handle: GenerationHandle,
         request: ContractSearchRequest,
     ) -> _CatalogResolution:
+        if request.product_lineage_ids is not None:
+            placeholders = ",".join("?" for _ in request.product_lineage_ids)
+            with handle.connect() as connection:
+                rows = connection.execute(
+                    "SELECT product_lineage_id,issuer FROM product_lineages "  # noqa: S608
+                    f"WHERE product_lineage_id IN ({placeholders})",
+                    request.product_lineage_ids,
+                ).fetchall()
+            if {str(row[0]) for row in rows} != set(request.product_lineage_ids):
+                raise ValueError("one or more explicit product lineages do not exist")
+            if request.issuer is not None and any(str(row[1]) != request.issuer for row in rows):
+                raise ValueError("explicit product lineage does not belong to issuer")
+            return _CatalogResolution("explicit_multiple", len(rows), None, None)
         if request.product_lineage_id is not None:
             with handle.connect() as connection:
                 row = connection.execute(
@@ -1197,8 +1429,21 @@ class V5ExactRepository:
                 candidates.append((str(row[0]), name, len(normalized_name)))
         if not candidates:
             return _CatalogResolution("unresolved", 0, None, None)
-        longest = max(candidate[2] for candidate in candidates)
-        longest_candidates = [candidate for candidate in candidates if candidate[2] == longest]
+        # Suppress only names nested in another matched product name. Two
+        # unrelated names remain ambiguous even when one name is longer.
+        longest_candidates = [
+            candidate
+            for candidate in candidates
+            if not _name_is_only_nested(
+                normalized_query,
+                _canonical_catalog_text(candidate[1]),
+                [
+                    _canonical_catalog_text(other[1])
+                    for other in candidates
+                    if candidate[2] < other[2]
+                ],
+            )
+        ]
         if len(longest_candidates) != 1:
             return _CatalogResolution(
                 "ambiguous",

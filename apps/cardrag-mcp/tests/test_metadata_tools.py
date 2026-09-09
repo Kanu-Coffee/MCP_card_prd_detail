@@ -52,12 +52,7 @@ def v5_runtime(
 
 
 def _freeze_today(monkeypatch: pytest.MonkeyPatch, today: date) -> None:
-    class FixedDate(date):
-        @classmethod
-        def today(cls) -> date:
-            return today
-
-    monkeypatch.setattr(repository_module, "date", FixedDate)
+    monkeypatch.setattr(repository_module, "_seoul_today", lambda: today)
 
 
 def _set_launch_texts(fixture: V5Fixture, *texts: str) -> None:

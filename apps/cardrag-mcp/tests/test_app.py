@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi.testclient import TestClient
+from mcp.server.mcpserver.exceptions import ToolError
 
 from cardrag_mcp.app import build_app
 from cardrag_mcp.config import Settings
@@ -52,6 +53,11 @@ def test_approved_mcp_tools(active_runtime) -> None:
         "include_history",
         "mode",
         "limit",
+        "response_mode",
+        "product_lineage_ids",
+        "launch_start_date",
+        "launch_end_date",
+        "expected_generation_id",
     }
     assert set(by_name["get_contract_bundle"].input_schema["properties"]) == {
         "contract_revision_id",
@@ -65,10 +71,22 @@ def test_approved_mcp_tools(active_runtime) -> None:
     assert set(by_name["list_recent_products"].input_schema["properties"]) == {
         "months",
         "issuer",
+        "start_date",
+        "end_date",
+        "issuers",
+        "limit",
+        "cursor",
+        "expected_generation_id",
     }
     assert set(by_name["find_products"].input_schema["properties"]) == {
         "keyword",
         "issuer",
+        "mode",
+        "issuers",
+        "sort",
+        "limit",
+        "cursor",
+        "expected_generation_id",
     }
     assert set(by_name["find_cards_by_merchant"].input_schema["properties"]) == {
         "merchant_name",
@@ -77,6 +95,8 @@ def test_approved_mcp_tools(active_runtime) -> None:
     assert set(by_name["get_product_summary"].input_schema["properties"]) == {
         "issuer",
         "identifier",
+        "products",
+        "expected_generation_id",
     }
     issuer_tools = {
         "search_contracts",
@@ -95,6 +115,39 @@ def test_approved_mcp_tools(active_runtime) -> None:
             assert issuer in serialized_schema
         assert "KB국민카드" in serialized_schema
     assert "unsupported_drm" in (by_name["get_product"].description or "")
+    assert by_name["search_contracts"].input_schema["properties"]["mode"]["enum"] == [
+        "exact",
+        "exhaustive",
+    ]
+    assert by_name["find_products"].input_schema["properties"]["mode"]["enum"] == [
+        "search",
+        "catalog",
+        "coverage",
+    ]
+    # The unchanged LibreChat bridge consumes inline schemas; nested batch fields
+    # must not introduce definitions or references it cannot resolve.
+    import json
+
+    assert "$ref" not in json.dumps([tool.input_schema for tool in tools])
+
+
+def test_tool_dispatch_metrics_are_bounded_and_do_not_contain_arguments(active_runtime) -> None:
+    import pytest
+
+    store, repository, _, _ = active_runtime
+    app = build_app(repository, store, settings_for(store.root))
+    server = app.state.mcp_server
+    asyncio.run(server.call_tool("find_products", {"keyword": "private-query-never-a-label"}))
+    with pytest.raises(ToolError):
+        asyncio.run(server.call_tool("private-invalid-tool", {}))
+    with pytest.raises(ToolError):
+        asyncio.run(server.call_tool("list_recent_products", {"months": -1}))
+    body = app.state.metrics.body().decode()
+    assert 'cardrag_mcp_tool_calls_total{outcome="success",tool="find_products"} 1.0' in body
+    assert 'cardrag_mcp_tool_calls_total{outcome="error",tool="unknown"} 1.0' in body
+    assert 'cardrag_mcp_tool_calls_total{outcome="error",tool="list_recent_products"} 1.0' in body
+    assert 'cardrag_mcp_tool_response_bytes_count{tool="find_products"} 1.0' in body
+    assert "private-query" not in body and "private-invalid-tool" not in body
 
 
 def test_public_health_and_protected_resources_metrics_and_mcp(active_runtime) -> None:

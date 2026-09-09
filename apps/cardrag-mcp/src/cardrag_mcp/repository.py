@@ -9,19 +9,20 @@ import hmac
 import json
 import math
 import sqlite3
-import unicodedata
 from calendar import monthrange
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from cardrag_core import EMBEDDING_DIMENSION
 from numpy.typing import NDArray
 
+from cardrag_mcp.catalog import CatalogRepository, check_generation, issuer_scope, page_limit
 from cardrag_mcp.embeddings import EmbeddingUnavailable, OpenRouterEmbedder
 from cardrag_mcp.exact import V5ExactRepository
-from cardrag_mcp.launch_date import resolve_launch_date
+from cardrag_mcp.metadata_cache import MetadataCache
 from cardrag_mcp.models import (
     ContractBundle,
     ContractSearchPage,
@@ -34,16 +35,17 @@ from cardrag_mcp.models import (
     MerchantSearchPage,
     OCRFailedProduct,
     Product,
-    ProductCatalogEntry,
     ProductCatalogPage,
+    ProductCoverage,
     ProductRevisionList,
     ProductSummary,
+    ProductSummaryBatch,
+    ProductSummaryRequest,
     RecentProductCatalogPage,
     SearchFilters,
     SearchPage,
     SearchRequest,
     SourcePage,
-    TemporalStatus,
     UnsupportedProduct,
 )
 from cardrag_mcp.reranker import RerankerShadowLane
@@ -57,30 +59,29 @@ VECTOR_CHUNK_ROWS = 8_192
 def _recent_product_period(months: int) -> tuple[date, date]:
     if isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= 120:
         raise ValueError("months must be an integer between 1 and 120")
-    today = date.today()
+    today = _seoul_today()
     year, month_index = divmod(today.year * 12 + today.month - 1 - months, 12)
     month = month_index + 1
     cutoff = date(year, month, min(today.day, monthrange(year, month)[1]))
     return cutoff, today
 
 
-def _revision_launch_dates(
-    connection: sqlite3.Connection, revision_ids: list[str]
-) -> dict[str, date | None]:
-    texts: dict[str, list[str]] = {}
-    for start in range(0, len(revision_ids), 500):
-        batch = revision_ids[start : start + 500]
-        placeholders = ",".join("?" for _ in batch)
-        rows = connection.execute(
-            f"""SELECT contract_revision_id, display_text
-                  FROM structure_nodes
-                 WHERE contract_revision_id IN ({placeholders})
-                   AND display_text LIKE '%출시%'""",  # noqa: S608 - placeholders only
-            batch,
-        ).fetchall()
-        for row in rows:
-            texts.setdefault(str(row["contract_revision_id"]), []).append(str(row["display_text"]))
-    return {revision_id: resolve_launch_date(values) for revision_id, values in texts.items()}
+def _seoul_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+
+def _explicit_period(start_date: date | None, end_date: date | None) -> tuple[date, date]:
+    if start_date is None or end_date is None:
+        raise ValueError("start_date and end_date must be provided together")
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        raise ValueError("start_date and end_date must be ISO dates")
+    if isinstance(start_date, datetime) or isinstance(end_date, datetime):
+        raise ValueError("start_date and end_date must be dates without a time")
+    if start_date > end_date:
+        raise ValueError("start_date must not be after end_date")
+    if end_date > _seoul_today():
+        raise ValueError("end_date must not be in the future (Asia/Seoul)")
+    return start_date, end_date
 
 
 def _fts_expression(query: str) -> str:
@@ -180,6 +181,9 @@ class ServingRepository:
         self.cursors = CursorCodec(cursor_secret)
         self.reranker_shadow = reranker_shadow
         self.exact = V5ExactRepository(store, embedder, reranker_shadow)
+        self.metadata_cache = MetadataCache()
+        self.exact.metadata_cache = self.metadata_cache
+        self.catalog = CatalogRepository(self.cursors, self.metadata_cache)
 
     @property
     def ready(self) -> bool:
@@ -1005,156 +1009,71 @@ class ServingRepository:
 
     async def list_recent_products(
         self,
-        months: int = 3,
+        months: int | None = None,
         issuer: str | None = None,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        issuers: list[str] | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        expected_generation_id: str | None = None,
     ) -> RecentProductCatalogPage:
+        explicit = start_date is not None or end_date is not None
+        if explicit and months is not None:
+            raise ValueError("months and explicit start_date/end_date are mutually exclusive")
+        start, end = (
+            _explicit_period(start_date, end_date)
+            if explicit
+            else _recent_product_period(3 if months is None else months)
+        )
+        scope = issuer_scope(issuer, issuers)
+        selected_limit = page_limit(
+            limit, enabled=explicit or issuers is not None or cursor is not None
+        )
         with self.store.pin() as handle:
-            return await asyncio.to_thread(self._list_recent_products, handle, months, issuer)
-
-    @staticmethod
-    def _list_recent_products(
-        handle: GenerationHandle,
-        months: int,
-        issuer: str | None,
-    ) -> RecentProductCatalogPage:
-        cutoff_date, today = _recent_product_period(months)
-
-        with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
-                sql = """SELECT pl.issuer, pl.product_code, pl.product_lineage_id,
-                                pl.name AS product_name, pl.document_type,
-                                cr.contract_revision_id, cr.effective_date, cr.temporal_status
-                           FROM contract_revisions AS cr
-                           JOIN product_lineages AS pl
-                             ON pl.product_lineage_id = cr.product_lineage_id
-                          WHERE cr.temporal_status = 'current'"""
-                params: list[Any] = []
-                if issuer is not None:
-                    sql += " AND pl.issuer = ?"
-                    params.append(issuer)
-
-                products = connection.execute(sql, params).fetchall()
-                rev_launch_dates = _revision_launch_dates(
-                    connection, [str(product["contract_revision_id"]) for product in products]
-                )
-                items: list[ProductCatalogEntry] = []
-                unknown_launch_date_count = 0
-                for p in products:
-                    eff_raw = p["effective_date"]
-                    eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
-                    cr_id = str(p["contract_revision_id"])
-                    launch_d = rev_launch_dates.get(cr_id)
-                    if launch_d is None:
-                        unknown_launch_date_count += 1
-                    elif cutoff_date <= launch_d <= today:
-                        items.append(
-                            ProductCatalogEntry(
-                                issuer=str(p["issuer"]),
-                                product_code=str(p["product_code"]),
-                                product_lineage_id=str(p["product_lineage_id"]),
-                                product_name=str(p["product_name"]),
-                                document_type=str(p["document_type"]),
-                                effective_date=eff_date,
-                                launch_date=launch_d,
-                                temporal_status=cast(TemporalStatus, str(p["temporal_status"])),
-                            )
-                        )
-                items.sort(
-                    key=lambda x: (
-                        x.launch_date or date.min,
-                        x.product_name,
-                    ),
-                    reverse=True,
-                )
-                return RecentProductCatalogPage(
-                    generation_id=handle.generation_id,
-                    items=tuple(items),
-                    total_count=len(items),
-                    period_start=cutoff_date,
-                    period_end=today,
-                    unknown_launch_date_count=unknown_launch_date_count,
-                )
-            return RecentProductCatalogPage(
-                generation_id=handle.generation_id,
-                items=(),
-                total_count=0,
-                period_start=cutoff_date,
-                period_end=today,
-                unknown_launch_date_count=0,
+            check_generation(handle, expected_generation_id)
+            return await asyncio.to_thread(
+                self.catalog.recent,
+                handle,
+                start=start,
+                end=end,
+                scope=scope,
+                limit=selected_limit,
+                cursor=cursor,
             )
 
     async def find_products(
         self,
-        keyword: str,
+        keyword: str | None = None,
         issuer: str | None = None,
-    ) -> ProductCatalogPage:
+        *,
+        mode: str = "search",
+        issuers: list[str] | None = None,
+        sort: str = "name",
+        limit: int | None = None,
+        cursor: str | None = None,
+        expected_generation_id: str | None = None,
+    ) -> ProductCatalogPage | ProductCoverage:
+        scope = issuer_scope(issuer, issuers)
+        selected_limit = (
+            page_limit(
+                limit, enabled=mode == "catalog" or issuers is not None or cursor is not None
+            )
+            if mode != "coverage"
+            else limit
+        )
         with self.store.pin() as handle:
-            return await asyncio.to_thread(self._find_products, handle, keyword, issuer)
-
-    @staticmethod
-    def _find_products(
-        handle: GenerationHandle,
-        keyword: str,
-        issuer: str | None,
-    ) -> ProductCatalogPage:
-        norm_keyword = " ".join(unicodedata.normalize("NFKC", keyword).casefold().split())
-        if not norm_keyword:
-            raise ValueError("keyword must not be blank")
-
-        with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
-                sql = """SELECT pl.issuer, pl.product_code, pl.product_lineage_id,
-                                pl.name AS product_name, pl.document_type,
-                                cr.contract_revision_id, cr.effective_date, cr.temporal_status
-                           FROM contract_revisions AS cr
-                           JOIN product_lineages AS pl
-                             ON pl.product_lineage_id = cr.product_lineage_id
-                          WHERE cr.temporal_status = 'current'"""
-                params: list[Any] = []
-                if issuer is not None:
-                    sql += " AND pl.issuer = ?"
-                    params.append(issuer)
-
-                rows = connection.execute(sql, params).fetchall()
-                matched_rows: list[sqlite3.Row] = []
-                matched_cr_ids: list[str] = []
-                for row in rows:
-                    name_norm = " ".join(
-                        unicodedata.normalize("NFKC", str(row["product_name"])).casefold().split()
-                    )
-                    if norm_keyword in name_norm:
-                        matched_rows.append(row)
-                        matched_cr_ids.append(str(row["contract_revision_id"]))
-
-                rev_launch_dates = _revision_launch_dates(connection, matched_cr_ids)
-
-                items: list[ProductCatalogEntry] = []
-                for p in matched_rows:
-                    eff_raw = p["effective_date"]
-                    eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
-                    cr_id = str(p["contract_revision_id"])
-                    items.append(
-                        ProductCatalogEntry(
-                            issuer=str(p["issuer"]),
-                            product_code=str(p["product_code"]),
-                            product_lineage_id=str(p["product_lineage_id"]),
-                            product_name=str(p["product_name"]),
-                            document_type=str(p["document_type"]),
-                            effective_date=eff_date,
-                            launch_date=rev_launch_dates.get(cr_id),
-                            temporal_status=cast(TemporalStatus, str(p["temporal_status"])),
-                        )
-                    )
-                items.sort(key=lambda x: (x.issuer, x.product_name))
-                return ProductCatalogPage(
-                    generation_id=handle.generation_id,
-                    items=tuple(items),
-                    total_count=len(items),
-                )
-            return ProductCatalogPage(
-                generation_id=handle.generation_id,
-                items=(),
-                total_count=0,
+            check_generation(handle, expected_generation_id)
+            return await asyncio.to_thread(
+                self.catalog.find,
+                handle,
+                keyword=keyword,
+                mode=mode,
+                scope=scope,
+                sort=sort,
+                limit=selected_limit,
+                cursor=cursor,
             )
 
     async def find_cards_by_merchant(
@@ -1231,139 +1150,27 @@ class ServingRepository:
 
     async def get_product_summary(
         self,
-        issuer: str,
-        identifier: str,
-    ) -> ProductSummary | None:
+        issuer: str | None = None,
+        identifier: str | None = None,
+        *,
+        products: list[ProductSummaryRequest] | None = None,
+        expected_generation_id: str | None = None,
+    ) -> ProductSummary | ProductSummaryBatch | None:
+        if products is not None:
+            if issuer is not None or identifier is not None:
+                raise ValueError("products and issuer/identifier are mutually exclusive")
+            if not isinstance(products, list) or not 1 <= len(products) <= 50:
+                raise ValueError("products must contain between 1 and 50 identifiers")
+            requests = [ProductSummaryRequest.model_validate(product) for product in products]
+        else:
+            if identifier is not None and not identifier.strip():
+                raise ValueError("identifier must not be blank")
+            if issuer is None or identifier is None:
+                raise ValueError("issuer and identifier must be provided together")
+            requests = [ProductSummaryRequest(issuer=issuer, identifier=identifier)]
         with self.store.pin() as handle:
-            return await asyncio.to_thread(self._get_product_summary, handle, issuer, identifier)
-
-    @staticmethod
-    def _get_product_summary(
-        handle: GenerationHandle,
-        issuer: str,
-        identifier: str,
-    ) -> ProductSummary | None:
-        cleaned_id = identifier.strip()
-        if not cleaned_id:
-            raise ValueError("identifier must not be blank")
-
-        with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
-                row = connection.execute(
-                    """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
-                              cr.contract_revision_id, cr.effective_date
-                         FROM product_lineages AS pl
-                         JOIN contract_revisions AS cr
-                           ON cr.product_lineage_id = pl.product_lineage_id
-                        WHERE pl.issuer = ? AND pl.product_code = ?
-                          AND cr.temporal_status = 'current'
-                        ORDER BY cr.contract_revision_id
-                        LIMIT 1""",
-                    (issuer, cleaned_id),
-                ).fetchone()
-
-                if row is None:
-                    norm_id = " ".join(unicodedata.normalize("NFKC", cleaned_id).casefold().split())
-                    candidates = connection.execute(
-                        """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
-                                  cr.contract_revision_id, cr.effective_date
-                             FROM product_lineages AS pl
-                             JOIN contract_revisions AS cr
-                               ON cr.product_lineage_id = pl.product_lineage_id
-                            WHERE pl.issuer = ?
-                              AND cr.temporal_status = 'current'""",
-                        (issuer,),
-                    ).fetchall()
-                    for cand in candidates:
-                        cand_name = " ".join(
-                            unicodedata.normalize("NFKC", str(cand["product_name"]))
-                            .casefold()
-                            .split()
-                        )
-                        if norm_id in cand_name:
-                            row = cand
-                            break
-
-                if row is None:
-                    return None
-
-                cr_id = str(row["contract_revision_id"])
-                p_issuer = str(row["issuer"])
-                p_code = str(row["product_code"])
-                p_name = str(row["product_name"])
-                eff_raw = row["effective_date"]
-                eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
-
-                nodes = connection.execute(
-                    """SELECT node_type, major_class, raw_heading, display_text, ordinal
-                         FROM structure_nodes
-                        WHERE contract_revision_id = ?
-                        ORDER BY ordinal""",
-                    (cr_id,),
-                ).fetchall()
-
-                launch_d = resolve_launch_date(str(node["display_text"]) for node in nodes)
-                annual_fee: str | None = None
-                benefit_headings: list[str] = []
-                benefit_summaries: list[str] = []
-
-                for n in nodes:
-                    txt = str(n["display_text"]).strip()
-                    mclass = str(n["major_class"])
-                    ntype = str(n["node_type"])
-                    heading = str(n["raw_heading"] or "").strip()
-
-                    if annual_fee is None and "연회비" in txt:
-                        cleaned_fee = " ".join(txt.split())
-                        if len(cleaned_fee) > 10 and not any(
-                            k in cleaned_fee for k in ["반환", "기준", "산정", "중도해지"]
-                        ):
-                            annual_fee = cleaned_fee[:250]
-
-                    if mclass == "BENEFIT":
-                        if heading and ntype in ("MAJOR_SECTION", "ITEM"):
-                            h_clean = heading.replace("#", "").strip()
-                            if h_clean and h_clean not in benefit_headings and len(h_clean) > 2:
-                                if not any(
-                                    k in h_clean
-                                    for k in ["유의사항", "이용안내", "공통", "기준", "기타"]
-                                ):
-                                    benefit_headings.append(h_clean)
-                        if (
-                            ntype in ("ITEM", "PARAGRAPH", "TABLE_ROW")
-                            and len(benefit_summaries) < 5
-                        ):
-                            b_clean = " ".join(txt.split())
-                            benefit_keywords = (
-                                "할인",
-                                "적립",
-                                "캐시백",
-                                "면제",
-                                "무료",
-                                "제공",
-                                "포인트",
-                            )
-                            ignore_keywords = (
-                                "유의사항",
-                                "연회비",
-                                "금융소비자",
-                                "기준",
-                                "실적제외",
-                            )
-                            if any(w in b_clean for w in benefit_keywords):
-                                if not any(k in b_clean for k in ignore_keywords):
-                                    if len(b_clean) > 10 and b_clean not in benefit_summaries:
-                                        benefit_summaries.append(b_clean[:180])
-
-                return ProductSummary(
-                    generation_id=handle.generation_id,
-                    issuer=p_issuer,
-                    product_code=p_code,
-                    product_name=p_name,
-                    effective_date=eff_date,
-                    launch_date=launch_d,
-                    annual_fee_text=annual_fee,
-                    benefit_headings=tuple(benefit_headings[:5]),
-                    benefit_summary_texts=tuple(benefit_summaries[:5]),
-                )
-            return None
+            check_generation(handle, expected_generation_id)
+            if handle.metadata.schema_id != "cardrag.serving-db.v5" and products is None:
+                return None
+            result = await asyncio.to_thread(self.catalog.summaries, handle, requests)
+            return result if products is not None else result.items[0]
