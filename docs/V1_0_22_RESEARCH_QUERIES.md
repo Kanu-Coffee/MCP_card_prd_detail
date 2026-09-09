@@ -49,6 +49,11 @@ MCP의 structured/text 중복 필드까지 포함한 HTTP 전송 크기를 의�
 제한한다. DB 연결이나 generation pin을 캐시에 보존하지 않는다. 요약에 lineage,
 revision, document, 출처 및 근거 참조를 제공해 같은 상품을 반복 탐색할 필요를 줄인다.
 
+이미지 검사에서 확인한 CVE-2026-84382 대응으로 MCP의 전이 의존성 `httpx2`와
+`httpcore2`를 2.12.0으로 고정한다. 재해결 시에도 `httpx2>=2.12.0`을 요구한다.
+이 의존성은 Worker 패키지에 포함되지 않는다. 압축 응답 streaming의 메모리 제한 수정은
+[HTTPX2 2.12.0 릴리스 기록](https://pypi.org/project/httpx2/2.12.0/)에서 확인할 수 있다.
+
 인증된 `/metrics`는 도구별 성공·실패·취소, 실행 시간, MCP 결과 직렬화 바이트와 캐시
 hit/miss/eviction/사용량을 제공한다. 질의문, 상품명, 사용자 정보는 metric label에 넣지
 않는다. Compact의 JSON 제한과 MCP 봉투를 포함한 관측 바이트는 서로 다른 지표다.
