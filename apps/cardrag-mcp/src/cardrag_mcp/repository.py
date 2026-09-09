@@ -10,6 +10,7 @@ import json
 import math
 import sqlite3
 import unicodedata
+from calendar import monthrange
 from collections.abc import Iterable
 from datetime import date
 from typing import Any, Literal, cast
@@ -20,7 +21,7 @@ from numpy.typing import NDArray
 
 from cardrag_mcp.embeddings import EmbeddingUnavailable, OpenRouterEmbedder
 from cardrag_mcp.exact import V5ExactRepository
-from cardrag_mcp.launch_date import parse_launch_date
+from cardrag_mcp.launch_date import resolve_launch_date
 from cardrag_mcp.models import (
     ContractBundle,
     ContractSearchPage,
@@ -37,6 +38,7 @@ from cardrag_mcp.models import (
     ProductCatalogPage,
     ProductRevisionList,
     ProductSummary,
+    RecentProductCatalogPage,
     SearchFilters,
     SearchPage,
     SearchRequest,
@@ -50,6 +52,35 @@ from cardrag_mcp.store import GenerationHandle, GenerationStore
 
 RRF_K = 60
 VECTOR_CHUNK_ROWS = 8_192
+
+
+def _recent_product_period(months: int) -> tuple[date, date]:
+    if isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= 120:
+        raise ValueError("months must be an integer between 1 and 120")
+    today = date.today()
+    year, month_index = divmod(today.year * 12 + today.month - 1 - months, 12)
+    month = month_index + 1
+    cutoff = date(year, month, min(today.day, monthrange(year, month)[1]))
+    return cutoff, today
+
+
+def _revision_launch_dates(
+    connection: sqlite3.Connection, revision_ids: list[str]
+) -> dict[str, date | None]:
+    texts: dict[str, list[str]] = {}
+    for start in range(0, len(revision_ids), 500):
+        batch = revision_ids[start : start + 500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = connection.execute(
+            f"""SELECT contract_revision_id, display_text
+                  FROM structure_nodes
+                 WHERE contract_revision_id IN ({placeholders})
+                   AND display_text LIKE '%출시%'""",  # noqa: S608 - placeholders only
+            batch,
+        ).fetchall()
+        for row in rows:
+            texts.setdefault(str(row["contract_revision_id"]), []).append(str(row["display_text"]))
+    return {revision_id: resolve_launch_date(values) for revision_id, values in texts.items()}
 
 
 def _fts_expression(query: str) -> str:
@@ -976,7 +1007,7 @@ class ServingRepository:
         self,
         months: int = 3,
         issuer: str | None = None,
-    ) -> ProductCatalogPage:
+    ) -> RecentProductCatalogPage:
         with self.store.pin() as handle:
             return await asyncio.to_thread(self._list_recent_products, handle, months, issuer)
 
@@ -985,30 +1016,11 @@ class ServingRepository:
         handle: GenerationHandle,
         months: int,
         issuer: str | None,
-    ) -> ProductCatalogPage:
-        today = date.today()
-        year = today.year
-        month = today.month - months
-        while month <= 0:
-            year -= 1
-            month += 12
-        cutoff_date = date(year, month, 1)
+    ) -> RecentProductCatalogPage:
+        cutoff_date, today = _recent_product_period(months)
 
         with handle.connect() as connection:
             if handle.metadata.schema_id == "cardrag.serving-db.v5":
-                launch_rows = connection.execute(
-                    """SELECT contract_revision_id, display_text
-                         FROM structure_nodes
-                        WHERE display_text LIKE '%출시%'"""
-                ).fetchall()
-                rev_launch_dates: dict[str, date] = {}
-                for row in launch_rows:
-                    ld = parse_launch_date(str(row["display_text"]))
-                    if ld is not None:
-                        cr_id = str(row["contract_revision_id"])
-                        if cr_id not in rev_launch_dates or ld > rev_launch_dates[cr_id]:
-                            rev_launch_dates[cr_id] = ld
-
                 sql = """SELECT pl.issuer, pl.product_code, pl.product_lineage_id,
                                 pl.name AS product_name, pl.document_type,
                                 cr.contract_revision_id, cr.effective_date, cr.temporal_status
@@ -1022,15 +1034,19 @@ class ServingRepository:
                     params.append(issuer)
 
                 products = connection.execute(sql, params).fetchall()
+                rev_launch_dates = _revision_launch_dates(
+                    connection, [str(product["contract_revision_id"]) for product in products]
+                )
                 items: list[ProductCatalogEntry] = []
+                unknown_launch_date_count = 0
                 for p in products:
                     eff_raw = p["effective_date"]
                     eff_date = date.fromisoformat(str(eff_raw)) if eff_raw else None
                     cr_id = str(p["contract_revision_id"])
                     launch_d = rev_launch_dates.get(cr_id)
-                    if (launch_d is not None and launch_d >= cutoff_date) or (
-                        eff_date is not None and eff_date >= cutoff_date
-                    ):
+                    if launch_d is None:
+                        unknown_launch_date_count += 1
+                    elif cutoff_date <= launch_d <= today:
                         items.append(
                             ProductCatalogEntry(
                                 issuer=str(p["issuer"]),
@@ -1045,21 +1061,26 @@ class ServingRepository:
                         )
                 items.sort(
                     key=lambda x: (
-                        x.launch_date or x.effective_date or date.min,
-                        x.effective_date or date.min,
+                        x.launch_date or date.min,
                         x.product_name,
                     ),
                     reverse=True,
                 )
-                return ProductCatalogPage(
+                return RecentProductCatalogPage(
                     generation_id=handle.generation_id,
                     items=tuple(items),
                     total_count=len(items),
+                    period_start=cutoff_date,
+                    period_end=today,
+                    unknown_launch_date_count=unknown_launch_date_count,
                 )
-            return ProductCatalogPage(
+            return RecentProductCatalogPage(
                 generation_id=handle.generation_id,
                 items=(),
                 total_count=0,
+                period_start=cutoff_date,
+                period_end=today,
+                unknown_launch_date_count=0,
             )
 
     async def find_products(
@@ -1105,22 +1126,7 @@ class ServingRepository:
                         matched_rows.append(row)
                         matched_cr_ids.append(str(row["contract_revision_id"]))
 
-                rev_launch_dates: dict[str, date] = {}
-                if matched_cr_ids:
-                    placeholders = ",".join("?" for _ in matched_cr_ids)
-                    launch_rows = connection.execute(
-                        f"""SELECT contract_revision_id, display_text
-                              FROM structure_nodes
-                             WHERE contract_revision_id IN ({placeholders})
-                               AND display_text LIKE '%출시%'""",  # noqa: S608 - placeholders only
-                        matched_cr_ids,
-                    ).fetchall()
-                    for r in launch_rows:
-                        ld = parse_launch_date(str(r["display_text"]))
-                        if ld is not None:
-                            c_id = str(r["contract_revision_id"])
-                            if c_id not in rev_launch_dates or ld > rev_launch_dates[c_id]:
-                                rev_launch_dates[c_id] = ld
+                rev_launch_dates = _revision_launch_dates(connection, matched_cr_ids)
 
                 items: list[ProductCatalogEntry] = []
                 for p in matched_rows:
@@ -1296,7 +1302,7 @@ class ServingRepository:
                     (cr_id,),
                 ).fetchall()
 
-                launch_d: date | None = None
+                launch_d = resolve_launch_date(str(node["display_text"]) for node in nodes)
                 annual_fee: str | None = None
                 benefit_headings: list[str] = []
                 benefit_summaries: list[str] = []
@@ -1306,9 +1312,6 @@ class ServingRepository:
                     mclass = str(n["major_class"])
                     ntype = str(n["node_type"])
                     heading = str(n["raw_heading"] or "").strip()
-
-                    if launch_d is None and "출시" in txt:
-                        launch_d = parse_launch_date(txt)
 
                     if annual_fee is None and "연회비" in txt:
                         cleaned_fee = " ".join(txt.split())

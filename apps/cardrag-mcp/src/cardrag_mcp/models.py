@@ -688,6 +688,20 @@ class ProductCatalogPage(StrictModel):
     total_count: int = Field(ge=0)
 
 
+class RecentProductCatalogPage(ProductCatalogPage):
+    """Confirmed launches within an inclusive period, with unknown-date coverage."""
+
+    period_start: date
+    period_end: date
+    unknown_launch_date_count: int = Field(
+        ge=0,
+        description=(
+            "Current product revisions in the selected issuer scope without a confirmed "
+            "launch date. These are excluded from items and are not known recent launches."
+        ),
+    )
+
+
 class MerchantSearchHit(StrictModel):
     """Matched card product with benefit text excerpts."""
 

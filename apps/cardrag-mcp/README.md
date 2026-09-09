@@ -83,8 +83,15 @@ call. Each identical request resumes its generation/query-bound checkpoint and
 returns `running` progress plus the stable job ID until all contracts are
 scored. Partial runs expose neither bundles nor a completion artifact; only the
 `complete` response does. RRF remains a v4-only compatibility path. The public
-MCP surface remains the five legacy tools plus `search_contracts`,
-`get_contract_bundle`, and `list_product_revisions`.
+MCP surface has 12 default tools: the five legacy tools plus `search_contracts`,
+`get_contract_bundle`, `list_product_revisions`, `list_recent_products`,
+`find_products`, `find_cards_by_merchant`, and `get_product_summary`.
+In v1.0.21, issuer-taking tools accept common Korean and English issuer names
+and return explicit errors for unknown names. `list_recent_products` returns
+confirmed launches within the requested calendar-month interval, with explicit
+period bounds and a separate count of current products with unknown launch dates.
+Document effective dates never substitute for launch dates. See the
+[v1.0.21 contract](../../docs/V1_0_21_MCP_INPUTS_AND_LAUNCH_DATES.md).
 
 The Qwen reranker lane is disabled by default and settings validation permits it
 only on `candidate-v1.0.11`. When enabled, it sends only already exact-scored

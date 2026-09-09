@@ -12,13 +12,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 
 from cardrag_mcp.config import Settings
 from cardrag_mcp.experimental_map_reduce import ExperimentalMapReduceLane
@@ -254,14 +255,18 @@ def build_mcp_server(
 
     @server.tool()
     async def list_recent_products(
-        months: int = 3,
+        months: Annotated[int, Field(ge=1, le=120, strict=True)] = 3,
         issuer: IssuerInput | None = None,
     ) -> dict[str, Any]:
-        """List card products launched or revised within the specified number of months.
+        """List only confirmed card launches in the last 1 to 120 calendar months.
 
-        Returns both the official launch date (parsed from disclosure text) and the contract
-        effective date. Results are sorted newest-first. Use this tool for time-based queries
-        like 'recently released cards' or 'cards launched in the last 3 months'.
+        The inclusive period_start/period_end runs from the same day months ago (clamped
+        to that month's last day) through today. Only launch_date determines inclusion;
+        effective_date is the document revision date and never a launch-date fallback.
+        Future launches are excluded and confirmed launches are sorted newest-first.
+        unknown_launch_date_count covers all current product revisions in the issuer
+        scope whose launch date is missing, invalid, or conflicting. It is not a count
+        of recent launches: report those dates as [확인 필요] and never estimate them.
         """
 
         result = await repository.list_recent_products(

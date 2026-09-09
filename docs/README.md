@@ -1,5 +1,6 @@
 # CardRAG 문서
 
+- [v1.0.21 MCP 카드사 입력·출시일 처리](V1_0_21_MCP_INPUTS_AND_LAUNCH_DATES.md)
 - [v1.0.20 8사 수집·TLS·candidate 검증](V1_0_20_ISSUERS.md)
 - [v1.0.19 WebDAV 14회·7일·10GiB 주기 검증·대용량 단일 검증·복구](V1_0_19_WEBDAV_VERIFICATION.md)
 

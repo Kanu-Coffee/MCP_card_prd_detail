@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import date
 from pathlib import Path
 
 import numpy as np
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from v5_fixtures import V5Fixture, install_v5_fixture
 
+import cardrag_mcp.repository as repository_module
+from cardrag_mcp.app import build_mcp_server
+from cardrag_mcp.config import Settings
 from cardrag_mcp.launch_date import parse_launch_date
 from cardrag_mcp.models import (
     MerchantSearchPage,
     ProductCatalogPage,
     ProductSummary,
+    RecentProductCatalogPage,
 )
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.store import GenerationStore
@@ -28,7 +34,9 @@ class FakeEmbedder:
 @pytest.fixture
 def v5_runtime(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[GenerationStore, ServingRepository, V5Fixture]:
+    _freeze_today(monkeypatch, date(2026, 9, 9))
     store = GenerationStore(tmp_path / "state", maximum_vector_bytes=2 * 1024 * 1024)
     fixture, _ = install_v5_fixture(store)
     query = np.zeros((4096,), dtype=np.float32)
@@ -41,6 +49,30 @@ def v5_runtime(
         maximum_candidates=20,
     )
     return store, repository, fixture
+
+
+def _freeze_today(monkeypatch: pytest.MonkeyPatch, today: date) -> None:
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return today
+
+    monkeypatch.setattr(repository_module, "date", FixedDate)
+
+
+def _set_launch_texts(fixture: V5Fixture, *texts: str) -> None:
+    """Change only the isolated temporary metadata fixture."""
+    with sqlite3.connect(fixture.database) as connection:
+        connection.execute(
+            "UPDATE contract_revisions SET effective_date = ? WHERE contract_revision_id = ?",
+            ("2026-09-08", fixture.current_revision_id),
+        )
+        for ordinal, text in zip((3, 5), texts, strict=False):
+            connection.execute(
+                "UPDATE structure_nodes SET display_text = ? "
+                "WHERE contract_revision_id = ? AND ordinal = ?",
+                (text, fixture.current_revision_id, ordinal),
+            )
 
 
 # ── Launch Date Parser Tests ──────────────────────────────────────────
@@ -90,23 +122,131 @@ def test_parse_launch_date_no_date_or_invalid() -> None:
 @pytest.mark.asyncio
 async def test_list_recent_products(v5_runtime) -> None:
     _, repository, fixture = v5_runtime
-    # The fixture has revisions with effective dates
-    page: ProductCatalogPage = await repository.list_recent_products(months=120)
-    assert isinstance(page, ProductCatalogPage)
+    _set_launch_texts(fixture, "상품 출시일 : 2026년 08월 12일")
+    page = await repository.list_recent_products(months=3)
+    assert isinstance(page, RecentProductCatalogPage)
     assert page.generation_id == fixture.generation_id
-    # Current revisions in fixture should be returned
-    assert page.total_count >= 1
-    assert any(item.product_name == "알파 카드" for item in page.items)
+    assert page.total_count == 1
+    assert page.items[0].product_name == "알파 카드"
+    assert page.items[0].launch_date == date(2026, 8, 12)
+    assert page.items[0].effective_date == date(2026, 9, 8)
+    assert page.period_start == date(2026, 6, 9)
+    assert page.period_end == date(2026, 9, 9)
+    assert page.unknown_launch_date_count == 0
 
 
 @pytest.mark.asyncio
 async def test_list_recent_products_issuer_filter(v5_runtime) -> None:
     _, repository, _ = v5_runtime
     kb_page = await repository.list_recent_products(months=120, issuer="kb")
-    assert kb_page.total_count >= 1
+    assert kb_page.total_count == 0
+    assert kb_page.unknown_launch_date_count == 1
 
     woori_page = await repository.list_recent_products(months=120, issuer="woori")
     assert woori_page.total_count == 0
+    assert woori_page.unknown_launch_date_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "unknown_count"),
+    (
+        ("상품 출시일 : 1993년 10월 02일", 0),
+        ("출시일 미기재", 1),
+        ("상품 출시일 : 2026년 09월 10일", 0),
+        ("상품 출시일 : 2026년 02월 31일", 1),
+    ),
+)
+async def test_recent_products_never_use_revision_date_or_future_launch(
+    v5_runtime, text: str, unknown_count: int
+) -> None:
+    _, repository, fixture = v5_runtime
+    _set_launch_texts(fixture, text)
+    page = await repository.list_recent_products(months=3)
+    assert page.items == ()
+    assert page.total_count == 0
+    assert page.unknown_launch_date_count == unknown_count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("today", "months", "start", "launch", "included"),
+    (
+        (date(2026, 9, 9), 3, date(2026, 6, 9), "2026-06-08", False),
+        (date(2026, 9, 9), 3, date(2026, 6, 9), "2026-06-09", True),
+        (date(2026, 9, 9), 3, date(2026, 6, 9), "2026-09-09", True),
+        (date(2026, 3, 31), 1, date(2026, 2, 28), "2026-02-28", True),
+        (date(2024, 3, 31), 1, date(2024, 2, 29), "2024-02-28", False),
+        (date(2024, 3, 31), 1, date(2024, 2, 29), "2024-02-29", True),
+        (date(2026, 1, 31), 3, date(2025, 10, 31), "2025-10-30", False),
+        (date(2026, 1, 31), 3, date(2025, 10, 31), "2025-10-31", True),
+    ),
+)
+async def test_recent_products_calendar_month_boundaries(
+    v5_runtime, monkeypatch, today, months, start, launch, included
+) -> None:
+    _, repository, fixture = v5_runtime
+    _freeze_today(monkeypatch, today)
+    _set_launch_texts(fixture, f"상품 출시일 : {launch.replace('-', '.')}")
+    page = await repository.list_recent_products(months=months)
+    assert page.period_start == start
+    assert page.period_end == today
+    assert page.total_count == int(included)
+    assert page.unknown_launch_date_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("months", (-1, 0, 121, 1.5, True, "3"))
+async def test_recent_products_reject_invalid_months_in_repository_and_mcp(
+    v5_runtime, months
+) -> None:
+    store, repository, _ = v5_runtime
+    with pytest.raises(ValueError, match="months must be an integer between 1 and 120"):
+        await repository.list_recent_products(months=months)
+    server = build_mcp_server(
+        repository,
+        store,
+        Settings(
+            environment="test",
+            mcp_bearer_token="test-static-bearer-token-000000000000",
+            mcp_state_dir=store.root,
+            mcp_public_base_url="http://testserver",
+        ),
+    )
+    with pytest.raises(ToolError):
+        await server.call_tool("list_recent_products", {"months": months})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("texts", "expected"),
+    (
+        (("상품 출시일 : 2026.08.12", "카드 신규 출시(2026년 08월 12일)"), date(2026, 8, 12)),
+        (("상품 출시일 : 2026.08.12", "상품 출시일 : 2026.09.01"), None),
+        (("상품 출시일 : 2026.09.01", "상품 출시일 : 2026.08.12"), None),
+        (("상품 출시일 : 2026.08.12; 상품 출시일 : 2026.09.01",), None),
+        (("상품 출시일 : 2026.08.12", "상품 출시일 : 2026.02.31"), None),
+        (("출시일 미기재",), None),
+    ),
+)
+async def test_launch_dates_are_consistent_across_metadata_tools(
+    v5_runtime, texts, expected
+) -> None:
+    _, repository, fixture = v5_runtime
+    _set_launch_texts(fixture, *texts)
+    recent = await repository.list_recent_products(months=3)
+    found = await repository.find_products("알파")
+    summary = await repository.get_product_summary("kb", "ALPHA")
+    assert summary is not None
+    assert found.items[0].launch_date == summary.launch_date == expected
+    assert "unknown_launch_date_count" not in found.model_dump()
+    if expected is None:
+        assert recent.items == ()
+        assert recent.unknown_launch_date_count == 1
+        assert found.model_dump(mode="json")["items"][0]["launch_date"] is None
+    else:
+        assert recent.items[0].launch_date == expected
+        assert recent.unknown_launch_date_count == 0
 
 
 @pytest.mark.asyncio
