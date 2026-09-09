@@ -22,6 +22,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from cardrag_mcp.config import Settings
 from cardrag_mcp.experimental_map_reduce import ExperimentalMapReduceLane
+from cardrag_mcp.issuer_input import IssuerInput, normalize_issuer, normalize_optional_issuer
 from cardrag_mcp.models import (
     ContractSearchRequest,
     SearchFilters,
@@ -123,7 +124,7 @@ def build_mcp_server(
     @server.tool()
     async def search_contracts(
         query: str,
-        issuer: str | None = None,
+        issuer: IssuerInput | None = None,
         product_lineage_id: str | None = None,
         as_of: str | None = None,
         include_history: bool = False,
@@ -136,7 +137,7 @@ def build_mcp_server(
         result = await repository.search_contracts(
             ContractSearchRequest(
                 query=query,
-                issuer=issuer,
+                issuer=normalize_optional_issuer(issuer),
                 product_lineage_id=product_lineage_id,
                 as_of=parsed_as_of,
                 include_history=include_history,
@@ -165,18 +166,20 @@ def build_mcp_server(
 
     @server.tool()
     async def list_product_revisions(
-        issuer: str,
+        issuer: IssuerInput,
         product_lineage_id: str,
     ) -> dict[str, Any]:
         """Return current, superseded, and ambiguous revisions for one product lineage."""
 
-        value = await repository.list_product_revisions(issuer, product_lineage_id)
+        value = await repository.list_product_revisions(
+            normalize_issuer(issuer), product_lineage_id
+        )
         return value.model_dump(mode="json")
 
     @server.tool()
     async def search_evidence(
         query: str,
-        issuer: str | None = None,
+        issuer: IssuerInput | None = None,
         product_code: str | None = None,
         section_type: str | None = None,
         limit: int = 10,
@@ -189,7 +192,7 @@ def build_mcp_server(
             SearchRequest(
                 query=query,
                 filters=SearchFilters(
-                    issuer=issuer,
+                    issuer=normalize_optional_issuer(issuer),
                     product_code=product_code,
                     section_type=section_type,
                 ),
@@ -214,10 +217,10 @@ def build_mcp_server(
         return value.model_dump(mode="json")
 
     @server.tool()
-    async def get_product(issuer: str, product_code: str) -> dict[str, Any]:
+    async def get_product(issuer: IssuerInput, product_code: str) -> dict[str, Any]:
         """Return the product, including explicit unsupported_drm or ocr_failed availability."""
 
-        value = await repository.get_product(issuer, product_code)
+        value = await repository.get_product(normalize_issuer(issuer), product_code)
         if value is None:
             raise ValueError("product not found")
         return value.model_dump(mode="json")
@@ -252,7 +255,7 @@ def build_mcp_server(
     @server.tool()
     async def list_recent_products(
         months: int = 3,
-        issuer: str | None = None,
+        issuer: IssuerInput | None = None,
     ) -> dict[str, Any]:
         """List card products launched or revised within the specified number of months.
 
@@ -261,13 +264,15 @@ def build_mcp_server(
         like 'recently released cards' or 'cards launched in the last 3 months'.
         """
 
-        result = await repository.list_recent_products(months=months, issuer=issuer)
+        result = await repository.list_recent_products(
+            months=months, issuer=normalize_optional_issuer(issuer)
+        )
         return result.model_dump(mode="json")
 
     @server.tool()
     async def find_products(
         keyword: str,
-        issuer: str | None = None,
+        issuer: IssuerInput | None = None,
     ) -> dict[str, Any]:
         """Search card products by partial name keyword (fuzzy).
 
@@ -276,13 +281,15 @@ def build_mcp_server(
         rather than a 6-digit product code.
         """
 
-        result = await repository.find_products(keyword=keyword, issuer=issuer)
+        result = await repository.find_products(
+            keyword=keyword, issuer=normalize_optional_issuer(issuer)
+        )
         return result.model_dump(mode="json")
 
     @server.tool()
     async def find_cards_by_merchant(
         merchant_name: str,
-        issuer: str | None = None,
+        issuer: IssuerInput | None = None,
     ) -> dict[str, Any]:
         """Find every card product whose BENEFIT nodes mention the given merchant or brand.
 
@@ -290,12 +297,15 @@ def build_mcp_server(
         '배달의민족'), returning matching benefit excerpts per card without vector search omissions.
         """
 
-        result = await repository.find_cards_by_merchant(merchant_name=merchant_name, issuer=issuer)
+        result = await repository.find_cards_by_merchant(
+            merchant_name=merchant_name,
+            issuer=normalize_optional_issuer(issuer),
+        )
         return result.model_dump(mode="json")
 
     @server.tool()
     async def get_product_summary(
-        issuer: str,
+        issuer: IssuerInput,
         identifier: str,
     ) -> dict[str, Any]:
         """Return a compact summary of one card product: name, dates, annual fee, and top benefits.
@@ -304,7 +314,9 @@ def build_mcp_server(
         Produces a lightweight 1-2KB summary instead of the massive full contract bundle.
         """
 
-        result = await repository.get_product_summary(issuer=issuer, identifier=identifier)
+        result = await repository.get_product_summary(
+            issuer=normalize_issuer(issuer), identifier=identifier
+        )
         if result is None:
             raise ValueError("product not found")
         return result.model_dump(mode="json")

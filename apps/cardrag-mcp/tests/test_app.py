@@ -78,6 +78,22 @@ def test_approved_mcp_tools(active_runtime) -> None:
         "issuer",
         "identifier",
     }
+    issuer_tools = {
+        "search_contracts",
+        "list_product_revisions",
+        "search_evidence",
+        "get_product",
+        "list_recent_products",
+        "find_products",
+        "find_cards_by_merchant",
+        "get_product_summary",
+    }
+    for tool_name in issuer_tools:
+        issuer_schema = by_name[tool_name].input_schema["properties"]["issuer"]
+        serialized_schema = str(issuer_schema)
+        for issuer in ("bc", "hana", "hyundai", "kb", "lotte", "samsung", "shinhan", "woori"):
+            assert issuer in serialized_schema
+        assert "KB국민카드" in serialized_schema
     assert "unsupported_drm" in (by_name["get_product"].description or "")
 
 
