@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -37,7 +37,7 @@ from cardrag_worker.contracts import (
     SourceRecord,
     snapshot_from_records,
 )
-from cardrag_worker.downloader import ProtectedDocumentError, validate_pdf
+from cardrag_worker.downloader import PDFValidationError, ProtectedDocumentError, validate_pdf
 from cardrag_worker.downloader import SecurePDFDownloader as RealDownloader
 from cardrag_worker.gc import GCPartialFailure
 from cardrag_worker.ocr import (
@@ -3683,3 +3683,306 @@ async def test_pdf_concurrency_rollback_keeps_acquisition_identity_unchanged(
             receipt.pop("run_id")
             receipts.append(receipt)
     assert receipts[0] == receipts[1]
+
+
+@pytest.fixture
+def completed_download_stage(tmp_path: Path) -> Iterator[SimpleNamespace]:
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[Adapter((source(),))],
+            ocr=FakeOCR(),  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+        )
+        run_id = state.start_run()
+        document_id = source().source_id
+        state.ensure_stage(run_id, document_id, "download", max_attempts=4)
+        # A prior success may already have consumed its entire original budget.
+        for _ in range(4):
+            state.stage_started(run_id, document_id, "download")
+        state.stage_succeeded(run_id, document_id, "download")
+        row = tuple(state.connection.execute("SELECT * FROM stage").fetchone())
+        artifact = tmp_path / "preserved-ocr.md"
+        artifact.write_bytes(b"previously verified OCR checkpoint")
+        yield SimpleNamespace(
+            pipeline=pipeline,
+            state=state,
+            run_id=run_id,
+            document_id=document_id,
+            row=row,
+            artifact=artifact,
+            artifact_mtime=artifact.stat().st_mtime_ns,
+        )
+
+
+def assert_completed_download_preserved(context: SimpleNamespace) -> None:
+    row = context.state.connection.execute(
+        "SELECT * FROM stage WHERE run_id=? AND document_id=? AND stage_name='download'",
+        (context.run_id, context.document_id),
+    ).fetchone()
+    assert tuple(row) == context.row
+    assert context.artifact.read_bytes() == b"previously verified OCR checkpoint"
+    assert context.artifact.stat().st_mtime_ns == context.artifact_mtime
+
+
+def revalidation_http_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://issuer.example/pdf?token=RAW_REVALIDATION_URL_SECRET")
+    return httpx.HTTPStatusError(
+        "RAW_REVALIDATION_EXCEPTION_SECRET",
+        request=request,
+        response=httpx.Response(status, request=request),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("RAW_REVALIDATION_EXCEPTION_SECRET"),
+        httpx.ConnectError("RAW_REVALIDATION_EXCEPTION_SECRET"),
+        httpx.RemoteProtocolError("RAW_REVALIDATION_EXCEPTION_SECRET"),
+        revalidation_http_error(503),
+    ],
+)
+async def test_completed_download_revalidation_retries_without_changing_success_evidence(
+    completed_download_stage: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    context = completed_download_stage
+    delays: list[float] = []
+    calls = 0
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async def acquire() -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise error
+        return b"verified PDF"
+
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", sleep)
+    caplog.set_level("INFO", logger="cardrag_worker.pipeline")
+    result = await context.pipeline._finite_stage(
+        run_id=context.run_id,
+        document_id=context.document_id,
+        name="download",
+        operation=acquire,
+        maximum_attempts=4,
+    )
+    assert result == b"verified PDF"
+    assert (calls, delays) == (3, [1.0, 2.0])
+    assert_completed_download_preserved(context)
+    assert context.document_id in caplog.text
+    assert context.run_id in caplog.text
+    assert "stage=download" in caplog.text
+    assert "attempt=3 max_attempts=4 outcome=succeeded" in caplog.text
+    assert "RAW_REVALIDATION" not in caplog.text
+    assert "https://" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_completed_download_revalidation_exhausts_finite_budget_and_logs_safe_identity(
+    completed_download_stage: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = completed_download_stage
+    delays: list[float] = []
+    calls = 0
+    context.pipeline.retry_cap_seconds = 3
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async def acquire() -> None:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("RAW_REVALIDATION_EXCEPTION_SECRET")
+
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", sleep)
+    with pytest.raises(httpx.ReadTimeout):
+        await context.pipeline._finite_stage(
+            run_id=context.run_id,
+            document_id=context.document_id,
+            name="download",
+            operation=acquire,
+            maximum_attempts=4,
+        )
+    assert (calls, delays) == (4, [1.0, 2.0, 3.0])
+    assert_completed_download_preserved(context)
+    assert "category=network error_kind=ReadTimeout" in caplog.text
+    assert "attempt=4 max_attempts=4 outcome=exhausted" in caplog.text
+    assert context.document_id in caplog.text
+    assert "RAW_REVALIDATION" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        revalidation_http_error(401),
+        revalidation_http_error(403),
+        revalidation_http_error(404),
+        ProviderSystemicError("provider_process_authentication_failed", exit_code=1),
+        ProviderSystemicError("provider_process_network_error", exit_code=1),
+        PDFValidationError("RAW_REVALIDATION_INVALID_PDF_SECRET"),
+        httpx.UnsupportedProtocol("RAW_REVALIDATION_UNSUPPORTED_PROTOCOL_SECRET"),
+    ],
+)
+async def test_completed_download_revalidation_does_not_retry_auth_systemic_or_invalid_data(
+    completed_download_stage: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    context = completed_download_stage
+    calls = 0
+
+    async def forbidden_sleep(_delay: float) -> None:
+        raise AssertionError("non-transient failures must not sleep or retry")
+
+    async def acquire() -> None:
+        nonlocal calls
+        calls += 1
+        raise error
+
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", forbidden_sleep)
+    with pytest.raises(type(error)) as captured:
+        await context.pipeline._finite_stage(
+            run_id=context.run_id,
+            document_id=context.document_id,
+            name="download",
+            operation=acquire,
+            maximum_attempts=4,
+        )
+    assert captured.value is error
+    assert calls == 1
+    assert_completed_download_preserved(context)
+    assert "outcome=failed" in caplog.text
+    assert "RAW_REVALIDATION" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_backoff", [False, True])
+async def test_completed_download_revalidation_cancellation_preserves_evidence_and_drains(
+    completed_download_stage: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    during_backoff: bool,
+) -> None:
+    context = completed_download_stage
+    blocked = asyncio.Event()
+    calls = 0
+
+    async def sleep(_delay: float) -> None:
+        blocked.set()
+        await asyncio.Future()
+
+    async def acquire() -> None:
+        nonlocal calls
+        calls += 1
+        if during_backoff:
+            raise httpx.ReadTimeout("RAW_REVALIDATION_CANCELLATION_SECRET")
+        blocked.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", sleep)
+    task = asyncio.create_task(
+        context.pipeline._finite_stage(
+            run_id=context.run_id,
+            document_id=context.document_id,
+            name="download",
+            operation=acquire,
+            maximum_attempts=4,
+        )
+    )
+    await blocked.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await task
+    assert calls == 1
+    assert captured.value.__context__ is None
+    assert_completed_download_preserved(context)
+
+
+@pytest.mark.asyncio
+async def test_completed_download_revalidation_honors_caller_terminal_predicate(
+    completed_download_stage: SimpleNamespace,
+) -> None:
+    context = completed_download_stage
+    calls = 0
+
+    async def acquire() -> None:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("synthetic terminal origin failure")
+
+    with pytest.raises(httpx.ReadTimeout):
+        await context.pipeline._finite_stage(
+            run_id=context.run_id,
+            document_id=context.document_id,
+            name="download",
+            operation=acquire,
+            maximum_attempts=4,
+            non_retryable_predicate=lambda _exc: True,
+        )
+    assert calls == 1
+    assert_completed_download_preserved(context)
+
+
+@pytest.mark.asyncio
+async def test_succeeded_ocr_revalidation_keeps_provider_retry_policy_unchanged(
+    completed_download_stage: SimpleNamespace,
+) -> None:
+    context = completed_download_stage
+    context.state.ensure_stage(context.run_id, context.document_id, "ocr", max_attempts=4)
+    context.state.stage_started(context.run_id, context.document_id, "ocr")
+    context.state.stage_succeeded(context.run_id, context.document_id, "ocr")
+    calls = 0
+
+    async def recognize() -> None:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("an ambiguous provider response must not be replayed")
+
+    with pytest.raises(httpx.ReadTimeout):
+        await context.pipeline._finite_stage(
+            run_id=context.run_id,
+            document_id=context.document_id,
+            name="ocr",
+            operation=recognize,
+            maximum_attempts=4,
+        )
+    assert calls == 1
+    assert_completed_download_preserved(context)
+
+
+@pytest.mark.asyncio
+async def test_completed_download_revalidation_redacts_untrusted_log_identifiers(
+    completed_download_stage: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = completed_download_stage
+
+    async def acquire() -> None:
+        raise PDFValidationError("RAW_REVALIDATION_EXCEPTION_SECRET")
+
+    with pytest.raises(PDFValidationError):
+        await context.pipeline._revalidate_download(
+            run_id="RAW_REVALIDATION_RUN_SECRET",
+            document_id="https://issuer.example/RAW_REVALIDATION_URL_SECRET",
+            operation=acquire,
+            maximum_attempts=4,
+            retry_base_seconds=1,
+            non_retryable_predicate=None,
+        )
+    assert "run_id=redacted stage=download document_id=redacted" in caplog.text
+    assert "RAW_REVALIDATION" not in caplog.text
+    assert_completed_download_preserved(context)

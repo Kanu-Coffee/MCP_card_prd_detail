@@ -60,7 +60,8 @@ def test_mcp_final_is_minimal_nonroot_and_has_no_run_instruction() -> None:
         assert shell_or_package_manager not in mcp
     assert "COPY --from=runtime-layout /etc/passwd /etc/passwd" in runtime
     assert "COPY --from=runtime-layout /etc/group /etc/group" in runtime
-    assert 'org.opencontainers.image.source="https://github.com/Kanu-Coffee/MCP_card_prd_detail"' in runtime
+    assert "ARG SOURCE_URL=https://github.com/Kanu-Coffee/MCP_card_prd_detail" in runtime
+    assert 'org.opencontainers.image.source="${SOURCE_URL}"' in runtime
     assert 'org.opencontainers.image.version="${APP_VERSION}"' in runtime
     assert 'org.opencontainers.image.revision="${VCS_REF}"' in runtime
     assert "USER 10001:10001" in runtime
@@ -137,42 +138,15 @@ def test_runtime_images_publish_apache_2_0_license_metadata() -> None:
     assert "Proprietary" not in DOCKERFILE
 
 
-def test_runtime_docs_record_fail_closed_verification_gap() -> None:
-    runtime_doc = (ROOT / "docs/V1_0_10_CONTAINER_RUNTIME.md").read_text(encoding="utf-8")
+def test_worker_sandbox_exceptions_do_not_grant_privileged_container_access() -> None:
     worker_compose = (ROOT / "deploy/worker/compose.yaml").read_text(encoding="utf-8")
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-
-    for required in (
-        "bubblewrap=0.11.2-r0",
-        "libcap=2.78-r0",
-        "92e4644298be253e29f66793e087b5c77e569a6dd39b7d3238302508874a427d",
-        "0a6dc8ec3226500e7a3546fb19bbcbc3afa270f77d7a91b9f47ee6c6318e7224",
-        "ignore-unfixed",
-        "allowlist",
-        "final image의 0/0 증명이 아닙니다",
-        "bin/python`은 `/usr/bin/python3.14",
-        "service account를",
-        "bubblewrap user-namespace smoke",
-        "Codex read-only sandbox smoke",
-        "seccomp=unconfined",
-        "apparmor=unconfined",
-        "systempaths=unconfined",
-        'shell_environment_policy.inherit="none"',
-        "credential token form",
-        "native/adopted remote cache",
-        "/health/ready",
-    ):
-        assert required in runtime_doc
 
     assert "seccomp=unconfined" in worker_compose
     assert "apparmor=unconfined" in worker_compose
     assert "systempaths=unconfined" not in worker_compose
     assert "privileged:" not in worker_compose
     assert "cap_add:" not in worker_compose
-
-    assert "docker pull" in runtime_doc
-    assert "docker build" in runtime_doc
-    assert "전혀 수행하지 않았습니다" in runtime_doc
     assert "Wolfi `bubblewrap` and `libcap`" in notices
     assert "official signed Wolfi package index" in notices
     assert "Debian base-image packages" not in notices

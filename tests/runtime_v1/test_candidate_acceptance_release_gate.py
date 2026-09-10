@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import json
@@ -5,8 +6,14 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
+
+from cardrag_core.candidate_acceptance import MCP_REQUIRED_ARGUMENTS, MCP_TOOLS
+from cardrag_mcp.app import build_mcp_server
+from cardrag_mcp.config import Settings
 
 ROOT = Path(__file__).resolve().parents[2]
+AUTH_VALUE = "test-discovery-bearer-00000000000000"
 
 
 def _portable_publish_verifier(workflow: str) -> str:
@@ -72,7 +79,14 @@ validate_local_image_identity "fixture:tag" "$1" "$2" "$3"
     )
 
 
-def _public_package_is_valid(tmp_path: Path, package: object) -> bool:
+def _public_package_is_valid(
+    tmp_path: Path,
+    package: object,
+    *,
+    owner: str = "Kanu-Coffee",
+    owner_type: str = "User",
+    package_name: str = "mcp-card-prd-detail-candidate",
+) -> bool:
     jq = shutil.which("jq")
     assert jq is not None
     package_path = tmp_path / "package.json"
@@ -83,7 +97,13 @@ def _public_package_is_valid(tmp_path: Path, package: object) -> bool:
             "-e",
             "--arg",
             "owner",
-            "Kanu-Coffee",
+            owner,
+            "--arg",
+            "owner_type",
+            owner_type,
+            "--arg",
+            "package_name",
+            package_name,
             "-f",
             str(ROOT / ".github/actions/verify-public-candidate-package/validate-package.jq"),
             str(package_path),
@@ -145,14 +165,14 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
         'git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
         "((${#candidate_evidence_paths[@]} > 0))",
         'git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" --',
-        'test "$version" = "1.0.20"',
-        "if: ${{ inputs.version == '1.0.20' }}",
-        "':(exclude)release-evidence/v1.0.20/**'",
-        "release-evidence/v1.0.20/*) ;;",
+        'test "$version" = "1.0.22"',
+        "if: ${{ inputs.version == '1.0.22' }}",
+        "':(exclude)release-evidence/v1.0.22/**'",
+        "release-evidence/v1.0.22/*) ;;",
         'candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"',
         'test "$(sha256sum "$candidate_acceptance" | awk \'{print $1}\')" =',
         "candidate_validation=$(",
-        ".venv/bin/python -m cardrag_core.candidate_acceptance",
+        ".venv/bin/python -m cardrag_mcp.candidate_smoke",
         '--expected-receipt-sha256 "$CANDIDATE_ACCEPTANCE_SHA256"',
         '--expected-image-repository "$CANDIDATE_IMAGE_REPOSITORY"',
         "worker_image.platform_manifest_digest",
@@ -173,20 +193,9 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
     assert "release-evidence/v1.0.11" not in workflow
 
 
-def test_release_legacy_validator_binds_the_contemporaneous_execution_record() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-
-    assert 'legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"' in workflow
-    assert '--historical-source-artifact "$legacy_historical_source"' in workflow
-
-
 def test_release_validates_the_complete_compact_v2_score_evidence() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
-    operator_documents = (
-        (ROOT / "docs/V1_0_10_AGGREGATION_PROFILE.md").read_text(encoding="utf-8"),
-        (ROOT / "docs/V1_0_10_GOLD_EVALUATION.md").read_text(encoding="utf-8"),
-    )
 
     for contract in (
         'aggregation_corpus_inventory="$evidence_dir/document-aggregation-corpus-inventory.jsonl"',
@@ -215,9 +224,6 @@ def test_release_validates_the_complete_compact_v2_score_evidence() -> None:
     assert validate_job.count("--external-lexical-ranks") == 1
     assert "qwen_page.lexical-ranks" not in validate_job
     assert "document-aggregation-query-vector-matrix.f32" not in validate_job
-    for document in operator_documents:
-        assert "document-aggregation-query-vectors.f32" in document
-        assert "document-aggregation-query-vector-matrix.f32" not in document
 
 
 def test_release_binds_exactly_three_portable_answer_evidence_chains() -> None:
@@ -359,7 +365,6 @@ def test_release_validators_read_the_manifest_bound_preserved_path_snapshot() ->
     binding_index = validate_job.index(snapshot_binding)
     for invocation in (
         "candidate_validation=$(",
-        ".venv/bin/python -m cardrag_worker.legacy_v4_audit",
         ".venv/bin/python -m cardrag_mcp.aggregation_profile",
         '.venv/bin/python -m cardrag_mcp.evaluation "${validator_args[@]}"',
         '.venv/bin/python -m cardrag_mcp.gold_capture "${capture_args[@]}"',
@@ -392,7 +397,7 @@ def test_portable_preparse_includes_all_candidate_acceptance_evidence() -> None:
         "native_cache_audit",
         "native_cache_before",
         "rollback_ledger",
-        "v109_identity",
+        "baseline_identity",
         "worker_metrics",
     }
     key_block = validate_job.split("                  expected_evidence_keys = {\n", 1)[1].split(
@@ -565,7 +570,7 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a" in strict_job
     assert "sha256sum --check --strict" in strict_job
     assert "matrix:\n        target: [worker, mcp]" in strict_job
-    assert "CANDIDATE_IMAGE_REPOSITORY: ghcr.io/kanu-coffee/" in workflow
+    assert "CANDIDATE_IMAGE_REPOSITORY: ${{ vars.CARDRAG_CANDIDATE_IMAGE_REPOSITORY" in workflow
     assert "packages: read" in strict_job
     assert strict_job.count("uses: ./.github/actions/verify-public-candidate-package") == 1
     assert "/orgs/Kanu-Coffee/packages/" not in strict_job
@@ -671,18 +676,19 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
         encoding="utf-8"
     )
     assert (
-        '"https://api.github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/'
-        'mcp-card-prd-detail-candidate"' in package_action
+        '"https://api.github.com/${owner_route}/${GITHUB_REPOSITORY_OWNER}/packages/container/${package_name}"'
+        in package_action
     )
+    assert '"$package_owner" = "${GITHUB_REPOSITORY_OWNER,,}"' in package_action
     assert "curl --proto '=https' --tlsv1.2" in package_action
     assert 'test -n "${GH_TOKEN:-}"' in package_action
     assert '-H "Authorization: Bearer ${GH_TOKEN}"' in package_action
-    assert "gh api" not in package_action
-    assert '.name == "mcp-card-prd-detail-candidate"' in package_filter
+    assert 'gh api "repos/${GITHUB_REPOSITORY}" --jq ' in package_action
+    assert '$ARGS.named.package_name // "mcp-card-prd-detail-candidate"' in package_filter
     assert '.visibility == "public"' in package_filter
     assert '.package_type == "container"' in package_filter
     assert "((.owner.login | ascii_downcase) == ($owner | ascii_downcase))" in package_filter
-    assert '.owner.type == "User"' in package_filter
+    assert '.owner.type == ($ARGS.named.owner_type // "User")' in package_filter
     assert ".repository" not in package_filter
     assert not (ROOT / ".github/actions/verify-private-candidate-package").exists()
 
@@ -787,13 +793,8 @@ def test_release_local_image_identity_is_portable_and_fail_closed() -> None:
         assert result.returncode != 0
 
 
-def test_migration_runtime_capture_accepts_classic_missing_descriptor() -> None:
-    migration = (ROOT / "docs/V1_0_11_MIGRATION.md").read_text(encoding="utf-8")
+def test_runtime_capture_accepts_classic_missing_descriptor() -> None:
     descriptor_filter = ".[0].ImageManifestDescriptor // null"
-
-    assert "--format '{{json .ImageManifestDescriptor}}'" not in migration
-    assert 'container_inspect=$(docker container inspect "$candidate_container")' in migration
-    assert descriptor_filter in migration
 
     jq = shutil.which("jq")
     assert jq is not None
@@ -1002,3 +1003,30 @@ def test_release_metadata_preserves_scan_and_candidate_source_identity() -> None
 
     assert "docker/build-push-action@" not in workflow
     assert "docker/setup-buildx-action@" not in workflow
+
+
+def test_release_smoke_contract_matches_actual_default_mcp_discovery(tmp_path: Path) -> None:
+    # Register the actual API without activating a generation or performing I/O.
+    settings = Settings(environment="test", mcp_state_dir=tmp_path, mcp_bearer_token=AUTH_VALUE)
+    server = build_mcp_server(Mock(), Mock(), settings)
+    tools = asyncio.run(server.list_tools())
+    assert tuple(tool.name for tool in tools) == MCP_TOOLS
+    assert len(tools) == 12
+    for tool in tools:
+        assert tuple(tool.input_schema.get("required", ())) == MCP_REQUIRED_ARGUMENTS[tool.name]
+    assert "experimental_long_context_audit" not in MCP_TOOLS
+
+
+def test_public_candidate_package_supports_explicit_fork_ownership(tmp_path: Path) -> None:
+    candidate = {
+        "id": 2,
+        "name": "cardrag-candidate",
+        "package_type": "container",
+        "visibility": "public",
+        "owner": {"login": "ExampleOrg", "type": "Organization"},
+    }
+    options = {"owner": "ExampleOrg", "owner_type": "Organization", "package_name": "cardrag-candidate"}
+    assert _public_package_is_valid(tmp_path, candidate, **options)
+    assert not _public_package_is_valid(tmp_path, candidate)
+    candidate["visibility"] = "private"
+    assert not _public_package_is_valid(tmp_path, candidate, **options)

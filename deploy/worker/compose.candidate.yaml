@@ -1,11 +1,12 @@
-name: cardrag-v114-candidate
+name: cardrag-v122-candidate
 
 services:
   worker:
-    image: ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@${CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST:?receipt-bound Worker sha256 index digest is required}
+    image: ${CARDRAG_CANDIDATE_IMAGE_REPOSITORY:-ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate}@${CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST:?receipt-bound Worker sha256 index digest is required}
     build: !reset null
     pull_policy: always
     environment:
+      # Channel identifies the compatible data contract, not the application version.
       CARDRAG_CHANNEL: candidate-v1.0.11
       CARDRAG_STABLE_PUBLICATION_APPROVED: "false"
       CARDRAG_OCR_CACHE_PUBLICATION_APPROVED: "false"
@@ -34,6 +35,6 @@ services:
 
 volumes:
   worker-state:
-    name: cardrag-worker-v114-candidate-state
+    name: cardrag-worker-v122-candidate-state
   codex-home:
-    name: cardrag-worker-v114-candidate-codex-home
+    name: cardrag-worker-v122-candidate-codex-home

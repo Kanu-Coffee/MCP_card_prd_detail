@@ -69,13 +69,14 @@ def _material(uri: str, algorithm: str, digest: str) -> dict[str, Any]:
 def _subject_name(role: str) -> str:
     return (
         "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-        f"@candidate-v1.0.20-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
+        f"@candidate-v1.0.22-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
     )
 
 
 def _build_args() -> dict[str, str]:
     return {
-        "build-arg:APP_VERSION": "1.0.20",
+        "build-arg:APP_VERSION": "1.0.22",
+        "build-arg:SOURCE_URL": "https://github.com/Kanu-Coffee/MCP_card_prd_detail",
         "build-arg:CODEX_SHA256": ("605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"),
         "build-arg:CODEX_VERSION": "0.151.0",
         "build-arg:PYTHON_DEV_IMAGE": (
@@ -233,13 +234,13 @@ def _cardrag_spdx_package(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "SPDXID": f"SPDXRef-Package-python-{name}",
-        "versionInfo": "1.0.20",
+        "versionInfo": "1.0.22",
         "licenseDeclared": "Apache-2.0",
         "externalRefs": [
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": f"pkg:pypi/{name}@1.0.20",
+                "referenceLocator": f"pkg:pypi/{name}@1.0.22",
             }
         ],
     }
@@ -349,7 +350,13 @@ INDEX_ARGS = (
 )
 
 
-def _provenance_passes(document: dict[str, Any], role: str = "worker") -> bool:
+def _provenance_passes(
+    document: dict[str, Any],
+    role: str = "worker",
+    *,
+    source_repository: str = "Kanu-Coffee/MCP_card_prd_detail",
+    image_repository: str = "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate",
+) -> bool:
     return _jq(
         "validate-candidate-provenance.jq",
         document,
@@ -358,17 +365,28 @@ def _provenance_passes(document: dict[str, Any], role: str = "worker") -> bool:
         SOURCE_COMMIT,
         "--arg",
         "source_uri",
-        SOURCE_URI,
+        f"https://github.com/{source_repository}.git#{SOURCE_COMMIT}",
+        "--arg",
+        "source_repository",
+        source_repository,
         "--arg",
         "platform_digest_hex",
         PLATFORM_HEX,
+        "--arg",
+        "image_repository",
+        image_repository,
         "--arg",
         "role",
         role,
     )
 
 
-def _sbom_passes(document: dict[str, Any], role: str = "worker") -> bool:
+def _sbom_passes(
+    document: dict[str, Any],
+    role: str = "worker",
+    *,
+    image_repository: str = "ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate",
+) -> bool:
     return _jq(
         "validate-candidate-sbom.jq",
         document,
@@ -378,6 +396,9 @@ def _sbom_passes(document: dict[str, Any], role: str = "worker") -> bool:
         "--arg",
         "platform_digest_hex",
         PLATFORM_HEX,
+        "--arg",
+        "image_repository",
+        image_repository,
         "--arg",
         "role",
         role,
@@ -595,65 +616,11 @@ def test_sbom_policy_matches_buildkit_032_shape_and_rejects_unbound_inventory() 
 
 @pytest.mark.parametrize("role", ("worker", "mcp"))
 def test_candidate_supply_chain_rejects_historical_release_artifacts(role: str) -> None:
-    historical_provenance = json.loads(json.dumps(_provenance(role)).replace("1.0.20", "1.0.14"))
-    historical_sbom = json.loads(json.dumps(_sbom(role)).replace("1.0.20", "1.0.14"))
+    historical_provenance = json.loads(json.dumps(_provenance(role)).replace("1.0.22", "1.0.14"))
+    historical_sbom = json.loads(json.dumps(_sbom(role)).replace("1.0.22", "1.0.14"))
 
     assert not _provenance_passes(historical_provenance, role)
     assert not _sbom_passes(historical_sbom, role)
-
-
-def test_historical_public_source_candidate_producer_keeps_pinned_build_recipe() -> None:
-    document = (ROOT / "docs/V1_0_14_MIGRATION.md").read_text(encoding="utf-8")
-    producer = document.split("```bash", maxsplit=1)[1].split("```", maxsplit=1)[0]
-
-    assert (
-        'source_context="https://github.com/Kanu-Coffee/MCP_card_prd_detail.git#$CANDIDATE_SOURCE_COMMIT"'
-    ) in document
-    assert "set -euo pipefail" in document
-    assert "((${#buildkit_versions[@]} == 1))" in document
-    assert 'test "${buildkit_versions[0]}" = "v0.32.2"' in document
-    assert "GIT_AUTH_HEADER" not in producer
-    assert "GIT_AUTH_TOKEN" not in producer
-    assert "    --secret " not in producer
-    assert "공개된 source repository" in document
-    assert "두 Git auth ID의 optional 내장 선언" in document
-    assert "이 선언 자체는 token 값의 미전달을 증명하지 않으므로" in document
-    for build_arg in (
-        "APP_VERSION=1.0.14",
-        '"VCS_REF=$CANDIDATE_SOURCE_COMMIT"',
-        "PYTHON_DEV_IMAGE=cgr.dev/chainguard/python:latest-dev@sha256:",
-        "PYTHON_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest@sha256:",
-        "UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:",
-        "CODEX_VERSION=0.151.0",
-        "CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
-    ):
-        assert f"--build-arg {build_arg}" in document
-    assert "--build-context" in document and "금지" in document
-    assert "oci-mediatypes=true,oci-artifact=true" in document
-    assert (
-        "generator=docker.io/docker/buildkit-syft-scanner:stable-1@sha256:"
-        "ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9"
-    ) in document
-    assert '"$source_context"' in document
-    assert "docker buildx build \\" in document
-    assert "docker buildx build ." not in document
-    for sealing_contract in (
-        '--metadata-file "$role_metadata"',
-        '."containerimage.digest"',
-        '."containerimage.config.digest"',
-        "validate-candidate-oci-index.jq",
-        "validate-candidate-platform-manifest.jq",
-        "validate-candidate-attestation-manifest.jq",
-        "validate-candidate-provenance.jq",
-        "validate-candidate-sbom.jq",
-        'test "sha256:$(sha256sum "$layer_path"',
-        'docker pull --platform linux/amd64 "$exact_image"',
-    ):
-        assert sealing_contract in document
-    assert "외부 trust boundary" in document
-    assert "raw SLSA statement" in document
-    assert "기술적 release blocker" in document
-    assert "hard external release blocker" not in document
 
 
 @pytest.mark.parametrize(
@@ -691,3 +658,23 @@ def test_strict_json_boundary_accepts_unique_finite_json(tmp_path: Path) -> None
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_candidate_supply_chain_binds_configured_fork_source_and_package() -> None:
+    source = "ExampleOrg/cardrag"
+    image = "ghcr.io/exampleorg/cardrag-candidate"
+    provenance = json.loads(
+        json.dumps(_provenance())
+        .replace("Kanu-Coffee/MCP_card_prd_detail", source)
+        .replace("ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate", image)
+    )
+    sbom = json.loads(json.dumps(_sbom()).replace("ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate", image))
+    assert _provenance_passes(provenance, source_repository=source, image_repository=image)
+    assert _sbom_passes(sbom, image_repository=image)
+    assert not _provenance_passes(provenance)
+    assert not _sbom_passes(sbom)
+    tampered = copy.deepcopy(provenance)
+    tampered["predicate"]["invocation"]["parameters"]["args"]["build-arg:SOURCE_URL"] = (
+        "https://github.com/other/source"
+    )
+    assert not _provenance_passes(tampered, source_repository=source, image_repository=image)

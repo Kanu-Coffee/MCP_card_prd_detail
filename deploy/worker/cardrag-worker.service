@@ -1,6 +1,6 @@
 [Unit]
 Description=Run the one-shot CardRAG Worker
-Documentation=file:/opt/cardrag/current/docs/SIMPLE_RUNTIME.md
+Documentation=file:/opt/cardrag/current/deploy/README.md
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

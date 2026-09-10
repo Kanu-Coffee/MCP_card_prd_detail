@@ -1,4 +1,4 @@
-"""Fail-closed verifier for the v1.0.20 real-candidate acceptance receipt.
+"""Fail-closed verifier for the v1.0.22 real-candidate acceptance receipt.
 
 The receipt is a canonical technical trust root.  It does not manufacture
 runtime evidence or imply a separate human approval: it binds exact canonical
@@ -15,11 +15,19 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final, Literal, Self, cast
 
-from pydantic import BaseModel, Field, StringConstraints, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .canonical import canonical_json_bytes, canonical_sha256
 from .domain import ArtifactRef, StrictFrozenModel
@@ -27,7 +35,7 @@ from .embedding import Qwen3EmbeddingProviderId
 from .manifests import GenerationManifest, GenerationPointer, GenerationReady
 from .paths import validate_identifier, validate_relative_path
 
-RECEIPT_SCHEMA: Final = "cardrag.candidate-acceptance-receipt.v1"
+RECEIPT_SCHEMA: Final = "cardrag.candidate-acceptance-receipt.v2"
 VALIDATION_SCHEMA: Final = "cardrag.candidate-acceptance-validation.v1"
 CANDIDATE_ISSUERS: Final = ("bc", "hana", "hyundai", "kb", "lotte", "samsung", "shinhan", "woori")
 MCP_TOOLS: Final = (
@@ -39,8 +47,76 @@ MCP_TOOLS: Final = (
     "get_product",
     "get_source_pdf",
     "get_source_page",
+    "list_recent_products",
+    "find_products",
+    "find_cards_by_merchant",
+    "get_product_summary",
 )
-V109_IDENTITY_ASSETS: Final = (
+# Offline evidence uses the normalized JSON payload returned by the tool function,
+# never a JSON-RPC or MCP CallToolResult envelope. Full response models are also
+# replayed by cardrag_mcp.candidate_smoke in the release workflow.
+MCP_REQUIRED_ARGUMENTS: Final = {
+    "search_contracts": ("query",),
+    "get_contract_bundle": ("contract_revision_id",),
+    "list_product_revisions": ("issuer", "product_lineage_id"),
+    "search_evidence": ("query",),
+    "get_evidence": ("evidence_id",),
+    "get_product": ("issuer", "product_code"),
+    "get_source_pdf": ("document_id",),
+    "get_source_page": ("document_id", "page"),
+    "list_recent_products": (),
+    "find_products": (),
+    "find_cards_by_merchant": ("merchant_name",),
+    "get_product_summary": (),
+}
+_MCP_RESPONSE_FIELDS: Final[dict[str, dict[str, type[object]]]] = {
+    "search_contracts": {"generation_id": str, "bundles": list, "coverage": dict},
+    "get_contract_bundle": {"generation_id": str, "contract": dict, "scope": str, "nodes": list},
+    "list_product_revisions": {
+        "generation_id": str,
+        "issuer": str,
+        "product_lineage_id": str,
+        "revisions": list,
+    },
+    "search_evidence": {"generation_id": str, "items": list, "retrieval_mode": str, "degraded": bool},
+    "get_evidence": {"generation_id": str, "evidence_id": str, "document_id": str, "items": list},
+    "get_product": {"issuer": str, "product_code": str, "name": str, "availability": str},
+    "get_source_pdf": {
+        "document_id": str,
+        "url": str,
+        "sha256": str,
+        "size_bytes": int,
+        "mime_type": str,
+        "range_supported": bool,
+    },
+    "get_source_page": {
+        "document_id": str,
+        "page": int,
+        "page_count": int,
+        "text": str,
+        "text_sha256": str,
+        "pdf_sha256": str,
+    },
+    "list_recent_products": {
+        "generation_id": str,
+        "items": list,
+        "total_count": int,
+        "period_start": str,
+        "period_end": str,
+        "unknown_launch_date_count": int,
+    },
+    "find_products": {"generation_id": str, "items": list, "total_count": int},
+    "find_cards_by_merchant": {
+        "generation_id": str,
+        "merchant_query": str,
+        "items": list,
+        "total_count": int,
+    },
+    "get_product_summary": {"generation_id": str, "issuer": str, "product_code": str, "product_name": str},
+}
+
+
+BASELINE_IDENTITY_ASSETS: Final = (
     "docker_worker_runtime",
     "docker_mcp_runtime",
     "worker_image",
@@ -113,7 +189,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.20"]
+    version: Literal["1.0.22"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -144,20 +220,20 @@ class CandidateImageIdentity(_CanonicalModel):
 
 
 class EffectiveConfigEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-effective-config.v3"]
+    schema_version: Literal["cardrag.candidate-effective-config.v4"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.20"]
-    compose_project: Literal["cardrag-v114-candidate"]
+    release_version: Literal["1.0.22"]
+    compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
-    worker_volume: Literal["cardrag-worker-v114-candidate-state"]
+    worker_volume: Literal["cardrag-worker-v122-candidate-state"]
     worker_state_mount_path: Literal["/var/lib/cardrag-worker"]
-    worker_codex_home_volume: Literal["cardrag-worker-v114-candidate-codex-home"]
+    worker_codex_home_volume: Literal["cardrag-worker-v122-candidate-codex-home"]
     worker_codex_home_mount_path: Literal["/var/lib/cardrag-codex-home"]
     worker_codex_auth_root: Literal["/var/lib/cardrag-codex-home"]
     worker_home: Literal["/var/lib/cardrag-codex-home/home"]
-    mcp_volume: Literal["cardrag-mcp-v114-candidate-state"]
+    mcp_volume: Literal["cardrag-mcp-v122-candidate-state"]
     mcp_host: Literal["127.0.0.1"]
-    mcp_port: Literal[18014]
+    mcp_port: Literal[18022]
     rootfs_read_only: Literal[True]
     cap_drop_all: Literal[True]
     no_new_privileges: Literal[True]
@@ -166,7 +242,7 @@ class EffectiveConfigEvidence(_CanonicalModel):
     worker_systempaths_unconfined: Literal[False]
     worker_privileged: Literal[False]
     worker_cap_add_count: Literal[0]
-    v109_volume_rw_mounts: Literal[0]
+    baseline_volume_rw_mounts: Literal[0]
     worker_max_state_bytes: Literal[137438953472]
     worker_reserved_free_space_bytes: Literal[2147483648]
     worker_max_vector_sidecar_bytes: Literal[17179869184]
@@ -191,7 +267,7 @@ class EffectiveConfigEvidence(_CanonicalModel):
     candidate_webdav_namespace_sha256: Sha256Hex
     stable_channel_used: Literal[False]
     stable_publication_approved: Literal[False]
-    v109_seed_access: Literal["read-only"]
+    baseline_seed_access: Literal["read-only"]
     ocr_cache_mode: Literal["read-only"]
     ocr_cache_publication_approved: Literal[False]
     remote_gc_approved: Literal[False]
@@ -262,7 +338,7 @@ class IssuerRunMetrics(_CanonicalModel):
 
 
 class WorkerMetricsEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-worker-metrics.v3"]
+    schema_version: Literal["cardrag.candidate-worker-metrics.v4"]
     source_commit: SourceCommit
     generation_id: str
     generation_manifest_sha256: Sha256Hex
@@ -302,6 +378,9 @@ class WorkerMetricsEvidence(_CanonicalModel):
     ocr_credential_token_rejection_verified: Literal[True]
     full_candidate_run: Literal[True]
     run_completed: Literal[True]
+    terminal_exit_code: Literal[0]
+    terminal_result: dict[str, JsonValue]
+    terminal_result_sha256: Sha256Hex
     issuer_metrics: tuple[IssuerRunMetrics, ...]
     documents: PositiveStrictInt
     chunks: PositiveStrictInt
@@ -334,6 +413,19 @@ class WorkerMetricsEvidence(_CanonicalModel):
 
     @model_validator(mode="after")
     def metrics_cover_the_full_run(self) -> Self:
+        if canonical_sha256(self.terminal_result) != self.terminal_result_sha256:
+            raise ValueError("Worker terminal hash does not match the retained result")
+        run_id = self.terminal_result.get("run_id")
+        if not isinstance(run_id, str):
+            raise ValueError("Worker terminal result has no run identifier")
+        validate_identifier(run_id, label="run_id")
+        if (
+            self.terminal_result.get("status") != "succeeded"
+            or self.terminal_result.get("generation_id") != self.generation_id
+            or type(self.terminal_result.get("documents")) is not int
+            or self.terminal_result["documents"] != self.documents
+        ):
+            raise ValueError("Worker terminal result does not prove the completed candidate generation")
         if tuple(row.issuer for row in self.issuer_metrics) != CANDIDATE_ISSUERS:
             raise ValueError("Worker metrics must cover exactly eight issuers")
         if self.documents != sum(row.acquired for row in self.issuer_metrics):
@@ -351,11 +443,96 @@ class WorkerMetricsEvidence(_CanonicalModel):
 class ToolSmokeResult(_CanonicalModel):
     tool: str
     passed: Literal[True]
+    generation_id: str
+    request_arguments: dict[str, JsonValue]
+    request_sha256: Sha256Hex
+    response: dict[str, JsonValue]
     response_sha256: Sha256Hex
+
+    @model_validator(mode="after")
+    def raw_request_and_response_are_bound(self) -> Self:
+        validate_identifier(self.generation_id, label="generation_id")
+        if self.tool not in MCP_REQUIRED_ARGUMENTS:
+            raise ValueError("MCP smoke tool is not a default tool")
+        for key in MCP_REQUIRED_ARGUMENTS[self.tool]:
+            value = self.request_arguments.get(key)
+            if key == "page":
+                valid = type(value) is int and value > 0
+            else:
+                valid = isinstance(value, str) and bool(value.strip())
+            if not valid:
+                raise ValueError("MCP smoke request is missing a valid required argument")
+        if (
+            self.tool == "find_products"
+            and self.request_arguments.get("mode", "search") == "search"
+            and (
+                not isinstance(self.request_arguments.get("keyword"), str)
+                or not self.request_arguments["keyword"]
+            )
+        ):
+            raise ValueError("MCP product search requires a keyword")
+        if self.tool == "get_product_summary":
+            products = self.request_arguments.get("products")
+            requests = products if isinstance(products, list) else [self.request_arguments]
+            if (
+                not requests
+                or len(requests) > 50
+                or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("issuer"), str)
+                    or not item["issuer"]
+                    or not isinstance(item.get("identifier"), str)
+                    or not item["identifier"]
+                    for item in requests
+                )
+            ):
+                raise ValueError("MCP summary request requires explicit product identities")
+        if self.request_arguments.get("expected_generation_id") not in (None, self.generation_id):
+            raise ValueError("MCP request belongs to a different generation")
+        if canonical_sha256({"tool": self.tool, "arguments": self.request_arguments}) != self.request_sha256:
+            raise ValueError("MCP smoke request hash does not match the retained arguments")
+        if not self.response or canonical_sha256(self.response) != self.response_sha256:
+            raise ValueError("MCP smoke response hash does not match the retained response")
+        if self.response.get("isError") is True or self.response.get("error"):
+            raise ValueError("MCP smoke response reports an error")
+        if {"jsonrpc", "result", "isError", "structuredContent", "content"} & self.response.keys():
+            raise ValueError("MCP smoke response must be a normalized tool payload, not an envelope")
+        fields = _MCP_RESPONSE_FIELDS[self.tool]
+        if self.tool == "find_products" and self.request_arguments.get("mode") == "coverage":
+            fields = {"generation_id": str, "schema_id": str, "issuers": list, "product_count": int}
+        if self.tool == "get_product_summary" and isinstance(self.request_arguments.get("products"), list):
+            fields = {"generation_id": str, "items": list}
+        if any(type(self.response.get(key)) is not kind for key, kind in fields.items()):
+            raise ValueError("MCP smoke response is missing the tool's required payload fields")
+        pending: list[JsonValue] = [self.response]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if "generation_id" in value and value["generation_id"] != self.generation_id:
+                    raise ValueError("MCP smoke response belongs to a different generation")
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+        for key in ("document_id", "evidence_id", "product_code", "product_lineage_id"):
+            if (
+                key in self.request_arguments
+                and key in self.response
+                and self.request_arguments[key] != self.response[key]
+            ):
+                raise ValueError("MCP response identity differs from the request")
+        if self.tool == "get_source_page" and self.request_arguments["page"] != self.response["page"]:
+            raise ValueError("MCP page response differs from the request")
+        if (
+            self.tool == "get_product"
+            and self.response["availability"] == "available"
+            and not isinstance(self.response.get("document"), dict)
+        ):
+            raise ValueError("MCP available product response requires its document")
+        return self
 
 
 class MCPSmokeEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-mcp-smoke.v2"]
+    schema_version: Literal["cardrag.candidate-mcp-smoke.v3"]
     source_commit: SourceCommit
     generation_id: str
     generation_manifest_sha256: Sha256Hex
@@ -406,9 +583,11 @@ class MCPSmokeEvidence(_CanonicalModel):
     @model_validator(mode="after")
     def all_tools_and_rows_are_exact(self) -> Self:
         if self.discovered_tools != MCP_TOOLS:
-            raise ValueError("MCP discovery must return exactly eight canonical tools")
+            raise ValueError("MCP discovery must return exactly twelve canonical tools")
         if tuple(result.tool for result in self.tool_results) != MCP_TOOLS:
             raise ValueError("MCP smoke must call every canonical tool exactly once")
+        if any(result.generation_id != self.generation_id for result in self.tool_results):
+            raise ValueError("MCP smoke calls must all belong to the accepted generation")
         if self.scored_contracts != self.expected_active_contracts:
             raise ValueError("MCP exact smoke did not score every active contract")
         if self.scored_embedding_rows != self.expected_embedding_rows:
@@ -614,7 +793,7 @@ class RollbackStep(_CanonicalModel):
 
 
 class RollbackLedgerEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-v4-v5-rollback-ledger.v1"]
+    schema_version: Literal["cardrag.candidate-rollback-ledger.v2"]
     source_commit: SourceCommit
     channel: Literal["candidate-v1.0.11"]
     steps: tuple[RollbackStep, ...]
@@ -622,33 +801,34 @@ class RollbackLedgerEvidence(_CanonicalModel):
     stable_channel_write_requests: Literal[0]
 
     @model_validator(mode="after")
-    def sequence_is_v4_v5_restart_v4_v5(self) -> Self:
+    def sequence_restores_the_original_baseline(self) -> Self:
         if len(self.steps) != 5:
             raise ValueError("rollback ledger must contain exactly five steps")
+        baseline_schema = self.steps[0].serving_schema
         expected = (
-            (1, "activate", "cardrag.serving-db.v4"),
+            (1, "activate", baseline_schema),
             (2, "activate", "cardrag.serving-db.v5"),
             (3, "restart", "cardrag.serving-db.v5"),
-            (4, "activate", "cardrag.serving-db.v4"),
+            (4, "activate", baseline_schema),
             (5, "activate", "cardrag.serving-db.v5"),
         )
         observed = tuple((step.ordinal, step.action, step.serving_schema) for step in self.steps)
         if observed != expected:
-            raise ValueError("rollback ledger sequence is not v4-v5-restart-v4-v5")
+            raise ValueError("rollback ledger sequence is not baseline-candidate-restart-baseline-candidate")
         if self.steps[0].generation_id != self.steps[3].generation_id:
-            raise ValueError("rollback did not restore the original v4 generation")
+            raise ValueError("rollback did not restore the original baseline generation")
         if self.steps[1].generation_id != self.steps[2].generation_id:
             raise ValueError("restart did not retain the v5 generation")
         if self.steps[1].generation_id != self.steps[4].generation_id:
             raise ValueError("final activation did not restore the tested v5 generation")
         if self.steps[0].generation_id == self.steps[1].generation_id:
-            raise ValueError("rollback ledger v4 and v5 generations are not distinct")
+            raise ValueError("rollback ledger baseline and candidate generations are not distinct")
         if self.steps[1].runtime_instance_sha256 == self.steps[2].runtime_instance_sha256:
             raise ValueError("rollback ledger does not prove a distinct restart instance")
         return self
 
 
-class V109AssetIdentity(_CanonicalModel):
+class BaselineAssetIdentity(_CanonicalModel):
     asset: str
     before_sha256: Sha256Hex
     after_sha256: Sha256Hex
@@ -657,24 +837,24 @@ class V109AssetIdentity(_CanonicalModel):
     @model_validator(mode="after")
     def identities_match(self) -> Self:
         if self.before_sha256 != self.after_sha256:
-            raise ValueError("v1.0.9 asset identity changed")
+            raise ValueError("baseline asset identity changed")
         return self
 
 
-class V109IdentityEvidence(_CanonicalModel):
-    schema_version: Literal["cardrag.v109-before-after-identity.v1"]
+class BaselineIdentityEvidence(_CanonicalModel):
+    schema_version: Literal["cardrag.baseline-before-after-identity.v1"]
     source_commit: SourceCommit
-    assets: tuple[V109AssetIdentity, ...]
-    candidate_rw_mounts_of_v109_volumes: Literal[0]
+    assets: tuple[BaselineAssetIdentity, ...]
+    candidate_rw_mounts_of_baseline_volumes: Literal[0]
     candidate_stable_channel_requests: Literal[0]
     candidate_librechat_switch_requests: Literal[0]
     destructive_cleanup_commands: Literal[0]
-    v109_restart_commands: Literal[0]
+    baseline_restart_commands: Literal[0]
 
     @model_validator(mode="after")
     def all_operating_assets_are_covered(self) -> Self:
-        if tuple(asset.asset for asset in self.assets) != V109_IDENTITY_ASSETS:
-            raise ValueError("v1.0.9 identity ledger does not cover the canonical asset set")
+        if tuple(asset.asset for asset in self.assets) != BASELINE_IDENTITY_ASSETS:
+            raise ValueError("baseline identity ledger does not cover the canonical asset set")
         return self
 
 
@@ -690,7 +870,7 @@ class CandidateEvidenceBindings(_CanonicalModel):
     native_cache_audit: EvidenceFile
     generation_cas: EvidenceFile
     rollback_ledger: EvidenceFile
-    v109_identity: EvidenceFile
+    baseline_identity: EvidenceFile
 
     def files(self) -> tuple[EvidenceFile, ...]:
         return (
@@ -705,7 +885,7 @@ class CandidateEvidenceBindings(_CanonicalModel):
             self.native_cache_audit,
             self.generation_cas,
             self.rollback_ledger,
-            self.v109_identity,
+            self.baseline_identity,
         )
 
     @model_validator(mode="after")
@@ -717,10 +897,10 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
-    schema_version: Literal["cardrag.candidate-acceptance-receipt.v1"]
-    release_version: Literal["1.0.20"]
+    schema_version: Literal["cardrag.candidate-acceptance-receipt.v2"]
+    release_version: Literal["1.0.22"]
     source_commit: SourceCommit
-    compose_project: Literal["cardrag-v114-candidate"]
+    compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
     generation_id: str
     issuers: tuple[str, ...]
@@ -941,6 +1121,7 @@ def verify_candidate_acceptance(
     expected_receipt_sha256: str,
     expected_source_commit: str,
     expected_image_repository: str,
+    mcp_response_validator: Callable[[ToolSmokeResult], None] | None = None,
 ) -> CandidateAcceptanceValidation:
     """Validate a canonical receipt and all of its bound evidence read-only."""
 
@@ -1008,7 +1189,7 @@ def verify_candidate_acceptance(
             bindings.rollback_ledger,
             RollbackLedgerEvidence,
         )
-        v109 = _load_bound_model(root_descriptor, bindings.v109_identity, V109IdentityEvidence)
+        baseline = _load_bound_model(root_descriptor, bindings.baseline_identity, BaselineIdentityEvidence)
     finally:
         os.close(root_descriptor)
 
@@ -1021,7 +1202,7 @@ def verify_candidate_acceptance(
         native_audit.source_commit,
         generation_cas.source_commit,
         rollback.source_commit,
-        v109.source_commit,
+        baseline.source_commit,
     )
     if any(source != receipt.source_commit for source in evidence_sources):
         raise CandidateAcceptanceError("evidence_source_commit_mismatch")
@@ -1111,6 +1292,8 @@ def verify_candidate_acceptance(
         or worker.codex_home != config.worker_codex_home_mount_path
         or worker.home != config.worker_home
         or worker.documents != manifest.counts.documents
+        or worker.terminal_result.get("corpus_sha256") != manifest.corpus_sha256
+        or worker.terminal_result.get("contract_sha256") != manifest.contract_sha256
         or worker.chunks != manifest.counts.chunks
         or worker.embedding_rows != manifest.vector_sidecar.row_count
         or worker.vector_sidecar_size_bytes != manifest.vector_sidecar.artifact.size_bytes
@@ -1134,6 +1317,9 @@ def verify_candidate_acceptance(
         or mcp.expected_embedding_rows != manifest.vector_sidecar.row_count
     ):
         raise CandidateAcceptanceError("mcp_smoke_binding_mismatch")
+    if mcp_response_validator is not None:
+        for result in mcp.tool_results:
+            mcp_response_validator(result)
 
     if before.phase != "before" or after.phase != "after" or before.entries != after.entries:
         raise CandidateAcceptanceError("native_cache_snapshot_changed")
@@ -1198,7 +1384,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    mcp_response_validator: Callable[[ToolSmokeResult], None] | None = None,
+) -> int:
     arguments = _parser().parse_args(argv)
     try:
         validation = verify_candidate_acceptance(
@@ -1207,6 +1397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_receipt_sha256=cast(str, arguments.expected_receipt_sha256),
             expected_source_commit=cast(str, arguments.expected_source_commit),
             expected_image_repository=cast(str, arguments.expected_image_repository),
+            mcp_response_validator=mcp_response_validator,
         )
     except CandidateAcceptanceError:
         print("candidate acceptance validation failed", file=sys.stderr)
@@ -1222,8 +1413,9 @@ if __name__ == "__main__":  # pragma: no cover
 __all__ = [
     "CANDIDATE_ISSUERS",
     "MCP_TOOLS",
+    "MCP_REQUIRED_ARGUMENTS",
     "RECEIPT_SCHEMA",
-    "V109_IDENTITY_ASSETS",
+    "BASELINE_IDENTITY_ASSETS",
     "CandidateAcceptanceError",
     "CandidateAcceptanceReceipt",
     "CandidateAcceptanceValidation",
@@ -1240,8 +1432,8 @@ __all__ = [
     "RollbackLedgerEvidence",
     "RollbackStep",
     "ToolSmokeResult",
-    "V109AssetIdentity",
-    "V109IdentityEvidence",
+    "BaselineAssetIdentity",
+    "BaselineIdentityEvidence",
     "WorkerMetricsEvidence",
     "main",
     "verify_candidate_acceptance",

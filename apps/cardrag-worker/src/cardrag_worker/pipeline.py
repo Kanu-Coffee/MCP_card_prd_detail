@@ -1392,6 +1392,37 @@ def _safe_stage_error(exc: Exception) -> str:
     return f"worker_stage_failure: Worker pipeline stage failed ({', '.join(fields)})."
 
 
+def _retryable_download_revalidation_kind(exc: Exception) -> str | None:
+    """Allow transient origin failures without retrying provider or invalid data errors."""
+
+    for error_type in (
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.CloseError,
+        httpx.RemoteProtocolError,
+        httpx.TimeoutException,
+        httpx.NetworkError,
+    ):
+        if isinstance(exc, error_type):
+            return error_type.__name__
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {
+        408,
+        425,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }:
+        return "HTTPStatusError"
+    return None
+
+
 def _safe_v5_embedding_terminal_error(exc: Exception) -> str:
     if isinstance(exc, V5CapacityError):
         return "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
@@ -2015,6 +2046,15 @@ class WorkerPipeline:
         self.state.ensure_stage(run_id, document_id, name, max_attempts=maximum)
         row = self.state.get_stage(run_id, document_id, name)
         if row is not None and row.status == "succeeded":
+            if name == "download":
+                return await self._revalidate_download(
+                    run_id=run_id,
+                    document_id=document_id,
+                    operation=operation,
+                    maximum_attempts=maximum,
+                    retry_base_seconds=retry_base_seconds,
+                    non_retryable_predicate=non_retryable_predicate,
+                )
             with self.performance.measure(f"stage.{name}"):
                 return await operation()
         while True:
@@ -2065,6 +2105,85 @@ class WorkerPipeline:
             # Keep cancellation during backoff outside the exception handler so
             # the prior provider exception cannot become CancelledError context.
             await asyncio.sleep(retry_after)
+
+    async def _revalidate_download(
+        self,
+        *,
+        run_id: str,
+        document_id: str,
+        operation: Callable[[], Awaitable[T]],
+        maximum_attempts: int,
+        retry_base_seconds: float,
+        non_retryable_predicate: Callable[[Exception], bool] | None,
+    ) -> T:
+        """Recheck a completed PDF within a fresh budget, preserving its success row.
+
+        A resume must validate cached bytes and refresh stale origin metadata.
+        Transient origin errors need the normal finite download budget even when
+        the prior download succeeded. This is deliberately download-only: OCR
+        provider calls can have ambiguous outcomes and keep their existing policy.
+        """
+
+        safe_run_id = run_id if re.fullmatch(r"[0-9a-f]{32}", run_id) else "redacted"
+        safe_document_id = (
+            document_id if re.fullmatch(r"(?:source|doc)_[0-9a-f]{64}", document_id) else "redacted"
+        )
+        for attempt in range(1, maximum_attempts + 1):
+            try:
+                with self.performance.measure("stage.download"):
+                    result = await operation()
+            except asyncio.CancelledError:
+                LOGGER.info(
+                    "Download revalidation run_id=%s stage=download document_id=%s "
+                    "attempt=%d max_attempts=%d outcome=cancelled",
+                    safe_run_id,
+                    safe_document_id,
+                    attempt,
+                    maximum_attempts,
+                )
+                raise
+            except Exception as exc:
+                kind = _retryable_download_revalidation_kind(exc)
+                retryable = kind is not None and not (
+                    non_retryable_predicate is not None and non_retryable_predicate(exc)
+                )
+                category, status_code, _ = _classify_worker_failure(exc)
+                outcome = (
+                    "retry"
+                    if retryable and attempt < maximum_attempts
+                    else ("exhausted" if retryable else "failed")
+                )
+                LOGGER.warning(
+                    "Download revalidation run_id=%s stage=download document_id=%s "
+                    "category=%s error_kind=%s status_code=%s attempt=%d max_attempts=%d outcome=%s",
+                    safe_run_id,
+                    safe_document_id,
+                    category,
+                    kind or "non_retryable",
+                    status_code,
+                    attempt,
+                    maximum_attempts,
+                    outcome,
+                )
+                if outcome != "retry":
+                    raise
+            else:
+                if attempt > 1:
+                    LOGGER.info(
+                        "Download revalidation run_id=%s stage=download document_id=%s "
+                        "attempt=%d max_attempts=%d outcome=succeeded",
+                        safe_run_id,
+                        safe_document_id,
+                        attempt,
+                        maximum_attempts,
+                    )
+                return result
+            # Leave the exception handler before sleeping so cancellation cannot
+            # retain a raw origin exception as its implicit context.
+            await asyncio.sleep(
+                retry_delay(attempt, base_seconds=retry_base_seconds, cap_seconds=self.retry_cap_seconds)
+            )
+        raise RuntimeError("download revalidation requires a positive finite attempt budget")
 
     async def run(self, *, resume_run_id: str | None = None) -> PipelineResult:
         self.performance = WorkerPerformance()

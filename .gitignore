@@ -10,6 +10,10 @@
 /backups/
 /quarantine/
 /build/
+/dist/
+/reports/
+/runtime/
+*.log
 
 # Card documents and generated indexes
 *.pdf
@@ -24,13 +28,25 @@
 # Secrets and local authentication
 .env
 .env.*
+*.env
+*.env.*
 !.env.example
+!*.env.example
 *.pem
 *.key
 credentials*.json
 oauth*.json
 .codex/
-/deploy/secrets/*.txt
+secrets/
+auth.json
+auth.json.*
+*.private
+*.private.*
+settings.local.*
+compose.override.yaml
+compose.override.yml
+docker-compose.override.yaml
+docker-compose.override.yml
 
 # Python and local tooling
 .task-tools/
