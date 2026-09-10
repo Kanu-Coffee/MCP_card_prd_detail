@@ -86,4 +86,4 @@ services:
 
 volumes:
   mcp-state:
-    name: ${CARDRAG_MCP_STATE_VOLUME:-cardrag-mcp-v111-state}
+    name: ${CARDRAG_MCP_STATE_VOLUME:-cardrag-mcp-v122-state}

@@ -138,7 +138,7 @@ def test_audit_seals_explicit_chunk_and_markdown_table_algorithms(tmp_path: Path
         "heading_chunks": 1,
         "pages": 1,
     }
-    observed = artifact["comparison_to_historical_run"]["observed"]
+    observed = artifact["metrics"]
     assert observed["continuation_chunks"] == {
         "denominator": 7,
         "numerator": 6,
@@ -195,17 +195,15 @@ def test_artifact_loader_and_validator_reject_tamper_and_resealed_claims(tmp_pat
         load_audit_artifact(link)
 
     tampered = json.loads(json.dumps(artifact))
-    tampered["comparison_to_historical_run"]["match"] = True
+    tampered["corpus_counts"]["evidence_chunks"] += 1
     with pytest.raises(LegacyV4AuditError, match="self-hash"):
         validate_audit_artifact(tampered)
 
     resealed = _reseal(tampered)
-    with pytest.raises(LegacyV4AuditError, match="comparison result"):
+    with pytest.raises(LegacyV4AuditError, match="denominators"):
         validate_audit_artifact(resealed)
 
     percentage_tamper = json.loads(json.dumps(artifact))
-    percentage_tamper["comparison_to_historical_run"]["observed"]["continuation_chunks"]["percent_4dp"] = (
-        "0.0000"
-    )
+    percentage_tamper["metrics"]["continuation_chunks"]["percent_4dp"] = "0.0000"
     with pytest.raises(LegacyV4AuditError, match="percentage"):
         validate_audit_artifact(_reseal(percentage_tamper))
