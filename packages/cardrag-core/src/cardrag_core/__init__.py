@@ -93,6 +93,7 @@ from .ocr import (
     OCRInput,
     OCRVerificationError,
     VerifiedOCR,
+    content_addressed_ocr_reuse_key,
     native_ocr_reuse_key,
     verify_ocr_bytes,
 )
@@ -218,6 +219,7 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_sha256",
     "channel_pointer_path",
+    "content_addressed_ocr_reuse_key",
     "expected_generation_files",
     "format_qwen3_document",
     "format_qwen3_query",

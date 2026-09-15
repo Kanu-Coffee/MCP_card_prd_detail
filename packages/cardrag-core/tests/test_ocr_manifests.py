@@ -26,6 +26,7 @@ from cardrag_core import (
     OCRVerificationError,
     adopted_ocr_reuse_key,
     canonical_sha256,
+    content_addressed_ocr_reuse_key,
     generation_database_path,
     native_ocr_reuse_key,
     sha256_bytes,
@@ -609,3 +610,18 @@ def test_generation_ocr_cache_identity_is_exact_and_all_or_nothing() -> None:
             ocr_reuse_key="not-a-sha256",
             page_count=2,
         )
+
+
+def test_content_addressed_ocr_reuse_key() -> None:
+    source1 = _source()
+    source2 = OCRInput(pdf_sha256=sha256_bytes(b"pdf"), pdf_size_bytes=3, page_count=2)
+    source3 = OCRInput(pdf_sha256=sha256_bytes(b"other"), pdf_size_bytes=3, page_count=2)
+
+    key1 = content_addressed_ocr_reuse_key(source1)
+    key2 = content_addressed_ocr_reuse_key(source2)
+    key3 = content_addressed_ocr_reuse_key(source3)
+
+    assert key1 == key2
+    assert key1 != key3
+    assert len(key1) == 64
+

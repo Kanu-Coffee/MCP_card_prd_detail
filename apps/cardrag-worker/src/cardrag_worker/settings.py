@@ -248,6 +248,9 @@ class WorkerSettings:
     ocr_model: str
     ocr_fallback_provider: str | None
     ocr_fallback_model: str | None
+    openrouter_ocr_model: str
+    openrouter_ocr_fallback_model: str | None
+    compatible_ocr_models: tuple[str, ...]
     ocr_reasoning_effort: str
     ocr_provider_timeout_seconds: float
     ocr_cache_mode: Literal["read-only", "read-write"]
@@ -306,8 +309,11 @@ class WorkerSettings:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
         ocr_provider = os.environ.get("CARDRAG_OCR_PROVIDER", "codex-exec").strip().casefold()
         fallback_provider = os.environ.get("CARDRAG_OCR_FALLBACK_PROVIDER")
+        is_openrouter_ocr = ocr_provider == "openrouter" or (
+            fallback_provider is not None and fallback_provider.strip().casefold() == "openrouter"
+        )
         api_key = _read_secret(
-            "CARDRAG_OPENROUTER_API_KEY", required=require_providers and ocr_provider == "openrouter"
+            "CARDRAG_OPENROUTER_API_KEY", required=require_providers and is_openrouter_ocr
         )
         if require_providers and not api_key:
             raise ValueError("OpenRouter API key is required for embeddings")
@@ -432,6 +438,15 @@ class WorkerSettings:
             ocr_model=os.environ.get("CARDRAG_OCR_MODEL", "gpt-5.6-sol"),
             ocr_fallback_provider=fallback_provider.strip().casefold() if fallback_provider else None,
             ocr_fallback_model=os.environ.get("CARDRAG_OCR_FALLBACK_MODEL"),
+            openrouter_ocr_model=os.environ.get("CARDRAG_OPENROUTER_OCR_MODEL", "google/gemini-3.1-pro").strip(),
+            openrouter_ocr_fallback_model=(
+                os.environ.get("CARDRAG_OPENROUTER_OCR_FALLBACK_MODEL", "").strip() or None
+            ),
+            compatible_ocr_models=tuple(
+                m.strip()
+                for m in os.environ.get("CARDRAG_OCR_COMPATIBLE_MODELS", "gpt-5.6-sol,gpt-5.4").split(",")
+                if m.strip()
+            ),
             ocr_reasoning_effort=os.environ.get("CARDRAG_OCR_REASONING_EFFORT", "high"),
             ocr_provider_timeout_seconds=_positive_float("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", 1800),
             ocr_cache_mode=ocr_cache_mode,

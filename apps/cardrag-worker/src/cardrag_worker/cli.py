@@ -53,7 +53,7 @@ from .embedding_v5 import (
 )
 from .gc import GCPartialFailure, collect_garbage
 from .issuers import enabled_adapters
-from .ocr import FailoverOCRResolver, OCRResolver
+from .ocr import FailoverOCRResolver, OCRResolver, discover_compatible_contracts
 from .pdf_cache import PDFCache
 from .pipeline import (
     OCRDocumentFailuresError,
@@ -180,15 +180,20 @@ def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = N
 
 
 def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
+    resolved_model = model
+    if name.strip().casefold() == "openrouter":
+        if not resolved_model or resolved_model in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.4"}:
+            resolved_model = settings.openrouter_ocr_model
     return make_ocr_provider(
         name,
-        model=model,
+        model=resolved_model,
         api_key=settings.openrouter_api_key,
         base_url=settings.openrouter_base_url,
         codex_executable=settings.codex_executable,
         codex_auth_root=settings.codex_auth_root,
         reasoning_effort=settings.ocr_reasoning_effort,
         timeout_seconds=settings.ocr_provider_timeout_seconds,
+        openrouter_fallback_model=settings.openrouter_ocr_fallback_model,
     )
 
 
@@ -349,11 +354,28 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 prompt_version=settings.ocr_prompt_version,
                 cache_mode=settings.ocr_cache_mode,
             )
+            compatible_contracts = discover_compatible_contracts(
+                state_dir=settings.state_dir,
+                current_contract=primary.contract,
+                compatible_models=settings.compatible_ocr_models,
+            )
+            if compatible_contracts:
+                primary.set_compatible_contracts(compatible_contracts)
+                logging.getLogger("cardrag_worker.cli").info(
+                    "OCR discovered %d compatible contracts: %s",
+                    len(compatible_contracts),
+                    ", ".join(c.model for c in compatible_contracts),
+                )
             resolver: OCRResolver | FailoverOCRResolver = primary
             if settings.ocr_fallback_provider:
                 fallback_model = settings.ocr_fallback_model
                 if not fallback_model:
-                    raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
+                    if settings.ocr_fallback_provider.strip().casefold() == "openrouter":
+                        fallback_model = settings.openrouter_ocr_model
+                    elif settings.ocr_fallback_provider.strip().casefold() in {"codex", "codex-exec"}:
+                        fallback_model = "gpt-5.6-terra"
+                    else:
+                        raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
                 fallback = OCRResolver(
                     provider=_provider(settings, settings.ocr_fallback_provider, fallback_model),
                     state=state,
@@ -366,6 +388,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     cache_epoch=settings.ocr_cache_epoch,
                     prompt_version=settings.ocr_prompt_version,
                     cache_mode=settings.ocr_cache_mode,
+                    compatible_contracts=compatible_contracts,
                 )
                 resolver = FailoverOCRResolver(primary, fallback)
             logging.getLogger("cardrag_worker.cli").info(

@@ -79,7 +79,7 @@ wheels = [
 
 [[package]]
 name = "cardrag-core"
-version = "1.0.22"
+version = "1.0.23"
 source = { editable = "packages/cardrag-core" }
 dependencies = [
     { name = "httpx" },
@@ -103,7 +103,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "cardrag-mcp"
-version = "1.0.22"
+version = "1.0.23"
 source = { editable = "apps/cardrag-mcp" }
 dependencies = [
     { name = "cardrag-core" },
@@ -141,7 +141,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "cardrag-worker"
-version = "1.0.22"
+version = "1.0.23"
 source = { editable = "apps/cardrag-worker" }
 dependencies = [
     { name = "beautifulsoup4" },

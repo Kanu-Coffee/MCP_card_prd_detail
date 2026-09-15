@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -14,11 +15,11 @@ import sys
 import threading
 import warnings
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import httpx
@@ -58,8 +59,9 @@ from .providers import (
     reject_credential_bearing_ocr,
 )
 from .state import WorkerState
-from .webdav import WebDAVClient
+from .webdav import CONTROL_OBJECT_MAX_BYTES, WebDAVClient
 
+LOGGER = logging.getLogger(__name__)
 PAGE_MARKER = re.compile(r"^## Page ([1-9][0-9]*)$", re.MULTILINE)
 OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS = 12
 OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
@@ -72,6 +74,7 @@ OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION = (
     "TARGET page markers in the same order and no other pages."
 )
 OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS = (0.25, 1.0)
+OCR_CACHE_READ_RETRY_DELAYS_SECONDS = OCR_CACHE_PUBLICATION_RETRY_DELAYS_SECONDS
 OCR_CACHE_PUBLICATION_DIAGNOSTIC = "native-cache-publication-diagnostic.json"
 OCR_CACHE_PUBLICATION_DIAGNOSTIC_MAX_BYTES = 4096
 LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES = 1024 * 1024
@@ -731,6 +734,45 @@ def plan_ocr_calls(
     return tuple(calls)
 
 
+def discover_compatible_contracts(
+    *,
+    state_dir: Path,
+    current_contract: NativeOCRContract,
+    compatible_models: Sequence[str] = (),
+) -> tuple[NativeOCRContract, ...]:
+    discovered: dict[str, NativeOCRContract] = {}
+    for model_name in compatible_models:
+        clean_model = model_name.strip()
+        if not clean_model or clean_model == current_contract.model:
+            continue
+        effort = "high" if ("sol" in clean_model or "5.4" in clean_model) else current_contract.reasoning_effort
+        with suppress(Exception):
+            synth = current_contract.model_copy(update={"model": clean_model, "reasoning_effort": effort})
+            if synth.contract_sha256 != current_contract.contract_sha256:
+                discovered[synth.contract_sha256] = synth
+
+    runs_dir = state_dir / "runs"
+    if runs_dir.is_dir():
+        with suppress(OSError):
+            for run_dir in sorted(runs_dir.iterdir()):
+                if not run_dir.is_dir() or run_dir.name.startswith("."):
+                    continue
+                docs_dir = run_dir / "documents"
+                if not docs_dir.is_dir():
+                    continue
+                for doc_dir in docs_dir.iterdir():
+                    if not doc_dir.is_dir():
+                        continue
+                    manifest_path = doc_dir / "ocr" / "native-manifest.json"
+                    if manifest_path.is_file():
+                        with suppress(Exception):
+                            manifest = OCRArtifactManifest.model_validate_json(manifest_path.read_bytes())
+                            if manifest.contract.contract_sha256 != current_contract.contract_sha256:
+                                discovered[manifest.contract.contract_sha256] = manifest.contract
+                                break
+    return tuple(discovered.values())
+
+
 class OCRResolver:
     """Resolve native WebDAV, then adopted WebDAV, then local resumable OCR."""
 
@@ -750,6 +792,7 @@ class OCRResolver:
         context_pages_before: int = 1,
         context_pages_after: int = 1,
         cache_mode: OCRCacheMode = "read-write",
+        compatible_contracts: Sequence[NativeOCRContract] = (),
     ) -> None:
         if chunk_pages < 1:
             raise ValueError("chunk_pages must be positive")
@@ -798,6 +841,15 @@ class OCRResolver:
             context_pages_after=context_pages_after,
             output_policy=OCR_OUTPUT_POLICY,
         )
+        self._compatible_contracts = tuple(
+            c for c in compatible_contracts if c.contract_sha256 != self.contract.contract_sha256
+        )
+
+    def set_compatible_contracts(self, compatible_contracts: Sequence[NativeOCRContract]) -> None:
+        self._compatible_contracts = tuple(
+            c for c in compatible_contracts if c.contract_sha256 != self.contract.contract_sha256
+        )
+
 
     @property
     def cache_mode(self) -> OCRCacheMode:
@@ -817,6 +869,7 @@ class OCRResolver:
         reuse_key: str,
         provenance: str,
         prefetch_only: bool = False,
+        allow_compatible_contract: bool = False,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
         key = self._native_seal_key(
             output_dir=output_dir, source=source, reuse_key=reuse_key, provenance=provenance
@@ -853,6 +906,7 @@ class OCRResolver:
                     source=source,
                     reuse_key=reuse_key,
                     expected_size_bytes=manifest_size,
+                    allow_compatible_contract=allow_compatible_contract,
                 )
                 if admitted_manifest is None:
                     return None
@@ -870,7 +924,19 @@ class OCRResolver:
                 reuse_key=reuse_key,
                 provenance=provenance,
                 admitted_manifest=admitted_manifest,
+                allow_compatible_contract=allow_compatible_contract,
             )
+            if loaded is not None and not prefetch_only:
+                res_obj, man_obj, body_bytes = loaded
+                if man_obj.contract != self.contract:
+                    with suppress(Exception):
+                        man_obj = self._reseal_manifest(
+                            output_dir=output_dir,
+                            manifest=man_obj,
+                            source=source,
+                            reuse_key=reuse_key,
+                        )
+                        loaded = (res_obj, man_obj, body_bytes)
             if loaded is not None and before is not None and snapshot() == before:
                 result, manifest, body = loaded
                 # Charge retained strings plus conservative manifest overhead;
@@ -975,6 +1041,7 @@ class OCRResolver:
         source: OCRInput,
         reuse_key: str,
         expected_size_bytes: int | None = None,
+        allow_compatible_contract: bool = False,
     ) -> OCRArtifactManifest | None:
         manifest_path = output_dir / "native-manifest.json"
         try:
@@ -994,9 +1061,53 @@ class OCRResolver:
             raise OCRValidationError("local native OCR manifest is invalid") from exc
         if manifest.canonical_bytes() != manifest_body:
             raise OCRValidationError("local native OCR manifest is not canonical")
-        if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
+        if manifest.source != source:
             return None
-        return manifest
+        if manifest.contract == self.contract:
+            if manifest.reuse_key != reuse_key:
+                return None
+            return manifest
+        if allow_compatible_contract:
+            contract_ok = (
+                manifest.contract in self._compatible_contracts
+                or any(manifest.contract.model == c.model for c in self._compatible_contracts)
+                or manifest.reuse_key == native_ocr_reuse_key(manifest.contract, source)
+            )
+            if contract_ok and manifest.reuse_key == native_ocr_reuse_key(manifest.contract, source):
+                return manifest
+        return None
+
+    def _reseal_manifest(
+        self,
+        *,
+        output_dir: Path,
+        manifest: OCRArtifactManifest,
+        source: OCRInput,
+        reuse_key: str,
+    ) -> OCRArtifactManifest:
+        resealed = OCRArtifactManifest(
+            created_at=manifest.created_at,
+            contract=self.contract,
+            reuse_key=reuse_key,
+            source=source,
+            output=manifest.output,
+            ocr_chars=manifest.ocr_chars,
+            page_output_sha256=manifest.page_output_sha256,
+        )
+        parent_descriptor = _open_beneath_directory(
+            output_dir,
+            state_root=self._state_root,
+            create=True,
+        )
+        try:
+            _atomic_replace_at(
+                parent_descriptor,
+                "native-manifest.json",
+                resealed.canonical_bytes(),
+            )
+        finally:
+            os.close(parent_descriptor)
+        return resealed
 
     def _read_native_seal(
         self,
@@ -1006,9 +1117,13 @@ class OCRResolver:
         reuse_key: str,
         provenance: str,
         admitted_manifest: OCRArtifactManifest | None = None,
+        allow_compatible_contract: bool = False,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
         manifest = admitted_manifest or self._read_native_manifest(
-            output_dir=output_dir, source=source, reuse_key=reuse_key
+            output_dir=output_dir,
+            source=source,
+            reuse_key=reuse_key,
+            allow_compatible_contract=allow_compatible_contract,
         )
         if manifest is None:
             return None
@@ -1111,11 +1226,13 @@ class OCRResolver:
                     manifest = OCRArtifactManifest.model_validate_json(manifest_body)
                 except (FileNotFoundError, OSError, OCRValidationError, ValueError):
                     continue
-                if (
-                    manifest.canonical_bytes() != manifest_body
-                    or manifest.contract != self.contract
-                    or not re.fullmatch(r"[0-9a-f]{64}", manifest.reuse_key)
-                ):
+                if manifest.canonical_bytes() != manifest_body:
+                    continue
+                contract_matches = (manifest.contract == self.contract) or (
+                    manifest.contract in self._compatible_contracts
+                    or any(manifest.contract.model == c.model for c in self._compatible_contracts)
+                )
+                if not contract_matches or not re.fullmatch(r"[0-9a-f]{64}", manifest.reuse_key):
                     continue
                 indexed.setdefault(manifest.reuse_key, []).append(output_dir)
         return {key: tuple(paths) for key, paths in indexed.items()}
@@ -1165,6 +1282,7 @@ class OCRResolver:
                     source=source,
                     reuse_key=reuse_key,
                     provenance="native-local-indexed",
+                    allow_compatible_contract=True,
                 )
             except (OSError, OCRValidationError):
                 continue
@@ -1181,18 +1299,78 @@ class OCRResolver:
         # for the same exact contract. Choose the lowest output identity so a
         # resumed run converges without another provider call.
         _selected_path, selected_result, selected_manifest, selected_body = candidates[min(candidates)]
-        if _selected_path != output_dir:
+        if _selected_path != output_dir or selected_manifest.contract != self.contract:
             self._materialize_native_seal(
                 output_dir=output_dir,
                 manifest=selected_manifest,
                 body=selected_body,
             )
+            if selected_manifest.contract != self.contract:
+                with suppress(Exception):
+                    selected_manifest = self._reseal_manifest(
+                        output_dir=output_dir,
+                        manifest=selected_manifest,
+                        source=source,
+                        reuse_key=native_ocr_reuse_key(self.contract, source),
+                    )
         await self._register_run_local_native(
             run_id=run_id,
             reuse_key=reuse_key,
             output_dir=output_dir,
         )
         return selected_result, selected_manifest, selected_body
+
+    async def _get_cache_bytes(
+        self,
+        path: str | PurePosixPath,
+        *,
+        phase: OCRCachePublicationPhase,
+        max_bytes: int | None = CONTROL_OBJECT_MAX_BYTES,
+    ) -> bytes | None:
+        """Retry one immutable GET without replaying lookup repair or provider work."""
+
+        assert self.webdav is not None
+        attempts = len(OCR_CACHE_READ_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                body = await self.webdav.get_bytes(path, max_bytes=max_bytes)
+            except Exception as exc:
+                # Read and publication transport failures share the same narrow
+                # transient classification. Preserve the original exception so
+                # exhausted reads keep the existing systemic failure contract.
+                error = _cache_publication_error(phase, exc)
+                outcome = (
+                    "retry"
+                    if error.retryable and attempt < attempts
+                    else "exhausted"
+                    if error.retryable
+                    else "failed"
+                )
+                LOGGER.warning(
+                    "OCR cache read phase=%s error_kind=%s status_code=%s "
+                    "attempt=%d max_attempts=%d outcome=%s",
+                    phase,
+                    error.error_kind,
+                    error.status_code,
+                    attempt,
+                    attempts,
+                    outcome,
+                )
+                if outcome != "retry":
+                    raise
+            else:
+                if attempt > 1:
+                    LOGGER.info(
+                        "OCR cache read phase=%s attempt=%d max_attempts=%d outcome=succeeded",
+                        phase,
+                        attempt,
+                        attempts,
+                    )
+                return body
+            # Cancellation during backoff must not retain a sensitive transport
+            # exception as its context, so sleep outside the exception handler.
+            await asyncio.sleep(OCR_CACHE_READ_RETRY_DELAYS_SECONDS[attempt - 1])
+        raise AssertionError("bounded OCR cache read loop did not terminate")
 
     async def _lookup_cache(
         self,
@@ -1206,8 +1384,8 @@ class OCRResolver:
     ) -> OCRResult | None:
         if self.webdav is None:
             return None
-        ready_body = await self.webdav.get_bytes(ocr_ready_path(reuse_key, kind=kind))
-        manifest_body = await self.webdav.get_bytes(ocr_manifest_path(reuse_key, kind=kind))
+        ready_body = await self._get_cache_bytes(ocr_ready_path(reuse_key, kind=kind), phase="ready")
+        manifest_body = await self._get_cache_bytes(ocr_manifest_path(reuse_key, kind=kind), phase="manifest")
         if ready_body is None and manifest_body is None:
             return None
         if kind == "native" and ready_body is None and manifest_body is not None:
@@ -1240,10 +1418,14 @@ class OCRResolver:
                 raise OCRValidationError("native OCR cache control JSON is not canonical")
             if ready.reuse_key != reuse_key or ready.ocr_sha256 != manifest.output.sha256:
                 raise OCRValidationError("native OCR READY contract mismatch")
+            contract_matches = (manifest.contract == self.contract) or (
+                manifest.contract in self._compatible_contracts
+                or any(manifest.contract.model == c.model for c in self._compatible_contracts)
+            )
             if (
                 manifest.reuse_key != reuse_key
                 or manifest.source != source
-                or manifest.contract != self.contract
+                or not contract_matches
             ):
                 raise OCRValidationError("native OCR cache source/contract mismatch")
             artifact = manifest.output
@@ -1273,7 +1455,7 @@ class OCRResolver:
             char_count = adopted.ocr_chars
             provider = "legacy-adoption"
             model = adopted.receipt.source_database_id
-        body = await self.webdav.get_bytes(artifact.path, max_bytes=artifact.size_bytes)
+        body = await self._get_cache_bytes(artifact.path, phase="cas", max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
             raise OCRValidationError("OCR cache artifact is missing or corrupt")
         reject_credential_bearing_ocr(body)
@@ -1334,7 +1516,7 @@ class OCRResolver:
         if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
             raise OCRValidationError("partial native OCR manifest contract mismatch")
         artifact = manifest.output
-        body = await self.webdav.get_bytes(artifact.path, max_bytes=artifact.size_bytes)
+        body = await self._get_cache_bytes(artifact.path, phase="cas", max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
             raise OCRValidationError("partial native OCR artifact is missing or corrupt")
         reject_credential_bearing_ocr(body)
@@ -1412,6 +1594,7 @@ class OCRResolver:
         source: OCRInput,
         reuse_key: str,
         prefetch_only: bool = False,
+        allow_compatible_contract: bool = False,
     ) -> tuple[OCRResult, OCRArtifactManifest, bytes] | None:
         return self._load_native_seal(
             output_dir=output_dir,
@@ -1419,6 +1602,7 @@ class OCRResolver:
             reuse_key=reuse_key,
             provenance="native-local",
             prefetch_only=prefetch_only,
+            allow_compatible_contract=allow_compatible_contract,
         )
 
     def _materialize_prior_local_native(
@@ -1511,6 +1695,7 @@ class OCRResolver:
             source=source,
             reuse_key=reuse_key,
             prefetch_only=prefetch_only,
+            allow_compatible_contract=True,
         )
         if local is None:
             return None
@@ -1535,6 +1720,7 @@ class OCRResolver:
                 output_dir=output_dir,
                 source=source,
                 reuse_key=reuse_key,
+                allow_compatible_contract=True,
             )
             if materialized is None:
                 raise OCRValidationError("materialized prior local native OCR lost its contract")
@@ -1736,6 +1922,10 @@ class OCRResolver:
         cache_candidate_list: list[tuple[Literal["native", "adopted"], str, str | None]] = [
             ("native", native_key, None)
         ]
+        for prior_contract in self._compatible_contracts:
+            prior_key = native_ocr_reuse_key(prior_contract, source)
+            if prior_key != native_key:
+                cache_candidate_list.append(("native", prior_key, None))
         for policy in adopted_policies:
             cache_candidate_list.append(
                 (
@@ -1772,6 +1962,7 @@ class OCRResolver:
                         output_dir=output_dir,
                         source=source,
                         reuse_key=native_key,
+                        allow_compatible_contract=True,
                     )
                     if local_remote is not None:
                         await self._register_run_local_native(
@@ -1789,6 +1980,7 @@ class OCRResolver:
             output_dir=output_dir,
             source=source,
             reuse_key=native_key,
+            allow_compatible_contract=True,
         )
         if (
             local is not None
@@ -1825,6 +2017,20 @@ class OCRResolver:
                 output_dir=output_dir,
                 expected_ocr_identity=expected_ocr_identity,
             )
+        if local is None:
+            for prior_contract in self._compatible_contracts:
+                prior_key = native_ocr_reuse_key(prior_contract, source)
+                if prior_key == native_key:
+                    continue
+                local = await self._lookup_indexed_run_local_native(
+                    run_id=run_id,
+                    source=source,
+                    reuse_key=prior_key,
+                    output_dir=output_dir,
+                    expected_ocr_identity=expected_ocr_identity,
+                )
+                if local is not None:
+                    break
         if local is not None:
             local_result, local_manifest, local_body = local
             committed = await self._commit_local_native(
@@ -1838,6 +2044,7 @@ class OCRResolver:
                 output_dir=output_dir,
                 source=source,
                 reuse_key=native_key,
+                allow_compatible_contract=True,
             )
             if final_local is None or final_local[0].ocr_sha256 != committed.ocr_sha256:
                 raise OCRValidationError("committed local native OCR identity is unavailable")

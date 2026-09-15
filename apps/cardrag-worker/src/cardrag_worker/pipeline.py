@@ -2311,6 +2311,7 @@ class WorkerPipeline:
                 self.state.finish_run_if_running(run_id, "failed", error=exc.stored_error)
                 raise
             except Exception as exc:
+                LOGGER.exception("Worker pipeline failed unexpectedly during run %s: %s", run_id, exc)
                 category, status_code, error_number = _classify_worker_failure(exc)
                 failure = WorkerUnexpectedFailureRecord(
                     run_id=run_id,
@@ -3025,6 +3026,7 @@ class WorkerPipeline:
                         supersedes_document_id=(
                             item.supersedes_document_id
                             if item.supersedes_document_id in materialized_ids
+                            and item.supersedes_document_id != item.source.document_id(item.pdf.sha256)
                             else None
                         ),
                     )
@@ -4630,6 +4632,8 @@ class WorkerPipeline:
                 supersedes_revision_id=(
                     None
                     if document.supersedes_document_id is None
+                    or document.supersedes_document_id == document.record.document_id
+                    or revision_id_by_document_id.get(document.supersedes_document_id) == artifact.contract_revision_id
                     else revision_id_by_document_id.get(document.supersedes_document_id)
                 ),
             )

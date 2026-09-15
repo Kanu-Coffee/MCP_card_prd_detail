@@ -124,6 +124,17 @@ def native_ocr_reuse_key(contract: NativeOCRContract, source: OCRInput) -> str:
     )
 
 
+def content_addressed_ocr_reuse_key(source: OCRInput) -> str:
+    """Return a model-agnostic lookup key based solely on PDF content identity."""
+
+    return canonical_sha256(
+        {
+            "input": source,
+            "schema_version": "cardrag.ocr-content-reuse-key.v1",
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedOCR:
     """Canonical OCR bytes after every structural/hash check has passed."""
