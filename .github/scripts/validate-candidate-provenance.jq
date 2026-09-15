@@ -8,8 +8,8 @@ def exact_keys($expected):
   (keys | sort) == ($expected | sort);
 
 def expected_subject_name:
-  "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-  + "@candidate-v1.0.20-\($role)-\($source_commit)?platform=linux%2Famd64";
+  "pkg:docker/\($image_repository)"
+  + "@candidate-v1.0.22-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -19,7 +19,8 @@ def exact_subject:
 
 def expected_build_args:
   {
-    "build-arg:APP_VERSION": "1.0.20",
+    "build-arg:APP_VERSION": "1.0.22",
+    "build-arg:SOURCE_URL": "https://github.com/\($source_repository)",
     "build-arg:CODEX_SHA256":
       "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
     "build-arg:CODEX_VERSION": "0.151.0",
@@ -77,11 +78,11 @@ def exact_frontend_request:
 def expected_git_source:
   {
     "identifier":
-      "git://github.com/Kanu-Coffee/MCP_card_prd_detail.git#\($source_commit)",
+      "git://github.com/\($source_repository).git#\($source_commit)",
     "attrs": {
       "git.authheadersecret": "GIT_AUTH_HEADER",
       "git.authtokensecret": "GIT_AUTH_TOKEN",
-      "git.fullurl": "https://github.com/Kanu-Coffee/MCP_card_prd_detail.git"
+      "git.fullurl": "https://github.com/\($source_repository).git"
     }
   };
 
@@ -151,6 +152,9 @@ def exact_immutable_materials:
   );
 
 ($source_commit | sha1_hex)
+and ($image_repository | type == "string" and test("^ghcr\\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"))
+and ($source_repository | type == "string" and test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+and $source_uri == "https://github.com/\($source_repository).git#\($source_commit)"
 and ($platform_digest_hex | sha256_hex)
 and ($role == "worker" or $role == "mcp")
 and (exact_keys(["_type", "predicate", "predicateType", "subject"]))

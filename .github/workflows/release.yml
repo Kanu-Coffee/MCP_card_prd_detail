@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       aggregation_profile_sha256:
-        description: "SHA-256 of the sealed v1.0.20 document aggregation profile artifact"
+        description: "SHA-256 of the sealed v1.0.22 document aggregation profile artifact"
         required: true
         type: string
       capture_set_receipt_sha256:
@@ -45,8 +45,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: ymtop59/mcp-card-prd-detail
-  CANDIDATE_IMAGE_REPOSITORY: ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate
+  IMAGE_NAME: ${{ vars.CARDRAG_PUBLIC_IMAGE_REPOSITORY || 'ymtop59/mcp-card-prd-detail' }}
+  CANDIDATE_IMAGE_REPOSITORY: ${{ vars.CARDRAG_CANDIDATE_IMAGE_REPOSITORY || 'ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate' }}
   IMMUTABLE_TAG_RULE: '^[0-9]+\.[0-9]+\.[0-9]+-(mcp|worker|admin)(-sha-[0-9a-f]{12})?$'
 
 jobs:
@@ -110,17 +110,19 @@ jobs:
         run: |
           set -euo pipefail
           version=$REQUESTED_VERSION
+          [[ "$IMAGE_NAME" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]
+          [[ "$CANDIDATE_IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           # This workflow's candidate receipt, OCI provenance, and portable
           # evidence validators are release-specific. Refuse every other
           # version before the conditional evidence block so a future version
           # can never bypass the strong gate by falling through it.
-          test "$version" = "1.0.20"
+          test "$version" = "1.0.22"
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
           test "$GITHUB_REF" = "refs/tags/v$version"
           test "$(git cat-file -t "refs/tags/v$version")" = tag
-          if [[ "$version" == "1.0.20" ]]; then
+          if [[ "$version" == "1.0.22" ]]; then
             evidence_dir="release-evidence/v${version}"
             evidence_dir=$(realpath --canonicalize-existing "$evidence_dir")
             acceptance_report="$evidence_dir/gold-evaluation-report.json"
@@ -132,9 +134,6 @@ jobs:
             capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"
             candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
             serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"
-            legacy_historical="$evidence_dir/v109-kb-real-regression-baseline.json"
-            legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"
-            legacy_reaudit="$evidence_dir/v109-kb-v4-structure-reaudit.json"
             portable_evidence_relative_paths=(
               candidate-acceptance-receipt.json
               gold-evaluation-report.json
@@ -147,9 +146,6 @@ jobs:
               document-aggregation-score-matrix.f32
               document-aggregation-query-vectors.f32
               serving-generation-manifest.json
-              v109-kb-real-regression-baseline.json
-              v109-structure-audit-execution.json
-              v109-kb-v4-structure-reaudit.json
               v109_baseline.jsonl
               qwen_page.jsonl
               qwen_structure_exact.jsonl
@@ -586,7 +582,7 @@ jobs:
                       "source_commit",
                   }
                   assert candidate_receipt["schema_version"] == (
-                      "cardrag.candidate-acceptance-receipt.v1"
+                      "cardrag.candidate-acceptance-receipt.v2"
                   )
                   assert candidate_receipt["source_commit"] == source_commit
                   evidence_bindings = candidate_receipt["evidence"]
@@ -601,7 +597,7 @@ jobs:
                       "native_cache_audit",
                       "native_cache_before",
                       "rollback_ledger",
-                      "v109_identity",
+                      "baseline_identity",
                       "worker_metrics",
                   }
                   assert isinstance(evidence_bindings, dict)
@@ -785,18 +781,15 @@ jobs:
             capture_set_receipt="$evidence_dir/gold-capture-set-receipt.json"
             candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
             serving_generation_manifest="$evidence_dir/serving-generation-manifest.json"
-            legacy_historical="$evidence_dir/v109-kb-real-regression-baseline.json"
-            legacy_historical_source="$evidence_dir/v109-structure-audit-execution.json"
-            legacy_reaudit="$evidence_dir/v109-kb-v4-structure-reaudit.json"
             mapfile -d '' candidate_evidence_paths < <(
               git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
             )
             ((${#candidate_evidence_paths[@]} > 0))
             git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" -- \
-              . ':(exclude)release-evidence/v1.0.20/**'
+              . ':(exclude)release-evidence/v1.0.22/**'
             for evidence_path in "${candidate_evidence_paths[@]}"; do
               case "$evidence_path" in
-                release-evidence/v1.0.20/*) ;;
+                release-evidence/v1.0.22/*) ;;
                 *)
                   echo "non-evidence change after candidate source: $evidence_path" >&2
                   exit 1
@@ -805,7 +798,7 @@ jobs:
             done
             test "$(sha256sum "$candidate_acceptance" | awk '{print $1}')" = \
               "$CANDIDATE_ACCEPTANCE_SHA256"
-            candidate_validation=$(.venv/bin/python -m cardrag_core.candidate_acceptance \
+            candidate_validation=$(.venv/bin/python -m cardrag_mcp.candidate_smoke \
               --receipt "$candidate_acceptance" \
               --evidence-root "$evidence_dir" \
               --expected-receipt-sha256 "$CANDIDATE_ACCEPTANCE_SHA256" \
@@ -844,10 +837,6 @@ jobs:
             [[ "$mcp_attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             test "$(sha256sum "$capture_set_receipt" | awk '{print $1}')" = \
               "$CAPTURE_SET_RECEIPT_SHA256"
-            .venv/bin/python -m cardrag_worker.legacy_v4_audit \
-              --validate-release-artifact "$legacy_reaudit" \
-              --historical-artifact "$legacy_historical" \
-              --historical-source-artifact "$legacy_historical_source"
             .venv/bin/python -m cardrag_mcp.aggregation_profile \
               --gold "$evidence_dir/gold.jsonl" \
               --scores "$aggregation_scores" \
@@ -1066,7 +1055,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Upload the exact portable evaluation evidence
-        if: ${{ inputs.version == '1.0.20' }}
+        if: ${{ inputs.version == '1.0.22' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: portable-evidence-${{ steps.version.outputs.version }}
@@ -1368,10 +1357,12 @@ jobs:
           python3 .github/scripts/validate-strict-json.py \
             "provenance-${TARGET}.json" "sbom-${TARGET}.json"
           platform_digest_hex=${platform_digest#sha256:}
-          source_uri="https://github.com/Kanu-Coffee/MCP_card_prd_detail.git#${CANDIDATE_SOURCE_COMMIT}"
+          source_uri="https://github.com/${GITHUB_REPOSITORY}.git#${CANDIDATE_SOURCE_COMMIT}"
           jq -e \
             --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
             --arg source_uri "$source_uri" \
+            --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg image_repository "$CANDIDATE_IMAGE_REPOSITORY" \
             --arg platform_digest_hex "$platform_digest_hex" \
             --arg role "$TARGET" \
             -f .github/scripts/validate-candidate-provenance.jq \
@@ -1380,6 +1371,7 @@ jobs:
             --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
             --arg role "$TARGET" \
             --arg platform_digest_hex "$platform_digest_hex" \
+            --arg image_repository "$CANDIDATE_IMAGE_REPOSITORY" \
             -f .github/scripts/validate-candidate-sbom.jq \
             "sbom-${TARGET}.json" >/dev/null
           evidence_secret_scan_dir=$(mktemp -d)
@@ -1409,6 +1401,9 @@ jobs:
           test "$(docker image inspect "$image" \
             --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = \
             "$VERSION"
+          test "$(docker image inspect "$image" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = \
+            "https://github.com/${GITHUB_REPOSITORY}"
           test "$(docker image inspect "$image" --format '{{ json .Config.Entrypoint }}')" = \
             "[\"cardrag-${TARGET}\"]"
           test "$(docker image inspect "$image" --format '{{ .Config.User }}')" = \
@@ -1653,6 +1648,9 @@ jobs:
             expected_entrypoint="[\"cardrag-${role}\"]"
             test "$revision" = "$CANDIDATE_SOURCE_COMMIT"
             test "$version" = "$VERSION"
+            test "$(docker image inspect "$reference" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = \
+              "https://github.com/${GITHUB_REPOSITORY}"
             test "$entrypoint" = "$expected_entrypoint"
             test "$user" = "10001:10001"
             test "$(docker image inspect "$reference" --format '{{ .Os }}/{{ .Architecture }}')" = \
@@ -1662,7 +1660,7 @@ jobs:
           }
 
           repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
-            "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
+            "https://hub.docker.com/v2/namespaces/${IMAGE_NAME%%/*}/repositories/${IMAGE_NAME#*/}")
           jq -e --arg rule "$IMMUTABLE_TAG_RULE" \
             '.immutable_tags_settings.enabled == true
              and .immutable_tags_settings.rules == [$rule]' \
@@ -2214,6 +2212,9 @@ jobs:
             --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = \
             "$VERSION"
           test "$(docker image inspect "$source_reference" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = \
+            "https://github.com/${GITHUB_REPOSITORY}"
+          test "$(docker image inspect "$source_reference" \
             --format '{{ json .Config.Entrypoint }}')" = "[\"cardrag-${TARGET}\"]"
           test "$(docker image inspect "$source_reference" --format '{{ .Config.User }}')" = \
             "10001:10001"
@@ -2233,7 +2234,7 @@ jobs:
           remote_tag_commit=$(jq -r '.object.sha' <<<"$remote_tag")
           test "$remote_tag_commit" = "$GITHUB_SHA"
           repository=$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
-            "https://hub.docker.com/v2/namespaces/ymtop59/repositories/mcp-card-prd-detail")
+            "https://hub.docker.com/v2/namespaces/${IMAGE_NAME%%/*}/repositories/${IMAGE_NAME#*/}")
           jq -e --arg rule "$IMMUTABLE_TAG_RULE" \
             '.immutable_tags_settings.enabled == true
              and .immutable_tags_settings.rules == [$rule]' \
@@ -3041,7 +3042,7 @@ jobs:
               encoding="utf-8",
           )
           notes = [
-              f"CardRAG v{os.environ['VERSION']} Worker/MCP 단순화 런타임 릴리스입니다.",
+              f"CardRAG v{os.environ['VERSION']} Worker/MCP 릴리스입니다.",
               "",
               "이미지(immutable digest):",
               "",

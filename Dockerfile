@@ -60,8 +60,9 @@ FROM ${PYTHON_RUNTIME_IMAGE} AS runtime
 
 ARG APP_VERSION=dev
 ARG VCS_REF=unknown
+ARG SOURCE_URL=https://github.com/Kanu-Coffee/MCP_card_prd_detail
 
-LABEL org.opencontainers.image.source="https://github.com/Kanu-Coffee/MCP_card_prd_detail" \
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.licenses="Apache-2.0"
@@ -85,8 +86,9 @@ ARG CODEX_VERSION
 ARG CODEX_SHA256
 ARG APP_VERSION=dev
 ARG VCS_REF=unknown
+ARG SOURCE_URL=https://github.com/Kanu-Coffee/MCP_card_prd_detail
 
-LABEL org.opencontainers.image.source="https://github.com/Kanu-Coffee/MCP_card_prd_detail" \
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.licenses="Apache-2.0"

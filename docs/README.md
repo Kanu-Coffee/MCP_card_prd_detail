@@ -1,46 +1,16 @@
-# CardRAG 문서
+# 문서 안내
 
-- [v1.0.20 8사 수집·TLS·candidate 검증](V1_0_20_ISSUERS.md)
-- [v1.0.19 WebDAV 14회·7일·10GiB 주기 검증·대용량 단일 검증·복구](V1_0_19_WEBDAV_VERIFICATION.md)
+| 필요한 작업 | 문서 |
+|---|---|
+| 설치, 설정, 인증, 모니터링 | [OPERATIONS](OPERATIONS.md) |
+| 상품 조사와 MCP 클라이언트 연동 | [MCP_API](MCP_API.md) |
+| generation, OCR, 검색 데이터 계약 | [DATA_FORMATS](DATA_FORMATS.md) |
+| 백업, 복구, 재개, 저장 공간 관리 | [RECOVERY](RECOVERY.md) |
+| 검색 평가, 프로파일과 실험 기능 | [EVALUATION](EVALUATION.md) |
+| 릴리스 검증과 stable 전환 | [RELEASING](RELEASING.md) |
+| 개발 환경과 기여 | [CONTRIBUTING](../CONTRIBUTING.md) |
+| 비밀 관리와 보안 경계 | [SECURITY](../SECURITY.md) |
 
-- [v1.0.18 Worker 효율화·PDF/OCR 완료 장벽·설정·성능 인수 기준](V1_0_18_WORKER_EFFICIENCY.md)
-- [WebDAV 반복 검증 비용·주기화·업로드 간소화 검토안](WEBDAV_VERIFICATION_OPTIMIZATION_REVIEW.md)
-
-아래 운영 기준과 읽는 순서는 v1.0.14 recovery 당시 기록입니다.
-
-현재 보호해야 할 운영 기준은 v1.0.9이며 v1.0.14는 v1.0.11 데이터 계약을 유지하는
-별도 recovery candidate에서만 개발·검증합니다. 운영 컨테이너, volume, stable pointer,
-`/opt/cardrag/current`와 LibreChat 경로는 명시적 cutover 승인 전까지 변경하지 않습니다.
-
-## v1.0.14 읽는 순서
-
-1. [프로젝트 README](../README.md)
-2. [v1.0.13 게시 장애 분석과 v1.0.14 수정](V1_0_14_INCIDENT.md)
-3. [v1.0.14 offline recovery, migration과 rollback](V1_0_14_MIGRATION.md)
-4. [v1.0.12 SIGBUS 장애 분석과 v1.0.13 수정](V1_0_13_INCIDENT.md)
-5. [v1.0.13 offline recovery, migration과 rollback](V1_0_13_MIGRATION.md)
-6. [v1.0.12 embedding 재시도 장애 기록](V1_0_12_INCIDENT.md)
-7. [v1.0.11 candidate migration baseline](V1_0_11_MIGRATION.md)
-8. [archive와 운영 state 관리](V1_0_11_ARCHIVE_MANAGEMENT.md)
-9. [v1.0.10 구조·임베딩·exact 검색 baseline](V1_0_10_STRUCTURE_EMBEDDING.md)
-10. [v1.0.10 acceptance baseline](V1_0_10_ACCEPTANCE.md)
-11. [v1.0.10 candidate acceptance receipt baseline](V1_0_10_CANDIDATE_ACCEPTANCE.md)
-12. [Chainguard/Wolfi 컨테이너 런타임 baseline](V1_0_10_CONTAINER_RUNTIME.md)
-13. [배포 overlay와 secrets](../deploy/README.md)
-
-## 기존 운영 기록
-
-- [v1.0.9 migration](V1_0_9_MIGRATION.md)
-- [v1.0.8 OCR 종료 조사](V1_0_8_OCR_INCIDENT_2026_08_28.md)
-- [simple runtime](SIMPLE_RUNTIME.md)
-- [legacy OCR adoption v2](LEGACY_DATA_KIT_ADOPTION_V2.md)
-
-Worker는 유일한 WebDAV writer이고 MCP는 검증된 generation을 로컬 read-only로
-서비스합니다. Live Worker SQLite를 직접 여는 외부 monitor는 금지합니다. v1.0.14
-candidate acceptance는 stable 전환이나 구버전 cleanup을 자동 승인하지 않습니다.
-
-## 라이선스
-
-프로젝트 자체 코드와 문서는 [Apache License 2.0](../LICENSE)으로 공개됩니다.
-외부 구성요소에는 각 구성요소의 라이선스가 적용되며 자세한 내용은
-[제3자 고지](../THIRD_PARTY_NOTICES.md)에 기록합니다.
+버전 번호가 붙은 데이터 schema와 artifact 형식은 호환성 계약입니다. 소프트웨어 버전과
+독립적으로 유지하며 문서 정리를 이유로 데이터 키·채널·캐시 identity를 바꾸지 않습니다.
+운영 로그, 실행별 검증 증빙, 인증과 배포 설정은 각 운영자가 저장소 밖에서 관리합니다.

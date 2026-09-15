@@ -8,8 +8,8 @@ def exact_keys($expected):
   (keys | sort) == ($expected | sort);
 
 def expected_subject_name:
-  "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-  + "@candidate-v1.0.20-\($role)-\($source_commit)?platform=linux%2Famd64";
+  "pkg:docker/\($image_repository)"
+  + "@candidate-v1.0.22-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -24,18 +24,19 @@ def unique_spdx_ids:
 def exact_cardrag_package($name):
   [.predicate.packages[] | select(.name == $name)] as $matches
   | ($matches | length == 1)
-  and $matches[0].versionInfo == "1.0.20"
+  and $matches[0].versionInfo == "1.0.22"
   and $matches[0].licenseDeclared == "Apache-2.0"
   and ([
     $matches[0].externalRefs[]?
     | select(
         .referenceCategory == "PACKAGE-MANAGER"
         and .referenceType == "purl"
-        and .referenceLocator == "pkg:pypi/\($name)@1.0.20"
+        and .referenceLocator == "pkg:pypi/\($name)@1.0.22"
       )
   ] | length == 1);
 
 ($source_commit | sha1_hex)
+and ($image_repository | type == "string" and test("^ghcr\\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"))
 and ($platform_digest_hex | sha256_hex)
 and ($role == "worker" or $role == "mcp")
 and (exact_keys(["_type", "predicate", "predicateType", "subject"]))

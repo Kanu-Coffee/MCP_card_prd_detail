@@ -1,15 +1,26 @@
 name: Verify public candidate package
-description: Fail closed unless the exact user-owned GHCR candidate package is publicly readable
+description: Fail closed unless the configured owner-bound GHCR candidate package is publicly readable
 
 runs:
   using: composite
   steps:
-    - name: Verify exact public user-owned package metadata
+    - name: Verify exact public owner-bound package metadata
       shell: bash
       run: |
         set -euo pipefail
         [[ "${GITHUB_REPOSITORY_OWNER:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
         test -n "${GH_TOKEN:-}"
+        [[ "${CANDIDATE_IMAGE_REPOSITORY:-}" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]
+        package_owner=${CANDIDATE_IMAGE_REPOSITORY#ghcr.io/}
+        package_owner=${package_owner%%/*}
+        test "$package_owner" = "${GITHUB_REPOSITORY_OWNER,,}"
+        package_name=${CANDIDATE_IMAGE_REPOSITORY##*/}
+        owner_type=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.owner.type')
+        case "$owner_type" in
+          User) owner_route=users ;;
+          Organization) owner_route=orgs ;;
+          *) echo "unsupported GitHub repository owner type" >&2; exit 1 ;;
+        esac
 
         package_json=$(mktemp)
         trap 'rm -f "$package_json"' EXIT
@@ -19,10 +30,12 @@ runs:
           -H "Accept: application/vnd.github+json" \
           -H "Authorization: Bearer ${GH_TOKEN}" \
           -H "X-GitHub-Api-Version: 2026-03-10" \
-          "https://api.github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/mcp-card-prd-detail-candidate" \
+          "https://api.github.com/${owner_route}/${GITHUB_REPOSITORY_OWNER}/packages/container/${package_name}" \
           > "$package_json"
 
         jq -e \
           --arg owner "$GITHUB_REPOSITORY_OWNER" \
+          --arg owner_type "$owner_type" \
+          --arg package_name "$package_name" \
           -f "$GITHUB_ACTION_PATH/validate-package.jq" \
           "$package_json" >/dev/null

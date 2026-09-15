@@ -519,6 +519,7 @@ class OpenRouterOCRProvider:
         *,
         api_key: str,
         model: str,
+        fallback_model: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
         timeout_seconds: float = 1800,
     ) -> None:
@@ -528,8 +529,34 @@ class OpenRouterOCRProvider:
             raise ValueError("OCR provider timeout must be positive")
         self.api_key = api_key
         self.model = model
+        self.fallback_model = fallback_model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+
+    async def _post_chat_completion(
+        self,
+        client: httpx.AsyncClient,
+        model: str,
+        content: list[dict[str, object]],
+        models: Sequence[str] | None = None,
+    ) -> str:
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0,
+        }
+        if models:
+            payload["models"] = list(models)
+        response = await client.post(
+            self.base_url + "/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        try:
+            return str(response.json()["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError):
+            raise ProviderSystemicError("provider_contract_invalid") from None
 
     async def recognize(
         self,
@@ -550,24 +577,51 @@ class OpenRouterOCRProvider:
             total_pages=total_pages,
         )
         content: list[dict[str, object]] = [{"type": "text", "text": prompt + "\n\n" + instructions}]
+        def _encode_image(image_path: Path) -> tuple[str, str]:
+            raw = image_path.read_bytes()
+            if len(raw) <= 3_500_000:
+                return "image/png", base64.b64encode(raw).decode("ascii")
+            try:
+                import io
+                from PIL import Image
+
+                im = Image.open(image_path)
+                if im.mode in ("RGBA", "P"):
+                    im = im.convert("RGB")
+                max_dim = max(im.size)
+                if max_dim > 3840:
+                    scale = 3840.0 / max_dim
+                    im = im.resize((int(im.width * scale), int(im.height * scale)), Image.Resampling.LANCZOS)
+                quality = 90
+                data = raw
+                while quality >= 60:
+                    buf = io.BytesIO()
+                    im.save(buf, format="JPEG", quality=quality, optimize=True)
+                    candidate = buf.getvalue()
+                    if len(candidate) <= 3_500_000:
+                        return "image/jpeg", base64.b64encode(candidate).decode("ascii")
+                    data = candidate
+                    quality -= 10
+                    im = im.resize((int(im.width * 0.8), int(im.height * 0.8)), Image.Resampling.LANCZOS)
+                return "image/jpeg", base64.b64encode(data).decode("ascii")
+            except Exception:
+                return "image/png", base64.b64encode(raw).decode("ascii")
+
         for image in images:
-            encoded = base64.b64encode(image.read_bytes()).decode("ascii")
-            content.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + encoded}})
+            mime_type, encoded = _encode_image(image)
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}})
+        models_list = [self.model, self.fallback_model] if self.fallback_model else None
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(
-                self.base_url + "/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": content}],
-                    "temperature": 0,
-                },
-            )
-        response.raise_for_status()
-        try:
-            text = str(response.json()["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError):
-            raise ProviderSystemicError("provider_contract_invalid") from None
+            try:
+                text = await self._post_chat_completion(client, self.model, content, models=models_list)
+            except (httpx.HTTPStatusError, httpx.TimeoutException, ProviderSystemicError) as exc:
+                if self.fallback_model and self.fallback_model != self.model:
+                    try:
+                        text = await self._post_chat_completion(client, self.fallback_model, content, models=None)
+                    except Exception:
+                        raise exc from None
+                else:
+                    raise
         reject_credential_bearing_ocr(text)
         return text
 
@@ -683,12 +737,14 @@ def make_ocr_provider(
     codex_auth_root: Path | None,
     reasoning_effort: str = "high",
     timeout_seconds: float = 1800,
+    openrouter_fallback_model: str | None = None,
 ) -> OCRProvider:
     normalized = provider.casefold()
     if normalized == "openrouter":
         return OpenRouterOCRProvider(
             api_key=api_key or "",
             model=model,
+            fallback_model=openrouter_fallback_model,
             base_url=base_url,
             timeout_seconds=timeout_seconds,
         )

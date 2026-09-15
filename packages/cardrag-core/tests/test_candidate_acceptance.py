@@ -9,10 +9,12 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from cardrag_core.candidate_acceptance import (
+    BASELINE_IDENTITY_ASSETS,
     CANDIDATE_ISSUERS,
     MCP_TOOLS,
     RECEIPT_SCHEMA,
-    V109_IDENTITY_ASSETS,
+    BaselineAssetIdentity,
+    BaselineIdentityEvidence,
     CandidateAcceptanceError,
     CandidateAcceptanceReceipt,
     CandidateEvidenceBindings,
@@ -28,8 +30,6 @@ from cardrag_core.candidate_acceptance import (
     RollbackLedgerEvidence,
     RollbackStep,
     ToolSmokeResult,
-    V109AssetIdentity,
-    V109IdentityEvidence,
     WorkerMetricsEvidence,
     main,
     verify_candidate_acceptance,
@@ -78,6 +78,82 @@ class AcceptanceBundle:
     @property
     def receipt_sha256(self) -> str:
         return hashlib.sha256(self.receipt_path.read_bytes()).hexdigest()
+
+
+def _smoke_call(tool: str, generation_id: str) -> ToolSmokeResult:
+    # Synthetic shape fixtures for the core integrity verifier. Release also replays
+    # complete MCP response models in cardrag_mcp.candidate_smoke.
+    arguments = {
+        "search_contracts": {"query": "혜택"},
+        "get_contract_bundle": {"contract_revision_id": "revision"},
+        "list_product_revisions": {"issuer": "kb", "product_lineage_id": "lineage"},
+        "search_evidence": {"query": "혜택"},
+        "get_evidence": {"evidence_id": "evidence"},
+        "get_product": {"issuer": "kb", "product_code": "product"},
+        "get_source_pdf": {"document_id": "doc-kb"},
+        "get_source_page": {"document_id": "doc-kb", "page": 1},
+        "list_recent_products": {"months": 1},
+        "find_products": {"keyword": "card"},
+        "find_cards_by_merchant": {"merchant_name": "merchant"},
+        "get_product_summary": {"issuer": "kb", "identifier": "product"},
+    }[tool]
+    responses = {
+        "search_contracts": {"bundles": [], "coverage": {}},
+        "get_contract_bundle": {"contract": {}, "scope": "full", "nodes": []},
+        "list_product_revisions": {"issuer": "kb", "product_lineage_id": "lineage", "revisions": []},
+        "search_evidence": {"items": [], "retrieval_mode": "exact", "degraded": False},
+        "get_evidence": {"evidence_id": "evidence", "document_id": "doc-kb", "items": []},
+        "get_product": {
+            "issuer": "kb",
+            "product_code": "product",
+            "name": "Card",
+            "availability": "available",
+            "document": {},
+        },
+        "get_source_pdf": {
+            "document_id": "doc-kb",
+            "url": "https://cardrag.example/sources/doc-kb/pdf",
+            "sha256": "a" * 64,
+            "size_bytes": 10,
+            "mime_type": "application/pdf",
+            "range_supported": True,
+        },
+        "get_source_page": {
+            "document_id": "doc-kb",
+            "page": 1,
+            "page_count": 1,
+            "text": "source",
+            "text_sha256": "b" * 64,
+            "pdf_sha256": "a" * 64,
+        },
+        "list_recent_products": {
+            "items": [],
+            "total_count": 0,
+            "period_start": "2026-08-01",
+            "period_end": "2026-09-01",
+            "unknown_launch_date_count": 1,
+        },
+        "find_products": {"items": [], "total_count": 0},
+        "find_cards_by_merchant": {"merchant_query": "merchant", "items": [], "total_count": 0},
+        "get_product_summary": {
+            "issuer": "kb",
+            "product_code": "product",
+            "product_name": "Card",
+            "launch_date": None,
+        },
+    }
+    response = responses[tool]
+    if tool not in {"get_product", "get_source_pdf", "get_source_page"}:
+        response["generation_id"] = generation_id
+    return ToolSmokeResult(
+        tool=tool,
+        passed=True,
+        generation_id=generation_id,
+        request_arguments=arguments,
+        request_sha256=canonical_sha256({"tool": tool, "arguments": arguments}),
+        response=response,
+        response_sha256=canonical_sha256(response),
+    )
 
 
 def _manifest() -> GenerationManifest:
@@ -290,20 +366,20 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         generation_objects_by_path[path] for path in sorted(generation_objects_by_path)
     )
     config = EffectiveConfigEvidence(
-        schema_version="cardrag.candidate-effective-config.v3",
+        schema_version="cardrag.candidate-effective-config.v4",
         source_commit=SOURCE_COMMIT,
-        release_version="1.0.20",
-        compose_project="cardrag-v114-candidate",
+        release_version="1.0.22",
+        compose_project="cardrag-v122-candidate",
         channel="candidate-v1.0.11",
-        worker_volume="cardrag-worker-v114-candidate-state",
+        worker_volume="cardrag-worker-v122-candidate-state",
         worker_state_mount_path="/var/lib/cardrag-worker",
-        worker_codex_home_volume="cardrag-worker-v114-candidate-codex-home",
+        worker_codex_home_volume="cardrag-worker-v122-candidate-codex-home",
         worker_codex_home_mount_path="/var/lib/cardrag-codex-home",
         worker_codex_auth_root="/var/lib/cardrag-codex-home",
         worker_home="/var/lib/cardrag-codex-home/home",
-        mcp_volume="cardrag-mcp-v114-candidate-state",
+        mcp_volume="cardrag-mcp-v122-candidate-state",
         mcp_host="127.0.0.1",
-        mcp_port=18014,
+        mcp_port=18022,
         rootfs_read_only=True,
         cap_drop_all=True,
         no_new_privileges=True,
@@ -312,7 +388,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         worker_systempaths_unconfined=False,
         worker_privileged=False,
         worker_cap_add_count=0,
-        v109_volume_rw_mounts=0,
+        baseline_volume_rw_mounts=0,
         worker_max_state_bytes=137438953472,
         worker_reserved_free_space_bytes=2147483648,
         worker_max_vector_sidecar_bytes=17179869184,
@@ -351,7 +427,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'c' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.20",
+            version="1.0.22",
             platform="linux/amd64",
             entrypoint="cardrag-worker",
             user="10001:10001",
@@ -375,7 +451,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
             attestation_reference_type="attestation-manifest",
             attestation_subject_digest=f"sha256:{'e' * 64}",
             revision=SOURCE_COMMIT,
-            version="1.0.20",
+            version="1.0.22",
             platform="linux/amd64",
             entrypoint="cardrag-mcp",
             user="10001:10001",
@@ -383,7 +459,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         candidate_webdav_namespace_sha256=sha256_bytes(b"candidate namespace"),
         stable_channel_used=False,
         stable_publication_approved=False,
-        v109_seed_access="read-only",
+        baseline_seed_access="read-only",
         ocr_cache_mode="read-only",
         ocr_cache_publication_approved=False,
         remote_gc_approved=False,
@@ -415,8 +491,16 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         for row in manifest.issuer_ocr_counts
     )
     generation_write_requests = len(generation_objects) + 5
+    terminal_result = {
+        "run_id": "candidate-run",
+        "status": "succeeded",
+        "generation_id": manifest.generation_id,
+        "documents": manifest.counts.documents,
+        "corpus_sha256": manifest.corpus_sha256,
+        "contract_sha256": manifest.contract_sha256,
+    }
     worker = WorkerMetricsEvidence(
-        schema_version="cardrag.candidate-worker-metrics.v3",
+        schema_version="cardrag.candidate-worker-metrics.v4",
         source_commit=SOURCE_COMMIT,
         generation_id=manifest.generation_id,
         generation_manifest_sha256=manifest.manifest_sha256,
@@ -456,6 +540,9 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         ocr_credential_token_rejection_verified=True,
         full_candidate_run=True,
         run_completed=True,
+        terminal_exit_code=0,
+        terminal_result=terminal_result,
+        terminal_result_sha256=canonical_sha256(terminal_result),
         issuer_metrics=issuer_metrics,
         documents=manifest.counts.documents,
         chunks=manifest.counts.chunks,
@@ -474,7 +561,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         generation_publication_calls=generation_write_requests,
     )
     mcp = MCPSmokeEvidence(
-        schema_version="cardrag.candidate-mcp-smoke.v2",
+        schema_version="cardrag.candidate-mcp-smoke.v3",
         source_commit=SOURCE_COMMIT,
         generation_id=manifest.generation_id,
         generation_manifest_sha256=manifest.manifest_sha256,
@@ -501,10 +588,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         exact_blocks=2,
         cross_contract_node_count=0,
         discovered_tools=MCP_TOOLS,
-        tool_results=tuple(
-            ToolSmokeResult(tool=tool, passed=True, response_sha256=sha256_bytes(tool.encode()))
-            for tool in MCP_TOOLS
-        ),
+        tool_results=tuple(_smoke_call(tool, manifest.generation_id) for tool in MCP_TOOLS),
         bundle_source_spans_verified=True,
         revision_history_verified=True,
         legacy_adapter_verified=True,
@@ -606,7 +690,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         stable_channel_write_requests=0,
     )
     rollback = RollbackLedgerEvidence(
-        schema_version="cardrag.candidate-v4-v5-rollback-ledger.v1",
+        schema_version="cardrag.candidate-rollback-ledger.v2",
         source_commit=SOURCE_COMMIT,
         channel="candidate-v1.0.11",
         steps=(
@@ -669,23 +753,23 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         rollback_verified=True,
         stable_channel_write_requests=0,
     )
-    v109 = V109IdentityEvidence(
-        schema_version="cardrag.v109-before-after-identity.v1",
+    baseline = BaselineIdentityEvidence(
+        schema_version="cardrag.baseline-before-after-identity.v1",
         source_commit=SOURCE_COMMIT,
         assets=tuple(
-            V109AssetIdentity(
+            BaselineAssetIdentity(
                 asset=asset,
-                before_sha256=sha256_bytes(f"v109 {asset}".encode()),
-                after_sha256=sha256_bytes(f"v109 {asset}".encode()),
+                before_sha256=sha256_bytes(f"baseline {asset}".encode()),
+                after_sha256=sha256_bytes(f"baseline {asset}".encode()),
                 equal=True,
             )
-            for asset in V109_IDENTITY_ASSETS
+            for asset in BASELINE_IDENTITY_ASSETS
         ),
-        candidate_rw_mounts_of_v109_volumes=0,
+        candidate_rw_mounts_of_baseline_volumes=0,
         candidate_stable_channel_requests=0,
         candidate_librechat_switch_requests=0,
         destructive_cleanup_commands=0,
-        v109_restart_commands=0,
+        baseline_restart_commands=0,
     )
     models: dict[str, BaseModel] = {
         "effective_config": config,
@@ -699,7 +783,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         "native_cache_audit": native_audit,
         "generation_cas": generation_cas,
         "rollback_ledger": rollback,
-        "v109_identity": v109,
+        "baseline_identity": baseline,
     }
     names = {
         "effective_config": "effective-config.json",
@@ -713,7 +797,7 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         "native_cache_audit": "native-cache-audit.json",
         "generation_cas": "generation-cas-audit.json",
         "rollback_ledger": "rollback-ledger.json",
-        "v109_identity": "v109-identity.json",
+        "baseline_identity": "baseline-identity.json",
     }
     no_lf = {"generation_manifest", "generation_ready", "candidate_pointer"}
     bindings: dict[str, EvidenceFile] = {}
@@ -723,9 +807,9 @@ def _write_valid_bundle(root: Path) -> AcceptanceBundle:
         bindings[field] = _file_binding(names[field], raw)
     receipt = CandidateAcceptanceReceipt(
         schema_version=RECEIPT_SCHEMA,
-        release_version="1.0.20",
+        release_version="1.0.22",
         source_commit=SOURCE_COMMIT,
-        compose_project="cardrag-v114-candidate",
+        compose_project="cardrag-v122-candidate",
         channel="candidate-v1.0.11",
         generation_id=manifest.generation_id,
         issuers=CANDIDATE_ISSUERS,
@@ -949,7 +1033,7 @@ def test_effective_config_rejects_a_cross_role_platform_manifest(tmp_path: Path)
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("worker_codex_home_volume", "cardrag-worker-v114-candidate-state"),
+        ("worker_codex_home_volume", "cardrag-worker-v122-candidate-state"),
         ("worker_codex_home_mount_path", "/var/lib/cardrag-worker/codex"),
         ("worker_codex_auth_root", "/var/lib/cardrag-worker/codex"),
         ("worker_home", "/var/lib/cardrag-worker/home"),
@@ -1422,7 +1506,7 @@ def test_acceptance_rejects_noncanonical_and_duplicate_json(tmp_path: Path) -> N
         ("native_cache_audit", "native_write_requests", 1),
         ("generation_cas", "stable_channel_write_requests", 1),
         ("rollback_ledger", "stable_channel_write_requests", 1),
-        ("v109_identity", "candidate_rw_mounts_of_v109_volumes", 1),
+        ("baseline_identity", "candidate_rw_mounts_of_baseline_volumes", 1),
     ),
 )
 def test_acceptance_rejects_each_fail_closed_candidate_invariant(
@@ -1573,7 +1657,7 @@ def test_rollback_ledger_rejects_one_generation_disguised_as_v4_and_v5(tmp_path:
         {**step.model_dump(mode="python"), "generation_id": v4_generation_id} for step in rollback.steps
     )
 
-    with pytest.raises(ValidationError, match="v4 and v5 generations are not distinct"):
+    with pytest.raises(ValidationError, match="baseline and candidate generations are not distinct"):
         RollbackLedgerEvidence.model_validate(payload)
 
 
@@ -1606,4 +1690,127 @@ def test_acceptance_rejects_evidence_from_another_source_commit(tmp_path: Path) 
     _rewrite_bound_file(bundle, "worker_metrics", mismatched.canonical_bytes())
 
     with pytest.raises(CandidateAcceptanceError, match="^evidence_source_commit_mismatch$"):
+        _verify(bundle)
+
+
+@pytest.mark.parametrize("field", ("request_arguments", "request_sha256", "response", "response_sha256"))
+def test_mcp_smoke_rejects_tampered_raw_calls(tmp_path: Path, field: str) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["mcp_smoke"].model_dump(mode="python")["tool_results"][0]
+    payload[field] = {"tampered": True} if field in {"request_arguments", "response"} else "f" * 64
+    with pytest.raises(ValidationError, match="hash does not match|required argument"):
+        ToolSmokeResult.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "response", ({"isError": True}, {"error": "failed"}, {"generation_id": "other-generation"})
+)
+def test_mcp_smoke_rejects_error_or_foreign_responses(tmp_path: Path, response: dict) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["mcp_smoke"].model_dump(mode="python")["tool_results"][0]
+    payload["response"].update(response)
+    payload["response_sha256"] = canonical_sha256(payload["response"])
+    with pytest.raises(ValidationError, match="reports an error|different generation"):
+        ToolSmokeResult.model_validate(payload)
+
+
+def test_mcp_smoke_requires_current_twelve_tool_set(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["mcp_smoke"].model_dump(mode="python")
+    payload["discovered_tools"] = MCP_TOOLS[:8]
+    payload["tool_results"] = payload["tool_results"][:8]
+    with pytest.raises(ValidationError, match="exactly twelve"):
+        MCPSmokeEvidence.model_validate(payload)
+
+
+def test_rollback_ledger_accepts_a_distinct_v5_baseline(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["rollback_ledger"].model_dump(mode="python")
+    for index in (0, 3):
+        payload["steps"][index]["serving_schema"] = "cardrag.serving-db.v5"
+        payload["steps"][index]["search_mode"] = "exact"
+        payload["steps"][index]["search_contracts_outcome"] = "exact-passed"
+    RollbackLedgerEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "status", ("no_change", "failed", "interrupted", "already_running", "shutdown_complete")
+)
+def test_worker_acceptance_rejects_non_success_terminal_result(tmp_path: Path, status: str) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["worker_metrics"].model_dump(mode="python")
+    payload["terminal_result"]["status"] = status
+    payload["terminal_result_sha256"] = canonical_sha256(payload["terminal_result"])
+    with pytest.raises(ValidationError, match="completed candidate generation"):
+        WorkerMetricsEvidence.model_validate(payload)
+
+
+def test_worker_acceptance_rejects_tampered_terminal_result(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["worker_metrics"].model_dump(mode="python")
+    payload["terminal_result"]["run_id"] = "replaced-run"
+    with pytest.raises(ValidationError, match="terminal hash"):
+        WorkerMetricsEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {"isError": False, "structuredContent": {"generation_id": "other-generation"}},
+        {"jsonrpc": "2.0", "result": {"isError": True}},
+        {"ok": True},
+    ),
+)
+def test_mcp_smoke_rejects_envelopes_and_shape_free_success(response: dict) -> None:
+    payload = _smoke_call("get_product", "candidate-generation").model_dump(mode="python")
+    payload.update(response=response, response_sha256=canonical_sha256(response))
+    with pytest.raises(ValidationError, match="normalized tool payload|required payload fields"):
+        ToolSmokeResult.model_validate(payload)
+
+
+def test_mcp_smoke_rejects_missing_arguments_even_with_matching_hashes() -> None:
+    payload = _smoke_call("get_product", "candidate-generation").model_dump(mode="python")
+    payload["request_arguments"] = {}
+    payload["request_sha256"] = canonical_sha256({"tool": "get_product", "arguments": {}})
+    with pytest.raises(ValidationError, match="required argument"):
+        ToolSmokeResult.model_validate(payload)
+
+
+def test_mcp_smoke_rejects_nested_generation_substitution() -> None:
+    payload = _smoke_call("search_contracts", "candidate-generation").model_dump(mode="python")
+    payload["response"]["bundles"] = [{"generation_id": "other-generation"}]
+    payload["response_sha256"] = canonical_sha256(payload["response"])
+    with pytest.raises(ValidationError, match="different generation"):
+        ToolSmokeResult.model_validate(payload)
+
+
+def test_release_replays_mcp_response_validator_before_acceptance(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    seen: list[str] = []
+
+    def reject(call: ToolSmokeResult) -> None:
+        seen.append(call.tool)
+        raise CandidateAcceptanceError("mcp_response_schema_invalid")
+
+    with pytest.raises(CandidateAcceptanceError, match="mcp_response_schema_invalid"):
+        verify_candidate_acceptance(
+            bundle.receipt_path.resolve(),
+            bundle.root.resolve(),
+            expected_receipt_sha256=bundle.receipt_sha256,
+            expected_source_commit=SOURCE_COMMIT,
+            expected_image_repository=IMAGE_REPOSITORY,
+            mcp_response_validator=reject,
+        )
+    assert seen == [MCP_TOOLS[0]]
+
+
+def test_worker_terminal_result_must_bind_manifest_corpus(tmp_path: Path) -> None:
+    bundle = _write_valid_bundle(tmp_path)
+    payload = bundle.models["worker_metrics"].model_dump(mode="python")
+    payload["terminal_result"]["corpus_sha256"] = "f" * 64
+    payload["terminal_result_sha256"] = canonical_sha256(payload["terminal_result"])
+    _rewrite_bound_file(
+        bundle, "worker_metrics", WorkerMetricsEvidence.model_validate(payload).canonical_bytes()
+    )
+    with pytest.raises(CandidateAcceptanceError, match="worker_metrics_binding_mismatch"):
         _verify(bundle)

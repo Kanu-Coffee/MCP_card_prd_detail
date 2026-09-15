@@ -393,10 +393,15 @@ class SearchCoverage(StrictModel):
     lexical_error: Literal["fts_unavailable", "query_invalid", "internal_error"] | None = None
     lexical_global_matched_evidence_count: int = Field(ge=0)
     lexical_global_additional_evidence_count: int = Field(ge=0)
-    catalog_resolution_status: Literal["explicit", "resolved", "unresolved", "ambiguous"]
+    catalog_resolution_status: Literal[
+        "explicit", "explicit_multiple", "resolved", "unresolved", "ambiguous"
+    ]
     catalog_candidate_count: int = Field(ge=0)
     catalog_resolved_product_lineage_id: Identifier | None = None
     catalog_resolved_product_name: str | None = None
+    catalog_resolution_hint: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     response_node_count: int = Field(ge=0, le=MAX_SEARCH_RESPONSE_NODES)
     response_character_count: int = Field(ge=0, le=MAX_SEARCH_RESPONSE_CHARACTERS)
     response_node_limit: Literal[2048] = MAX_SEARCH_RESPONSE_NODES
@@ -527,6 +532,11 @@ class SearchCoverage(StrictModel):
             raise ValueError("unresolved catalog diagnostics cannot declare candidates")
         if self.catalog_resolution_status == "ambiguous" and self.catalog_candidate_count < 2:
             raise ValueError("ambiguous catalog diagnostics require multiple candidates")
+        if (
+            self.catalog_resolution_status == "explicit_multiple"
+            and self.catalog_candidate_count < 1
+        ):
+            raise ValueError("explicit product list must declare candidates")
         return self
 
     @model_validator(mode="after")
@@ -594,10 +604,37 @@ class SearchCoverage(StrictModel):
         return self
 
 
+class CompactSearchDiagnostics(StrictModel):
+    response_mode: Literal["compact"] = "compact"
+    response_byte_limit: Literal[65536] = 65_536
+    response_bytes: int = Field(ge=0, le=65_536)
+    evidence_scope: Literal["selected_complete_clause_groups"] = "selected_complete_clause_groups"
+    full_contract_complete: Literal[False] = False
+    candidate_count_semantics: Literal["ranked_candidates_not_verified_condition_matches"] = (
+        "ranked_candidates_not_verified_condition_matches"
+    )
+    ranked_candidate_contracts: int = Field(ge=0)
+    candidate_clause_groups: int = Field(ge=0)
+    returned_clause_groups: int = Field(ge=0)
+    omitted_clause_groups: int = Field(ge=0)
+    omitted_contracts: int = Field(ge=0)
+    omission_reasons: tuple[Literal["response_byte_limit", "candidate_limit", "coarse_view"], ...]
+    omitted_group_sample: tuple[str, ...] = Field(default=(), max_length=8)
+    omitted_group_sample_complete: bool = True
+    retrieval_hint: str = (
+        "Counts describe scored/ranked candidates, not verified benefit matches. "
+        "Only returned clause groups are complete. Use explicit product IDs or "
+        "get_contract_bundle for omitted contract content."
+    )
+
+
 class ContractSearchPage(StrictModel):
     generation_id: Identifier
     bundles: tuple[ContractEvidenceBundle, ...]
     coverage: SearchCoverage
+    compact: CompactSearchDiagnostics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def bundles_respect_the_sealed_response_budget(self) -> ContractSearchPage:
@@ -617,6 +654,13 @@ class ContractSearchRequest(StrictModel):
     query: str = Field(min_length=1, max_length=2_000)
     issuer: Identifier | None = None
     product_lineage_id: Identifier | None = None
+    product_lineage_ids: tuple[Identifier, ...] | None = Field(
+        default=None, min_length=1, max_length=100
+    )
+    launch_start_date: date | None = None
+    launch_end_date: date | None = None
+    expected_generation_id: Identifier | None = None
+    response_mode: Literal["auto", "full", "compact"] = "auto"
     as_of: date | None = None
     include_history: bool = False
     mode: Literal["exact", "exhaustive"] = "exact"
@@ -634,6 +678,19 @@ class ContractSearchRequest(StrictModel):
     def temporal_scope_is_unambiguous(self) -> ContractSearchRequest:
         if self.include_history and self.as_of is not None:
             raise ValueError("include_history and as_of are mutually exclusive")
+        if self.product_lineage_id is not None and self.product_lineage_ids is not None:
+            raise ValueError("product_lineage_id and product_lineage_ids are mutually exclusive")
+        if self.product_lineage_ids is not None and len(set(self.product_lineage_ids)) != len(
+            self.product_lineage_ids
+        ):
+            raise ValueError("product_lineage_ids must be unique")
+        if (self.launch_start_date is None) != (self.launch_end_date is None):
+            raise ValueError("launch_start_date and launch_end_date must be provided together")
+        if self.launch_start_date is not None and self.launch_end_date is not None:
+            if self.launch_start_date > self.launch_end_date:
+                raise ValueError("launch_start_date must not follow launch_end_date")
+            if self.include_history or self.as_of is not None:
+                raise ValueError("launch date filtering requires current revisions")
         return self
 
 
@@ -678,6 +735,9 @@ class ProductCatalogEntry(StrictModel):
     effective_date: date | None = None
     launch_date: date | None = None
     temporal_status: TemporalStatus
+    contract_revision_id: Identifier | None = None
+    document_id: Identifier | None = None
+    launch_date_status: Literal["confirmed", "missing", "invalid", "conflicting"] = "missing"
 
 
 class ProductCatalogPage(StrictModel):
@@ -686,6 +746,48 @@ class ProductCatalogPage(StrictModel):
     generation_id: Identifier
     items: tuple[ProductCatalogEntry, ...]
     total_count: int = Field(ge=0)
+    next_cursor: str | None = None
+    schema_status: Literal["supported", "unsupported_schema"] = "supported"
+    count_unit: Literal["current_revision"] = "current_revision"
+
+
+class IssuerCoverage(StrictModel):
+    issuer: Identifier
+    display_name: str
+    loaded: bool
+    product_count: int = Field(ge=0)
+    available_product_count: int = Field(ge=0)
+    current_revision_count: int | None = Field(default=None, ge=0)
+    confirmed_launch_date_count: int | None = Field(default=None, ge=0)
+    unknown_launch_date_count: int | None = Field(default=None, ge=0)
+    unsupported_drm_count: int = Field(ge=0)
+    ocr_failed_count: int = Field(ge=0)
+
+
+class ProductCoverage(StrictModel):
+    generation_id: Identifier
+    schema_id: str
+    launch_date_support: Literal["supported", "unsupported_schema"]
+    supported_issuers: tuple[str, ...]
+    loaded_issuers: tuple[str, ...]
+    issuers: tuple[IssuerCoverage, ...]
+    product_count: int = Field(ge=0)
+    coverage_scope: Literal["loaded_generation_only"] = "loaded_generation_only"
+    launch_date_count_unit: Literal["current_revision"] = "current_revision"
+
+
+class RecentProductCatalogPage(ProductCatalogPage):
+    """Confirmed launches within an inclusive period, with unknown-date coverage."""
+
+    period_start: date
+    period_end: date
+    unknown_launch_date_count: int = Field(
+        ge=0,
+        description=(
+            "Current product revisions in the selected issuer scope without a confirmed "
+            "launch date. These are excluded from items and are not known recent launches."
+        ),
+    )
 
 
 class MerchantSearchHit(StrictModel):
@@ -706,6 +808,13 @@ class MerchantSearchPage(StrictModel):
     total_count: int = Field(ge=0)
 
 
+class SummaryEvidence(StrictModel):
+    field: Literal["launch_date", "annual_fee", "benefit"]
+    node_id: Identifier
+    pages: tuple[int, ...]
+    excerpt: str = Field(max_length=300)
+
+
 class ProductSummary(StrictModel):
     """Compact summary of a card product."""
 
@@ -718,3 +827,22 @@ class ProductSummary(StrictModel):
     annual_fee_text: str | None = None
     benefit_headings: tuple[str, ...] = ()
     benefit_summary_texts: tuple[str, ...] = ()
+    product_lineage_id: Identifier | None = None
+    contract_revision_id: Identifier | None = None
+    document_id: Identifier | None = None
+    source_id: Identifier | None = None
+    source_url: str | None = None
+    pdf_sha256: Sha256Hex | None = None
+    launch_date_status: Literal["confirmed", "missing", "invalid", "conflicting"] = "missing"
+    launch_date_evidence: tuple[str, ...] = ()
+    evidence: tuple[SummaryEvidence, ...] = ()
+
+
+class ProductSummaryRequest(StrictModel):
+    issuer: Identifier
+    identifier: Identifier
+
+
+class ProductSummaryBatch(StrictModel):
+    generation_id: Identifier
+    items: tuple[ProductSummary | None, ...]

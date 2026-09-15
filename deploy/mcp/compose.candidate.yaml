@@ -1,11 +1,12 @@
-name: cardrag-v114-candidate
+name: cardrag-v122-candidate
 
 services:
   mcp:
-    image: ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?receipt-bound MCP sha256 index digest is required}
+    image: ${CARDRAG_CANDIDATE_IMAGE_REPOSITORY:-ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate}@${CARDRAG_CANDIDATE_MCP_IMAGE_DIGEST:?receipt-bound MCP sha256 index digest is required}
     build: !reset null
     pull_policy: always
     environment:
+      # Channel identifies the compatible data contract, not the application version.
       CARDRAG_CHANNEL: candidate-v1.0.11
       # Candidate reads the shared canonical root through its isolated channel.
       CARDRAG_WEBDAV_BASE_URL: ${CARDRAG_WEBDAV_BASE_URL:?shared CARDRAG_WEBDAV_BASE_URL is required}
@@ -26,8 +27,8 @@ services:
       CARDRAG_MCP_RERANKER_AUDIT_MAX_TOTAL_BYTES: "536870912"
       CARDRAG_MCP_RERANKER_AUDIT_MAX_ARTIFACT_BYTES: "8388608"
     ports: !override
-      - "${CARDRAG_CANDIDATE_MCP_BIND_ADDRESS:-127.0.0.1}:${CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18014}:8000"
+      - "${CARDRAG_CANDIDATE_MCP_BIND_ADDRESS:-127.0.0.1}:${CARDRAG_CANDIDATE_MCP_PUBLISHED_PORT:-18022}:8000"
 
 volumes:
   mcp-state:
-    name: ${CARDRAG_CANDIDATE_MCP_STATE_VOLUME:-cardrag-mcp-v114-candidate-state}
+    name: ${CARDRAG_CANDIDATE_MCP_STATE_VOLUME:-cardrag-mcp-v122-candidate-state}

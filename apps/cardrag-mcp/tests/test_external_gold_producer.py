@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -2714,57 +2715,20 @@ def test_qwen_replay_load_resource_preflight_precedes_matrix_allocation(
     assert allocations == 0
 
 
-def test_external_release_docs_use_distinct_complete_bootstrap_and_final_commands() -> None:
+def test_documented_qwen_page_inputs_example_matches_cli_contract() -> None:
     repository = Path(__file__).resolve().parents[3]
-    external = (repository / "docs/V1_0_10_EXTERNAL_GOLD_PRODUCER.md").read_text(encoding="utf-8")
-    evaluation = (repository / "docs/V1_0_10_GOLD_EVALUATION.md").read_text(encoding="utf-8")
-
-    for document in (external, evaluation):
-        assert "/bootstrap/" in document
-        assert "/final/" in document
-        assert "같은 출력 경로" not in document
-        assert "--source-generation-manifest" in document
-        assert "--source-database" in document
-        for argument in (
-            "--answer-input",
-            "--expected-answer-input-sha256",
-            "--answer-producer-receipt",
-            "--expected-answer-producer-receipt-sha256",
-            "--answer-artifact",
-            "--expected-answer-artifact-sha256",
-            "--answer-call-ledger",
-            "--answer-state-identity",
-            "--answer-state-bundle",
-            "--answer-profile-id",
-            "--answer-retrieval-run",
-            "--expected-answer-retrieval-run-sha256",
-            "--answer-retrieval-capture-receipt",
-            "--expected-answer-retrieval-capture-receipt-sha256",
-            "--answer-retrieval-attestation",
-            "--expected-answer-retrieval-attestation-sha256",
-            "--answer-retrieval-raw-score",
-            "--expected-answer-retrieval-raw-score-sha256",
-            "--answer-retrieval-corpus-inventory",
-            "--expected-answer-retrieval-corpus-inventory-sha256",
-            "--answer-retrieval-dense-score-matrix",
-            "--expected-answer-retrieval-dense-score-matrix-sha256",
-            "--answer-retrieval-query-vector-matrix",
-            "--expected-answer-retrieval-query-vector-matrix-sha256",
-        ):
-            assert argument in document
-    for argument in (
-        "--expected-v109-run-id",
-        "--expected-v109-generation-id",
-        "--expected-v109-manifest-sha256",
-        "--expected-v109-database-sha256",
-        "--answer-retrieval-lexical-ranks",
-    ):
-        assert argument in external
-    assert "1,024..67,108,864" in external
-    assert "0 < value <= 3,600" in external
-    assert "exact integer `1..128`" in external
-    assert "document-aggregation-query-vector-matrix.f32" not in evaluation
-    assert evaluation.count("document-aggregation-query-vectors.f32") == 6
+    document = (repository / "docs/EVALUATION.md").read_text(encoding="utf-8")
+    command = next(
+        block.split("```", 1)[0]
+        for block in document.split("```bash\n")[1:]
+        if block.startswith("uv run cardrag-gold-external-producer qwen-page-inputs")
+    )
+    arguments = producer._parser().parse_args(shlex.split(command.replace("\\\n", ""))[3:])
+    assert arguments.source_generation_manifest == Path("/evaluation/source/generation.json")
+    assert arguments.source_database == Path("/evaluation/source/index.sqlite3")
+    assert arguments.output == Path("/evaluation/qwen-page-inputs.jsonl")
+    assert arguments.provider_id == "deepinfra"
+    assert arguments.maximum_tokens == 8192
 
 
 @pytest.mark.asyncio
