@@ -20,7 +20,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 import pypdfium2 as pdfium  # type: ignore[import-untyped]
@@ -53,6 +53,7 @@ from .providers import (
     DEFAULT_OCR_PROMPT,
     OCR_BLANK_PAGE_SENTINEL,
     OCR_SPARSE_PAGE_PREFIX,
+    DocumentOCRProvider,
     OCRProvider,
     ProviderDocumentError,
     ProviderSystemicError,
@@ -65,7 +66,9 @@ LOGGER = logging.getLogger(__name__)
 PAGE_MARKER = re.compile(r"^## Page ([1-9][0-9]*)$", re.MULTILINE)
 OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS = 12
 OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
+PADDLEOCR_PROCESSOR_VERSION = "cardrag-worker-paddleocr/1.0.0"
 OCR_SEGMENTATION_STRATEGY_ID = "cardrag.ocr.windowed-continuity.v1"
+OCR_DOCUMENT_SEGMENTATION_STRATEGY_ID = "cardrag.ocr.full-document.v1"
 OCR_OUTPUT_POLICY: Literal["target-pages-only"] = "target-pages-only"
 OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION = (
     "Correction: use the sparse-page marker only as the first body line of a TARGET page "
@@ -745,7 +748,9 @@ def discover_compatible_contracts(
         clean_model = model_name.strip()
         if not clean_model or clean_model == current_contract.model:
             continue
-        effort = "high" if ("sol" in clean_model or "5.4" in clean_model) else current_contract.reasoning_effort
+        effort = (
+            "high" if ("sol" in clean_model or "5.4" in clean_model) else current_contract.reasoning_effort
+        )
         with suppress(Exception):
             synth = current_contract.model_copy(update={"model": clean_model, "reasoning_effort": effort})
             if synth.contract_sha256 != current_contract.contract_sha256:
@@ -824,21 +829,32 @@ class OCRResolver:
         self._run_local_manifest_index_locks: dict[tuple[str, str], asyncio.Lock] = (
             state._ocr_run_local_manifest_index_locks
         )
+        document_provider = isinstance(provider, DocumentOCRProvider)
+        document_ocr_provider = cast(DocumentOCRProvider, provider) if document_provider else None
+        contract_render_scale_milli = (
+            document_ocr_provider.render_scale_milli
+            if document_ocr_provider is not None
+            else render_scale_milli
+        )
         self.contract = NativeOCRContract(
-            processor_version=OCR_PROCESSOR_VERSION,
+            processor_version=(PADDLEOCR_PROCESSOR_VERSION if document_provider else OCR_PROCESSOR_VERSION),
             cache_epoch=cache_epoch,
             prompt_version=prompt_version,
             prompt_sha256=sha256_bytes(prompt.encode()),
-            renderer_id="pypdfium2/5.12.1",
-            render_scale_milli=render_scale_milli,
+            renderer_id=(
+                document_ocr_provider.renderer_id if document_ocr_provider is not None else "pypdfium2/5.12.1"
+            ),
+            render_scale_milli=contract_render_scale_milli,
             provider=provider.provider,
             model=provider.model,
             reasoning_effort=getattr(provider, "reasoning_effort", None),
-            segmentation_strategy_id=OCR_SEGMENTATION_STRATEGY_ID,
-            whole_document_max_pages=whole_document_max_pages,
-            target_pages_per_call=chunk_pages,
-            context_pages_before=context_pages_before,
-            context_pages_after=context_pages_after,
+            segmentation_strategy_id=(
+                OCR_DOCUMENT_SEGMENTATION_STRATEGY_ID if document_provider else OCR_SEGMENTATION_STRATEGY_ID
+            ),
+            whole_document_max_pages=100 if document_provider else whole_document_max_pages,
+            target_pages_per_call=100 if document_provider else chunk_pages,
+            context_pages_before=0 if document_provider else context_pages_before,
+            context_pages_after=0 if document_provider else context_pages_after,
             output_policy=OCR_OUTPUT_POLICY,
         )
         self._compatible_contracts = tuple(
@@ -849,7 +865,6 @@ class OCRResolver:
         self._compatible_contracts = tuple(
             c for c in compatible_contracts if c.contract_sha256 != self.contract.contract_sha256
         )
-
 
     @property
     def cache_mode(self) -> OCRCacheMode:
@@ -1422,11 +1437,7 @@ class OCRResolver:
                 manifest.contract in self._compatible_contracts
                 or any(manifest.contract.model == c.model for c in self._compatible_contracts)
             )
-            if (
-                manifest.reuse_key != reuse_key
-                or manifest.source != source
-                or not contract_matches
-            ):
+            if manifest.reuse_key != reuse_key or manifest.source != source or not contract_matches:
                 raise OCRValidationError("native OCR cache source/contract mismatch")
             artifact = manifest.output
             page_hashes = manifest.page_output_sha256
@@ -2055,6 +2066,81 @@ class OCRResolver:
             )
             shutil.rmtree(output_dir / "rendered", ignore_errors=True)
             return committed
+        if isinstance(self.provider, DocumentOCRProvider):
+            raw_pages = await self.provider.recognize_document(
+                pdf_path,
+                expected_page_count=page_count,
+                output_dir=output_dir,
+            )
+            normalized_values: list[str] = []
+            for value in raw_pages:
+                normalized = value.strip()
+                visible_characters = len("".join(normalized.split()))
+                if not normalized:
+                    normalized = OCR_BLANK_PAGE_SENTINEL
+                elif visible_characters <= OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS:
+                    normalized = f"{OCR_SPARSE_PAGE_PREFIX}\n{normalized}"
+                normalized_values.append(normalized)
+            pages = _validate_and_normalize_target_page_values(
+                tuple(range(1, page_count + 1)),
+                tuple(normalized_values),
+            )
+            body = (
+                "\n\n".join(f"## Page {index}\n\n{value}" for index, value in enumerate(pages, 1)) + "\n"
+            ).encode()
+            reject_credential_bearing_ocr(body)
+            verified = verify_ocr_bytes(body, expected_page_count=page_count)
+            result = OCRResult(
+                pages=tuple(_page_body(page) for page in verified.pages),
+                ocr_bytes=body,
+                ocr_text=verified.text,
+                ocr_sha256=verified.sha256,
+                size_bytes=verified.size_bytes,
+                provenance="native",
+                provider=self.provider.provider,
+                model=self.provider.model,
+                reuse_key=native_key,
+                provider_called=True,
+            )
+            manifest = OCRArtifactManifest(
+                reuse_key=result.reuse_key,
+                source=source,
+                contract=self.contract,
+                output=ArtifactRef.for_cas(
+                    sha256=result.ocr_sha256,
+                    size_bytes=result.size_bytes,
+                    media_type="text/markdown; charset=utf-8",
+                ),
+                ocr_chars=verified.char_count,
+                page_output_sha256=verified.page_sha256,
+                created_at=datetime.now(UTC),
+            )
+            self._materialize_native_seal(
+                output_dir=output_dir,
+                manifest=manifest,
+                body=body,
+            )
+            result = await self._commit_local_native(
+                result=result,
+                manifest=manifest,
+                body=body,
+                output_dir=output_dir,
+                source_document_id=document_id,
+            )
+            final_local = self._load_local_native(
+                output_dir=output_dir,
+                source=source,
+                reuse_key=native_key,
+            )
+            if final_local is None or final_local[0].ocr_sha256 != result.ocr_sha256:
+                raise OCRValidationError("committed local native OCR identity is unavailable")
+            await self._register_run_local_native(
+                run_id=run_id,
+                reuse_key=native_key,
+                output_dir=output_dir,
+            )
+            return result
+
         images = render_pdf(
             pdf_path,
             output_dir / "rendered",

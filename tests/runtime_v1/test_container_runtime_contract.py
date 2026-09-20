@@ -34,6 +34,10 @@ def test_runtime_sources_and_build_tool_are_digest_pinned() -> None:
         "f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332"
     ) in DOCKERFILE
     assert (
+        "ARG PADDLE_PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:"
+        "2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26"
+    ) in DOCKERFILE
+    assert (
         "ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:"
         "e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1"
     ) in DOCKERFILE
@@ -44,9 +48,29 @@ def test_runtime_sources_and_build_tool_are_digest_pinned() -> None:
     assert "UV_PYTHON=3.14" in _stage("source")
     assert "UV_PYTHON_DOWNLOADS=never" in _stage("source")
     assert "sys.version_info[:2] == (3, 14)" in _stage("source")
-    assert "slim-bookworm" not in DOCKERFILE
     assert "4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2" not in DOCKERFILE
-    assert "apt-get" not in DOCKERFILE
+    for stage in ("source", "runtime", "worker-runtime", "worker", "mcp"):
+        assert "slim-bookworm" not in _stage(stage)
+        assert "apt-get" not in _stage(stage)
+
+
+def test_optional_paddle_worker_is_pinned_nonroot_and_has_persistent_model_cache() -> None:
+    paddle_build = _stage("paddle-worker-build")
+    paddle = _stage("worker-paddle")
+
+    assert "FROM ${PADDLE_PYTHON_IMAGE} AS paddle-worker-build" in paddle_build
+    assert "UV_PYTHON=3.13" in paddle_build
+    assert "--extra paddleocr" in paddle_build
+    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker-paddle" in paddle
+    assert "useradd --uid 10001 --gid 10001" in paddle
+    assert "USER 10001:10001" in paddle
+    assert "PADDLE_PDX_CACHE_HOME=/var/lib/cardrag-paddle" in paddle
+    assert (
+        'VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home", "/var/lib/cardrag-paddle"]'
+        in paddle
+    )
+    assert 'org.opencontainers.image.licenses="Apache-2.0"' in paddle
+    assert 'ENTRYPOINT ["cardrag-worker"]' in paddle
 
 
 def test_mcp_final_is_minimal_nonroot_and_has_no_run_instruction() -> None:
@@ -131,8 +155,9 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
 def test_runtime_images_publish_apache_2_0_license_metadata() -> None:
     runtime = _stage("runtime")
     worker_runtime = _stage("worker-runtime")
+    paddle = _stage("worker-paddle")
 
-    for stage in (runtime, worker_runtime):
+    for stage in (runtime, worker_runtime, paddle):
         assert 'org.opencontainers.image.licenses="Apache-2.0"' in stage
         assert "COPY --chmod=0444 LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/cardrag/" in stage
     assert "Proprietary" not in DOCKERFILE
@@ -149,4 +174,4 @@ def test_worker_sandbox_exceptions_do_not_grant_privileged_container_access() ->
     assert "cap_add:" not in worker_compose
     assert "Wolfi `bubblewrap` and `libcap`" in notices
     assert "official signed Wolfi package index" in notices
-    assert "Debian base-image packages" not in notices
+    assert "optional CPU PaddleOCR" in notices

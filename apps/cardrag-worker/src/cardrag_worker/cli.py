@@ -64,7 +64,7 @@ from .pipeline import (
     resume_sealed_publication,
     validate_document_aggregation_head,
 )
-from .providers import OCRProvider, make_ocr_provider
+from .providers import OCRProvider, PaddleOCRVLProvider, make_ocr_provider
 from .settings import PublicationResumeSettings, WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
 from .tokenizer_v5 import ensure_qwen_tokenizer
@@ -181,9 +181,10 @@ def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = N
 
 def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
     resolved_model = model
-    if name.strip().casefold() == "openrouter":
-        if not resolved_model or resolved_model in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.4"}:
-            resolved_model = settings.openrouter_ocr_model
+    if name.strip().casefold() == "openrouter" and (
+        not resolved_model or resolved_model in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.4"}
+    ):
+        resolved_model = settings.openrouter_ocr_model
     return make_ocr_provider(
         name,
         model=resolved_model,
@@ -194,6 +195,11 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
         reasoning_effort=settings.ocr_reasoning_effort,
         timeout_seconds=settings.ocr_provider_timeout_seconds,
         openrouter_fallback_model=settings.openrouter_ocr_fallback_model,
+        paddleocr_pipeline_version=settings.paddleocr_pipeline_version,
+        paddleocr_cache_dir=settings.paddleocr_cache_dir,
+        paddleocr_pdf_dpi=settings.paddleocr_pdf_dpi,
+        paddleocr_cpu_threads=settings.paddleocr_cpu_threads,
+        paddleocr_timeout_seconds=settings.paddleocr_timeout_seconds,
     )
 
 
@@ -374,6 +380,12 @@ async def _run(resume: str | None) -> dict[str, Any]:
                         fallback_model = settings.openrouter_ocr_model
                     elif settings.ocr_fallback_provider.strip().casefold() in {"codex", "codex-exec"}:
                         fallback_model = "gpt-5.6-terra"
+                    elif settings.ocr_fallback_provider.strip().casefold() in {
+                        "local-paddleocr",
+                        "paddleocr",
+                        "paddleocr-vl",
+                    }:
+                        fallback_model = "PaddleOCR-VL-1.6"
                     else:
                         raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
                 fallback = OCRResolver(
@@ -564,6 +576,43 @@ def run_command(
         raise typer.Exit(code=1) from None
     except Exception:
         _echo_worker_unexpected_failure()
+        raise typer.Exit(code=1) from None
+
+
+@app.command("paddleocr-prefetch")
+def paddleocr_prefetch_command() -> None:
+    """Download and initialize the configured local PaddleOCR-VL models."""
+
+    try:
+        settings = WorkerSettings.from_env()
+        provider = _provider(
+            settings,
+            "local-paddleocr",
+            {
+                "v1": "PaddleOCR-VL",
+                "v1.5": "PaddleOCR-VL-1.5",
+                "v1.6": "PaddleOCR-VL-1.6",
+            }.get(settings.paddleocr_pipeline_version, ""),
+        )
+        if not isinstance(provider, PaddleOCRVLProvider):
+            raise RuntimeError("PaddleOCR provider construction failed")
+        asyncio.run(provider.prefetch_models())
+        _echo(
+            {
+                "cache_dir": settings.paddleocr_cache_dir,
+                "model": provider.model,
+                "pipeline_version": provider.pipeline_version,
+                "status": "ready",
+            }
+        )
+    except Exception:
+        _echo(
+            {
+                "reason": "Local PaddleOCR-VL model preparation failed.",
+                "reason_code": "paddleocr_prefetch_failed",
+                "status": "failed",
+            }
+        )
         raise typer.Exit(code=1) from None
 
 

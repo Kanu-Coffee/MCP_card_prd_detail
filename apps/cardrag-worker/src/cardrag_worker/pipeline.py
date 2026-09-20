@@ -193,6 +193,22 @@ REMOTE_GC_ERROR = "remote_gc_failed: Remote garbage collection failed after dura
 REMOTE_GC_PARTIAL_ERROR = (
     "remote_gc_partial_failure: Remote garbage collection stopped after partial deletion."
 )
+_V5_SPAN_NULL_INTEGRITY_ERROR = re.compile(
+    r"^NULL value in embedding_view_spans\."
+    r"(?:row_index|contract_revision_id|page|source_start|source_end|text_sha256|span_ordinal)$"
+)
+
+
+def _unexpected_v5_integrity_errors(rows: Sequence[Sequence[object]]) -> tuple[str, ...]:
+    if not rows:
+        return ("integrity_check returned no result",)
+    errors: list[str] = []
+    for row in rows:
+        value = row[0] if row else None
+        if value == "ok" or (isinstance(value, str) and _V5_SPAN_NULL_INTEGRITY_ERROR.fullmatch(value)):
+            continue
+        errors.append(str(value))
+    return tuple(errors)
 
 
 class CorpusConflictError(RuntimeError):
@@ -3408,7 +3424,7 @@ class WorkerPipeline:
                     candidate_seal = json.loads(candidate_seal_path.read_text(encoding="utf-8"))
                     validated_seal = await self._validate_local_seal(candidate_seal)
                 except Exception as seal_err:
-                    LOGGER.debug("Skipping unreadable candidate seal %s: %s", candidate_seal_path, seal_err)
+                    LOGGER.warning("Skipping unreadable candidate seal %s: %s", candidate_seal_path, seal_err)
                     continue
 
                 c_manifest = validated_seal.manifest
@@ -4633,7 +4649,8 @@ class WorkerPipeline:
                     None
                     if document.supersedes_document_id is None
                     or document.supersedes_document_id == document.record.document_id
-                    or revision_id_by_document_id.get(document.supersedes_document_id) == artifact.contract_revision_id
+                    or revision_id_by_document_id.get(document.supersedes_document_id)
+                    == artifact.contract_revision_id
                     else revision_id_by_document_id.get(document.supersedes_document_id)
                 ),
             )
@@ -5619,9 +5636,28 @@ class WorkerPipeline:
         def verify_database_binding() -> None:
             connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro&immutable=1", uri=True)
             try:
-                integrity = connection.execute("PRAGMA integrity_check").fetchone()
-                if integrity is None or integrity[0] != "ok":
-                    raise RuntimeError("sealed serving database failed integrity_check")
+                if manifest.schema_version != GENERATION_SCHEMA_ID_V5:
+                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                    if integrity is None or integrity[0] != "ok":
+                        raise RuntimeError("sealed serving database failed integrity_check")
+                else:
+                    integrity_rows = connection.execute("PRAGMA integrity_check(100)").fetchall()
+                    real_errors = _unexpected_v5_integrity_errors(integrity_rows)
+                    if real_errors:
+                        raise RuntimeError(
+                            f"sealed serving database failed integrity_check: {real_errors[0]}"
+                        )
+                    if any(row[0] != "ok" for row in integrity_rows):
+                        null_span_count = int(
+                            connection.execute(
+                                """SELECT count(*) FROM embedding_view_spans
+                                   WHERE row_index IS NULL OR contract_revision_id IS NULL
+                                      OR page IS NULL OR source_start IS NULL OR source_end IS NULL
+                                      OR text_sha256 IS NULL OR span_ordinal IS NULL"""
+                            ).fetchone()[0]
+                        )
+                        if null_span_count:
+                            raise RuntimeError("sealed serving database contains a NULL embedding view span")
                 if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise RuntimeError("sealed serving database failed foreign_key_check")
                 metadata = {

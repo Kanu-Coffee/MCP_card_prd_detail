@@ -1,0 +1,18 @@
+services:
+  worker:
+    build:
+      target: worker-paddle
+    environment:
+      - CARDRAG_OCR_PROVIDER=local-paddleocr
+      - CARDRAG_OCR_MODEL=PaddleOCR-VL-1.6
+      - CARDRAG_PADDLEOCR_PIPELINE_VERSION=${CARDRAG_PADDLEOCR_PIPELINE_VERSION:-v1.6}
+      - CARDRAG_PADDLEOCR_CACHE_DIR=/var/lib/cardrag-paddle
+      - CARDRAG_PADDLEOCR_PDF_DPI=${CARDRAG_PADDLEOCR_PDF_DPI:-300}
+      - CARDRAG_PADDLEOCR_CPU_THREADS=${CARDRAG_PADDLEOCR_CPU_THREADS:-8}
+      - CARDRAG_PADDLEOCR_TIMEOUT_SECONDS=${CARDRAG_PADDLEOCR_TIMEOUT_SECONDS:-14400}
+    volumes:
+      - paddle-models:/var/lib/cardrag-paddle
+
+volumes:
+  paddle-models:
+    name: ${CARDRAG_PADDLEOCR_MODEL_VOLUME:-cardrag-worker-paddleocr-models}

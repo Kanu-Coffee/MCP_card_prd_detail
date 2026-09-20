@@ -264,14 +264,11 @@ def plan_revision_history_v5(
         predecessor_last = max(source_rows[predecessor_source_id], key=lambda row: row.revision_id)
         target_identity = (target_first.source_id, target_first.pdf_sha256)
         predecessor_identity = (predecessor_last.source_id, predecessor_last.pdf_sha256)
-        if (
-            target_identity != predecessor_identity
-            and (
-                predecessor_source_id not in resolved_sources
-                or source_id not in resolved_sources
-                or resolved_sources[source_id].document_id(target_first.pdf_sha256)
-                != resolved_sources[predecessor_source_id].document_id(predecessor_last.pdf_sha256)
-            )
+        if target_identity != predecessor_identity and (
+            predecessor_source_id not in resolved_sources
+            or source_id not in resolved_sources
+            or resolved_sources[source_id].document_id(target_first.pdf_sha256)
+            != resolved_sources[predecessor_source_id].document_id(predecessor_last.pdf_sha256)
         ):
             predecessor_candidates[target_identity].add(predecessor_identity)
 
@@ -298,9 +295,7 @@ def plan_revision_history_v5(
             resolved_predecessor_doc_id = resolved_sources[predecessor_source_id].document_id(
                 predecessor_pdf_sha256
             )
-            candidate_doc_id = resolved_sources[contract_identity[0]].document_id(
-                contract_identity[1]
-            )
+            candidate_doc_id = resolved_sources[contract_identity[0]].document_id(contract_identity[1])
             if resolved_predecessor_doc_id != candidate_doc_id:
                 supersedes_document_id = resolved_predecessor_doc_id
         planned.append(

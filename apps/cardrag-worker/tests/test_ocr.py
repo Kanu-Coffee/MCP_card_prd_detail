@@ -68,6 +68,64 @@ OCR_BODY_SINGLE_MARKER_NEWLINE = (
 ).encode()
 
 
+class FakeDocumentProvider:
+    provider = "local-paddleocr"
+    model = "PaddleOCR-VL-1.6"
+    renderer_id = "paddlex-pdfium/300dpi"
+    render_scale_milli = 4167
+    reasoning_effort = None
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def recognize_document(
+        self,
+        pdf_path: Path,
+        *,
+        expected_page_count: int,
+        output_dir: Path,
+    ) -> tuple[str, ...]:
+        assert pdf_path.is_file()
+        assert expected_page_count == 2
+        assert output_dir.name == "ocr"
+        self.calls += 1
+        return ("KB", "전월 이용금액 40만원 이상이면 월 최대 1만원까지 10% 할인됩니다.")
+
+
+@pytest.mark.asyncio
+async def test_full_document_provider_uses_existing_native_artifact_contract(tmp_path: Path) -> None:
+    provider = FakeDocumentProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(provider=provider, state=state, webdav=None)  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf_path = tmp_path / "sample.pdf"
+        pdf_path.write_bytes(b"pdf")
+        output_dir = tmp_path / "ocr"
+        result = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_paddle",
+            pdf_path=pdf_path,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=2,
+            output_dir=output_dir,
+        )
+
+        assert provider.calls == 1
+        assert result.provider == "local-paddleocr"
+        assert result.pages[0] == f"{OCR_SPARSE_PAGE_PREFIX}\nKB"
+        assert result.pages[1].startswith("전월 이용금액 40만원")
+        assert (output_dir / "ocr.md").read_bytes() == result.ocr_bytes
+        assert (output_dir / "native-manifest.json").is_file()
+        assert not (output_dir / "rendered").exists()
+        assert resolver.contract.processor_version == "cardrag-worker-paddleocr/1.0.0"
+        assert resolver.contract.segmentation_strategy_id == "cardrag.ocr.full-document.v1"
+        assert resolver.contract.render_scale_milli == 4167
+    finally:
+        state.close()
+
+
 def _fee8f65_validate_sparse_target_page(page_number: int, value: str) -> str:
     """Reproduce the v1.0.9 sparse provider/checkpoint boundary exactly."""
 
@@ -3758,4 +3816,3 @@ async def test_openrouter_ocr_multi_model_fallback(tmp_path: Path, respx_mock: A
     assert len(respx_mock.calls) == 2
     req2_payload = json.loads(respx_mock.calls[1].request.content)
     assert req2_payload["model"] == "anthropic/claude-opus-5"
-

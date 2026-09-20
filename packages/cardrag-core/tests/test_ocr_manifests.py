@@ -624,4 +624,3 @@ def test_content_addressed_ocr_reuse_key() -> None:
     assert key1 == key2
     assert key1 != key3
     assert len(key1) == 64
-

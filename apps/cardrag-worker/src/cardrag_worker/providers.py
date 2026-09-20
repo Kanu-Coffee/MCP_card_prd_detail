@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import math
 import os
 import re
+import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 import httpx
 from cardrag_core import (
@@ -329,6 +331,24 @@ class OCRProvider(Protocol):
     ) -> str: ...
 
 
+@runtime_checkable
+class DocumentOCRProvider(Protocol):
+    """OCR provider capable of parsing an ordered PDF as one document."""
+
+    provider: str
+    model: str
+    renderer_id: str
+    render_scale_milli: int
+
+    async def recognize_document(
+        self,
+        pdf_path: Path,
+        *,
+        expected_page_count: int,
+        output_dir: Path,
+    ) -> tuple[str, ...]: ...
+
+
 def validate_vectors(vectors: Sequence[Sequence[float]], *, count: int) -> list[list[float]]:
     if len(vectors) != count:
         raise ProviderError(f"embedding count {len(vectors)} != {count}")
@@ -577,15 +597,17 @@ class OpenRouterOCRProvider:
             total_pages=total_pages,
         )
         content: list[dict[str, object]] = [{"type": "text", "text": prompt + "\n\n" + instructions}]
+
         def _encode_image(image_path: Path) -> tuple[str, str]:
             raw = image_path.read_bytes()
             if len(raw) <= 3_500_000:
                 return "image/png", base64.b64encode(raw).decode("ascii")
             try:
                 import io
+
                 from PIL import Image
 
-                im = Image.open(image_path)
+                im: Image.Image = Image.open(image_path)
                 if im.mode in ("RGBA", "P"):
                     im = im.convert("RGB")
                 max_dim = max(im.size)
@@ -617,7 +639,9 @@ class OpenRouterOCRProvider:
             except (httpx.HTTPStatusError, httpx.TimeoutException, ProviderSystemicError) as exc:
                 if self.fallback_model and self.fallback_model != self.model:
                     try:
-                        text = await self._post_chat_completion(client, self.fallback_model, content, models=None)
+                        text = await self._post_chat_completion(
+                            client, self.fallback_model, content, models=None
+                        )
                     except Exception:
                         raise exc from None
                 else:
@@ -727,6 +751,202 @@ class CodexOCRProvider:
             raise ProviderSystemicError("provider_contract_invalid") from None
 
 
+class PaddleOCRVLProvider:
+    """Local CPU PaddleOCR-VL full-document provider.
+
+    Inference lives in a child process so cancellation and timeouts cannot
+    leave a CPU inference thread running after the finite Worker exits.
+    """
+
+    provider = "local-paddleocr"
+    reasoning_effort: str | None = None
+
+    def __init__(
+        self,
+        *,
+        model: str = "PaddleOCR-VL-1.6",
+        pipeline_version: str = "v1.6",
+        cache_dir: Path,
+        pdf_dpi: int = 300,
+        cpu_threads: int = 8,
+        timeout_seconds: float = 14_400,
+        executable: str | None = None,
+    ) -> None:
+        if pipeline_version not in {"v1", "v1.5", "v1.6"}:
+            raise ValueError("unsupported PaddleOCR-VL pipeline version")
+        expected_model = {
+            "v1": "PaddleOCR-VL",
+            "v1.5": "PaddleOCR-VL-1.5",
+            "v1.6": "PaddleOCR-VL-1.6",
+        }[pipeline_version]
+        if model != expected_model:
+            raise ValueError("PaddleOCR-VL model must match its pipeline version")
+        if not cache_dir.is_absolute():
+            raise ValueError("PaddleOCR cache directory must be absolute")
+        if not 72 <= pdf_dpi <= 576:
+            raise ValueError("PaddleOCR PDF DPI must be between 72 and 576")
+        if not 1 <= cpu_threads <= 64:
+            raise ValueError("PaddleOCR CPU threads must be between 1 and 64")
+        if timeout_seconds <= 0:
+            raise ValueError("OCR provider timeout must be positive")
+        self.model = model
+        self.pipeline_version = pipeline_version
+        self.cache_dir = cache_dir
+        self.pdf_dpi = pdf_dpi
+        self.cpu_threads = cpu_threads
+        self.timeout_seconds = timeout_seconds
+        self.executable = executable or sys.executable
+        self.renderer_id = f"paddlex-pdfium/{pdf_dpi}dpi"
+        self.render_scale_milli = round(pdf_dpi / 72 * 1000)
+        self._semaphore = asyncio.Semaphore(1)
+
+    def _child_environment(self) -> dict[str, str]:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        for child in ("home", "xdg-cache", "huggingface", "modelscope"):
+            (self.cache_dir / child).mkdir(exist_ok=True)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "HOME": str(self.cache_dir / "home"),
+                "XDG_CACHE_HOME": str(self.cache_dir / "xdg-cache"),
+                "HF_HOME": str(self.cache_dir / "huggingface"),
+                "MODELSCOPE_CACHE": str(self.cache_dir / "modelscope"),
+                "PADDLE_PDX_CACHE_HOME": str(self.cache_dir),
+                "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+                "PADDLE_PDX_PDF_RENDER_SCALE": f"{self.pdf_dpi / 72:.12g}",
+            }
+        )
+        return environment
+
+    async def prefetch_models(self) -> None:
+        environment = self._child_environment()
+        result_path = self.cache_dir / ".cardrag-paddleocr-prefetch.json"
+        result_path.unlink(missing_ok=True)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.executable,
+                "-m",
+                "cardrag_worker.paddleocr_runner",
+                "--output",
+                str(result_path),
+                "--pipeline-version",
+                self.pipeline_version,
+                "--cpu-threads",
+                str(self.cpu_threads),
+                "--prefetch",
+                env=environment,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            raise ProviderSystemicError("provider_process_spawn_failed") from None
+        try:
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+        except (TimeoutError, asyncio.CancelledError):
+            process.kill()
+            await process.wait()
+            result_path.unlink(missing_ok=True)
+            raise
+        try:
+            if process.returncode or not result_path.is_file():
+                raise ProviderSystemicError(
+                    "provider_process_configuration_failed",
+                    exit_code=process.returncode or 1,
+                    stderr_size_bytes=len(stderr),
+                    stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                ) from None
+        finally:
+            result_path.unlink(missing_ok=True)
+
+    async def recognize_document(
+        self,
+        pdf_path: Path,
+        *,
+        expected_page_count: int,
+        output_dir: Path,
+    ) -> tuple[str, ...]:
+        if expected_page_count < 1 or expected_page_count > 100:
+            raise ProviderDocumentError() from None
+        result_path = output_dir / "checkpoints" / "paddle-document-result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.unlink(missing_ok=True)
+        environment = self._child_environment()
+        arguments = (
+            self.executable,
+            "-m",
+            "cardrag_worker.paddleocr_runner",
+            "--input",
+            str(pdf_path.resolve()),
+            "--output",
+            str(result_path.resolve()),
+            "--expected-pages",
+            str(expected_page_count),
+            "--pipeline-version",
+            self.pipeline_version,
+            "--cpu-threads",
+            str(self.cpu_threads),
+        )
+        async with self._semaphore:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *arguments,
+                    cwd=output_dir,
+                    env=environment,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except OSError:
+                raise ProviderSystemicError("provider_process_spawn_failed") from None
+            try:
+                _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+            except (TimeoutError, asyncio.CancelledError):
+                process.kill()
+                await process.wait()
+                result_path.unlink(missing_ok=True)
+                raise
+        try:
+            if process.returncode:
+                if process.returncode == 65:
+                    raise ProviderDocumentError() from None
+                raise ProviderSystemicError(
+                    "provider_process_configuration_failed",
+                    exit_code=process.returncode,
+                    stderr_size_bytes=len(stderr),
+                    stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                ) from None
+            if not result_path.is_file() or result_path.stat().st_size > 64 * 1024 * 1024:
+                raise ProviderSystemicError("provider_contract_invalid") from None
+            try:
+                payload = json.loads(result_path.read_bytes())
+                pages = payload["pages"]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+                raise ProviderSystemicError("provider_contract_invalid") from None
+            if (
+                not isinstance(pages, list)
+                or len(pages) != expected_page_count
+                or any(not isinstance(page, str) for page in pages)
+            ):
+                raise ProviderSystemicError("provider_contract_invalid") from None
+            for page in pages:
+                reject_credential_bearing_ocr(page)
+            return tuple(pages)
+        finally:
+            result_path.unlink(missing_ok=True)
+
+    async def recognize(
+        self,
+        images: Sequence[Path],
+        *,
+        page_numbers: Sequence[int],
+        target_page_numbers: Sequence[int],
+        total_pages: int,
+        prompt: str,
+    ) -> str:
+        raise ProviderSystemicError("provider_contract_invalid") from None
+
+
 def make_ocr_provider(
     provider: str,
     *,
@@ -738,6 +958,11 @@ def make_ocr_provider(
     reasoning_effort: str = "high",
     timeout_seconds: float = 1800,
     openrouter_fallback_model: str | None = None,
+    paddleocr_pipeline_version: str = "v1.6",
+    paddleocr_cache_dir: Path | None = None,
+    paddleocr_pdf_dpi: int = 300,
+    paddleocr_cpu_threads: int = 8,
+    paddleocr_timeout_seconds: float = 14_400,
 ) -> OCRProvider:
     normalized = provider.casefold()
     if normalized == "openrouter":
@@ -756,4 +981,17 @@ def make_ocr_provider(
             timeout_seconds=timeout_seconds,
             reasoning_effort=reasoning_effort,
         )
-    raise ValueError(f"unsupported OCR provider {provider!r}; supported: openrouter, codex-exec")
+    if normalized in {"local-paddleocr", "paddleocr", "paddleocr-vl"}:
+        if paddleocr_cache_dir is None:
+            raise ValueError("PaddleOCR cache directory is required")
+        return PaddleOCRVLProvider(
+            model=model,
+            pipeline_version=paddleocr_pipeline_version,
+            cache_dir=paddleocr_cache_dir,
+            pdf_dpi=paddleocr_pdf_dpi,
+            cpu_threads=paddleocr_cpu_threads,
+            timeout_seconds=paddleocr_timeout_seconds,
+        )
+    raise ValueError(
+        f"unsupported OCR provider {provider!r}; supported: openrouter, codex-exec, local-paddleocr"
+    )

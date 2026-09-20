@@ -1,7 +1,7 @@
 # CardRAG
 
 카드사 상품안내장 PDF를 수집하고, 조항·표·주석의 연결 관계를 보존해 검색하는 MCP 서버입니다.
-현재 소스 버전은 **1.0.23**입니다. 카드 상품 탐색, 출시 상품 조사, 혜택 비교에 필요한
+현재 소스 버전은 **1.0.24**입니다. 카드 상품 탐색, 출시 상품 조사, 혜택 비교에 필요한
 원문 근거와 출처를 AI 클라이언트에 제공합니다.
 
 ```text
@@ -57,6 +57,10 @@ uv run --all-packages pytest
 API 키가 필요합니다. 기본 OCR 모델은 `gpt-5.6-sol`, 임베딩은 Qwen3 8B 4,096차원입니다.
 모델·제공자의 이용 가능 여부와 접근 권한은 사용하는 계정에서 확인해야 합니다.
 수집된 데이터나 인증 정보는 저장소에 포함되지 않습니다.
+
+OCR provider는 기존 `codex-exec`, `openrouter` 외에 CPU 전용
+`local-paddleocr`를 지원합니다. 로컬 방식은 PaddleOCR-VL full document pipeline과
+영구 모델 cache를 사용하며 선택적 Docker overlay 설치법은 운영 안내에 있습니다.
 
 컨테이너 설치에는 Linux amd64와 Docker Compose 2.24.4 이상을 사용합니다. Worker의
 Codex sandbox를 위해 user namespace를 허용하는 커널이 필요합니다.

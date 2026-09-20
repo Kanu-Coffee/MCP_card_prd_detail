@@ -54,6 +54,10 @@ OCR 기본값은 `codex-exec`, `gpt-5.6-sol`, reasoning `high`입니다. Qwen �
 4,096차원, tokenizer와 provider profile은 generation identity에 묶이므로 기존 vector와
 다른 모델을 섞지 않습니다. API의 제공 모델·권한은 해당 계정에서 확인합니다.
 
+로컬 CPU OCR은 `local-paddleocr` provider와 별도 Compose overlay를 사용합니다. 이 경로는
+PaddleOCR 3.7.0의 PaddleOCR-VL 1.6 full document pipeline을 약 300 DPI로 실행하며 OCR용
+외부 API를 호출하지 않습니다. 후속 임베딩은 기존 OpenRouter 설정을 계속 사용합니다.
+
 선택한 호스트와 경로로 env 예시를 수정한 후, 출력에 비밀이 포함되지 않는 설정 검사를
 수행합니다. `config --quiet`는 실제 자격증명이나 원격 저장소까지 검증하지 않습니다.
 
@@ -76,6 +80,24 @@ docker compose --env-file /etc/cardrag/mcp.env \
 docker compose --env-file /etc/cardrag/worker.env -f deploy/worker/compose.yaml build worker
 docker compose --env-file /etc/cardrag/mcp.env -f deploy/mcp/compose.yaml build mcp
 ```
+
+로컬 PaddleOCR Worker는 Python 3.13/glibc 기반의 선택적 이미지입니다. 모델 cache를 먼저
+준비하면 이후 OCR은 네트워크 없이 실행할 수 있습니다.
+
+```bash
+docker compose --env-file /etc/cardrag/worker.env \
+  -f deploy/worker/compose.yaml -f deploy/worker/compose.paddleocr.yaml \
+  build worker
+docker compose --env-file /etc/cardrag/worker.env \
+  -f deploy/worker/compose.yaml -f deploy/worker/compose.paddleocr.yaml \
+  run --rm worker paddleocr-prefetch
+```
+
+`worker.env`에는 `CARDRAG_OCR_PROVIDER=local-paddleocr`와
+`CARDRAG_OCR_MODEL=PaddleOCR-VL-1.6`을 설정합니다. 기본 cache volume은
+`cardrag-worker-paddleocr-models`이며 `CARDRAG_PADDLEOCR_MODEL_VOLUME`으로 바꿀 수 있습니다.
+완전 오프라인 실행 전에는 온라인 환경에서 위 prefetch를 성공시키고 같은 volume을 옮긴 뒤,
+`--network none`에서도 로컬 PDF에 대한 OCR smoke test가 통과하는지 확인합니다.
 
 처음 사용하는 **새 Codex 인증 볼륨**에서 로그인합니다.
 
@@ -111,6 +133,12 @@ docker compose --env-file /etc/cardrag/worker.env \
   -f deploy/worker/compose.yaml -f deploy/worker/compose.secrets.yaml \
   run --rm worker run
 ```
+
+PaddleOCR를 선택한 경우 위 두 명령 모두 `compose.paddleocr.yaml`을 마지막 `-f` 인자로
+추가합니다. CPU 추론은 문서당 직렬 실행되고 기본 timeout은 4시간입니다. 결과 위치와
+`ocr.md`/manifest/CAS 계약은 다른 OCR provider와 동일합니다. 300 DPI 실제 3페이지
+상품안내장 검증에서는 약 34분과 최대 약 8.4 GiB 메모리가 관찰됐으므로, 운영 호스트에는
+문서 복잡도에 따른 추가 여유를 확보합니다.
 
 Worker의 종료 코드와 terminal 결과, 검증된 게시 결과를 확인한 뒤 MCP를 실행합니다.
 

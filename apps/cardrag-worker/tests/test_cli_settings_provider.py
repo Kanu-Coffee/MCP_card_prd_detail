@@ -38,6 +38,7 @@ from cardrag_worker.pipeline import (
 from cardrag_worker.providers import (
     CodexOCRProvider,
     OpenRouterOCRProvider,
+    PaddleOCRVLProvider,
     ProviderError,
     ProviderSystemicError,
 )
@@ -1125,6 +1126,103 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
     monkeypatch.setenv("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", "0")
     with pytest.raises(ValueError, match="CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS"):
         WorkerSettings.from_env()
+
+
+def test_local_paddleocr_settings_and_factory_are_cpu_document_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("CARDRAG_OCR_PROVIDER", "local-paddleocr")
+    monkeypatch.delenv("CARDRAG_OCR_MODEL", raising=False)
+    monkeypatch.setenv("CARDRAG_PADDLEOCR_CACHE_DIR", str(tmp_path / "models"))
+    settings = WorkerSettings.from_env()
+
+    assert settings.ocr_model == "PaddleOCR-VL-1.6"
+    assert settings.paddleocr_pipeline_version == "v1.6"
+    assert settings.paddleocr_pdf_dpi == 300
+    assert settings.paddleocr_cpu_threads == 8
+    assert settings.paddleocr_timeout_seconds == 14_400
+    provider = cli_module._provider(settings, settings.ocr_provider, settings.ocr_model)
+    assert isinstance(provider, PaddleOCRVLProvider)
+    assert provider.renderer_id == "paddlex-pdfium/300dpi"
+    assert provider.render_scale_milli == 4167
+
+
+@pytest.mark.asyncio
+async def test_local_paddleocr_prefetch_accepts_library_logs_and_uses_private_cache_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            arguments = captured["args"]
+            output = Path(arguments[arguments.index("--output") + 1])
+            output.write_text('{"pipeline_version":"v1.6"}\n', encoding="utf-8")
+            return b"Paddle initialization log\n", b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def create(*args: str, **kwargs: Any) -> Process:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    cache_dir = tmp_path / "models"
+    provider = PaddleOCRVLProvider(cache_dir=cache_dir)
+    await provider.prefetch_models()
+
+    environment = captured["env"]
+    assert environment["HOME"] == str(cache_dir / "home")
+    assert environment["PADDLE_PDX_CACHE_HOME"] == str(cache_dir)
+    assert environment["PADDLE_PDX_PDF_RENDER_SCALE"] == "4.16666666667"
+    assert (cache_dir / "huggingface").is_dir()
+    assert not (cache_dir / ".cardrag-paddleocr-prefetch.json").exists()
+
+
+def test_paddleocr_markdown_keeps_table_text_but_removes_temporary_image_links() -> None:
+    from cardrag_worker.paddleocr_runner import _markdown_text
+
+    result = SimpleNamespace(
+        markdown={
+            "res": {
+                "markdown_texts": [
+                    "금액 10,000원 ![카드 이미지](temporary/page/image.png)",
+                    "<table><tr><td>20%</td></tr></table><img src='temporary.png'>",
+                ]
+            }
+        }
+    )
+
+    assert _markdown_text(result) == ("금액 10,000원 카드 이미지\n\n<table><tr><td>20%</td></tr></table>")
+
+
+def test_paddleocr_runner_gives_extensionless_cache_object_a_private_pdf_link(
+    tmp_path: Path,
+) -> None:
+    from cardrag_worker.paddleocr_runner import _paddle_input_path
+
+    cache_object = tmp_path / "pdf-cache" / ("a" * 64)
+    cache_object.parent.mkdir()
+    cache_object.write_bytes(b"%PDF-1.7")
+    output_path = tmp_path / "run" / "checkpoints" / "paddle-result.json"
+
+    with _paddle_input_path(cache_object, output_path=output_path) as paddle_input:
+        assert paddle_input.parent == output_path.parent
+        assert paddle_input.suffix == ".pdf"
+        assert paddle_input.is_symlink()
+        assert paddle_input.resolve() == cache_object
+
+    assert not paddle_input.exists()
+    assert cache_object.read_bytes() == b"%PDF-1.7"
 
 
 def test_embedding_response_caps_are_bounded_canonical_integers(

@@ -2,6 +2,7 @@
 
 ARG PYTHON_DEV_IMAGE=cgr.dev/chainguard/python:latest-dev@sha256:4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2
 ARG PYTHON_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest@sha256:f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332
+ARG PADDLE_PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1
 ARG CODEX_VERSION=0.151.0
 ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6
@@ -34,6 +35,24 @@ RUN test "$(uv --version)" = "uv 0.8.17" && \
 
 FROM source AS worker-build
 RUN uv sync --frozen --no-dev --no-editable --package cardrag-worker
+
+
+FROM ${PADDLE_PYTHON_IMAGE} AS paddle-worker-build
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=3.13 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/cardrag
+WORKDIR /workspace
+COPY --from=uv /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock README.md ./
+COPY packages/cardrag-core ./packages/cardrag-core
+COPY apps/cardrag-worker ./apps/cardrag-worker
+COPY apps/cardrag-mcp ./apps/cardrag-mcp
+RUN uv sync --frozen --no-dev --no-editable --package cardrag-worker --extra paddleocr
 
 
 FROM source AS mcp-build
@@ -133,6 +152,72 @@ COPY --from=runtime-layout --chown=10001:10001 \
 COPY --from=runtime-layout --chown=10001:10001 \
   /var/lib/cardrag-codex-home /var/lib/cardrag-codex-home
 VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home"]
+ENTRYPOINT ["cardrag-worker"]
+CMD ["run"]
+
+
+FROM ${PADDLE_PYTHON_IMAGE} AS worker-paddle
+ARG CODEX_VERSION
+ARG CODEX_SHA256
+ARG APP_VERSION=dev
+ARG VCS_REF=unknown
+ARG SOURCE_URL=https://github.com/Kanu-Coffee/MCP_card_prd_detail
+
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="CardRAG Worker with PaddleOCR-VL" \
+      org.opencontainers.image.description="One-shot CardRAG worker with local CPU PaddleOCR-VL"
+
+ENV PATH="/opt/cardrag/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Seoul \
+    HOME=/var/lib/cardrag-paddle/home \
+    XDG_CACHE_HOME=/var/lib/cardrag-paddle/xdg-cache \
+    HF_HOME=/var/lib/cardrag-paddle/huggingface \
+    MODELSCOPE_CACHE=/var/lib/cardrag-paddle/modelscope \
+    PADDLE_PDX_CACHE_HOME=/var/lib/cardrag-paddle
+
+# Debian security revisions move independently of the digest-pinned base;
+# package names are limited to runtime libraries and the apt index is removed.
+# hadolint ignore=DL3008
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends \
+      bubblewrap \
+      ca-certificates \
+      libcap2-bin \
+      libgl1 \
+      libglib2.0-0 \
+      libgomp1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --gid 10001 cardrag && \
+    useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin cardrag && \
+    mkdir -p /usr/share/doc/cardrag /var/lib/cardrag-worker \
+      /var/lib/cardrag-codex-home/home /var/lib/cardrag-paddle/home \
+      /var/lib/cardrag-paddle/xdg-cache /var/lib/cardrag-paddle/huggingface \
+      /var/lib/cardrag-paddle/modelscope && \
+    chown -R 10001:10001 /var/lib/cardrag-worker /var/lib/cardrag-codex-home \
+      /var/lib/cardrag-paddle && \
+    chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-codex-home \
+      /var/lib/cardrag-codex-home/home /var/lib/cardrag-paddle
+COPY --chmod=0444 LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/cardrag/
+ADD --chmod=0644 \
+  "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
+  /tmp/codex.tar.gz
+RUN printf '%s  %s\n' "${CODEX_SHA256}" /tmp/codex.tar.gz > /tmp/codex.sha256 && \
+    sha256sum -c /tmp/codex.sha256 && \
+    tar --extract --gzip --file /tmp/codex.tar.gz --directory /usr/local/bin && \
+    mv /usr/local/bin/codex-x86_64-unknown-linux-musl /usr/local/bin/codex && \
+    chmod 0755 /usr/local/bin/codex && \
+    ln -s codex /usr/local/bin/codex-linux-sandbox && \
+    rm /tmp/codex.tar.gz /tmp/codex.sha256
+COPY --from=paddle-worker-build /opt/cardrag /opt/cardrag
+WORKDIR /app
+USER 10001:10001
+VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home", "/var/lib/cardrag-paddle"]
 ENTRYPOINT ["cardrag-worker"]
 CMD ["run"]
 

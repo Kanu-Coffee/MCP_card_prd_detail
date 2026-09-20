@@ -1,6 +1,12 @@
 [tool.uv]
 # MCP's transitive HTTP client: reject versions affected by CVE-2026-84382.
-constraint-dependencies = ["httpx2>=2.12.0"]
+constraint-dependencies = [
+  "httpx2>=2.12.0",
+  # Keep the existing Python 3.14 runtime resolution independent from the
+  # older versions required by the optional Python 3.13 Paddle stack.
+  "numpy==2.5.2; python_version >= '3.14'",
+  "pyyaml==6.0.3; python_version >= '3.14'",
+]
 
 [tool.uv.workspace]
 members = [

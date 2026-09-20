@@ -258,6 +258,11 @@ class WorkerSettings:
     ocr_prompt_version: str
     codex_executable: str
     codex_auth_root: Path | None
+    paddleocr_pipeline_version: str
+    paddleocr_cache_dir: Path
+    paddleocr_pdf_dpi: int
+    paddleocr_cpu_threads: int
+    paddleocr_timeout_seconds: float
     ocr_chunk_pages: int
     ocr_whole_document_max_pages: int
     ocr_context_pages_before: int
@@ -308,13 +313,13 @@ class WorkerSettings:
         if require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
         ocr_provider = os.environ.get("CARDRAG_OCR_PROVIDER", "codex-exec").strip().casefold()
+        if ocr_provider in {"paddleocr", "paddleocr-vl"}:
+            ocr_provider = "local-paddleocr"
         fallback_provider = os.environ.get("CARDRAG_OCR_FALLBACK_PROVIDER")
         is_openrouter_ocr = ocr_provider == "openrouter" or (
             fallback_provider is not None and fallback_provider.strip().casefold() == "openrouter"
         )
-        api_key = _read_secret(
-            "CARDRAG_OPENROUTER_API_KEY", required=require_providers and is_openrouter_ocr
-        )
+        api_key = _read_secret("CARDRAG_OPENROUTER_API_KEY", required=require_providers and is_openrouter_ocr)
         if require_providers and not api_key:
             raise ValueError("OpenRouter API key is required for embeddings")
         auth_root = os.environ.get("CARDRAG_CODEX_AUTH_ROOT")
@@ -435,10 +440,15 @@ class WorkerSettings:
             document_aggregation_profile_path=aggregation_path,
             document_aggregation_profile_artifact_sha256=aggregation_sha256,
             ocr_provider=ocr_provider,
-            ocr_model=os.environ.get("CARDRAG_OCR_MODEL", "gpt-5.6-sol"),
+            ocr_model=os.environ.get(
+                "CARDRAG_OCR_MODEL",
+                "PaddleOCR-VL-1.6" if ocr_provider == "local-paddleocr" else "gpt-5.6-sol",
+            ),
             ocr_fallback_provider=fallback_provider.strip().casefold() if fallback_provider else None,
             ocr_fallback_model=os.environ.get("CARDRAG_OCR_FALLBACK_MODEL"),
-            openrouter_ocr_model=os.environ.get("CARDRAG_OPENROUTER_OCR_MODEL", "google/gemini-3.1-pro").strip(),
+            openrouter_ocr_model=os.environ.get(
+                "CARDRAG_OPENROUTER_OCR_MODEL", "google/gemini-3.1-pro"
+            ).strip(),
             openrouter_ocr_fallback_model=(
                 os.environ.get("CARDRAG_OPENROUTER_OCR_FALLBACK_MODEL", "").strip() or None
             ),
@@ -454,6 +464,18 @@ class WorkerSettings:
             ocr_prompt_version=os.environ.get("CARDRAG_OCR_PROMPT_VERSION", "cardrag-ocr.ko.v2"),
             codex_executable=os.environ.get("CARDRAG_CODEX_EXECUTABLE", "codex"),
             codex_auth_root=resolved_auth_root,
+            paddleocr_pipeline_version=os.environ.get("CARDRAG_PADDLEOCR_PIPELINE_VERSION", "v1.6").strip(),
+            paddleocr_cache_dir=Path(
+                os.path.abspath(
+                    os.environ.get(
+                        "CARDRAG_PADDLEOCR_CACHE_DIR",
+                        os.fspath(state_dir / "paddleocr-cache"),
+                    )
+                )
+            ),
+            paddleocr_pdf_dpi=_bounded_int("CARDRAG_PADDLEOCR_PDF_DPI", 300, minimum=72, maximum=576),
+            paddleocr_cpu_threads=_bounded_int("CARDRAG_PADDLEOCR_CPU_THREADS", 8, minimum=1, maximum=64),
+            paddleocr_timeout_seconds=_positive_float("CARDRAG_PADDLEOCR_TIMEOUT_SECONDS", 14_400),
             ocr_chunk_pages=_bounded_int("CARDRAG_OCR_CHUNK_PAGES", 2, minimum=1, maximum=100),
             ocr_whole_document_max_pages=_bounded_int(
                 "CARDRAG_OCR_WHOLE_DOCUMENT_MAX_PAGES", 4, minimum=1, maximum=100

@@ -189,7 +189,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.22", "1.0.23"]
+    version: Literal["1.0.22", "1.0.23", "1.0.24"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -222,7 +222,7 @@ class CandidateImageIdentity(_CanonicalModel):
 class EffectiveConfigEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-effective-config.v4"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.22", "1.0.23"]
+    release_version: Literal["1.0.22", "1.0.23", "1.0.24"]
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
     worker_volume: Literal["cardrag-worker-v122-candidate-state"]
@@ -898,7 +898,7 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v2"]
-    release_version: Literal["1.0.22", "1.0.23"]
+    release_version: Literal["1.0.22", "1.0.23", "1.0.24"]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]

@@ -74,6 +74,19 @@ class _PinnedFakeTokenCounter:
         return max(1, len(text))
 
 
+def test_v5_integrity_filter_only_accepts_known_span_null_diagnostic() -> None:
+    classify = pipeline_module._unexpected_v5_integrity_errors  # noqa: SLF001
+
+    assert classify([("ok",)]) == ()
+    assert classify([("NULL value in embedding_view_spans.row_index",)]) == ()
+    assert classify([("NULL value in embedding_view_spans.span_ordinal",)]) == ()
+    assert classify([]) == ("integrity_check returned no result",)
+    assert classify([("NULL value in embedding_view_spans.unknown_column",)]) == (
+        "NULL value in embedding_view_spans.unknown_column",
+    )
+    assert classify([("database disk image is malformed",)]) == ("database disk image is malformed",)
+
+
 def test_v5_corpus_identity_binds_temporal_supersession_and_unresolved_truth(
     tmp_path: Path,
 ) -> None:
