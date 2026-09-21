@@ -2308,7 +2308,6 @@ class WorkerPipeline:
                 OCRDocumentFailuresError,
                 OCRFailureBookkeepingError,
                 OCRSystemicFailureError,
-                ProtectedDocumentError,
                 StructureDocumentFailuresError,
                 V5CapacityError,
             ) as exc:
@@ -2888,11 +2887,19 @@ class WorkerPipeline:
                         operation=acquire,
                         maximum_attempts=adapter.spec.maximum_retries,
                         retry_base_seconds=adapter.spec.retry_base_seconds,
-                        non_retryable_predicate=expected_protected if allowance is not None else None,
+                        non_retryable_predicate=lambda exc: isinstance(exc, ProtectedDocumentError),
                     )
                 except ProtectedDocumentError as exc:
                     if not expected_protected(exc):
-                        raise
+                        LOGGER.warning(
+                            "Unregistered protected document skipped "
+                            "issuer=%s product_code=%s source_id=%s magic=%s sha256=%s",
+                            source.issuer,
+                            source.product_code,
+                            source_key,
+                            exc.magic,
+                            exc.sha256,
+                        )
                     self.state.stage_skipped(
                         run_id,
                         source_key,

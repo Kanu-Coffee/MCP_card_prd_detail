@@ -1,7 +1,5 @@
 services:
   worker:
-    build:
-      target: worker-paddle
     environment:
       - CARDRAG_OCR_PROVIDER=local-paddleocr
       - CARDRAG_OCR_MODEL=PaddleOCR-VL-1.6

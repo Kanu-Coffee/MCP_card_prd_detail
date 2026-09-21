@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/\($image_repository)"
-  + "@candidate-v1.0.26-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.27-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -19,7 +19,7 @@ def exact_subject:
 
 def expected_build_args:
   {
-    "build-arg:APP_VERSION": "1.0.26",
+    "build-arg:APP_VERSION": "1.0.27",
     "build-arg:SOURCE_URL": "https://github.com/\($source_repository)",
     "build-arg:CODEX_SHA256":
       "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",

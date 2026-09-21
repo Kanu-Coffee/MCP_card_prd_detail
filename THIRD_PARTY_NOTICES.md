@@ -15,18 +15,17 @@ license files. Notable runtime components include:
 - certifi (MPL-2.0)
 - NumPy (BSD-3-Clause and bundled dependency licenses)
 - optional PaddleOCR, PaddlePaddle, and PaddleX components in the
-  `worker-paddle` image (Apache-2.0 and bundled dependency licenses)
+  unified `worker` image (Apache-2.0 and bundled dependency licenses)
 - FastAPI, MCP, Pydantic, Typer, and other Python packages under the licenses
   declared in their installed package metadata
 - the OpenAI Codex CLI in the Worker image, distributed under its upstream
   project terms
 - Chainguard Python and Wolfi base-image packages, with package license and SBOM
-  metadata retained in the image
-- the Debian and Python base components used by the optional CPU PaddleOCR
-  Worker image, under their respective package licenses
-- Wolfi `bubblewrap` and `libcap` in the Worker image, installed from the
-  official signed Wolfi package index at the exact versions recorded in the
-  Dockerfile
+  metadata retained in the MCP image
+- the Debian and Python base components used by the unified Worker
+  image, under their respective package licenses
+- `bubblewrap` and `libcap` in the Worker image, installed as Debian
+  runtime libraries at the exact versions recorded in the Dockerfile
 
 The release workflow attaches an SBOM attestation to each Worker and MCP image.
 The project `LICENSE` and this notice are copied into both images at

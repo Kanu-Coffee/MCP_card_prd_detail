@@ -3,7 +3,7 @@
 소스 준비, 공개 이미지 발행, 운영 전환은 각각 다른 단계입니다. 브랜치 업데이트나 CI 통과만으로
 실행 중인 Worker가 새 버전으로 바뀌지 않습니다. 릴리스 workflow도 호스트의 설치 경로,
 WebDAV stable 포인터, systemd 예약이나 클라이언트 설정을 변경하지 않습니다.
-현재 릴리스 검증기는 소프트웨어 **1.0.26**의 후보 증빙을 검증합니다.
+현재 릴리스 검증기는 소프트웨어 **1.0.27**의 후보 증빙을 검증합니다.
 
 ## 실행 중인 Worker 보호
 
@@ -31,7 +31,7 @@ Worker 종료 코드와 terminal 결과, 게시 완료 여부를 확인합니다
    수정하면 새 commit과 이미지로 필요한 검증을 다시 수행합니다.
 
 배포 설정과 운영 검증의 원본은 저장소 밖에 보관합니다. 공개 가능한 증빙을 별도로 생성한
-뒤 source commit 다음의 **증빙만 추가하는 commit**에 `release-evidence/v1.0.26/`로
+뒤 source commit 다음의 **증빙만 추가하는 commit**에 `release-evidence/v1.0.27/`로
 봉인합니다. Workflow는 두 commit 사이에서 이 경로 밖의 변경을 거부합니다.
 문서 정리나 버전 변경도 이 이후에 섞지 않습니다.
 
@@ -61,8 +61,8 @@ fallback을 제거합니다. `CARDRAG_CANDIDATE_IMAGE_REPOSITORY`로 사용할 G
 `mode=max,version=v0.2` provenance가 필요합니다. 검증 계약은 BuildKit 0.32.2와 Syft 1.51.0 및
 고정한 `docker/buildkit-syft-scanner` digest를 요구합니다. Scanner digest와
 OCI index·linux/amd64 image·별도 attestation manifest 형식도 아래 검증기를 따릅니다. Tag는
-`candidate-v1.0.26-<role>-<40자리 commit>` 형식을 사용합니다.
-`APP_VERSION=1.0.26`, `VCS_REF=<commit>`,
+`candidate-v1.0.27-<role>-<40자리 commit>` 형식을 사용합니다.
+`APP_VERSION=1.0.27`, `VCS_REF=<commit>`,
 `SOURCE_URL=https://github.com/<owner>/<repo>`를 명시적으로 전달하십시오.
 `CODEX_VERSION`, `CODEX_SHA256`, `PYTHON_DEV_IMAGE`, `PYTHON_RUNTIME_IMAGE`, `UV_IMAGE`도
 Dockerfile의 고정값과 같은 build 인자로 전달해야 합니다. 허용되는 정확한 전체 인자는
@@ -107,7 +107,7 @@ canonical hash를 함께 기록합니다. 오류 응답·스키마 불일치·�
 ## 공개 이미지 발행
 
 `.github/workflows/release.yml`은 수동 `workflow_dispatch` 전용이며 **이미 존재하는
-annotated `v1.0.26` tag**에서 실행합니다. Tag 생성·공개 이미지 업로드는 검증을 마친 뒤의
+annotated `v1.0.27` tag**에서 실행합니다. Tag 생성·공개 이미지 업로드는 검증을 마친 뒤의
 명시적인 릴리스 작업입니다. 일반 PR·브랜치 push는 발행하지 않습니다.
 
 Fork의 유지관리자는 다음을 자신의 저장소에 설정합니다. 후보 GHCR package owner는
@@ -124,7 +124,7 @@ Fork의 유지관리자는 다음을 자신의 저장소에 설정합니다. 후
 후보 패키지의 public visibility와 namespace 소유권도 검증합니다. fork의 OCI source,
 provenance와 repository 설정은 실제 빌드 원본과 일치해야 합니다.
 
-Dispatch의 필수 입력은 `version=1.0.26`, `candidate_source_commit`,
+Dispatch의 필수 입력은 `version=1.0.27`, `candidate_source_commit`,
 `acceptance_report_sha256`, `aggregation_profile_sha256`, `capture_set_receipt_sha256`,
 `candidate_acceptance_sha256`, `candidate_worker_image_digest`,
 `candidate_mcp_image_digest`입니다. 모두 검증한 실제 파일·이미지에서 얻습니다.

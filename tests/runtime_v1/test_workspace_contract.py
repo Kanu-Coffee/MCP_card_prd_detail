@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.26"}
+    assert versions == {"1.0.27"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -72,7 +72,7 @@ def test_default_deployment_has_only_worker_and_mcp() -> None:
     assert "deploy/mcp/compose.yaml" in root_compose
 
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert re.search(r"^FROM worker-runtime AS worker$", dockerfile, re.MULTILINE)
+    assert re.search(r"^FROM \${PADDLE_PYTHON_IMAGE} AS worker$", dockerfile, re.MULTILINE)
     assert re.search(r"^FROM runtime AS mcp$", dockerfile, re.MULTILINE)
     lowered = dockerfile.casefold()
     assert "postgres" not in lowered

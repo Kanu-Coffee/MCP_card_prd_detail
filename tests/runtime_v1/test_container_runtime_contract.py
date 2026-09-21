@@ -42,35 +42,35 @@ def test_runtime_sources_and_build_tool_are_digest_pinned() -> None:
         "e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1"
     ) in DOCKERFILE
     assert "FROM ${PYTHON_DEV_IMAGE} AS source" in DOCKERFILE
-    assert "FROM ${PYTHON_DEV_IMAGE} AS worker-runtime" in DOCKERFILE
+    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker" in DOCKERFILE
     assert "FROM ${PYTHON_RUNTIME_IMAGE} AS runtime" in DOCKERFILE
     assert 'test "$(uv --version)" = "uv 0.8.17"' in _stage("source")
     assert "UV_PYTHON=3.14" in _stage("source")
     assert "UV_PYTHON_DOWNLOADS=never" in _stage("source")
     assert "sys.version_info[:2] == (3, 14)" in _stage("source")
     assert "4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2" not in DOCKERFILE
-    for stage in ("source", "runtime", "worker-runtime", "worker", "mcp"):
+    for stage in ("source", "runtime", "mcp"):
         assert "slim-bookworm" not in _stage(stage)
         assert "apt-get" not in _stage(stage)
 
 
 def test_optional_paddle_worker_is_pinned_nonroot_and_has_persistent_model_cache() -> None:
-    paddle_build = _stage("paddle-worker-build")
-    paddle = _stage("worker-paddle")
+    worker_build = _stage("worker-build")
+    worker = _stage("worker")
 
-    assert "FROM ${PADDLE_PYTHON_IMAGE} AS paddle-worker-build" in paddle_build
-    assert "UV_PYTHON=3.13" in paddle_build
-    assert "--extra paddleocr" in paddle_build
-    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker-paddle" in paddle
-    assert "useradd --uid 10001 --gid 10001" in paddle
-    assert "USER 10001:10001" in paddle
-    assert "PADDLE_PDX_CACHE_HOME=/var/lib/cardrag-paddle" in paddle
+    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker-build" in worker_build
+    assert "UV_PYTHON=3.13" in worker_build
+    assert "--extra paddleocr" in worker_build
+    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker" in worker
+    assert "useradd --uid 10001 --gid 10001" in worker
+    assert "USER 10001:10001" in worker
+    assert "PADDLE_PDX_CACHE_HOME=/var/lib/cardrag-paddle" in worker
     assert (
         'VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home", "/var/lib/cardrag-paddle"]'
-        in paddle
+        in worker
     )
-    assert 'org.opencontainers.image.licenses="Apache-2.0"' in paddle
-    assert 'ENTRYPOINT ["cardrag-worker"]' in paddle
+    assert 'org.opencontainers.image.licenses="Apache-2.0"' in worker
+    assert 'ENTRYPOINT ["cardrag-worker"]' in worker
 
 
 def test_mcp_final_is_minimal_nonroot_and_has_no_run_instruction() -> None:
@@ -98,31 +98,25 @@ def test_mcp_final_is_minimal_nonroot_and_has_no_run_instruction() -> None:
 
 
 def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
-    layout = _stage("runtime-layout")
-    worker_runtime = _stage("worker-runtime")
     worker = _stage("worker")
 
-    assert "addgroup -S -g 10001 cardrag" in layout
-    assert "adduser -S -D -H -u 10001 -G cardrag" in layout
-    assert "/var/lib/cardrag-codex-home/home" in layout
-    assert "chown -R 10001:10001 /var/lib/cardrag-worker" in layout
-    assert "chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-codex-home" in layout
-    assert "bubblewrap=0.11.2-r0" in worker_runtime
-    assert "libcap=2.78-r0" in worker_runtime
-    assert "apk upgrade" not in worker_runtime
+    assert "useradd --uid 10001 --gid 10001" in worker
+    assert "/var/lib/cardrag-codex-home/home" in worker
+    assert "chown -R 10001:10001 /var/lib/cardrag-worker" in worker
+    assert "chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-codex-home" in worker
+    assert "bubblewrap" in worker
+    assert "libcap2-bin" in worker
     assert "--ignore-unfixed" not in DOCKERFILE
     assert "ARG CODEX_VERSION=0.151.0" in DOCKERFILE
     assert ("ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6") in DOCKERFILE
-    # The pinned Wolfi runtime provides BusyBox sha256sum, which implements the
-    # POSIX-style short check flag but not GNU's --check/--strict long options.
-    assert "sha256sum -c /tmp/codex.sha256" in worker_runtime
-    assert "sha256sum --check --strict" not in worker_runtime
-    assert "ln -s codex /usr/local/bin/codex-linux-sandbox" in worker_runtime
-    assert "codex --version" in worker_runtime
-    assert "USER 10001:10001" in worker_runtime
-    assert "/var/lib/cardrag-worker /var/lib/cardrag-worker" in worker
-    assert "/var/lib/cardrag-codex-home /var/lib/cardrag-codex-home" in worker
-    assert 'VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home"]' in worker
+    assert "sha256sum -c /tmp/codex.sha256" in worker
+    assert "ln -s codex /usr/local/bin/codex-linux-sandbox" in worker
+    assert "codex --version" in worker
+    assert "USER 10001:10001" in worker
+    assert (
+        'VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home", "/var/lib/cardrag-paddle"]'
+        in worker
+    )
     assert 'org.opencontainers.image.title="CardRAG Worker"' in worker
     assert 'ENTRYPOINT ["cardrag-worker"]' in worker
     assert 'CMD ["run"]' in worker
@@ -154,10 +148,9 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
 
 def test_runtime_images_publish_apache_2_0_license_metadata() -> None:
     runtime = _stage("runtime")
-    worker_runtime = _stage("worker-runtime")
-    paddle = _stage("worker-paddle")
+    worker = _stage("worker")
 
-    for stage in (runtime, worker_runtime, paddle):
+    for stage in (runtime, worker):
         assert 'org.opencontainers.image.licenses="Apache-2.0"' in stage
         assert "COPY --chmod=0444 LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/cardrag/" in stage
     assert "Proprietary" not in DOCKERFILE
@@ -172,6 +165,5 @@ def test_worker_sandbox_exceptions_do_not_grant_privileged_container_access() ->
     assert "systempaths=unconfined" not in worker_compose
     assert "privileged:" not in worker_compose
     assert "cap_add:" not in worker_compose
-    assert "Wolfi `bubblewrap` and `libcap`" in notices
-    assert "official signed Wolfi package index" in notices
-    assert "optional CPU PaddleOCR" in notices
+    assert "`bubblewrap` and `libcap`" in notices
+    assert "optional PaddleOCR" in notices

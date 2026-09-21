@@ -69,13 +69,13 @@ def _material(uri: str, algorithm: str, digest: str) -> dict[str, Any]:
 def _subject_name(role: str) -> str:
     return (
         "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-        f"@candidate-v1.0.26-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
+        f"@candidate-v1.0.27-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
     )
 
 
 def _build_args() -> dict[str, str]:
     return {
-        "build-arg:APP_VERSION": "1.0.26",
+        "build-arg:APP_VERSION": "1.0.27",
         "build-arg:SOURCE_URL": "https://github.com/Kanu-Coffee/MCP_card_prd_detail",
         "build-arg:CODEX_SHA256": ("605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"),
         "build-arg:CODEX_VERSION": "0.151.0",
@@ -234,13 +234,13 @@ def _cardrag_spdx_package(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "SPDXID": f"SPDXRef-Package-python-{name}",
-        "versionInfo": "1.0.26",
+        "versionInfo": "1.0.27",
         "licenseDeclared": "Apache-2.0",
         "externalRefs": [
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": f"pkg:pypi/{name}@1.0.26",
+                "referenceLocator": f"pkg:pypi/{name}@1.0.27",
             }
         ],
     }
@@ -616,8 +616,8 @@ def test_sbom_policy_matches_buildkit_032_shape_and_rejects_unbound_inventory() 
 
 @pytest.mark.parametrize("role", ("worker", "mcp"))
 def test_candidate_supply_chain_rejects_historical_release_artifacts(role: str) -> None:
-    historical_provenance = json.loads(json.dumps(_provenance(role)).replace("1.0.26", "1.0.14"))
-    historical_sbom = json.loads(json.dumps(_sbom(role)).replace("1.0.26", "1.0.14"))
+    historical_provenance = json.loads(json.dumps(_provenance(role)).replace("1.0.27", "1.0.14"))
+    historical_sbom = json.loads(json.dumps(_sbom(role)).replace("1.0.27", "1.0.14"))
 
     assert not _provenance_passes(historical_provenance, role)
     assert not _sbom_passes(historical_sbom, role)

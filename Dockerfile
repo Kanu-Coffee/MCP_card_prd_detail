@@ -33,11 +33,7 @@ RUN test "$(uv --version)" = "uv 0.8.17" && \
     python -c 'import sys; assert sys.version_info[:2] == (3, 14)'
 
 
-FROM source AS worker-build
-RUN uv sync --frozen --no-dev --no-editable --package cardrag-worker
-
-
-FROM ${PADDLE_PYTHON_IMAGE} AS paddle-worker-build
+FROM ${PADDLE_PYTHON_IMAGE} AS worker-build
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -100,63 +96,7 @@ WORKDIR /app
 USER 10001:10001
 
 
-FROM ${PYTHON_DEV_IMAGE} AS worker-runtime
-ARG CODEX_VERSION
-ARG CODEX_SHA256
-ARG APP_VERSION=dev
-ARG VCS_REF=unknown
-ARG SOURCE_URL=https://github.com/Kanu-Coffee/MCP_card_prd_detail
-
-LABEL org.opencontainers.image.source="${SOURCE_URL}" \
-      org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.licenses="Apache-2.0"
-
-ENV PATH="/opt/cardrag/bin:${PATH}" \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    TZ=Asia/Seoul
-
-USER 0
-# Exact versions make disappearance from Wolfi's signed rolling index fail the
-# build instead of silently upgrading either side of bwrap's dynamic ABI.
-RUN apk add --no-cache \
-      bubblewrap=0.11.2-r0 \
-      libcap=2.78-r0
-COPY --from=runtime-layout /etc/passwd /etc/passwd
-COPY --from=runtime-layout /etc/group /etc/group
-COPY --from=runtime-layout /usr/share/doc/cardrag /usr/share/doc/cardrag
-COPY --chmod=0444 LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/cardrag/
-ADD --chmod=0644 \
-  "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
-  /tmp/codex.tar.gz
-RUN printf '%s  %s\n' "${CODEX_SHA256}" /tmp/codex.tar.gz > /tmp/codex.sha256 && \
-    sha256sum -c /tmp/codex.sha256 && \
-    tar --extract --gzip --file /tmp/codex.tar.gz --directory /usr/local/bin && \
-    mv /usr/local/bin/codex-x86_64-unknown-linux-musl /usr/local/bin/codex && \
-    chmod 0755 /usr/local/bin/codex && \
-    ln -s codex /usr/local/bin/codex-linux-sandbox && \
-    rm /tmp/codex.tar.gz /tmp/codex.sha256 && \
-    codex --version
-
-WORKDIR /app
-USER 10001:10001
-
-
-FROM worker-runtime AS worker
-LABEL org.opencontainers.image.title="CardRAG Worker" \
-      org.opencontainers.image.description="One-shot card PDF, OCR, embedding, and WebDAV publisher"
-COPY --from=worker-build /opt/cardrag /opt/cardrag
-COPY --from=runtime-layout --chown=10001:10001 \
-  /var/lib/cardrag-worker /var/lib/cardrag-worker
-COPY --from=runtime-layout --chown=10001:10001 \
-  /var/lib/cardrag-codex-home /var/lib/cardrag-codex-home
-VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home"]
-ENTRYPOINT ["cardrag-worker"]
-CMD ["run"]
-
-
-FROM ${PADDLE_PYTHON_IMAGE} AS worker-paddle
+FROM ${PADDLE_PYTHON_IMAGE} AS worker
 ARG CODEX_VERSION
 ARG CODEX_SHA256
 ARG APP_VERSION=dev
@@ -167,8 +107,8 @@ LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.title="CardRAG Worker with PaddleOCR-VL" \
-      org.opencontainers.image.description="One-shot CardRAG worker with local CPU PaddleOCR-VL"
+      org.opencontainers.image.title="CardRAG Worker" \
+      org.opencontainers.image.description="One-shot CardRAG worker with codex-exec, openrouter, and local PaddleOCR-VL"
 
 ENV PATH="/opt/cardrag/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -213,8 +153,9 @@ RUN printf '%s  %s\n' "${CODEX_SHA256}" /tmp/codex.tar.gz > /tmp/codex.sha256 &&
     mv /usr/local/bin/codex-x86_64-unknown-linux-musl /usr/local/bin/codex && \
     chmod 0755 /usr/local/bin/codex && \
     ln -s codex /usr/local/bin/codex-linux-sandbox && \
-    rm /tmp/codex.tar.gz /tmp/codex.sha256
-COPY --from=paddle-worker-build /opt/cardrag /opt/cardrag
+    rm /tmp/codex.tar.gz /tmp/codex.sha256 && \
+    codex --version
+COPY --from=worker-build /opt/cardrag /opt/cardrag
 WORKDIR /app
 USER 10001:10001
 VOLUME ["/var/lib/cardrag-worker", "/var/lib/cardrag-codex-home", "/var/lib/cardrag-paddle"]

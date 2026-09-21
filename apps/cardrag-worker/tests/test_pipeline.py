@@ -37,7 +37,7 @@ from cardrag_worker.contracts import (
     SourceRecord,
     snapshot_from_records,
 )
-from cardrag_worker.downloader import PDFValidationError, ProtectedDocumentError, validate_pdf
+from cardrag_worker.downloader import PDFValidationError, validate_pdf
 from cardrag_worker.downloader import SecurePDFDownloader as RealDownloader
 from cardrag_worker.gc import GCPartialFailure
 from cardrag_worker.ocr import (
@@ -2435,48 +2435,108 @@ async def test_explicit_protected_product_is_audited_once_and_part_of_corpus_ide
 
 
 @pytest.mark.asyncio
-async def test_unlisted_protected_product_remains_a_terminal_download_failure(
+async def test_unlisted_protected_product_is_skipped_and_pipeline_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    record = source(source_url="https://cards.example/protected.pdf")
+    valid = source(product_code="valid", source_url="https://cards.example/valid.pdf")
+    protected = source(product_code="protected", source_url="https://cards.example/protected.pdf")
+    payload = pdf_bytes()
+    protected_payload = b"SCDSA002" + b"\x00" * 64
     requests: list[str] = []
-    install_http(monkeypatch, b"SCDSA002" + b"\x00" * 64, requests)
-    adapter = Adapter((record,))
+
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        content = protected_payload if request.url.path.endswith("protected.pdf") else payload
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=content,
+            request=request,
+        )
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(pipeline_module.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(
+        pipeline_module,
+        "SecurePDFDownloader",
+        lambda policy: RealDownloader(policy, resolver=lambda _host: ("93.184.216.34",)),
+    )
+    adapter = Adapter((valid, protected))
     with WorkerState(tmp_path / "state.sqlite3") as state:
+        webdav = FakeWebDAV(None)
         pipeline = WorkerPipeline(
             state=state,
             state_dir=tmp_path,
             adapters=[adapter],
             ocr=FakeOCR(),  # type: ignore[arg-type]
             embeddings=FakeEmbeddings(),
-            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            webdav=webdav,  # type: ignore[arg-type]
             collect_remote_garbage=False,
         )
-        with pytest.raises(ProtectedDocumentError):
-            await pipeline.run()
-        run_id = str(state.connection.execute("SELECT run_id FROM run").fetchone()[0])
-        stage = state.get_stage(run_id, record.source_id, "download")
-        assert stage is not None and stage.status == "failed"
-    assert len(requests) == adapter.spec.maximum_retries
+        webdav.current = RemoteGenerationIdentity(
+            generation_id="g-current",
+            corpus_sha256=corpus_for(
+                payload,
+                valid,
+                tmp_path,
+                unsupported=((protected, protected_payload),),
+            ),
+            contract_sha256=pipeline.contract_sha256,
+        )
+        result = await pipeline.run()
+        skipped = state.get_stage(result.run_id, protected.source_id, "download")
+        assert skipped is not None
+        assert (skipped.status, skipped.attempt_count) == ("skipped", 1)
+        assert skipped.last_error is not None and "unsupported_drm" in skipped.last_error
+    assert result.status == "no_change"
+    assert result.document_count == 1
+    assert result.unsupported_document_count == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_changed_protected_bytes_do_not_match_an_approved_source(
+async def test_changed_protected_bytes_are_skipped_as_unsupported_drm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    record = source(source_url="https://cards.example/protected.pdf")
+    valid = source(product_code="valid", source_url="https://cards.example/valid.pdf")
+    protected = source(product_code="protected", source_url="https://cards.example/protected.pdf")
+    payload = pdf_bytes()
     protected_payload = b"\x9b DRMONE" + b"changed"
     requests: list[str] = []
-    install_http(monkeypatch, protected_payload, requests)
-    adapter = Adapter((record,))
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        content = protected_payload if request.url.path.endswith("protected.pdf") else payload
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=content,
+            request=request,
+        )
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(pipeline_module.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(
+        pipeline_module,
+        "SecurePDFDownloader",
+        lambda policy: RealDownloader(policy, resolver=lambda _host: ("93.184.216.34",)),
+    )
+    adapter = Adapter((valid, protected))
     adapter.spec = replace(
         adapter.spec,
         protected_source_allowances=(
             ProtectedSourceAllowance(
-                source_id=record.source_id,
-                product_code=record.product_code,
-                source_version=record.source_version,
-                source_url=record.source_url,
+                source_id=protected.source_id,
+                product_code=protected.product_code,
+                source_version=protected.source_version,
+                source_url=protected.source_url,
                 sha256="f" * 64,
                 size_bytes=len(protected_payload),
                 magic="FASOO_DRMONE",
@@ -2484,22 +2544,35 @@ async def test_changed_protected_bytes_do_not_match_an_approved_source(
         ),
     )
     with WorkerState(tmp_path / "state.sqlite3") as state:
+        webdav = FakeWebDAV(None)
         pipeline = WorkerPipeline(
             state=state,
             state_dir=tmp_path,
             adapters=[adapter],
             ocr=FakeOCR(),  # type: ignore[arg-type]
             embeddings=FakeEmbeddings(),
-            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            webdav=webdav,  # type: ignore[arg-type]
             collect_remote_garbage=False,
         )
-        with pytest.raises(ProtectedDocumentError):
-            await pipeline.run()
-        run_id = str(state.connection.execute("SELECT run_id FROM run").fetchone()[0])
-        stage = state.get_stage(run_id, record.source_id, "download")
-        assert stage is not None and stage.status == "failed"
-        assert state.stage_status_count(run_id, "download", "skipped") == 0
-    assert len(requests) == adapter.spec.maximum_retries
+        webdav.current = RemoteGenerationIdentity(
+            generation_id="g-current",
+            corpus_sha256=corpus_for(
+                payload,
+                valid,
+                tmp_path,
+                unsupported=((protected, protected_payload),),
+            ),
+            contract_sha256=pipeline.contract_sha256,
+        )
+        result = await pipeline.run()
+        skipped = state.get_stage(result.run_id, protected.source_id, "download")
+        assert skipped is not None
+        assert (skipped.status, skipped.attempt_count) == ("skipped", 1)
+        assert skipped.last_error is not None and "unsupported_drm" in skipped.last_error
+    assert result.status == "no_change"
+    assert result.document_count == 1
+    assert result.unsupported_document_count == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio
