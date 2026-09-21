@@ -204,7 +204,8 @@ WebDAV는 검증 이력이 있는 기존 객체를 재사용하고 성공 실행
 `CARDRAG_OCR_CACHE_REQUIRE_HIT=true`를 함께 설정합니다. 이 모드는 `read-only`에서만
 허용되며 cache miss가 발생하면 OCR을 호출하지 않고 Worker를 실패시킵니다. 성공 실행의
 `ocr_provider_documents=0`과 `ocr_cache_reused=ocr_expected`를 확인하기 전에는 완전한
-cache 재사용으로 간주하지 않습니다.
+cache 재사용으로 간주하지 않습니다. 이 보호 모드의 기본값은 `false`이며, 일별 신규 OCR을
+수집하는 정상 배치에서는 설정하지 않습니다.
 원격 삭제는 `CARDRAG_REMOTE_GC_APPROVED=true`, `CARDRAG_COLLECT_REMOTE_GARBAGE=true`,
 stable 게시 권한이 모두 있어야 수행합니다. 설정 예시는 세 권한을 기본으로 끕니다.
 
