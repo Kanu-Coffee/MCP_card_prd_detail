@@ -1295,6 +1295,24 @@ def _verify_vector_sidecar(
             raise ServingDatabaseV5Error("vector sidecar has undeclared trailing bytes")
 
 
+_V5_SPAN_NULL_INTEGRITY_ERROR: Final = re.compile(
+    r"^NULL value in embedding_view_spans\."
+    r"(?:row_index|contract_revision_id|page|source_start|source_end|text_sha256|span_ordinal)$"
+)
+
+
+def unexpected_v5_integrity_errors(rows: Sequence[Sequence[object]]) -> tuple[str, ...]:
+    if not rows:
+        return ("integrity_check returned no result",)
+    errors: list[str] = []
+    for row in rows:
+        value = row[0] if row else None
+        if value == "ok" or (isinstance(value, str) and _V5_SPAN_NULL_INTEGRITY_ERROR.fullmatch(value)):
+            continue
+        errors.append(str(value))
+    return tuple(errors)
+
+
 def _verify_database(
     connection: sqlite3.Connection,
     *,
@@ -1305,9 +1323,21 @@ def _verify_database(
     run_integrity_check: bool = True,
 ) -> None:
     if run_integrity_check:
-        integrity = connection.execute("PRAGMA integrity_check").fetchone()
-        if integrity is None or integrity[0] != "ok":
-            raise ServingDatabaseV5Error(f"SQLite integrity check failed: {integrity}")
+        integrity_rows = connection.execute("PRAGMA integrity_check(100)").fetchall()
+        real_errors = unexpected_v5_integrity_errors(integrity_rows)
+        if real_errors:
+            raise ServingDatabaseV5Error(f"SQLite integrity check failed: {real_errors[0]}")
+        if any(row[0] != "ok" for row in integrity_rows):
+            null_span_count = int(
+                connection.execute(
+                    """SELECT count(*) FROM embedding_view_spans
+                       WHERE row_index IS NULL OR contract_revision_id IS NULL
+                          OR page IS NULL OR source_start IS NULL OR source_end IS NULL
+                          OR text_sha256 IS NULL OR span_ordinal IS NULL"""
+                ).fetchone()[0]
+            )
+            if null_span_count:
+                raise ServingDatabaseV5Error("serving database contains a NULL embedding view span")
     foreign = connection.execute("PRAGMA foreign_key_check").fetchall()
     if foreign:
         raise ServingDatabaseV5Error(f"SQLite foreign key check failed: {foreign[:3]}")
@@ -2475,4 +2505,5 @@ __all__ = [
     "VECTOR_SIDECAR_NAME",
     "ViewSourceSpanInput",
     "ViewType",
+    "unexpected_v5_integrity_errors",
 ]

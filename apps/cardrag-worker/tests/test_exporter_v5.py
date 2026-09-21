@@ -1379,3 +1379,18 @@ def test_v5_verify_database_optimized_detection(tmp_path: Path) -> None:
                 is_vacuumed_verify=False,
             )
         conn.execute("ROLLBACK TO test_sp")
+
+
+def test_v5_verify_database_handles_sqlite_without_rowid_integrity_false_positive() -> None:
+    classify = exporter_module.unexpected_v5_integrity_errors
+
+    assert classify([("ok",)]) == ()
+    assert classify([("NULL value in embedding_view_spans.contract_revision_id",)]) == ()
+    assert classify([("NULL value in embedding_view_spans.row_index",)]) == ()
+    assert classify([("NULL value in embedding_view_spans.span_ordinal",)]) == ()
+    assert classify([]) == ("integrity_check returned no result",)
+    assert classify([("NULL value in embedding_view_spans.unknown_col",)]) == (
+        "NULL value in embedding_view_spans.unknown_col",
+    )
+    assert classify([("database disk image is malformed",)]) == ("database disk image is malformed",)
+

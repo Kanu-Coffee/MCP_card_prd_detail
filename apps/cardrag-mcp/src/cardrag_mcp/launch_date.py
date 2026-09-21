@@ -27,7 +27,7 @@ _LAUNCH_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-PARSER_VERSION = "launch-date-v1.0.24"
+PARSER_VERSION = "launch-date-v1.0.25"
 LaunchDateStatus = Literal["confirmed", "missing", "invalid", "conflicting"]
 
 

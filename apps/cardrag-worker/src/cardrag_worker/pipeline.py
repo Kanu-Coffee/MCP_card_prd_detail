@@ -122,6 +122,7 @@ from .exporter_v5 import (
     StructureNodeInput,
     UnsupportedProductInput,
     ViewSourceSpanInput,
+    unexpected_v5_integrity_errors,
 )
 from .issuer_http import create_issuer_client
 from .ocr import (
@@ -193,22 +194,7 @@ REMOTE_GC_ERROR = "remote_gc_failed: Remote garbage collection failed after dura
 REMOTE_GC_PARTIAL_ERROR = (
     "remote_gc_partial_failure: Remote garbage collection stopped after partial deletion."
 )
-_V5_SPAN_NULL_INTEGRITY_ERROR = re.compile(
-    r"^NULL value in embedding_view_spans\."
-    r"(?:row_index|contract_revision_id|page|source_start|source_end|text_sha256|span_ordinal)$"
-)
-
-
-def _unexpected_v5_integrity_errors(rows: Sequence[Sequence[object]]) -> tuple[str, ...]:
-    if not rows:
-        return ("integrity_check returned no result",)
-    errors: list[str] = []
-    for row in rows:
-        value = row[0] if row else None
-        if value == "ok" or (isinstance(value, str) and _V5_SPAN_NULL_INTEGRITY_ERROR.fullmatch(value)):
-            continue
-        errors.append(str(value))
-    return tuple(errors)
+_unexpected_v5_integrity_errors = unexpected_v5_integrity_errors
 
 
 class CorpusConflictError(RuntimeError):
