@@ -113,6 +113,10 @@ class OCRValidationError(RuntimeError):
     pass
 
 
+class OCRCacheMissError(RuntimeError):
+    """Raised before any provider invocation when a cache-only run misses."""
+
+
 class OCRCachePublicationError(RuntimeError):
     """Secret-safe, phase-aware failure raised by native cache publication."""
 
@@ -797,6 +801,7 @@ class OCRResolver:
         context_pages_before: int = 1,
         context_pages_after: int = 1,
         cache_mode: OCRCacheMode = "read-write",
+        require_cache_hit: bool = False,
         compatible_contracts: Sequence[NativeOCRContract] = (),
     ) -> None:
         if chunk_pages < 1:
@@ -809,6 +814,8 @@ class OCRResolver:
             raise ValueError("render_scale_milli must be between 1000 and 8000")
         if cache_mode not in {"read-only", "read-write"}:
             raise ValueError("cache_mode must be read-only or read-write")
+        if require_cache_hit and cache_mode != "read-only":
+            raise ValueError("require_cache_hit requires read-only cache mode")
         self.provider = provider
         self.state = state
         self.webdav = webdav
@@ -820,6 +827,7 @@ class OCRResolver:
         self.render_scale_milli = render_scale_milli
         self.adoption_policy_version = adoption_policy_version
         self._cache_mode = cache_mode
+        self._require_cache_hit = require_cache_hit
         self._state_root = Path(os.path.abspath(os.fspath(state.path.parent)))
         self._local_prefetch = _NativeSealMemo()
         self._native_run_locks: dict[tuple[str, str], asyncio.Lock] = state._ocr_native_run_locks
@@ -2066,6 +2074,8 @@ class OCRResolver:
             )
             shutil.rmtree(output_dir / "rendered", ignore_errors=True)
             return committed
+        if self._require_cache_hit:
+            raise OCRCacheMissError("OCR cache miss in cache-only mode")
         if isinstance(self.provider, DocumentOCRProvider):
             raw_pages = await self.provider.recognize_document(
                 pdf_path,

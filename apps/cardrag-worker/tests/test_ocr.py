@@ -41,6 +41,7 @@ from cardrag_worker.ocr import (
     OCR_OUTPUT_POLICY,
     OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
     FailoverOCRResolver,
+    OCRCacheMissError,
     OCRCachePublicationError,
     OCRResolver,
     OCRResult,
@@ -122,6 +123,32 @@ async def test_full_document_provider_uses_existing_native_artifact_contract(tmp
         assert resolver.contract.processor_version == "cardrag-worker-paddleocr/1.0.0"
         assert resolver.contract.segmentation_strategy_id == "cardrag.ocr.full-document.v1"
         assert resolver.contract.render_scale_milli == 4167
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_cache_only_mode_rejects_a_miss_before_provider_call(tmp_path: Path) -> None:
+    provider = FakeDocumentProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(
+        provider=provider, state=state, webdav=None, cache_mode="read-only", require_cache_hit=True
+    )  # type: ignore[arg-type]
+    try:
+        run_id = state.start_run(run_id="run")
+        pdf_path = tmp_path / "sample.pdf"
+        pdf_path.write_bytes(b"pdf")
+        with pytest.raises(OCRCacheMissError, match="cache-only"):
+            await resolver.resolve(
+                run_id=run_id,
+                document_id="doc_cache_miss",
+                pdf_path=pdf_path,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=2,
+                output_dir=tmp_path / "ocr",
+            )
+        assert provider.calls == 0
     finally:
         state.close()
 

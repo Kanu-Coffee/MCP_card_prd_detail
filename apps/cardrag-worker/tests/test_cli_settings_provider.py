@@ -1115,6 +1115,7 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
     assert settings.ocr_prompt_version == "cardrag-ocr.ko.v2"
     assert settings.ocr_provider_timeout_seconds == 1800
     assert settings.ocr_cache_mode == "read-only"
+    assert settings.ocr_cache_require_hit is False
     assert settings.ocr_render_scale_milli == 6000
     assert settings.ocr_whole_document_max_pages == 4
     assert (settings.ocr_context_pages_before, settings.ocr_context_pages_after) == (1, 1)
@@ -1125,6 +1126,16 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
     monkeypatch.setenv("CARDRAG_OCR_RENDER_SCALE_MILLI", "6000")
     monkeypatch.setenv("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", "0")
     with pytest.raises(ValueError, match="CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS"):
+        WorkerSettings.from_env()
+
+
+def test_ocr_cache_require_hit_is_read_only_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_REQUIRE_HIT", "true")
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_MODE", "read-only")
+    assert WorkerSettings.from_env().ocr_cache_require_hit is True
+
+    monkeypatch.setenv("CARDRAG_OCR_CACHE_MODE", "read-write")
+    with pytest.raises(ValueError, match="OCR_CACHE_REQUIRE_HIT"):
         WorkerSettings.from_env()
 
 

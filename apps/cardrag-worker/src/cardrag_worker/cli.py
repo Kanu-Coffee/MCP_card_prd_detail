@@ -359,6 +359,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 cache_epoch=settings.ocr_cache_epoch,
                 prompt_version=settings.ocr_prompt_version,
                 cache_mode=settings.ocr_cache_mode,
+                require_cache_hit=settings.ocr_cache_require_hit,
             )
             compatible_contracts = discover_compatible_contracts(
                 state_dir=settings.state_dir,
@@ -400,11 +401,14 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     cache_epoch=settings.ocr_cache_epoch,
                     prompt_version=settings.ocr_prompt_version,
                     cache_mode=settings.ocr_cache_mode,
+                    require_cache_hit=settings.ocr_cache_require_hit,
                     compatible_contracts=compatible_contracts,
                 )
                 resolver = FailoverOCRResolver(primary, fallback)
             logging.getLogger("cardrag_worker.cli").info(
-                "Remote OCR cache access mode=%s", settings.ocr_cache_mode
+                "Remote OCR cache access mode=%s require_hit=%s",
+                settings.ocr_cache_mode,
+                settings.ocr_cache_require_hit,
             )
             embeddings = await _qwen_embedding_provider(settings)
             logging.getLogger("cardrag_worker.cli").info(

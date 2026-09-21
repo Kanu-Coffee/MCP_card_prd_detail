@@ -254,6 +254,7 @@ class WorkerSettings:
     ocr_reasoning_effort: str
     ocr_provider_timeout_seconds: float
     ocr_cache_mode: Literal["read-only", "read-write"]
+    ocr_cache_require_hit: bool
     ocr_cache_epoch: int
     ocr_prompt_version: str
     codex_executable: str
@@ -342,6 +343,9 @@ class WorkerSettings:
         if raw_ocr_cache_mode not in {"read-only", "read-write"}:
             raise ValueError("CARDRAG_OCR_CACHE_MODE must be read-only or read-write")
         ocr_cache_mode = cast(Literal["read-only", "read-write"], raw_ocr_cache_mode)
+        ocr_cache_require_hit = _boolean("CARDRAG_OCR_CACHE_REQUIRE_HIT", False)
+        if ocr_cache_require_hit and ocr_cache_mode != "read-only":
+            raise ValueError("CARDRAG_OCR_CACHE_REQUIRE_HIT=true requires CARDRAG_OCR_CACHE_MODE=read-only")
         if ocr_cache_mode == "read-write" and (channel != "stable" or not ocr_cache_publication_approved):
             raise ValueError(
                 "CARDRAG_OCR_CACHE_MODE=read-write requires stable channel and separate "
@@ -460,6 +464,7 @@ class WorkerSettings:
             ocr_reasoning_effort=os.environ.get("CARDRAG_OCR_REASONING_EFFORT", "high"),
             ocr_provider_timeout_seconds=_positive_float("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", 1800),
             ocr_cache_mode=ocr_cache_mode,
+            ocr_cache_require_hit=ocr_cache_require_hit,
             ocr_cache_epoch=_nonnegative_int("CARDRAG_OCR_CACHE_EPOCH", 0),
             ocr_prompt_version=os.environ.get("CARDRAG_OCR_PROMPT_VERSION", "cardrag-ocr.ko.v2"),
             codex_executable=os.environ.get("CARDRAG_CODEX_EXECUTABLE", "codex"),
