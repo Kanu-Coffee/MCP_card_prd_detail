@@ -9,6 +9,7 @@ import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -109,9 +110,9 @@ def main() -> int:
     ):
         return 65
     try:
-        from paddleocr import PaddleOCRVL  # type: ignore[import-not-found]
-
-        pipeline = PaddleOCRVL(
+        pipeline_class_name = "PaddleOCRVL"
+        pipeline_class = getattr(import_module("paddleocr"), pipeline_class_name)
+        pipeline = pipeline_class(
             pipeline_version=args.pipeline_version,
             device="cpu",
             cpu_threads=args.cpu_threads,
