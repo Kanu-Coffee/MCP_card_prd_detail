@@ -114,7 +114,7 @@ async def _generation_chain(
             or manifest.serving_database.size_bytes != ready.serving_database_size_bytes
         ):
             raise GCError(f"generation {generation_id} control hashes disagree")
-        if manifest.schema_version == "cardrag.generation.v5":
+        if manifest.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
             sidecar = manifest.vector_sidecar
             if sidecar is None or (
                 ready.vector_sidecar_sha256 != sidecar.artifact.sha256

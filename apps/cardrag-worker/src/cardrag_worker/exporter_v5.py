@@ -1,4 +1,4 @@
-"""Independent v5 serving database and 4,096D float32 sidecar exporter.
+"""Independent structured serving database and 4,096D float32 sidecar exporter.
 
 The input records in this module are boundary DTOs on purpose.  They do not
 import the parser's structure classes, allowing parsing, embedding, and export
@@ -27,7 +27,12 @@ from numbers import Real
 from pathlib import Path
 from typing import Final, Literal, final
 
-from cardrag_core import canonical_json_bytes, canonical_sha256, v5_exact_row_corpus_sha256
+from cardrag_core import (
+    LAUNCH_DATE_PARSER_VERSION,
+    canonical_json_bytes,
+    canonical_sha256,
+    v5_exact_row_corpus_sha256,
+)
 from cardrag_core.embedding import (
     QWEN3_DOCUMENT_POLICY,
     QWEN3_EMBEDDING_DIMENSION,
@@ -41,7 +46,10 @@ from cardrag_core.embedding import (
 
 LOGGER: Final = logging.getLogger(__name__)
 
-SERVING_SCHEMA_ID_V5: Final = "cardrag.serving-db.v5"
+SERVING_SCHEMA_ID_V6: Final = "cardrag.serving-db.v6"
+# Compatibility name retained for callers while the exporter implementation is
+# shared. New generations emitted by this class use the v6 schema identifier.
+SERVING_SCHEMA_ID_V5: Final = SERVING_SCHEMA_ID_V6
 VECTOR_SIDECAR_NAME: Final = "vectors.f32"
 VECTOR_ROW_BYTES: Final = QWEN3_EMBEDDING_DIMENSION * 4
 SQLITE_PAGE_BYTES: Final = 4096
@@ -174,6 +182,23 @@ class ContractRevisionInput:
     page_count: int
     temporal_status: TemporalStatus
     supersedes_revision_id: str | None = None
+    launch_date: str | None = None
+    launch_date_status: Literal["confirmed", "missing", "invalid", "conflicting"] = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedFieldEvidenceInput:
+    contract_revision_id: str
+    field: Literal["launch_date"]
+    candidate_ordinal: int
+    span_ordinal: int
+    match_kind: Literal["explicit_label", "date_before_launch"]
+    normalized_value: str | None
+    node_id: str
+    page: int
+    source_start: int
+    source_end: int
+    text_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +413,9 @@ CREATE TABLE contract_revisions (
   source_version TEXT NOT NULL,
   source_url TEXT NOT NULL,
   effective_date TEXT NOT NULL,
+  launch_date TEXT,
+  launch_date_status TEXT NOT NULL CHECK(launch_date_status IN
+    ('confirmed','missing','invalid','conflicting')),
   pdf_sha256 TEXT NOT NULL CHECK(length(pdf_sha256)=64),
   pdf_size_bytes INTEGER NOT NULL CHECK(pdf_size_bytes > 0),
   page_count INTEGER NOT NULL CHECK(page_count > 0),
@@ -396,7 +424,11 @@ CREATE TABLE contract_revisions (
   UNIQUE(product_lineage_id,contract_revision_id),
   FOREIGN KEY(product_lineage_id,supersedes_revision_id)
     REFERENCES contract_revisions(product_lineage_id,contract_revision_id),
-  CHECK(supersedes_revision_id IS NULL OR supersedes_revision_id != contract_revision_id)
+  CHECK(supersedes_revision_id IS NULL OR supersedes_revision_id != contract_revision_id),
+  CHECK(
+    (launch_date_status='confirmed' AND launch_date IS NOT NULL)
+    OR (launch_date_status!='confirmed' AND launch_date IS NULL)
+  )
 ) STRICT;
 CREATE UNIQUE INDEX contract_revisions_current_lineage_idx
   ON contract_revisions(product_lineage_id) WHERE temporal_status='current';
@@ -469,6 +501,25 @@ CREATE TABLE node_links (
     REFERENCES structure_nodes(node_id,contract_revision_id),
   FOREIGN KEY(to_node_id,to_contract_revision_id)
     REFERENCES structure_nodes(node_id,contract_revision_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE derived_field_evidence (
+  contract_revision_id TEXT NOT NULL REFERENCES contract_revisions(contract_revision_id),
+  field TEXT NOT NULL CHECK(field='launch_date'),
+  candidate_ordinal INTEGER NOT NULL CHECK(candidate_ordinal >= 0),
+  span_ordinal INTEGER NOT NULL CHECK(span_ordinal >= 0),
+  match_kind TEXT NOT NULL CHECK(match_kind IN ('explicit_label','date_before_launch')),
+  normalized_value TEXT,
+  node_id TEXT NOT NULL,
+  page INTEGER NOT NULL CHECK(page > 0),
+  source_start INTEGER NOT NULL CHECK(source_start >= 0),
+  source_end INTEGER NOT NULL CHECK(source_end > source_start),
+  text_sha256 TEXT NOT NULL CHECK(length(text_sha256)=64),
+  PRIMARY KEY(contract_revision_id,field,candidate_ordinal,span_ordinal),
+  FOREIGN KEY(node_id,contract_revision_id)
+    REFERENCES structure_nodes(node_id,contract_revision_id),
+  FOREIGN KEY(contract_revision_id,page)
+    REFERENCES document_pages(contract_revision_id,page)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE embedding_profiles (
@@ -859,6 +910,7 @@ def _validate_inputs(
     nodes: Sequence[StructureNodeInput],
     spans: Sequence[NodeSpanInput],
     links: Sequence[NodeLinkInput],
+    derived_field_evidence: Sequence[DerivedFieldEvidenceInput],
     profiles: Sequence[EmbeddingProfileInput],
     views: Sequence[EmbeddingViewInput],
     primary_embedding_profile_id: str,
@@ -985,6 +1037,19 @@ def _validate_inputs(
             date.fromisoformat(revision.effective_date)
         except ValueError:
             raise ServingDatabaseV5Error("contract revision effective_date is invalid") from None
+        if revision.launch_date_status not in {"confirmed", "missing", "invalid", "conflicting"}:
+            raise ServingDatabaseV5Error("contract revision launch_date_status is invalid")
+        if revision.launch_date_status == "confirmed":
+            if revision.launch_date is None:
+                raise ServingDatabaseV5Error("confirmed launch date is missing")
+            try:
+                parsed_launch_date = date.fromisoformat(revision.launch_date)
+            except ValueError:
+                raise ServingDatabaseV5Error("contract revision launch_date is invalid") from None
+            if parsed_launch_date.isoformat() != revision.launch_date:
+                raise ServingDatabaseV5Error("contract revision launch_date is not canonical")
+        elif revision.launch_date is not None:
+            raise ServingDatabaseV5Error("unconfirmed launch date must be null")
         _require_sha256(revision.pdf_sha256, field="pdf_sha256")
         if revision.pdf_size_bytes <= 0 or revision.page_count <= 0:
             raise ServingDatabaseV5Error("contract revision PDF size/page count must be positive")
@@ -1132,6 +1197,75 @@ def _validate_inputs(
             raise ServingDatabaseV5Error("node display_text does not equal its source spans")
         if bound_node.node_type in _CANONICAL_NODE_TYPES and not node_spans:
             raise ServingDatabaseV5Error("canonical structure node has no source span")
+
+    evidence_keys: set[tuple[str, str, int, int]] = set()
+    candidate_span_ordinals: dict[tuple[str, str, int], list[int]] = defaultdict(list)
+    for item in derived_field_evidence:
+        key = (item.contract_revision_id, item.field, item.candidate_ordinal, item.span_ordinal)
+        if key in evidence_keys:
+            raise ServingDatabaseV5Error("derived field evidence identity is duplicated")
+        evidence_keys.add(key)
+        evidence_revision = revision_by_id.get(item.contract_revision_id)
+        node = node_by_identity.get((item.node_id, item.contract_revision_id))
+        page = page_by_identity.get((item.contract_revision_id, item.page))
+        if evidence_revision is None or node is None or page is None:
+            raise ServingDatabaseV5Error("derived field evidence is not source-bound")
+        if (
+            item.field != "launch_date"
+            or item.match_kind not in {"explicit_label", "date_before_launch"}
+            or item.candidate_ordinal < 0
+            or item.span_ordinal < 0
+            or item.source_start < 0
+            or item.source_end <= item.source_start
+            or item.source_end > len(page.text)
+        ):
+            raise ServingDatabaseV5Error("derived field evidence contains an invalid bounded value")
+        source = page.text[item.source_start : item.source_end]
+        if hashlib.sha256(source.encode("utf-8")).hexdigest() != item.text_sha256:
+            raise ServingDatabaseV5Error("derived field evidence hash does not match source text")
+        if not any(
+            span.page == item.page
+            and span.source_start == item.source_start
+            and span.source_end == item.source_end
+            and span.text_sha256 == item.text_sha256
+            for span in spans_by_node[(item.node_id, item.contract_revision_id)]
+        ):
+            raise ServingDatabaseV5Error("derived field evidence does not match its node span")
+        if item.normalized_value is not None:
+            try:
+                normalized = date.fromisoformat(item.normalized_value)
+            except ValueError:
+                raise ServingDatabaseV5Error("derived field evidence date is invalid") from None
+            if normalized.isoformat() != item.normalized_value:
+                raise ServingDatabaseV5Error("derived field evidence date is not canonical")
+        candidate_span_ordinals[(item.contract_revision_id, item.field, item.candidate_ordinal)].append(
+            item.span_ordinal
+        )
+    for ordinals in candidate_span_ordinals.values():
+        if sorted(ordinals) != list(range(len(ordinals))):
+            raise ServingDatabaseV5Error("derived field evidence spans are not contiguous")
+    evidence_by_revision: dict[str, list[DerivedFieldEvidenceInput]] = defaultdict(list)
+    for item in derived_field_evidence:
+        evidence_by_revision[item.contract_revision_id].append(item)
+    for revision in revisions:
+        evidence_rows = evidence_by_revision[revision.contract_revision_id]
+        normalized_values = {
+            item.normalized_value for item in evidence_rows if item.normalized_value is not None
+        }
+        candidate_ordinals = sorted({item.candidate_ordinal for item in evidence_rows})
+        if candidate_ordinals and candidate_ordinals != list(range(len(candidate_ordinals))):
+            raise ServingDatabaseV5Error("derived field evidence candidates are not contiguous")
+        if revision.launch_date_status == "confirmed":
+            if normalized_values != {revision.launch_date}:
+                raise ServingDatabaseV5Error("confirmed launch date differs from its evidence")
+        elif revision.launch_date_status == "missing":
+            if evidence_rows:
+                raise ServingDatabaseV5Error("missing launch date unexpectedly has evidence")
+        elif revision.launch_date_status == "invalid":
+            if not evidence_rows or normalized_values:
+                raise ServingDatabaseV5Error("invalid launch date evidence is inconsistent")
+        elif len(normalized_values) < 2:
+            raise ServingDatabaseV5Error("conflicting launch date lacks distinct evidence")
 
     coverage_rows: list[RevisionCoverage] = []
     for revision in revisions:
@@ -1691,6 +1825,7 @@ class ServingDatabaseExporterV5:
         structure_nodes: Sequence[StructureNodeInput],
         node_spans: Sequence[NodeSpanInput],
         node_links: Sequence[NodeLinkInput],
+        derived_field_evidence: Sequence[DerivedFieldEvidenceInput] = (),
         embedding_profiles: Sequence[EmbeddingProfileInput],
         embedding_views: Sequence[EmbeddingViewInput],
         extra_metadata: Mapping[str, str] | None = None,
@@ -1746,6 +1881,7 @@ class ServingDatabaseExporterV5:
             nodes=structure_nodes,
             spans=node_spans,
             links=node_links,
+            derived_field_evidence=derived_field_evidence,
             profiles=embedding_profiles,
             views=embedding_views,
             primary_embedding_profile_id=primary_embedding_profile_id,
@@ -1781,6 +1917,17 @@ class ServingDatabaseExporterV5:
         )
         ordered_links = tuple(
             sorted(node_links, key=lambda row: (row.from_contract_revision_id, row.ordinal))
+        )
+        ordered_derived_evidence = tuple(
+            sorted(
+                derived_field_evidence,
+                key=lambda row: (
+                    row.contract_revision_id,
+                    row.field,
+                    row.candidate_ordinal,
+                    row.span_ordinal,
+                ),
+            )
         )
         ordered_profiles = tuple(sorted(embedding_profiles, key=lambda row: row.profile_id))
         ordered_views = tuple(sorted(embedding_views, key=lambda row: row.row_index))
@@ -1894,7 +2041,7 @@ class ServingDatabaseExporterV5:
                         "sealed aggregation requires one CONTRACT and at least one child row"
                     )
             metadata = {
-                "schema_id": SERVING_SCHEMA_ID_V5,
+                "schema_id": SERVING_SCHEMA_ID_V6,
                 "generation_id": generation_id,
                 "corpus_sha256": corpus_sha256,
                 "contract_sha256": contract_sha256,
@@ -1931,6 +2078,8 @@ class ServingDatabaseExporterV5:
                 "structure_node_count": str(len(ordered_nodes)),
                 "node_span_count": str(len(ordered_spans)),
                 "node_link_count": str(len(ordered_links)),
+                "derived_field_evidence_count": str(len(ordered_derived_evidence)),
+                "launch_date_parser_version": LAUNCH_DATE_PARSER_VERSION,
                 "embedding_profile_count": str(len(ordered_profiles)),
                 "embedding_view_span_count": str(sum(len(row.source_spans) for row in ordered_views)),
                 "unsupported_document_count": str(len(ordered_unsupported)),
@@ -2076,9 +2225,9 @@ class ServingDatabaseExporterV5:
                 connection.executemany(
                     """INSERT INTO contract_revisions
                        (contract_revision_id,product_lineage_id,document_id,source_id,
-                        source_version,source_url,effective_date,pdf_sha256,pdf_size_bytes,
-                        page_count,temporal_status,supersedes_revision_id)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        source_version,source_url,effective_date,launch_date,launch_date_status,
+                        pdf_sha256,pdf_size_bytes,page_count,temporal_status,supersedes_revision_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         (
                             row.contract_revision_id,
@@ -2088,6 +2237,8 @@ class ServingDatabaseExporterV5:
                             row.source_version,
                             row.source_url,
                             row.effective_date,
+                            row.launch_date,
+                            row.launch_date_status,
                             row.pdf_sha256,
                             row.pdf_size_bytes,
                             row.page_count,
@@ -2186,6 +2337,28 @@ class ServingDatabaseExporterV5:
                         row.link_type,
                     )
                     for row in ordered_links
+                ),
+            )
+            connection.executemany(
+                """INSERT INTO derived_field_evidence
+                   (contract_revision_id,field,candidate_ordinal,span_ordinal,match_kind,
+                    normalized_value,node_id,page,source_start,source_end,text_sha256)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    (
+                        row.contract_revision_id,
+                        row.field,
+                        row.candidate_ordinal,
+                        row.span_ordinal,
+                        row.match_kind,
+                        row.normalized_value,
+                        row.node_id,
+                        row.page,
+                        row.source_start,
+                        row.source_end,
+                        row.text_sha256,
+                    )
+                    for row in ordered_derived_evidence
                 ),
             )
             connection.executemany(
@@ -2481,6 +2654,7 @@ class ServingDatabaseExporterV5:
 __all__ = [
     "ContractRevisionInput",
     "DDL_V5",
+    "DerivedFieldEvidenceInput",
     "DocumentPageInput",
     "EmbeddingProfileInput",
     "EmbeddingViewInput",
@@ -2495,6 +2669,7 @@ __all__ = [
     "ProductLineageInput",
     "RevisionCoverage",
     "SERVING_SCHEMA_ID_V5",
+    "SERVING_SCHEMA_ID_V6",
     "ServingDatabaseExporterV5",
     "ServingDatabaseV5Error",
     "ServingExportV5",

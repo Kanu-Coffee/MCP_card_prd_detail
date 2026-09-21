@@ -27,6 +27,7 @@ from cardrag_worker.exporter_v5 import (
     SERVING_SCHEMA_ID_V5,
     VECTOR_ROW_BYTES,
     ContractRevisionInput,
+    DerivedFieldEvidenceInput,
     DocumentPageInput,
     EmbeddingProfileInput,
     EmbeddingViewInput,
@@ -194,6 +195,8 @@ def test_v5_export_writes_bound_database_and_little_endian_sidecar(tmp_path: Pat
     try:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
         assert metadata["schema_id"] == SERVING_SCHEMA_ID_V5
+        assert metadata["launch_date_parser_version"] == "cardrag.launch-date.v2"
+        assert metadata["derived_field_evidence_count"] == "0"
         assert metadata["embedding_dimension"] == "4096"
         assert metadata["embedding_count"] == "1"
         assert metadata["vector_sidecar_sha256"] == result.vector_sha256
@@ -216,6 +219,10 @@ def test_v5_export_writes_bound_database_and_little_endian_sidecar(tmp_path: Pat
             "display_text",
         }
         assert not {"embedding", "vector", "vector_json"}.intersection(columns)
+        revision_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(contract_revisions)")
+        }
+        assert {"launch_date", "launch_date_status"} <= revision_columns
         assert connection.execute("SELECT view_pk,row_index FROM embedding_views").fetchone() == (1, 0)
         assert connection.execute(
             """SELECT row_index,contract_revision_id,page,source_start,source_end,
@@ -236,6 +243,52 @@ def test_v5_export_writes_bound_database_and_little_endian_sidecar(tmp_path: Pat
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         connection.close()
+
+
+def test_v6_export_persists_source_bound_launch_date_evidence(tmp_path: Path) -> None:
+    records = _records()
+    revision = records["contract_revisions"][0]
+    page = records["document_pages"][0]
+    span = records["node_spans"][0]
+    records["contract_revisions"] = (
+        replace(revision, launch_date="2026-08-12", launch_date_status="confirmed"),
+    )
+    records["derived_field_evidence"] = (
+        DerivedFieldEvidenceInput(
+            contract_revision_id=revision.contract_revision_id,
+            field="launch_date",
+            candidate_ordinal=0,
+            span_ordinal=0,
+            match_kind="explicit_label",
+            normalized_value="2026-08-12",
+            node_id=span.node_id,
+            page=span.page,
+            source_start=span.source_start,
+            source_end=span.source_end,
+            text_sha256=span.text_sha256,
+        ),
+    )
+
+    database = tmp_path / "index.sqlite3"
+    ServingDatabaseExporterV5().export(database, tmp_path / "vectors.f32", **records)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT launch_date,launch_date_status FROM contract_revisions"
+        ).fetchone() == ("2026-08-12", "confirmed")
+        assert connection.execute(
+            """SELECT field,match_kind,normalized_value,node_id,page,source_start,
+                      source_end,text_sha256 FROM derived_field_evidence"""
+        ).fetchone() == (
+            "launch_date",
+            "explicit_label",
+            "2026-08-12",
+            span.node_id,
+            1,
+            0,
+            len(page.text),
+            span.text_sha256,
+        )
 
 
 def test_v5_export_accepts_already_encoded_rows_without_corpus_float_expansion(
@@ -1393,4 +1446,3 @@ def test_v5_verify_database_handles_sqlite_without_rowid_integrity_false_positiv
         "NULL value in embedding_view_spans.unknown_col",
     )
     assert classify([("database disk image is malformed",)]) == ("database disk image is malformed",)
-

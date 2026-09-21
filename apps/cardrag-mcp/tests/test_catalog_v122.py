@@ -299,7 +299,7 @@ def test_metadata_cache_lru_bounds_and_serialized_values() -> None:
         (["출시일: 2026.08.12"], "confirmed"),
         (["출시일: 2026.08.99"], "invalid"),
         (["출시일: 2026.08.12", "출시일: 2026.09.01"], "conflicting"),
-        (["출시일: 2026.08.12 / 출시일: 2026.09.01abc"], "invalid"),
+        (["출시일: 2026.08.12 / 출시일: 2026.09.01abc"], "confirmed"),
     ],
 )
 def test_launch_resolution_reasons(texts, status) -> None:

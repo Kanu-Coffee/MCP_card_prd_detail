@@ -2638,7 +2638,10 @@ def _source_page_chunks(
     generation_manifest: GenerationManifest,
     database_path: Path,
 ) -> tuple[PageChunk, ...]:
-    if generation_manifest.schema_version != "cardrag.generation.v5":
+    if generation_manifest.schema_version not in {
+        "cardrag.generation.v5",
+        "cardrag.generation.v6",
+    }:
         raise GoldCaptureError("page_source_requires_generation_v5")
     chunks: list[PageChunk] = []
     seen_identities: set[tuple[str, str]] = set()
@@ -2734,7 +2737,16 @@ def _source_page_chunks(
                 summary,
             )
             if (
-                metadata.get("schema_id") != "cardrag.serving-db.v5"
+                metadata.get("schema_id")
+                != getattr(
+                    generation_manifest,
+                    "serving_schema",
+                    (
+                        "cardrag.serving-db.v6"
+                        if generation_manifest.schema_version == "cardrag.generation.v6"
+                        else "cardrag.serving-db.v5"
+                    ),
+                )
                 or metadata.get("generation_id") != generation_manifest.generation_id
                 or metadata.get("current_revision_count") != str(current_count)
                 or summary_page_count < 1
@@ -2845,7 +2857,7 @@ def _validate_source_qwen_profile(
         None,
     )
     if (
-        manifest.schema_version != "cardrag.generation.v5"
+        manifest.schema_version not in {"cardrag.generation.v5", "cardrag.generation.v6"}
         or manifest.primary_embedding_profile_id != embedding_profile_id
         or profile is None
         or profile.provider != "openrouter"

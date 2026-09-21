@@ -218,7 +218,7 @@ class ServingRepository:
 
     async def search(self, request: SearchRequest) -> SearchPage:
         with self.store.pin() as handle:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 return await self._search_v5_compat(request, handle=handle)
             generation_id = handle.generation_id
             binding = _binding(request)
@@ -519,7 +519,7 @@ class ServingRepository:
         limit: int,
     ) -> EvidencePage | None:
         generation_id = handle.generation_id
-        if handle.metadata.schema_id == "cardrag.serving-db.v5":
+        if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             with handle.connect() as connection:
                 row = connection.execute(
                     "SELECT contract_revision_id FROM structure_nodes WHERE node_id=?",
@@ -663,7 +663,7 @@ class ServingRepository:
         product_code: str,
     ) -> Product | UnsupportedProduct | OCRFailedProduct | None:
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 rows = connection.execute(
                     """SELECT l.issuer,l.product_code,l.name,
                               r.document_id,l.name AS title,r.pdf_sha256,
@@ -831,7 +831,7 @@ class ServingRepository:
     @staticmethod
     def _get_document(handle: GenerationHandle, document_id: str) -> Document | None:
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 row = connection.execute(
                     """SELECT r.document_id,l.issuer,l.product_code,l.name AS title,
                               r.pdf_sha256,r.pdf_size_bytes,r.page_count
@@ -848,6 +848,7 @@ class ServingRepository:
             if row is None and handle.metadata.schema_id in {
                 "cardrag.serving-db.v4",
                 "cardrag.serving-db.v5",
+                "cardrag.serving-db.v6",
             }:
                 row = connection.execute(
                     """SELECT document_id,issuer,product_code,title,pdf_sha256,
@@ -866,7 +867,7 @@ class ServingRepository:
         handle: GenerationHandle, document_id: str, page: int
     ) -> SourcePage | None:
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 row = connection.execute(
                     """SELECT r.document_id,p.page,p.text,p.text_sha256,
                               r.page_count,r.pdf_sha256
@@ -902,7 +903,7 @@ class ServingRepository:
     ) -> tuple[Product | UnsupportedProduct | OCRFailedProduct, ...]:
         with self.store.pin() as handle:
             with handle.connect() as connection:
-                if handle.metadata.schema_id == "cardrag.serving-db.v5":
+                if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                     sql = """SELECT DISTINCT l.issuer,l.product_code
                                FROM product_lineages AS l
                                JOIN contract_revisions AS r
@@ -957,7 +958,7 @@ class ServingRepository:
     async def list_documents(self) -> tuple[Document, ...]:
         with self.store.pin() as handle:
             with handle.connect() as connection:
-                if handle.metadata.schema_id == "cardrag.serving-db.v5":
+                if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                     sql = """SELECT r.document_id,l.issuer,l.product_code,l.name AS title,
                                      r.pdf_sha256,r.pdf_size_bytes,r.page_count
                                 FROM contract_revisions AS r
@@ -969,6 +970,7 @@ class ServingRepository:
                 if handle.metadata.schema_id in {
                     "cardrag.serving-db.v4",
                     "cardrag.serving-db.v5",
+                    "cardrag.serving-db.v6",
                 }:
                     sql += """ UNION ALL
                         SELECT document_id,issuer,product_code,title,pdf_sha256,
@@ -983,7 +985,7 @@ class ServingRepository:
     @staticmethod
     def _list_pages(handle: GenerationHandle, document_id: str) -> tuple[SourcePage, ...]:
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 rows = connection.execute(
                     """SELECT r.document_id,p.page,p.text,p.text_sha256,
                               r.page_count,r.pdf_sha256
@@ -1097,7 +1099,7 @@ class ServingRepository:
             raise ValueError("merchant_name must not be blank")
 
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 sql = """SELECT pl.issuer, pl.product_code, pl.name AS product_name,
                                 sn.display_text
                            FROM structure_nodes AS sn
@@ -1170,7 +1172,14 @@ class ServingRepository:
             requests = [ProductSummaryRequest(issuer=issuer, identifier=identifier)]
         with self.store.pin() as handle:
             check_generation(handle, expected_generation_id)
-            if handle.metadata.schema_id != "cardrag.serving-db.v5" and products is None:
+            if (
+                handle.metadata.schema_id
+                not in {
+                    "cardrag.serving-db.v5",
+                    "cardrag.serving-db.v6",
+                }
+                and products is None
+            ):
                 return None
             result = await asyncio.to_thread(self.catalog.summaries, handle, requests)
             return result if products is not None else result.items[0]

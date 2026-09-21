@@ -1726,8 +1726,10 @@ def _build_corpus_snapshot(
     profile: ExperimentalMapReduceProfile,
     query: str,
 ) -> _CorpusSnapshot:
-    if handle.metadata.schema_id != "cardrag.serving-db.v5":
-        raise ExperimentalMapReduceError("experimental map-reduce requires an active v5 generation")
+    if handle.metadata.schema_id not in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
+        raise ExperimentalMapReduceError(
+            "experimental map-reduce requires an active structured generation"
+        )
     with handle.connect() as connection:
         revision_rows = connection.execute(
             """SELECT contract_revision_id

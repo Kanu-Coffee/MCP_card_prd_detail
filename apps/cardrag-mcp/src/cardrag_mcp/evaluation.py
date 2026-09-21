@@ -346,6 +346,7 @@ class RunArtifactManifest(_StrictModel):
     serving_schema: Literal[
         "cardrag.serving-db.v4",
         "cardrag.serving-db.v5",
+        "cardrag.serving-db.v6",
         "cardrag.evaluation-page.v1",
     ]
     embedding_model: str = Field(min_length=1, max_length=512)
@@ -393,7 +394,7 @@ class RunArtifactManifest(_StrictModel):
             valid = (
                 common_qwen
                 and self.profile_id == "cardrag.eval.qwen-structure-exact.v1"
-                and self.serving_schema == "cardrag.serving-db.v5"
+                and self.serving_schema in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}
                 and self.retrieval_policy == "qwen_structure_exact"
                 and not self.shadow_only
                 and self.primary_lane is None
@@ -403,7 +404,7 @@ class RunArtifactManifest(_StrictModel):
             valid = (
                 common_qwen
                 and self.profile_id == "cardrag.eval.lexical-shadow.v1"
-                and self.serving_schema == "cardrag.serving-db.v5"
+                and self.serving_schema in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}
                 and self.retrieval_policy == "qwen_structure_exact_lexical_shadow"
                 and self.shadow_only
                 and self.primary_lane == "qwen_structure_exact"
@@ -413,7 +414,7 @@ class RunArtifactManifest(_StrictModel):
             valid = (
                 common_qwen
                 and self.profile_id == "cardrag.eval.reranker-shadow.v1"
-                and self.serving_schema == "cardrag.serving-db.v5"
+                and self.serving_schema in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}
                 and self.retrieval_policy == "qwen_structure_exact_reranker_shadow"
                 and self.shadow_only
                 and self.primary_lane == "qwen_structure_exact"

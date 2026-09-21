@@ -27,9 +27,11 @@ from cardrag_core import (
     EMBEDDING_DIMENSION,
     EMBEDDING_POLICY_VERSION,
     EMBEDDING_VIEW_TYPES,
+    LAUNCH_DATE_PARSER_VERSION,
     QUERY_EMBEDDING_PREFIX,
     QWEN3_DOCUMENT_POLICY,
     ArtifactRef,
+    DerivedTextSegment,
     EmbeddingContract,
     EmbeddingProfile,
     EmbeddingVectorSidecar,
@@ -54,6 +56,7 @@ from cardrag_core import (
     generation_manifest_path,
     generation_vectors_path,
     object_path,
+    resolve_launch_date_segments,
     sealed_v5_retrieval_policy,
     sha256_bytes,
     sha256_file,
@@ -109,6 +112,7 @@ from .embedding_v5 import (
 from .exporter import ServingDatabaseExporter, encode_embedding
 from .exporter_v5 import (
     ContractRevisionInput,
+    DerivedFieldEvidenceInput,
     DocumentPageInput,
     EmbeddingProfileInput,
     EmbeddingViewInput,
@@ -170,8 +174,8 @@ from .webdav import PublishedBundle, WebDAVBundlePublisher, WebDAVClient
 
 T = TypeVar("T")
 CHUNK_CONTRACT = "cardrag.page-window.v1"
-GENERATION_SCHEMA_ID_V5 = "cardrag.generation.v5"
-SERVING_SCHEMA_ID_V5 = "cardrag.serving-db.v5"
+GENERATION_SCHEMA_ID_V5: Literal["cardrag.generation.v6"] = "cardrag.generation.v6"
+SERVING_SCHEMA_ID_V5: Literal["cardrag.serving-db.v6"] = "cardrag.serving-db.v6"
 V5_VIEW_MAXIMUM_CHARACTERS = 131_072
 MAX_GENERATION_MANIFEST_BYTES = 32 * 1024 * 1024
 MAX_WORKER_SEAL_BYTES = 64 * 1024 * 1024
@@ -1927,6 +1931,7 @@ class WorkerPipeline:
                 "adoption_policy_version": self.ocr.adoption_policy_version,
                 "structure": {
                     "schema_version": "cardrag.structure.v2",
+                    "launch_date_parser_version": LAUNCH_DATE_PARSER_VERSION,
                     "parser_profiles": parser_profiles,
                     "contextual_item_policy": contextual_item_policy_payload(),
                     "unclassified_fallback_policy": unclassified_fallback_policy_payload(),
@@ -4563,6 +4568,7 @@ class WorkerPipeline:
         parser_policy_sha256 = canonical_sha256(
             {
                 "contextual_item_policy": contextual_item_policy_payload(),
+                "launch_date_parser_version": LAUNCH_DATE_PARSER_VERSION,
                 "profiles": [
                     parser_profiles_by_issuer[issuer].payload for issuer in sorted(parser_profiles_by_issuer)
                 ],
@@ -4618,6 +4624,57 @@ class WorkerPipeline:
             document.record.document_id: artifact.contract_revision_id
             for document, artifact in document_artifacts
         }
+        launch_resolution_by_revision = {}
+        derived_evidence_rows: list[DerivedFieldEvidenceInput] = []
+        for _document, artifact in document_artifacts:
+            continuation_nodes = {
+                link.from_node_id for link in artifact.links if link.link_type == "CONTINUATION_OF"
+            }
+            source_nodes = tuple(
+                node
+                for node in sorted(artifact.nodes, key=lambda item: item.ordinal)
+                if node.node_type in {"PARAGRAPH", "LIST_ITEM", "TABLE_ROW", "FOOTNOTE", "UNCLASSIFIED"}
+                and node.spans
+            )
+            segments = tuple(
+                DerivedTextSegment(
+                    text=node.display_text,
+                    node_id=node.node_id,
+                    page=node.spans[0].page,
+                    source_start=node.spans[0].source_start,
+                    source_end=node.spans[-1].source_end,
+                    text_sha256=node.spans[0].text_sha256,
+                    group_id=node.parent_id or node.node_id,
+                    continuation_from_previous=node.node_id in continuation_nodes,
+                )
+                for node in source_nodes
+            )
+            resolution = resolve_launch_date_segments(segments)
+            launch_resolution_by_revision[artifact.contract_revision_id] = resolution
+            nodes_by_id = {node.node_id: node for node in source_nodes}
+            for candidate in resolution.evidence:
+                evidence_span_ordinal = 0
+                for segment in candidate.segments:
+                    if segment.node_id is None:
+                        continue
+                    node = nodes_by_id[segment.node_id]
+                    for span in node.spans:
+                        derived_evidence_rows.append(
+                            DerivedFieldEvidenceInput(
+                                contract_revision_id=artifact.contract_revision_id,
+                                field="launch_date",
+                                candidate_ordinal=candidate.candidate_ordinal,
+                                span_ordinal=evidence_span_ordinal,
+                                match_kind=candidate.match_kind,
+                                normalized_value=candidate.normalized_value,
+                                node_id=node.node_id,
+                                page=span.page,
+                                source_start=span.source_start,
+                                source_end=span.source_end,
+                                text_sha256=span.text_sha256,
+                            )
+                        )
+                        evidence_span_ordinal += 1
         revision_rows = tuple(
             ContractRevisionInput(
                 contract_revision_id=artifact.contract_revision_id,
@@ -4631,6 +4688,15 @@ class WorkerPipeline:
                 pdf_size_bytes=document.record.pdf_size_bytes,
                 page_count=document.record.page_count,
                 temporal_status=document.temporal_status,
+                launch_date=(
+                    None
+                    if launch_resolution_by_revision[artifact.contract_revision_id].launch_date is None
+                    else cast(
+                        date,
+                        launch_resolution_by_revision[artifact.contract_revision_id].launch_date,
+                    ).isoformat()
+                ),
+                launch_date_status=launch_resolution_by_revision[artifact.contract_revision_id].status,
                 supersedes_revision_id=(
                     None
                     if document.supersedes_document_id is None
@@ -4788,6 +4854,7 @@ class WorkerPipeline:
             structure_nodes=node_rows,
             node_spans=span_rows,
             node_links=link_rows,
+            derived_field_evidence=tuple(derived_evidence_rows),
             embedding_profiles=(exported_profile,),
             derived_views=tuple(view for _document, view in ordered_view_pairs),
             primary_embedding_profile_id=profile.profile_id,
@@ -5169,6 +5236,7 @@ class WorkerPipeline:
                 structure_nodes=node_rows,
                 node_spans=span_rows,
                 node_links=link_rows,
+                derived_field_evidence=tuple(derived_evidence_rows),
                 embedding_profiles=(exported_profile,),
                 embedding_views=view_rows,
                 document_aggregation_policy=(
@@ -5262,10 +5330,10 @@ class WorkerPipeline:
             maximum_tokens=profile.maximum_tokens,
         )
         manifest = GenerationManifest(
-            schema_version="cardrag.generation.v5",
+            schema_version=GENERATION_SCHEMA_ID_V5,
             generation_id=generation_id,
             created_at=datetime.now(UTC),
-            serving_schema="cardrag.serving-db.v5",
+            serving_schema=SERVING_SCHEMA_ID_V5,
             serving_database=ArtifactRef(
                 sha256=export.database_sha256,
                 size_bytes=export.database_size_bytes,

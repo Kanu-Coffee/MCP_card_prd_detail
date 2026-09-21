@@ -590,6 +590,7 @@ class GenerationManifest(StrictFrozenModel):
         "cardrag.generation.v3",
         "cardrag.generation.v4",
         "cardrag.generation.v5",
+        "cardrag.generation.v6",
     ] = "cardrag.generation.v3"
     generation_id: str
     created_at: AwareDatetime
@@ -599,6 +600,7 @@ class GenerationManifest(StrictFrozenModel):
         "cardrag.serving-db.v3",
         "cardrag.serving-db.v4",
         "cardrag.serving-db.v5",
+        "cardrag.serving-db.v6",
     ] = "cardrag.serving-db.v3"
     serving_database: ArtifactRef
     corpus_sha256: Sha256Hex
@@ -740,6 +742,7 @@ class GenerationManifest(StrictFrozenModel):
             "cardrag.generation.v3": "cardrag.serving-db.v3",
             "cardrag.generation.v4": "cardrag.serving-db.v4",
             "cardrag.generation.v5": "cardrag.serving-db.v5",
+            "cardrag.generation.v6": "cardrag.serving-db.v6",
         }[self.schema_version]
         if self.serving_schema != expected_serving_schema:
             raise ValueError("generation and serving database schema versions must match")
@@ -759,7 +762,7 @@ class GenerationManifest(StrictFrozenModel):
             raise ValueError("generation OCR object count does not match documents")
         if self.embedding_contract.count != self.counts.chunks:
             raise ValueError("embedding count must equal generation chunk count")
-        if self.schema_version == "cardrag.generation.v5":
+        if self.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
             if self.embedding_contract.dimension != QWEN3_EMBEDDING_DIMENSION:
                 raise ValueError("v5 embedding dimension must be 4096")
         elif self.embedding_contract.dimension != 1536:
@@ -767,7 +770,11 @@ class GenerationManifest(StrictFrozenModel):
         document_issuers = {document.issuer for document in self.documents}
         if not document_issuers.issubset(self.issuer_codes):
             raise ValueError("generation documents reference an undeclared issuer")
-        if self.schema_version in {"cardrag.generation.v4", "cardrag.generation.v5"}:
+        if self.schema_version in {
+            "cardrag.generation.v4",
+            "cardrag.generation.v5",
+            "cardrag.generation.v6",
+        }:
             if any(document.availability is None for document in self.documents):
                 raise ValueError("v4-v5 generation documents require explicit availability")
             count_issuers = tuple(row.issuer for row in self.issuer_ocr_counts)
@@ -798,7 +805,7 @@ class GenerationManifest(StrictFrozenModel):
                     raise ValueError("v4-v5 issuer OCR success rate is below 95 percent")
         elif self.issuer_ocr_counts or any(document.availability is not None for document in self.documents):
             raise ValueError("OCR publication dispositions require generation v4 or v5")
-        if self.schema_version == "cardrag.generation.v5":
+        if self.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
             self._validate_v5_contract()
         elif any(
             (

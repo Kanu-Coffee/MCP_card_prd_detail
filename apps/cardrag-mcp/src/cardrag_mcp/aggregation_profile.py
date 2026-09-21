@@ -1382,7 +1382,7 @@ def _validate_serving_generation_manifest(
         raise AggregationProfileError("serving_generation_manifest_invalid") from exc
     if data != manifest.canonical_bytes():
         raise AggregationProfileError("serving_generation_manifest_not_canonical")
-    if manifest.schema_version != "cardrag.generation.v5":
+    if manifest.schema_version not in {"cardrag.generation.v5", "cardrag.generation.v6"}:
         raise AggregationProfileError("serving_generation_manifest_not_v5")
     try:
         expected_profile = DocumentAggregationProfile.model_validate(sealed_profile)

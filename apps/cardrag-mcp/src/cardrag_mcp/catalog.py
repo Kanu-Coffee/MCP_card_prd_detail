@@ -9,12 +9,18 @@ import unicodedata
 from datetime import date
 from typing import Any, Literal, cast
 
+from cardrag_core import (
+    DerivedTextSegment,
+    resolve_launch_date_segments,
+    resolve_lineage_launch_date,
+)
+from cardrag_core import LaunchDateResolution as CoreLaunchDateResolution
+
 from cardrag_mcp.issuer_input import CANONICAL_ISSUER_CODES, normalize_issuer
 from cardrag_mcp.launch_date import (
     PARSER_VERSION,
     LaunchDateResolution,
     LaunchDateStatus,
-    resolve_launch_date_details,
 )
 from cardrag_mcp.metadata_cache import MetadataCache
 from cardrag_mcp.models import (
@@ -84,44 +90,146 @@ def revision_resolutions(
     products: list[sqlite3.Row],
     cache: MetadataCache,
 ) -> dict[str, LaunchDateResolution]:
-    resolved: dict[str, LaunchDateResolution] = {}
-    missing: list[str] = []
+    if not products:
+        return {}
+    schema_id = str(
+        connection.execute("SELECT value FROM metadata WHERE key='schema_id'").fetchone()[0]
+    )
+    lineage_ids = sorted({str(product["product_lineage_id"]) for product in products})
+    placeholders = ",".join("?" for _ in lineage_ids)
+    if schema_id == "cardrag.serving-db.v6":
+        revisions: dict[str, list[CoreLaunchDateResolution]] = {
+            lineage_id: [] for lineage_id in lineage_ids
+        }
+        for row in connection.execute(
+            "SELECT product_lineage_id,launch_date,launch_date_status "  # noqa: S608
+            "FROM contract_revisions WHERE product_lineage_id IN ("
+            + placeholders
+            + ") ORDER BY product_lineage_id,effective_date,contract_revision_id",
+            lineage_ids,
+        ):
+            raw_date = None if row[1] is None else date.fromisoformat(str(row[1]))
+            revisions[str(row[0])].append(
+                CoreLaunchDateResolution(raw_date, cast(LaunchDateStatus, str(row[2])))
+            )
+        by_lineage = {
+            lineage_id: resolve_lineage_launch_date(values)
+            for lineage_id, values in revisions.items()
+        }
+        evidence_by_lineage: dict[str, list[str]] = {lineage_id: [] for lineage_id in lineage_ids}
+        for evidence_row in connection.execute(
+            "SELECT r.product_lineage_id,p.text,e.source_start,e.source_end "  # noqa: S608
+            "FROM derived_field_evidence AS e JOIN contract_revisions AS r "
+            "ON r.contract_revision_id=e.contract_revision_id JOIN document_pages AS p "
+            "ON p.contract_revision_id=e.contract_revision_id AND p.page=e.page "
+            "WHERE r.product_lineage_id IN ("
+            + placeholders
+            + ") ORDER BY r.product_lineage_id,e.contract_revision_id,"
+            "e.candidate_ordinal,e.span_ordinal",
+            lineage_ids,
+        ):
+            excerpt = " ".join(
+                str(evidence_row[1])[int(evidence_row[2]) : int(evidence_row[3])].split()
+            )[:240]
+            target = evidence_by_lineage[str(evidence_row[0])]
+            if excerpt and excerpt not in target and len(target) < 8:
+                target.append(excerpt)
+        return {
+            str(product["contract_revision_id"]): LaunchDateResolution(
+                by_lineage[str(product["product_lineage_id"])].launch_date,
+                by_lineage[str(product["product_lineage_id"])].status,
+                tuple(evidence_by_lineage[str(product["product_lineage_id"])]),
+            )
+            for product in products
+        }
+
+    revision_rows = connection.execute(
+        "SELECT product_lineage_id,contract_revision_id,pdf_sha256 "  # noqa: S608
+        "FROM contract_revisions WHERE product_lineage_id IN ("
+        + placeholders
+        + ") ORDER BY product_lineage_id,effective_date,contract_revision_id",
+        lineage_ids,
+    ).fetchall()
+    revision_ids = [str(row[1]) for row in revision_rows]
+    revision_to_lineage = {str(row[1]): str(row[0]) for row in revision_rows}
+    identity_by_lineage: dict[str, list[str]] = {lineage_id: [] for lineage_id in lineage_ids}
+    for row in revision_rows:
+        identity_by_lineage[str(row[0])].append(str(row[2]))
+    cached_by_lineage: dict[str, LaunchDateResolution] = {}
+    missing_lineages: set[str] = set()
     keys: dict[str, tuple[str, ...]] = {}
-    for product in products:
-        revision_id = str(product["contract_revision_id"])
+    for lineage_id in lineage_ids:
         key = (
             generation_id,
-            revision_id,
-            str(product["pdf_sha256"]),
-            "launch_date",
+            lineage_id,
+            hashlib.sha256("|".join(identity_by_lineage[lineage_id]).encode()).hexdigest(),
+            "lineage_launch_date",
             PARSER_VERSION,
         )
-        keys[revision_id] = key
+        keys[lineage_id] = key
         cached = cache.get(key)
         if cached is None:
-            missing.append(revision_id)
+            missing_lineages.add(lineage_id)
         else:
-            resolved[revision_id] = LaunchDateResolution(
+            cached_by_lineage[lineage_id] = LaunchDateResolution(
                 date.fromisoformat(cached["launch_date"]) if cached["launch_date"] else None,
                 cast(LaunchDateStatus, cached["status"]),
                 tuple(cached["evidence"]),
             )
-    texts: dict[str, list[str]] = {revision_id: [] for revision_id in missing}
-    for start in range(0, len(missing), 500):
-        batch = missing[start : start + 500]
-        sql = (
-            "SELECT contract_revision_id,display_text FROM structure_nodes "  # noqa: S608 - placeholders only
+    wanted_revisions = [
+        revision_id
+        for revision_id in revision_ids
+        if revision_to_lineage[revision_id] in missing_lineages
+    ]
+    per_revision: dict[str, list[DerivedTextSegment]] = {
+        revision_id: [] for revision_id in wanted_revisions
+    }
+    if wanted_revisions:
+        revision_placeholders = ",".join("?" for _ in wanted_revisions)
+        continuations = {
+            (str(row[0]), str(row[1]))
+            for row in connection.execute(
+                "SELECT from_contract_revision_id,from_node_id FROM node_links "  # noqa: S608
+                "WHERE from_contract_revision_id IN ("
+                + revision_placeholders
+                + ") AND link_type='CONTINUATION_OF'",
+                wanted_revisions,
+            )
+        }
+        for row in connection.execute(
+            "SELECT contract_revision_id,node_id,parent_id,display_text FROM structure_nodes "  # noqa: S608
             "WHERE contract_revision_id IN ("
-            + ",".join("?" for _ in batch)
-            + ") AND display_text LIKE '%출시%' ORDER BY contract_revision_id,ordinal"
+            + revision_placeholders
+            + ") AND node_type IN ('PARAGRAPH','LIST_ITEM','TABLE_ROW','FOOTNOTE','UNCLASSIFIED') "
+            "ORDER BY contract_revision_id,ordinal",
+            wanted_revisions,
+        ):
+            revision_id, node_id = str(row[0]), str(row[1])
+            per_revision[revision_id].append(
+                DerivedTextSegment(
+                    text=str(row[3]),
+                    node_id=node_id,
+                    group_id=str(row[2]) if row[2] is not None else node_id,
+                    continuation_from_previous=(revision_id, node_id) in continuations,
+                )
+            )
+    core_by_lineage: dict[str, list[CoreLaunchDateResolution]] = {
+        lineage_id: [] for lineage_id in missing_lineages
+    }
+    for revision_id, segments in per_revision.items():
+        core_by_lineage[revision_to_lineage[revision_id]].append(
+            resolve_launch_date_segments(tuple(segments))
         )
-        for row in connection.execute(sql, batch):
-            texts[str(row["contract_revision_id"])].append(str(row["display_text"]))
-    for revision_id, values in texts.items():
-        resolution = resolve_launch_date_details(values)
-        resolved[revision_id] = resolution
+    for lineage_id, values in core_by_lineage.items():
+        core = resolve_lineage_launch_date(values)
+        resolution = LaunchDateResolution(
+            core.launch_date,
+            core.status,
+            tuple(item.excerpt for item in core.evidence),
+        )
+        cached_by_lineage[lineage_id] = resolution
         cache.set(
-            keys[revision_id],
+            keys[lineage_id],
             {
                 "launch_date": resolution.launch_date.isoformat()
                 if resolution.launch_date
@@ -130,7 +238,10 @@ def revision_resolutions(
                 "evidence": list(resolution.evidence),
             },
         )
-    return resolved
+    return {
+        str(product["contract_revision_id"]): cached_by_lineage[str(product["product_lineage_id"])]
+        for product in products
+    }
 
 
 def _entry(row: sqlite3.Row, resolution: LaunchDateResolution) -> ProductCatalogEntry:
@@ -185,7 +296,7 @@ class CatalogRepository:
         limit: int | None,
         cursor: str | None,
     ) -> RecentProductCatalogPage:
-        if handle.metadata.schema_id != "cardrag.serving-db.v5":
+        if handle.metadata.schema_id not in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             return RecentProductCatalogPage(
                 generation_id=handle.generation_id,
                 items=(),
@@ -261,7 +372,7 @@ class CatalogRepository:
             raise ValueError("mode must be search, catalog, or coverage")
         if sort not in {"name", "launch_date"}:
             raise ValueError("sort must be name or launch_date")
-        if handle.metadata.schema_id != "cardrag.serving-db.v5":
+        if handle.metadata.schema_id not in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             return ProductCatalogPage(
                 generation_id=handle.generation_id,
                 items=(),
@@ -325,7 +436,7 @@ class CatalogRepository:
                 str(row[0])
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-            v5 = handle.metadata.schema_id == "cardrag.serving-db.v5"
+            v5 = handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}
             revisions = _rows(connection, scope) if v5 else []
             dates = (
                 revision_resolutions(connection, handle.generation_id, revisions, self.cache)
@@ -396,7 +507,7 @@ class CatalogRepository:
     ) -> ProductSummaryBatch:
         if not 1 <= len(products) <= 50:
             raise ValueError("products must contain between 1 and 50 identifiers")
-        if handle.metadata.schema_id != "cardrag.serving-db.v5":
+        if handle.metadata.schema_id not in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             raise ValueError("batch product summaries require serving schema v5")
         with handle.connect() as connection:
             scope = tuple(sorted({normalize_issuer(product.issuer) for product in products}))
@@ -453,6 +564,72 @@ class CatalogRepository:
                 else:
                     missing[revision_id] = row
             if missing:
+                launch_resolutions = revision_resolutions(
+                    connection,
+                    handle.generation_id,
+                    list(missing.values()),
+                    self.cache,
+                )
+                launch_sources: dict[str, tuple[str, ...]] = {
+                    revision_id: () for revision_id in missing
+                }
+                launch_summary_evidence: dict[str, tuple[SummaryEvidence, ...]] = {
+                    revision_id: () for revision_id in missing
+                }
+                if handle.metadata.schema_id == "cardrag.serving-db.v6":
+                    lineage_to_current = {
+                        str(row["product_lineage_id"]): revision_id
+                        for revision_id, row in missing.items()
+                    }
+                    lineage_placeholders = ",".join("?" for _ in lineage_to_current)
+                    source_rows: dict[str, list[str]] = {revision_id: [] for revision_id in missing}
+                    for source_row in connection.execute(
+                        "SELECT DISTINCT r.product_lineage_id,r.contract_revision_id "  # noqa: S608
+                        "FROM contract_revisions AS r JOIN derived_field_evidence AS e "
+                        "ON e.contract_revision_id=r.contract_revision_id "
+                        "WHERE r.product_lineage_id IN ("
+                        + lineage_placeholders
+                        + ") ORDER BY r.product_lineage_id,r.effective_date,r.contract_revision_id",
+                        tuple(lineage_to_current),
+                    ):
+                        source_rows[lineage_to_current[str(source_row[0])]].append(
+                            str(source_row[1])
+                        )
+                    launch_sources = {
+                        revision_id: tuple(values) for revision_id, values in source_rows.items()
+                    }
+                    precise_evidence: dict[str, list[SummaryEvidence]] = {
+                        revision_id: [] for revision_id in missing
+                    }
+                    for evidence_row in connection.execute(
+                        "SELECT r.product_lineage_id,e.contract_revision_id,e.node_id,e.page,"  # noqa: S608
+                        "e.source_start,e.source_end,p.text FROM derived_field_evidence AS e "
+                        "JOIN contract_revisions AS r "
+                        "ON r.contract_revision_id=e.contract_revision_id "
+                        "JOIN document_pages AS p ON p.contract_revision_id=e.contract_revision_id "
+                        "AND p.page=e.page WHERE r.product_lineage_id IN ("
+                        + lineage_placeholders
+                        + ") ORDER BY r.product_lineage_id,e.contract_revision_id,"
+                        "e.candidate_ordinal,e.span_ordinal",
+                        tuple(lineage_to_current),
+                    ):
+                        target = precise_evidence[lineage_to_current[str(evidence_row[0])]]
+                        if len(target) >= 8:
+                            continue
+                        start, end = int(evidence_row[4]), int(evidence_row[5])
+                        target.append(
+                            SummaryEvidence(
+                                field="launch_date",
+                                node_id=str(evidence_row[2]),
+                                pages=(int(evidence_row[3]),),
+                                excerpt=" ".join(str(evidence_row[6])[start:end].split())[:300],
+                                contract_revision_id=str(evidence_row[1]),
+                            )
+                        )
+                    launch_summary_evidence = {
+                        revision_id: tuple(values)
+                        for revision_id, values in precise_evidence.items()
+                    }
                 placeholders = ",".join("?" for _ in missing)
                 nodes: dict[str, list[sqlite3.Row]] = {revision_id: [] for revision_id in missing}
                 for node in connection.execute(
@@ -460,8 +637,10 @@ class CatalogRepository:
                     "raw_heading,ordinal,display_text FROM structure_nodes "
                     "WHERE contract_revision_id IN ("
                     + placeholders
-                    + ") AND (major_class='BENEFIT' OR display_text LIKE '%출시%' "
-                    "OR display_text LIKE '%연회비%') ORDER BY contract_revision_id,ordinal",
+                    + ") AND (major_class IN ('BENEFIT','NOTICE','MIXED') "
+                    "OR display_text LIKE '%출시%' OR display_text LIKE '%발매%' "
+                    "OR display_text LIKE '%판매%개시%' OR display_text LIKE '%연회비%') "
+                    "ORDER BY contract_revision_id,ordinal",
                     tuple(missing),
                 ):
                     nodes[str(node["contract_revision_id"])].append(node)
@@ -475,7 +654,15 @@ class CatalogRepository:
                         (str(span["contract_revision_id"]), str(span["node_id"])), set()
                     ).add(int(span["page"]))
                 for revision_id, row in missing.items():
-                    summary = self._summary(handle, row, nodes[revision_id], pages)
+                    summary = self._summary(
+                        handle,
+                        row,
+                        nodes[revision_id],
+                        pages,
+                        launch_resolutions[revision_id],
+                        launch_sources[revision_id],
+                        launch_summary_evidence[revision_id],
+                    )
                     summaries[revision_id] = summary
                     self.cache.set(
                         (
@@ -501,15 +688,18 @@ class CatalogRepository:
         row: sqlite3.Row,
         nodes: list[sqlite3.Row],
         pages: dict[tuple[str, str], set[int]],
+        resolution: LaunchDateResolution,
+        launch_source_revision_ids: tuple[str, ...],
+        launch_summary_evidence: tuple[SummaryEvidence, ...],
     ) -> ProductSummary:
-        resolution = resolve_launch_date_details(str(node["display_text"]) for node in nodes)
         annual_fee: str | None = None
         headings: list[str] = []
         benefits: list[str] = []
-        evidence: list[SummaryEvidence] = []
+        conditions: list[str] = []
+        evidence: list[SummaryEvidence] = list(launch_summary_evidence)
         for node in nodes:
             text = " ".join(str(node["display_text"]).split())
-            fields: list[Literal["launch_date", "annual_fee", "benefit"]] = []
+            fields: list[Literal["launch_date", "annual_fee", "benefit", "condition"]] = []
             if (
                 "출시" in text
                 and len([item for item in evidence if item.field == "launch_date"]) < 8
@@ -551,6 +741,19 @@ class CatalogRepository:
                 ):
                     benefits.append(text[:180])
                     fields.append("benefit")
+            if (
+                str(node["major_class"]) in {"NOTICE", "MIXED"}
+                and node["node_type"] in ("ITEM", "PARAGRAPH", "TABLE_ROW", "FOOTNOTE")
+                and len(conditions) < 5
+                and len(text) > 8
+                and any(
+                    word in text
+                    for word in ("전월", "한도", "횟수", "제외", "유의", "조건", "이상", "미만")
+                )
+                and text[:180] not in conditions
+            ):
+                conditions.append(text[:180])
+                fields.append("condition")
             for field in fields:
                 evidence.append(
                     SummaryEvidence(
@@ -564,6 +767,7 @@ class CatalogRepository:
                             )
                         ),
                         excerpt=text[:300],
+                        contract_revision_id=str(row["contract_revision_id"]),
                     )
                 )
         return ProductSummary(
@@ -578,6 +782,7 @@ class CatalogRepository:
             annual_fee_text=annual_fee,
             benefit_headings=tuple(headings[:5]),
             benefit_summary_texts=tuple(benefits),
+            condition_summary_texts=tuple(conditions),
             product_lineage_id=row["product_lineage_id"],
             contract_revision_id=row["contract_revision_id"],
             document_id=row["document_id"],
@@ -586,5 +791,6 @@ class CatalogRepository:
             pdf_sha256=row["pdf_sha256"],
             launch_date_status=resolution.status,
             launch_date_evidence=resolution.evidence,
+            launch_date_source_revision_ids=launch_source_revision_ids,
             evidence=tuple(evidence),
         )

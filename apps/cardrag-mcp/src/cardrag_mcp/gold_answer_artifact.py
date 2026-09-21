@@ -77,6 +77,7 @@ ServingSchema = Literal[
     "cardrag.serving-db.v4",
     "cardrag.evaluation-page.v1",
     "cardrag.serving-db.v5",
+    "cardrag.serving-db.v6",
 ]
 DecisionMode = Literal["deterministic_extractive", "sealed_decisions", "provider"]
 RetrievalContract = Literal[
@@ -243,12 +244,14 @@ class AnswerInputManifest(_StrictModel):
 
     @model_validator(mode="after")
     def lane_contract_is_exact(self) -> Self:
-        expected_schema = {
+        expected_schemas = {
             "v109_baseline": "cardrag.serving-db.v4",
             "qwen_page": "cardrag.evaluation-page.v1",
-            "qwen_structure_exact": "cardrag.serving-db.v5",
+            "qwen_structure_exact": {"cardrag.serving-db.v5", "cardrag.serving-db.v6"},
         }[self.lane]
-        if self.serving_schema != expected_schema:
+        if isinstance(expected_schemas, str):
+            expected_schemas = {expected_schemas}
+        if self.serving_schema not in expected_schemas:
             raise ValueError("answer input lane and serving schema differ")
         if self.lane == "v109_baseline" and self.source_commit != V109_BASELINE_COMMIT:
             raise ValueError("v1.0.9 answer input is not pinned to the historical commit")
@@ -1048,7 +1051,7 @@ def _load_source_manifest(path: Path, *, lane: AnswerLane) -> SourceManifestBind
                 embedding_profile_id=None,
                 vector_sha256=(
                     source.vector_sidecar.artifact.sha256
-                    if source.schema_version == "cardrag.generation.v5"
+                    if source.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}
                     and source.vector_sidecar is not None
                     else None
                 ),
@@ -1063,9 +1066,11 @@ def _load_source_manifest(path: Path, *, lane: AnswerLane) -> SourceManifestBind
     expected = {
         "v109_baseline": "cardrag.serving-db.v4",
         "qwen_page": "cardrag.evaluation-page.v1",
-        "qwen_structure_exact": "cardrag.serving-db.v5",
+        "qwen_structure_exact": {"cardrag.serving-db.v5", "cardrag.serving-db.v6"},
     }[lane]
-    if result.serving_schema != expected:
+    if isinstance(expected, str):
+        expected = {expected}
+    if result.serving_schema not in expected:
         raise GoldAnswerProducerError("generation_manifest_lane_mismatch")
     return result
 

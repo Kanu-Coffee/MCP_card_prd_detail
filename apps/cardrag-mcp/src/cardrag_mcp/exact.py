@@ -640,6 +640,33 @@ class V5ExactRepository:
             raise ValueError("launch date bounds are required")
         if request.launch_end_date > seoul_today(clock=datetime):
             raise ValueError("launch_end_date must not be in the future (Asia/Seoul)")
+        if not revisions:
+            return ()
+        if handle.metadata.schema_id == "cardrag.serving-db.v6":
+            lineage_ids = sorted({revision.product_lineage_id for revision in revisions})
+            placeholders = ",".join("?" for _ in lineage_ids)
+            by_lineage: dict[str, set[date]] = defaultdict(set)
+            conflicting: set[str] = set()
+            with handle.connect() as connection:
+                for row in connection.execute(
+                    "SELECT product_lineage_id,launch_date,launch_date_status "  # noqa: S608
+                    "FROM contract_revisions WHERE product_lineage_id IN (" + placeholders + ")",
+                    lineage_ids,
+                ):
+                    lineage_id, raw_date, status = str(row[0]), row[1], str(row[2])
+                    if status == "conflicting":
+                        conflicting.add(lineage_id)
+                    if raw_date is not None:
+                        by_lineage[lineage_id].add(date.fromisoformat(str(raw_date)))
+            return tuple(
+                revision
+                for revision in revisions
+                if revision.product_lineage_id not in conflicting
+                and len(by_lineage[revision.product_lineage_id]) == 1
+                and request.launch_start_date
+                <= next(iter(by_lineage[revision.product_lineage_id]))
+                <= request.launch_end_date
+            )
         values: dict[str, date | None] = {}
         missing: list[ContractRevisionSummary] = []
         for revision in revisions:
@@ -1301,9 +1328,10 @@ class V5ExactRepository:
 
     @staticmethod
     def _vectors(handle: GenerationHandle) -> LoadedVectorsV5:
-        if handle.metadata.schema_id != "cardrag.serving-db.v5" or not isinstance(
-            handle.vectors, LoadedVectorsV5
-        ):
+        if handle.metadata.schema_id not in {
+            "cardrag.serving-db.v5",
+            "cardrag.serving-db.v6",
+        } or not isinstance(handle.vectors, LoadedVectorsV5):
             raise RuntimeError("active generation does not provide v5 contract search")
         return handle.vectors
 

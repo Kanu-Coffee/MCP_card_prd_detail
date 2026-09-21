@@ -158,7 +158,7 @@ def load_generation_handle(
         schema_id = "" if schema_row is None else str(schema_row[0])
         metadata = (
             validate_schema_v5(connection, maximum_sidecar_bytes=sidecar_limit)
-            if schema_id == "cardrag.serving-db.v5"
+            if schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}
             else validate_schema(connection, maximum_vector_bytes=maximum_vector_bytes)
         )
         if metadata.generation_id != generation_id:
@@ -176,7 +176,7 @@ def load_generation_handle(
         ):
             raise RuntimeError("database embedding count differs from manifest")
         resident_bytes = metadata.embedding_count * 4
-        if metadata.schema_id != "cardrag.serving-db.v5":
+        if metadata.schema_id not in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             resident_bytes += metadata.embedding_count * metadata.embedding_dimension * 4
         if resident_bytes > resident_limit:
             raise RuntimeError(
@@ -184,7 +184,7 @@ def load_generation_handle(
             )
         sidecar_candidate = directory / "vectors.f32"
         vector_sidecar_path: Path | None
-        if metadata.schema_id == "cardrag.serving-db.v5":
+        if metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             vectors: LoadedVectors | LoadedVectorsV5 = load_vectors_v5(
                 connection,
                 sidecar_candidate,
@@ -1029,7 +1029,10 @@ class GenerationStore:
                     schema_row = connection.execute(
                         "SELECT value FROM metadata WHERE key='schema_id'"
                     ).fetchone()
-                    if schema_row is not None and str(schema_row[0]) == "cardrag.serving-db.v5":
+                    if schema_row is not None and str(schema_row[0]) in {
+                        "cardrag.serving-db.v5",
+                        "cardrag.serving-db.v6",
+                    }:
                         referenced.update(
                             str(row[0])
                             for row in connection.execute(
@@ -1103,7 +1106,7 @@ class GenerationStore:
 
     def verify_handle_pdfs(self, handle: GenerationHandle) -> None:
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 sql = """SELECT r.document_id,l.issuer,l.product_code,l.name AS title,
                                  r.pdf_sha256,r.pdf_size_bytes,r.page_count
                             FROM contract_revisions AS r
@@ -1114,6 +1117,7 @@ class GenerationStore:
             if handle.metadata.schema_id in {
                 "cardrag.serving-db.v4",
                 "cardrag.serving-db.v5",
+                "cardrag.serving-db.v6",
             }:
                 sql += """ UNION ALL
                     SELECT document_id,issuer,product_code,title,pdf_sha256,

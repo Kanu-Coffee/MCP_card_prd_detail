@@ -189,7 +189,7 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_reference_type: Literal["attestation-manifest"]
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
-    version: Literal["1.0.22", "1.0.23", "1.0.24", "1.0.25"]
+    version: Literal["1.0.22", "1.0.23", "1.0.24", "1.0.25", "1.0.26"]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
     user: Literal["10001:10001"]
@@ -222,7 +222,7 @@ class CandidateImageIdentity(_CanonicalModel):
 class EffectiveConfigEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-effective-config.v4"]
     source_commit: SourceCommit
-    release_version: Literal["1.0.22", "1.0.23", "1.0.24", "1.0.25"]
+    release_version: Literal["1.0.22", "1.0.23", "1.0.24", "1.0.25", "1.0.26"]
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
     worker_volume: Literal["cardrag-worker-v122-candidate-state"]
@@ -548,7 +548,7 @@ class MCPSmokeEvidence(_CanonicalModel):
     cap_drop_all_verified: Literal[True]
     no_new_privileges_verified: Literal[True]
     health_ready: Literal[True]
-    serving_schema: Literal["cardrag.serving-db.v5"]
+    serving_schema: Literal["cardrag.serving-db.v5", "cardrag.serving-db.v6"]
     embedding_dimension: Literal[4096]
     retrieval_mode: Literal["exact"]
     approximate: Literal[False]
@@ -767,7 +767,11 @@ class GenerationCASEvidence(_CanonicalModel):
 class RollbackStep(_CanonicalModel):
     ordinal: PositiveStrictInt
     action: Literal["activate", "restart"]
-    serving_schema: Literal["cardrag.serving-db.v4", "cardrag.serving-db.v5"]
+    serving_schema: Literal[
+        "cardrag.serving-db.v4",
+        "cardrag.serving-db.v5",
+        "cardrag.serving-db.v6",
+    ]
     generation_id: str
     runtime_instance_sha256: Sha256Hex
     health_ready: Literal[True]
@@ -805,12 +809,15 @@ class RollbackLedgerEvidence(_CanonicalModel):
         if len(self.steps) != 5:
             raise ValueError("rollback ledger must contain exactly five steps")
         baseline_schema = self.steps[0].serving_schema
+        candidate_schema = self.steps[1].serving_schema
+        if candidate_schema not in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
+            raise ValueError("rollback ledger candidate schema is unsupported")
         expected = (
             (1, "activate", baseline_schema),
-            (2, "activate", "cardrag.serving-db.v5"),
-            (3, "restart", "cardrag.serving-db.v5"),
+            (2, "activate", candidate_schema),
+            (3, "restart", candidate_schema),
             (4, "activate", baseline_schema),
-            (5, "activate", "cardrag.serving-db.v5"),
+            (5, "activate", candidate_schema),
         )
         observed = tuple((step.ordinal, step.action, step.serving_schema) for step in self.steps)
         if observed != expected:
@@ -898,7 +905,7 @@ class CandidateEvidenceBindings(_CanonicalModel):
 
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v2"]
-    release_version: Literal["1.0.22", "1.0.23", "1.0.24", "1.0.25"]
+    release_version: Literal["1.0.22", "1.0.23", "1.0.24", "1.0.25", "1.0.26"]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
@@ -1206,10 +1213,16 @@ def verify_candidate_acceptance(
     )
     if any(source != receipt.source_commit for source in evidence_sources):
         raise CandidateAcceptanceError("evidence_source_commit_mismatch")
-    if manifest.schema_version != "cardrag.generation.v5" or manifest.serving_schema != (
-        "cardrag.serving-db.v5"
+    expected_generation_schema, expected_serving_schema = (
+        ("cardrag.generation.v6", "cardrag.serving-db.v6")
+        if receipt.release_version == "1.0.26"
+        else ("cardrag.generation.v5", "cardrag.serving-db.v5")
+    )
+    if (
+        manifest.schema_version != expected_generation_schema
+        or manifest.serving_schema != expected_serving_schema
     ):
-        raise CandidateAcceptanceError("generation_not_v5")
+        raise CandidateAcceptanceError("generation_schema_mismatch")
     if manifest.generation_id != receipt.generation_id or manifest.issuer_codes != CANDIDATE_ISSUERS:
         raise CandidateAcceptanceError("generation_identity_mismatch")
     if manifest.counts.documents < 1 or manifest.counts.chunks < 1:

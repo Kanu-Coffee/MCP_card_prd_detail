@@ -48,6 +48,7 @@ SCHEMA_EMBEDDING_DIMENSIONS = {
     "cardrag.serving-db.v3": EMBEDDING_DIMENSION,
     "cardrag.serving-db.v4": EMBEDDING_DIMENSION,
     "cardrag.serving-db.v5": QWEN3_EMBEDDING_DIMENSION,
+    "cardrag.serving-db.v6": QWEN3_EMBEDDING_DIMENSION,
 }
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -373,7 +374,7 @@ class WebDAVUpdater:
         ):
             raise RuntimeError("generation serving database artifact is invalid")
         sidecar = generation.vector_sidecar
-        if generation.serving_schema == "cardrag.serving-db.v5":
+        if generation.serving_schema in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             if sidecar is None:
                 raise RuntimeError("v5 generation requires a vector sidecar")
             if (
@@ -518,7 +519,11 @@ class WebDAVUpdater:
         document_issuers = {document.issuer for document in generation.documents}
         if not document_issuers.issubset(generation.issuer_codes):
             raise RuntimeError("generation document references an undeclared issuer")
-        if generation.serving_schema in {"cardrag.serving-db.v4", "cardrag.serving-db.v5"}:
+        if generation.serving_schema in {
+            "cardrag.serving-db.v4",
+            "cardrag.serving-db.v5",
+            "cardrag.serving-db.v6",
+        }:
             schema_label = "v4" if generation.serving_schema == "cardrag.serving-db.v4" else "v5"
             if tuple(row[0] for row in generation.issuer_ocr_counts) != generation.issuer_codes:
                 raise RuntimeError(f"{schema_label} generation issuer OCR counts are incomplete")
@@ -706,7 +711,7 @@ class WebDAVUpdater:
                     "database/handle vector sidecar differs from generation manifest"
                 )
             _verify_artifact(handle.vector_sidecar_path, sidecar)
-        if generation.serving_schema == "cardrag.serving-db.v5":
+        if generation.serving_schema in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
             aggregation_profile = generation.document_aggregation_profile
             if aggregation_profile is None:
                 if (
@@ -900,7 +905,7 @@ class WebDAVUpdater:
         tuple[str, ...],
     ]:
         with handle.connect() as connection:
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 document_rows = connection.execute(
                     """SELECT r.document_id,l.issuer,r.page_count,r.pdf_sha256,r.pdf_size_bytes
                          FROM contract_revisions AS r
@@ -932,6 +937,7 @@ class WebDAVUpdater:
             if handle.metadata.schema_id in {
                 "cardrag.serving-db.v4",
                 "cardrag.serving-db.v5",
+                "cardrag.serving-db.v6",
             }:
                 documents.extend(
                     (
@@ -955,7 +961,7 @@ class WebDAVUpdater:
             issuer_codes = tuple(
                 str(row[0]) for row in connection.execute("SELECT code FROM issuers ORDER BY code")
             )
-            if handle.metadata.schema_id == "cardrag.serving-db.v5":
+            if handle.metadata.schema_id in {"cardrag.serving-db.v5", "cardrag.serving-db.v6"}:
                 raw_counts = connection.execute(
                     """
                     SELECT

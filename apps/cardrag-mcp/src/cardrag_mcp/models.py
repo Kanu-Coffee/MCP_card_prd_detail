@@ -151,6 +151,7 @@ class ServingMetadata(StrictModel):
         "cardrag.serving-db.v3",
         "cardrag.serving-db.v4",
         "cardrag.serving-db.v5",
+        "cardrag.serving-db.v6",
     ]
     generation_id: Identifier
     corpus_sha256: Sha256Hex
@@ -809,10 +810,11 @@ class MerchantSearchPage(StrictModel):
 
 
 class SummaryEvidence(StrictModel):
-    field: Literal["launch_date", "annual_fee", "benefit"]
+    field: Literal["launch_date", "annual_fee", "benefit", "condition"]
     node_id: Identifier
     pages: tuple[int, ...]
     excerpt: str = Field(max_length=300)
+    contract_revision_id: Identifier | None = None
 
 
 class ProductSummary(StrictModel):
@@ -827,6 +829,7 @@ class ProductSummary(StrictModel):
     annual_fee_text: str | None = None
     benefit_headings: tuple[str, ...] = ()
     benefit_summary_texts: tuple[str, ...] = ()
+    condition_summary_texts: tuple[str, ...] = ()
     product_lineage_id: Identifier | None = None
     contract_revision_id: Identifier | None = None
     document_id: Identifier | None = None
@@ -835,6 +838,7 @@ class ProductSummary(StrictModel):
     pdf_sha256: Sha256Hex | None = None
     launch_date_status: Literal["confirmed", "missing", "invalid", "conflicting"] = "missing"
     launch_date_evidence: tuple[str, ...] = ()
+    launch_date_source_revision_ids: tuple[Identifier, ...] = ()
     evidence: tuple[SummaryEvidence, ...] = ()
 
 

@@ -567,7 +567,7 @@ def _load_generation_manifest(path: Path) -> tuple[GenerationManifest, str]:
         manifest = GenerationManifest.model_validate_json(payload)
     except Exception as exc:
         raise AggregationCaptureError("generation manifest is invalid") from exc
-    if manifest.schema_version != "cardrag.generation.v5":
+    if manifest.schema_version not in {"cardrag.generation.v5", "cardrag.generation.v6"}:
         raise AggregationCaptureError("score capture requires generation v5")
     if payload != manifest.canonical_bytes():
         raise AggregationCaptureError("generation manifest is not canonical")

@@ -53,7 +53,9 @@ list_recent_products(start_date="2026-01-01", end_date="2026-01-31",
 source의 `date_basis`가 실제 의미를 결정합니다. BC의 `product_launch` 같은 예외도
 별도 출시일 검증을 대신하지 않습니다. 출시일이
 없거나 잘못되었거나 충돌하면 추정하지 않고 `[확인 필요]`로 표시하십시오.
-`unknown_launch_date_count`는 해당 카드사 범위의 현재 상품 중 출시일 미확인 수이며,
+최신 안내장에 출시일이 없더라도 같은 상품 lineage의 과거 revision에 검증 가능한 근거가
+있으면 그 날짜를 사용합니다. 서로 다른 유효 날짜가 있으면 충돌로 남기며 임의로 최신값을
+선택하지 않습니다. `unknown_launch_date_count`는 해당 카드사 범위의 현재 상품 중 출시일 미확인 수이며,
 최근 출시 수에 더할 수 없습니다.
 
 명시 날짜는 양 끝 포함 `YYYY-MM-DD`이고 시작·종료를 함께 지정합니다. `months`와
@@ -89,7 +91,9 @@ search_contracts(query="연회비, 전월 실적과 적립 제외 조건",
 일괄 요약은 최대 50개이고 요청 순서를 유지합니다. 없는 상품은 일괄 응답에서 `null`,
 단건에서는 오류입니다. 모호한 이름에는 후보 식별자가 포함된 오류를 반환하므로 정확한
 코드 또는 lineage ID로 요청하십시오. 요약은 날짜 상태, document·revision·lineage와
-근거·출처 참조를 제공합니다.
+근거·출처 참조를 제공합니다. v6 응답의 `launch_date_source_revision_ids`는 출시일 근거가
+있는 revision을 구분하며, `condition_summary_texts`는 전월실적·한도·횟수·제외·유의 조건을
+혜택 요약과 분리해 제공합니다. 모든 요약 항목은 원문 node/page evidence로 재확인해야 합니다.
 
 복수 비교 검색은 `product_lineage_ids` 최대 100개를 지원하며 단일
 `product_lineage_id`와 함께 보내면 오류입니다. `launch_start_date`와 `launch_end_date`를

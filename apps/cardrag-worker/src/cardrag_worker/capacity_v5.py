@@ -22,6 +22,7 @@ from cardrag_core import QWEN3_EMBEDDING_DIMENSION
 
 from .exporter_v5 import (
     ContractRevisionInput,
+    DerivedFieldEvidenceInput,
     DocumentPageInput,
     EmbeddingProfileInput,
     IssuerInput,
@@ -92,7 +93,7 @@ DATABASE_EXPORT_PEAK_MULTIPLIER: Final = 4
 # exporter_v5 writes 41 base metadata rows, six view-count rows, ten node-type
 # rows, and four major-class rows.  The optional sealed-profile row and exact
 # caller-supplied extra metadata are added by the ledger helper.
-BASE_DATABASE_METADATA_ROWS: Final = 61
+BASE_DATABASE_METADATA_ROWS: Final = 62
 
 
 class V5CapacityError(RuntimeError):
@@ -405,6 +406,7 @@ def build_v5_database_ledger(
     structure_nodes: Sequence[StructureNodeInput],
     node_spans: Sequence[NodeSpanInput],
     node_links: Sequence[NodeLinkInput],
+    derived_field_evidence: Sequence[DerivedFieldEvidenceInput] = (),
     embedding_profiles: Sequence[EmbeddingProfileInput],
     derived_views: Sequence[DerivedView],
     primary_embedding_profile_id: str,
@@ -493,6 +495,8 @@ def build_v5_database_ledger(
             revision.source_version,
             revision.source_url,
             revision.effective_date,
+            revision.launch_date,
+            revision.launch_date_status,
             revision.pdf_sha256,
             revision.temporal_status,
             revision.supersedes_revision_id,
@@ -583,6 +587,16 @@ def build_v5_database_ledger(
             node_link.to_contract_revision_id,
             node_link.link_type,
         )
+    for evidence in derived_field_evidence:
+        payload = _add_text_bindings(
+            payload,
+            evidence.contract_revision_id,
+            evidence.field,
+            evidence.match_kind,
+            evidence.normalized_value,
+            evidence.node_id,
+            evidence.text_sha256,
+        )
     for embedding_profile in embedding_profiles:
         payload = _add_text_bindings(
             payload,
@@ -660,6 +674,7 @@ def build_v5_database_ledger(
     table_rows = (
         ("contract_revisions", len(contract_revisions)),
         ("document_pages", len(document_pages)),
+        ("derived_field_evidence", len(derived_field_evidence)),
         ("embedding_profiles", len(embedding_profiles)),
         ("embedding_view_spans", embedding_view_span_count),
         ("embedding_views", len(derived_views)),

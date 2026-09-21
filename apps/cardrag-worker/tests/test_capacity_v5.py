@@ -379,6 +379,7 @@ def test_database_ledger_counts_every_export_table_and_fixed_metadata_allowance(
     assert ledger.rows == {
         "contract_revisions": 1,
         "document_pages": 1,
+        "derived_field_evidence": 0,
         "embedding_profiles": 1,
         "embedding_view_spans": 1,
         "embedding_views": 1,

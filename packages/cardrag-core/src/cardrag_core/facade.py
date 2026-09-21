@@ -108,7 +108,7 @@ class MCPArtifactReader:
         ):
             raise ArtifactContractError("generation READY does not bind the serving database")
         vector_sidecar = manifest.vector_sidecar
-        if manifest.schema_version == "cardrag.generation.v5":
+        if manifest.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
             if vector_sidecar is None:
                 raise ArtifactContractError("v5 generation manifest does not declare a vector sidecar")
             if PurePosixPath(vector_sidecar.artifact.path) != generation_vectors_path(manifest.generation_id):
@@ -198,7 +198,14 @@ class MCPArtifactReader:
 
         selected = current or self.read_current_generation()
         sidecar = selected.manifest.vector_sidecar
-        if selected.manifest.schema_version != "cardrag.generation.v5" or sidecar is None:
+        if (
+            selected.manifest.schema_version
+            not in {
+                "cardrag.generation.v5",
+                "cardrag.generation.v6",
+            }
+            or sidecar is None
+        ):
             raise ArtifactContractError("selected generation has no v5 vector sidecar")
         artifact = sidecar.artifact
         expected_path = generation_vectors_path(selected.manifest.generation_id)
@@ -223,7 +230,14 @@ class MCPArtifactReader:
     ) -> VerifiedArtifact:
         selected = current or self.read_current_generation()
         sidecar = selected.manifest.vector_sidecar
-        if selected.manifest.schema_version != "cardrag.generation.v5" or sidecar is None:
+        if (
+            selected.manifest.schema_version
+            not in {
+                "cardrag.generation.v5",
+                "cardrag.generation.v6",
+            }
+            or sidecar is None
+        ):
             raise ArtifactContractError("selected generation has no v5 vector sidecar")
         artifact = sidecar.artifact
         expected_path = generation_vectors_path(selected.manifest.generation_id)

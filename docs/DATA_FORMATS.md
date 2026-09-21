@@ -26,8 +26,10 @@ lineage마다 `current`는 최대 하나이며, 최신 순서를 입증할 수 �
 출시일을 문서 개정일로 대체하지 않습니다. BC 수집기의 `effective_date`는
 `date_basis=product_launch`로 표시되므로 문서 개정일이라고 설명해서도 안 됩니다.
 공식 미래 출시일은 유효한 날짜일 수 있지만 현재까지의 최근 출시 목록에는 포함하지 않습니다.
-최근 기간은 서울의 현재 달력 날짜로 해석합니다. 날짜 미확인 수는 현재 revision 기준이며,
-그 수를 최근 출시 상품 수에 더하지 않습니다.
+최근 기간은 서울의 현재 달력 날짜로 해석합니다. v6에서는 revision별 추출 결과를 보존한 뒤
+lineage 전체에서 출시일을 해석합니다. 따라서 최신 안내장에 날짜가 없어도 과거 안내장의
+검증 가능한 출시일은 유지되며, 서로 다른 유효 날짜가 있으면 `conflicting`입니다. 날짜
+미확인 수는 현재 상품 lineage 기준이며, 그 수를 최근 출시 상품 수에 더하지 않습니다.
 
 카드사별 수집 목록의 범위도 source provenance입니다. 현대·하나·롯데의 공식 목록은
 개인·법인을 포함할 수 있고, BC는 개인 상품안내장 열을 사용합니다. 전체 결과를 모두 개인카드로
@@ -40,10 +42,16 @@ DRM 등으로 처리할 수 없는 문서는 다운로드한 PDF의 source ident
 
 ## 원본과 구조
 
-현재 serving schema는 `cardrag.serving-db.v5`입니다. v2/v3/v4 호환 reader도 유지하지만
-v5 전용 구조·coverage를 지원한다고 표시하지 않습니다. v3는 bounded `unsupported_drm`
+현재 serving schema는 `cardrag.serving-db.v6`입니다. v2/v3/v4/v5 호환 reader도 유지하지만
+구 schema에 v6의 파생 필드·근거가 있다고 표시하지 않습니다. v3는 bounded `unsupported_drm`
 disposition을, v4는 검증된 PDF와 실패 상태만 있고 OCR page/evidence는 없는 OCR 실패 상품을
 표현할 수 있습니다. 구 schema의 데이터가 없다는 사실과 기능 미지원은 구분합니다.
+
+v6의 `contract_revisions.launch_date`와 `launch_date_status`는 해당 revision에서만 추출한
+결과입니다. `derived_field_evidence`는 parser version, 후보 순서, 일치 종류와 정확한
+node/page/source span/hash를 결속합니다. 같은 구조 group 또는 명시적 continuation link 안에서만
+분리된 label·날짜를 결합하고, 2자리 연도나 개정일·시행일·효력일을 출시일로 승격하지 않습니다.
+MCP가 표시하는 상품 출시일은 이 revision 결과들을 lineage 단위로 합성한 값입니다.
 
 ```text
 product_lineage
@@ -76,7 +84,7 @@ artifact SHA를 SQLite metadata와 seal metrics에 결속합니다.
 `structure_failed_document_count=0`과 canonical empty-ledger SHA가 양쪽에 있어야 합니다.
 
 주요 봉인 테이블은 `issuers`, `product_lineages`, `contract_revisions`, `document_pages`,
-`structure_nodes`, `node_spans`, `node_links`, `revision_coverage`, `embedding_profiles`,
+`structure_nodes`, `node_spans`, `node_links`, `derived_field_evidence`, `revision_coverage`, `embedding_profiles`,
 `embedding_views`, `embedding_views_fts`, `metadata`입니다. schema와 논리 해시 계산에 포함되는
 disposition 테이블도 함께 검증해야 하며, 임의 열 추가·삭제 후 과거 seal을 재사용할 수 없습니다.
 

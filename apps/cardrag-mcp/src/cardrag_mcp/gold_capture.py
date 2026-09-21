@@ -495,6 +495,9 @@ class NativeV5AttestationManifest(_StrictModel):
     query_count: int = Field(ge=1, le=MAX_RELEASE_QUERIES)
     source_commit: SourceCommit
     generation_id: Identifier
+    serving_schema: Literal["cardrag.serving-db.v5", "cardrag.serving-db.v6"] = (
+        "cardrag.serving-db.v5"
+    )
     generation_manifest: ArtifactBinding
     serving_database: ArtifactBinding
     vector_sidecar: ArtifactBinding
@@ -1717,7 +1720,7 @@ def _verify_page_parent_source(
         cast(Path, source_generation_manifest_path)
     )
     if (
-        source_manifest.schema_version != "cardrag.generation.v5"
+        source_manifest.schema_version not in {"cardrag.generation.v5", "cardrag.generation.v6"}
         or source_manifest.generation_id != page_manifest.source_generation_id
         or source_manifest_binding != page_manifest.source_generation_manifest
         or ArtifactBinding(
@@ -1754,7 +1757,16 @@ def _verify_page_parent_source(
         except sqlite3.Error as exc:
             raise GoldCaptureError("page_parent_database_schema_invalid") from exc
     if (
-        metadata.get("schema_id") != "cardrag.serving-db.v5"
+        metadata.get("schema_id")
+        != getattr(
+            source_manifest,
+            "serving_schema",
+            (
+                "cardrag.serving-db.v6"
+                if source_manifest.schema_version == "cardrag.generation.v6"
+                else "cardrag.serving-db.v5"
+            ),
+        )
         or metadata.get("generation_id") != page_manifest.source_generation_id
         or metadata.get("current_revision_count") != str(current_count)
         or not sources
@@ -3342,7 +3354,7 @@ def _native_run_manifests(
         "source_commit": attestation.source_commit,
         "generation_id": attestation.generation_id,
         "generation_manifest_sha256": attestation.generation_manifest.sha256,
-        "serving_schema": "cardrag.serving-db.v5",
+        "serving_schema": attestation.serving_schema,
         "embedding_model": "qwen/qwen3-embedding-8b",
         "embedding_dimension": 4096,
         "rrf_k": None,
@@ -3419,8 +3431,25 @@ async def capture_native_v5_lanes(
     if candidate_source_commit is not None and actual_source_commit != candidate_source_commit:
         raise GoldCaptureError("candidate_source_commit_mismatch")
     generation_manifest, generation_binding = _load_generation_manifest(generation_manifest_path)
-    if generation_manifest.schema_version != "cardrag.generation.v5":
-        raise GoldCaptureError("native_capture_requires_generation_v5")
+    if generation_manifest.schema_version not in {
+        "cardrag.generation.v5",
+        "cardrag.generation.v6",
+    }:
+        raise GoldCaptureError("native_capture_requires_structured_generation")
+    serving_schema = getattr(
+        generation_manifest,
+        "serving_schema",
+        (
+            "cardrag.serving-db.v6"
+            if generation_manifest.schema_version == "cardrag.generation.v6"
+            else "cardrag.serving-db.v5"
+        ),
+    )
+    if serving_schema not in {
+        "cardrag.serving-db.v5",
+        "cardrag.serving-db.v6",
+    }:
+        raise GoldCaptureError("native_capture_requires_structured_serving_schema")
     resolved_generation = await asyncio.to_thread(generation_directory.resolve, strict=True)
     if resolved_generation.name != generation_manifest.generation_id:
         raise GoldCaptureError("generation_directory_manifest_mismatch")
@@ -3504,7 +3533,7 @@ async def capture_native_v5_lanes(
         expected_embedding_count=generation_manifest.embedding_contract.count,
     )
     if (
-        handle.metadata.schema_id != "cardrag.serving-db.v5"
+        handle.metadata.schema_id != serving_schema
         or handle.metadata.primary_embedding_profile_id
         != generation_manifest.primary_embedding_profile_id
         or handle.metadata.exact_row_corpus_sha256 != generation_manifest.exact_row_corpus_sha256
@@ -3520,6 +3549,10 @@ async def capture_native_v5_lanes(
         query_count=len(gold.queries),
         source_commit=actual_source_commit,
         generation_id=generation_manifest.generation_id,
+        serving_schema=cast(
+            Literal["cardrag.serving-db.v5", "cardrag.serving-db.v6"],
+            serving_schema,
+        ),
         generation_manifest=generation_binding,
         serving_database=database_binding,
         vector_sidecar=sidecar_binding,
@@ -3889,8 +3922,8 @@ def validate_native_v5_capture(
         release_gate=release_gate,
     )
     generation, generation_binding = _load_generation_manifest(generation_manifest_path)
-    if generation.schema_version != "cardrag.generation.v5":
-        raise GoldCaptureError("native_capture_requires_generation_v5")
+    if generation.schema_version not in {"cardrag.generation.v5", "cardrag.generation.v6"}:
+        raise GoldCaptureError("native_capture_requires_structured_generation")
     database_checkpoint = _regular_artifact_checkpoint(
         generation_directory / "index.sqlite3",
         maximum_bytes=_MAX_DATABASE_BYTES,
@@ -4630,7 +4663,7 @@ def _validate_native_release_attestation(
                 or run_manifest.source_version != "v1.0.11-candidate"
                 or run_manifest.generation_id != manifest.generation_id
                 or run_manifest.generation_manifest_sha256 != manifest.generation_manifest.sha256
-                or run_manifest.serving_schema != "cardrag.serving-db.v5"
+                or run_manifest.serving_schema != manifest.serving_schema
                 or run_manifest.embedding_model != manifest.embedding_model
                 or run_manifest.embedding_dimension != manifest.embedding_dimension
             ):

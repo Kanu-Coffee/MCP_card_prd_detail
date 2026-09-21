@@ -95,11 +95,11 @@ def test_duplicate_dates_are_consistent_across_nodes() -> None:
     "invalid",
     ["출시일: 2026.09.99", "출시일: 2026.09.101", "출시일: 2026년 02월 31일"],
 )
-def test_invalid_candidate_is_not_overridden_by_another_date(invalid: str) -> None:
+def test_unique_valid_candidate_is_not_erased_by_malformed_ocr(invalid: str) -> None:
     valid = "출시일: 2026.09.01"
-    assert resolve_launch_date([invalid, valid]) is None
-    assert resolve_launch_date([valid, invalid]) is None
-    assert parse_launch_date(f"{invalid} / {valid}") is None
+    assert resolve_launch_date([invalid, valid]) == date(2026, 9, 1)
+    assert resolve_launch_date([valid, invalid]) == date(2026, 9, 1)
+    assert parse_launch_date(f"{invalid} / {valid}") == date(2026, 9, 1)
 
 
 def test_no_nodes_have_no_launch_date() -> None:

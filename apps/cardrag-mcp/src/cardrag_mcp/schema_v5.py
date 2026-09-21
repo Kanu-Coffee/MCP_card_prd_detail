@@ -26,6 +26,7 @@ from numpy.typing import NDArray
 from cardrag_mcp.models import ServingMetadata
 
 SCHEMA_ID_V5 = "cardrag.serving-db.v5"
+SCHEMA_ID_V6 = "cardrag.serving-db.v6"
 V5_EMBEDDING_DIMENSION = 4096
 FLOAT32_BYTES = 4
 V5_VECTOR_ROW_BYTES = V5_EMBEDDING_DIMENSION * FLOAT32_BYTES
@@ -195,6 +196,41 @@ V5_REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "source_non_whitespace_count",
             "covered_non_whitespace_count",
             "coverage_sha256",
+        ),
+    }
+)
+
+V6_REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        **V5_REQUIRED_COLUMNS,
+        "contract_revisions": (
+            "contract_revision_id",
+            "product_lineage_id",
+            "document_id",
+            "source_id",
+            "source_version",
+            "source_url",
+            "effective_date",
+            "launch_date",
+            "launch_date_status",
+            "pdf_sha256",
+            "pdf_size_bytes",
+            "page_count",
+            "temporal_status",
+            "supersedes_revision_id",
+        ),
+        "derived_field_evidence": (
+            "contract_revision_id",
+            "field",
+            "candidate_ordinal",
+            "span_ordinal",
+            "match_kind",
+            "normalized_value",
+            "node_id",
+            "page",
+            "source_start",
+            "source_end",
+            "text_sha256",
         ),
     }
 )
@@ -1075,6 +1111,106 @@ def _validate_view_source_spans(
             raise ServingDatabaseV5Error("embedding view display text is not source-bound")
 
 
+def _validate_v6_launch_dates(
+    connection: sqlite3.Connection,
+    values: Mapping[str, str],
+) -> None:
+    if values.get("launch_date_parser_version") != "cardrag.launch-date.v2":
+        raise ServingDatabaseV5Error("v6 launch-date parser version is missing or unsupported")
+    evidence_count = int(
+        connection.execute("SELECT count(*) FROM derived_field_evidence").fetchone()[0]
+    )
+    if evidence_count != _metadata_int(values, "derived_field_evidence_count"):
+        raise ServingDatabaseV5Error("derived field evidence count differs from metadata")
+    revision_values: dict[str, tuple[str | None, str]] = {}
+    for revision_id, launch_date, status in connection.execute(
+        "SELECT contract_revision_id,launch_date,launch_date_status FROM contract_revisions"
+    ):
+        if status not in {"confirmed", "missing", "invalid", "conflicting"}:
+            raise ServingDatabaseV5Error("launch-date status is invalid")
+        if status == "confirmed":
+            if launch_date is None:
+                raise ServingDatabaseV5Error("confirmed launch date is null")
+            try:
+                parsed = date.fromisoformat(str(launch_date))
+            except ValueError:
+                raise ServingDatabaseV5Error("confirmed launch date is invalid") from None
+            if parsed.isoformat() != str(launch_date):
+                raise ServingDatabaseV5Error("confirmed launch date is not canonical")
+        elif launch_date is not None:
+            raise ServingDatabaseV5Error("unconfirmed launch date is not null")
+        revision_values[str(revision_id)] = (
+            None if launch_date is None else str(launch_date),
+            str(status),
+        )
+    invalid_evidence = connection.execute(
+        """SELECT 1 FROM derived_field_evidence AS e
+             LEFT JOIN structure_nodes AS n
+               ON n.node_id=e.node_id AND n.contract_revision_id=e.contract_revision_id
+             LEFT JOIN node_spans AS s
+               ON s.node_id=e.node_id AND s.contract_revision_id=e.contract_revision_id
+              AND s.page=e.page AND s.source_start=e.source_start
+              AND s.source_end=e.source_end AND s.text_sha256=e.text_sha256
+             JOIN document_pages AS p
+               ON p.contract_revision_id=e.contract_revision_id AND p.page=e.page
+            WHERE e.field!='launch_date'
+               OR e.match_kind NOT IN ('explicit_label','date_before_launch')
+               OR n.node_id IS NULL OR s.node_id IS NULL
+               OR e.source_start < 0 OR e.source_end <= e.source_start
+               OR e.source_end > length(p.text)
+               OR length(e.text_sha256)!=64
+            LIMIT 1"""
+    ).fetchone()
+    if invalid_evidence is not None:
+        raise ServingDatabaseV5Error("derived field evidence is not source-bound")
+    normalized_by_revision: dict[str, set[str]] = defaultdict(set)
+    evidence_count_by_revision: dict[str, int] = defaultdict(int)
+    candidate_ordinals_by_revision: dict[str, set[int]] = defaultdict(set)
+    span_ordinals_by_candidate: dict[tuple[str, int], list[int]] = defaultdict(list)
+    for row in connection.execute(
+        """SELECT e.contract_revision_id,e.field,e.candidate_ordinal,e.span_ordinal,
+                  e.normalized_value,e.text_sha256,p.text,e.source_start,e.source_end
+             FROM derived_field_evidence AS e
+             JOIN document_pages AS p
+               ON p.contract_revision_id=e.contract_revision_id AND p.page=e.page
+            ORDER BY e.contract_revision_id,e.field,e.candidate_ordinal,e.span_ordinal"""
+    ):
+        source = str(row[6])[int(row[7]) : int(row[8])]
+        if hashlib.sha256(source.encode("utf-8")).hexdigest() != str(row[5]):
+            raise ServingDatabaseV5Error("derived field evidence source hash differs")
+        if row[4] is not None:
+            try:
+                normalized = date.fromisoformat(str(row[4]))
+            except ValueError:
+                raise ServingDatabaseV5Error("derived field evidence date is invalid") from None
+            if normalized.isoformat() != str(row[4]):
+                raise ServingDatabaseV5Error("derived field evidence date is not canonical")
+            normalized_by_revision[str(row[0])].add(str(row[4]))
+        revision_id = str(row[0])
+        candidate_ordinal = int(row[2])
+        evidence_count_by_revision[revision_id] += 1
+        candidate_ordinals_by_revision[revision_id].add(candidate_ordinal)
+        span_ordinals_by_candidate[(revision_id, candidate_ordinal)].append(int(row[3]))
+    for ordinals in span_ordinals_by_candidate.values():
+        if ordinals != list(range(len(ordinals))):
+            raise ServingDatabaseV5Error("derived field evidence spans are not contiguous")
+    for revision_id, (launch_date, status) in revision_values.items():
+        values_for_revision = normalized_by_revision[revision_id]
+        candidate_ordinals = sorted(candidate_ordinals_by_revision[revision_id])
+        if candidate_ordinals and candidate_ordinals != list(range(len(candidate_ordinals))):
+            raise ServingDatabaseV5Error("derived field evidence candidates are not contiguous")
+        if status == "confirmed" and values_for_revision != {launch_date}:
+            raise ServingDatabaseV5Error("confirmed launch date differs from its evidence")
+        if status == "missing" and evidence_count_by_revision[revision_id]:
+            raise ServingDatabaseV5Error("missing launch date unexpectedly has evidence")
+        if status == "invalid" and (
+            not evidence_count_by_revision[revision_id] or values_for_revision
+        ):
+            raise ServingDatabaseV5Error("invalid launch date evidence is inconsistent")
+        if status == "conflicting" and len(values_for_revision) < 2:
+            raise ServingDatabaseV5Error("conflicting launch date lacks distinct evidence")
+
+
 def validate_schema_v5(
     connection: sqlite3.Connection,
     *,
@@ -1087,16 +1223,17 @@ def validate_schema_v5(
         raise ServingDatabaseV5Error("SQLite integrity_check failed")
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
         raise ServingDatabaseV5Error("SQLite foreign_key_check failed")
-    for table, expected in V5_REQUIRED_COLUMNS.items():
-        actual = _columns(connection, table)
-        if actual != expected:
-            raise ServingDatabaseV5Error(f"unexpected {table} schema: {actual!r}")
-
     values = {
         str(row[0]): str(row[1]) for row in connection.execute("SELECT key,value FROM metadata")
     }
-    if values.get("schema_id") != SCHEMA_ID_V5:
-        raise ServingDatabaseV5Error("serving database schema version is not v5")
+    schema_id = values.get("schema_id")
+    if schema_id not in {SCHEMA_ID_V5, SCHEMA_ID_V6}:
+        raise ServingDatabaseV5Error("serving database schema version is not v5 or v6")
+    required_columns = V6_REQUIRED_COLUMNS if schema_id == SCHEMA_ID_V6 else V5_REQUIRED_COLUMNS
+    for table, expected in required_columns.items():
+        actual = _columns(connection, table)
+        if actual != expected:
+            raise ServingDatabaseV5Error(f"unexpected {table} schema: {actual!r}")
     for key in ("generation_id", "embedding_provider", "embedding_model"):
         if not values.get(key):
             raise ServingDatabaseV5Error(f"metadata {key} is missing")
@@ -1146,6 +1283,8 @@ def validate_schema_v5(
     _validate_structure(connection, values)
     _validate_source_coverage(connection, values)
     _validate_view_source_spans(connection, values)
+    if schema_id == SCHEMA_ID_V6:
+        _validate_v6_launch_dates(connection, values)
 
     view_count = int(connection.execute("SELECT count(*) FROM embedding_views").fetchone()[0])
     if view_count != count:
@@ -1211,7 +1350,7 @@ def validate_schema_v5(
     try:
         return ServingMetadata.model_validate(
             {
-                "schema_id": SCHEMA_ID_V5,
+                "schema_id": schema_id,
                 "generation_id": values["generation_id"],
                 "corpus_sha256": values["corpus_sha256"],
                 "contract_sha256": values["contract_sha256"],

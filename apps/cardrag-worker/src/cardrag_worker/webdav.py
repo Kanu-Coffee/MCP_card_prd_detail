@@ -75,6 +75,7 @@ class RemoteGenerationIdentity:
         "cardrag.generation.v3",
         "cardrag.generation.v4",
         "cardrag.generation.v5",
+        "cardrag.generation.v6",
     ] = "cardrag.generation.v3"
     serving_schema: Literal[
         "cardrag.serving-db.v1",
@@ -82,6 +83,7 @@ class RemoteGenerationIdentity:
         "cardrag.serving-db.v3",
         "cardrag.serving-db.v4",
         "cardrag.serving-db.v5",
+        "cardrag.serving-db.v6",
     ] = "cardrag.serving-db.v3"
     ocr_failed_document_count: int = 0
 
@@ -94,6 +96,7 @@ class RemoteGenerationIdentity:
             "cardrag.generation.v3": "cardrag.serving-db.v3",
             "cardrag.generation.v4": "cardrag.serving-db.v4",
             "cardrag.generation.v5": "cardrag.serving-db.v5",
+            "cardrag.generation.v6": "cardrag.serving-db.v6",
         }[self.generation_schema]
         if self.serving_schema != expected:
             raise ValueError("remote generation and serving schema versions must match")
@@ -604,7 +607,7 @@ class WebDAVClient:
             reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
             current = reader.read_current_generation()
             reader.verify_serving_database(current=current)
-            if current.manifest.schema_version == "cardrag.generation.v5":
+            if current.manifest.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
                 reader.verify_vector_sidecar(current=current)
             references = {
                 (document.pdf.sha256, document.pdf.path): document.pdf
@@ -666,7 +669,7 @@ class PublishedBundle:
 
 def _guard_v5_stable_publication(client: object, *, schema_version: str) -> None:
     if (
-        schema_version == "cardrag.generation.v5"
+        schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}
         and getattr(client, "channel", "stable") == "stable"
         and not getattr(client, "stable_publication_approved", False)
     ):
@@ -717,7 +720,7 @@ class WebDAVBundlePublisher:
         vector_sha: str | None = None
         vector_size: int | None = None
         vector_artifact: ArtifactRef | None = None
-        if validated_manifest.schema_version == "cardrag.generation.v5":
+        if validated_manifest.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
             if vectors is None or validated_manifest.vector_sidecar is None:
                 raise ValueError("v5 publication requires a vector sidecar")
             vector_artifact = validated_manifest.vector_sidecar.artifact

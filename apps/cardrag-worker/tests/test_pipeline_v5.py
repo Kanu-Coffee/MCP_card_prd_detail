@@ -26,6 +26,7 @@ from cardrag_core import (
     generation_vectors_path,
     object_path,
 )
+from cardrag_mcp.schema_v5 import validate_schema_v5
 from helpers import pdf_bytes
 
 import cardrag_worker.pipeline as pipeline_module
@@ -392,8 +393,8 @@ class _FakeCandidateWebDAV:
             generation_id="g-other-candidate-head",
             corpus_sha256="c" * 64,
             contract_sha256="d" * 64,
-            generation_schema="cardrag.generation.v5",
-            serving_schema="cardrag.serving-db.v5",
+            generation_schema="cardrag.generation.v6",
+            serving_schema="cardrag.serving-db.v6",
         )
         self.current = current
         self.objects[str(self.pointer_path)] = b'{"generation_id":"g-other-candidate-head"}'
@@ -1175,8 +1176,8 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         assert {manifest_path, ready_path, database_path, vectors_path} <= webdav.objects.keys()
         manifest = GenerationManifest.model_validate_json(webdav.objects[manifest_path])
         ready = GenerationReady.model_validate_json(webdav.objects[ready_path])
-        assert manifest.schema_version == "cardrag.generation.v5"
-        assert manifest.serving_schema == "cardrag.serving-db.v5"
+        assert manifest.schema_version == "cardrag.generation.v6"
+        assert manifest.serving_schema == "cardrag.serving-db.v6"
         assert manifest.embedding_contract.dimension == 4096
         assert manifest.vector_sidecar is not None
         assert manifest.vector_sidecar.row_count == resumed.evidence_count
@@ -1196,7 +1197,9 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         local_database = tmp_path / "runs" / run_id / "sealed" / "index.sqlite3"
         with sqlite3.connect(f"{local_database.as_uri()}?mode=ro&immutable=1", uri=True) as connection:
             metadata = dict(connection.execute("SELECT key,value FROM metadata"))
-            assert metadata["schema_id"] == "cardrag.serving-db.v5"
+            assert metadata["schema_id"] == "cardrag.serving-db.v6"
+            assert metadata["launch_date_parser_version"] == "cardrag.launch-date.v2"
+            assert metadata["derived_field_evidence_count"] == "0"
             assert metadata["embedding_dimension"] == "4096"
             assert metadata["vector_sidecar_sha256"] == manifest.vector_sidecar.artifact.sha256
             assert metadata["revision_history_policy_version"] == REVISION_HISTORY_POLICY_VERSION
@@ -1204,6 +1207,11 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
             assert metadata["historical_revision_unresolved_sha256"] == (
                 unresolved_revision_ledger_sha256_v5(())
             )
+            assert connection.execute(
+                "SELECT count(*) FROM contract_revisions WHERE launch_date_status='missing'"
+            ).fetchone() == (2,)
+            assert connection.execute("SELECT count(*) FROM derived_field_evidence").fetchone() == (0,)
+            assert validate_schema_v5(connection).schema_id == "cardrag.serving-db.v6"
             assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
             assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
 
@@ -1341,8 +1349,8 @@ async def test_v5_pipeline_promotes_verified_m0_profile_into_sealed_m1(
             generation_id=m0_manifest.generation_id,
             corpus_sha256=m0_manifest.corpus_sha256,
             contract_sha256=m0_manifest.contract_sha256,
-            generation_schema="cardrag.generation.v5",
-            serving_schema="cardrag.serving-db.v5",
+            generation_schema=m0_manifest.schema_version,
+            serving_schema=m0_manifest.serving_schema,
         )
         webdav.current = current_m0
         stale = _verified_aggregation_profile(
@@ -1404,8 +1412,8 @@ async def test_v5_pipeline_promotes_verified_m0_profile_into_sealed_m1(
             generation_id=m1_manifest.generation_id,
             corpus_sha256=m1_manifest.corpus_sha256,
             contract_sha256=m1_manifest.contract_sha256,
-            generation_schema="cardrag.generation.v5",
-            serving_schema="cardrag.serving-db.v5",
+            generation_schema=m1_manifest.schema_version,
+            serving_schema=m1_manifest.serving_schema,
         )
         assert await m1_pipeline._validated_document_aggregation_head() == m1_manifest  # noqa: SLF001
 
@@ -1550,8 +1558,8 @@ async def test_v5_pipeline_cross_run_local_ocr_cache_lookup_on_corpus_change(
             generation_id=res1.generation_id,
             corpus_sha256=res1.corpus_sha256,
             contract_sha256=res1.contract_sha256,
-            generation_schema="cardrag.generation.v5",
-            serving_schema="cardrag.serving-db.v5",
+            generation_schema="cardrag.generation.v6",
+            serving_schema="cardrag.serving-db.v6",
         )
 
         # Run 2: corpus expands with card-b (corpus_sha256 changes)
