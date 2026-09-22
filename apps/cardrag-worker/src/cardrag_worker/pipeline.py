@@ -19,7 +19,7 @@ from contextlib import AsyncExitStack, suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Final, Literal, TypeVar, cast
 
 import httpx
 from cardrag_core import (
@@ -174,6 +174,8 @@ from .webdav import PublishedBundle, WebDAVBundlePublisher, WebDAVClient
 
 T = TypeVar("T")
 CHUNK_CONTRACT = "cardrag.page-window.v1"
+GENERATION_SCHEMA_ID_LEGACY_V5: Final = "cardrag.generation.v5"
+SERVING_SCHEMA_ID_LEGACY_V5: Final = "cardrag.serving-db.v5"
 GENERATION_SCHEMA_ID_V5: Literal["cardrag.generation.v6"] = "cardrag.generation.v6"
 SERVING_SCHEMA_ID_V5: Literal["cardrag.serving-db.v6"] = "cardrag.serving-db.v6"
 V5_VIEW_MAXIMUM_CHARACTERS = 131_072
@@ -5655,6 +5657,7 @@ class WorkerPipeline:
             raise RuntimeError("sealed generation manifest identity/contract mismatch")
         expected_schema_pair = {
             GENERATION_SCHEMA_ID: SERVING_SCHEMA_ID,
+            GENERATION_SCHEMA_ID_LEGACY_V5: SERVING_SCHEMA_ID_LEGACY_V5,
             GENERATION_SCHEMA_ID_V5: SERVING_SCHEMA_ID_V5,
         }
         if expected_schema_pair.get(manifest.schema_version) != manifest.serving_schema:
@@ -5672,7 +5675,7 @@ class WorkerPipeline:
 
         vector_path: Path | None = None
         v5_metrics: Mapping[str, Any] | None = None
-        if manifest.schema_version == GENERATION_SCHEMA_ID_V5:
+        if manifest.schema_version in {GENERATION_SCHEMA_ID_LEGACY_V5, GENERATION_SCHEMA_ID_V5}:
             if manifest.vector_sidecar is None:
                 raise RuntimeError("sealed v5 generation has no vector sidecar")
             vector_path = sealed_file(sealed.get("vector_path"), label="vector sidecar")
@@ -5697,7 +5700,7 @@ class WorkerPipeline:
         def verify_database_binding() -> None:
             connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro&immutable=1", uri=True)
             try:
-                if manifest.schema_version != GENERATION_SCHEMA_ID_V5:
+                if manifest.schema_version not in {GENERATION_SCHEMA_ID_LEGACY_V5, GENERATION_SCHEMA_ID_V5}:
                     integrity = connection.execute("PRAGMA integrity_check").fetchone()
                     if integrity is None or integrity[0] != "ok":
                         raise RuntimeError("sealed serving database failed integrity_check")
@@ -5725,7 +5728,7 @@ class WorkerPipeline:
                     str(key): str(value)
                     for key, value in connection.execute("SELECT key,value FROM metadata")
                 }
-                if manifest.schema_version == GENERATION_SCHEMA_ID_V5:
+                if manifest.schema_version in {GENERATION_SCHEMA_ID_LEGACY_V5, GENERATION_SCHEMA_ID_V5}:
                     structure_contract = manifest.structure_contract
                     vector_contract = manifest.vector_sidecar
                     if (
@@ -5736,7 +5739,7 @@ class WorkerPipeline:
                     ):
                         raise RuntimeError("sealed v5 manifest lost its structure/vector contract")
                     expected_metadata = {
-                        "schema_id": SERVING_SCHEMA_ID_V5,
+                        "schema_id": manifest.serving_schema,
                         "generation_id": generation_id,
                         "corpus_sha256": corpus_sha256,
                         "contract_sha256": contract_sha256,

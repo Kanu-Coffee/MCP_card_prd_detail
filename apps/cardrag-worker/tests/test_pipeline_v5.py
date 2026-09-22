@@ -547,6 +547,22 @@ async def test_v5_structure_failure_uses_lossless_fallback_and_seals_its_identit
         with pytest.raises(RuntimeError, match="structure_failed disposition"):
             await pipeline._validate_local_seal(tampered)  # noqa: SLF001
 
+            # Test that _validate_local_seal accepts v5 legacy generation manifests
+            v5_seal_data = json.loads(sealed_path.read_text(encoding="utf-8"))
+            v5_seal_data["manifest"]["schema_version"] = "cardrag.generation.v5"
+            v5_seal_data["manifest"]["serving_schema"] = "cardrag.serving-db.v5"
+            with sqlite3.connect(database_path) as connection:
+                connection.execute("UPDATE metadata SET value='cardrag.serving-db.v5' WHERE key='schema_id'")
+                connection.commit()
+            db_sha, db_size = pipeline_module.sha256_file(database_path)
+            v5_seal_data["database_sha256"] = db_sha
+            v5_seal_data["database_size_bytes"] = db_size
+            v5_seal_data["manifest"]["serving_database"]["sha256"] = db_sha
+            v5_seal_data["manifest"]["serving_database"]["size_bytes"] = db_size
+            validated_v5 = await pipeline._validate_local_seal(v5_seal_data)  # noqa: SLF001
+            assert validated_v5.manifest.schema_version == "cardrag.generation.v5"
+            assert validated_v5.manifest.serving_schema == "cardrag.serving-db.v5"
+
 
 @pytest.mark.asyncio
 async def test_v5_unavailable_fallback_continues_documents_then_blocks_publication(

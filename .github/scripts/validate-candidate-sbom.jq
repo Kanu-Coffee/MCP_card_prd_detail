@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/\($image_repository)"
-  + "@candidate-v1.0.27-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.28-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -24,14 +24,14 @@ def unique_spdx_ids:
 def exact_cardrag_package($name):
   [.predicate.packages[] | select(.name == $name)] as $matches
   | ($matches | length == 1)
-  and $matches[0].versionInfo == "1.0.27"
+  and $matches[0].versionInfo == "1.0.28"
   and $matches[0].licenseDeclared == "Apache-2.0"
   and ([
     $matches[0].externalRefs[]?
     | select(
         .referenceCategory == "PACKAGE-MANAGER"
         and .referenceType == "purl"
-        and .referenceLocator == "pkg:pypi/\($name)@1.0.27"
+        and .referenceLocator == "pkg:pypi/\($name)@1.0.28"
       )
   ] | length == 1);
 
