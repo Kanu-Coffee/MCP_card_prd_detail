@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -13,7 +14,12 @@ import cardrag_mcp.catalog as catalog_module
 import cardrag_mcp.repository as repository_module
 from cardrag_mcp.launch_date import resolve_launch_date_details
 from cardrag_mcp.metadata_cache import MetadataCache
-from cardrag_mcp.models import ProductCoverage, ProductSummaryBatch, ProductSummaryRequest
+from cardrag_mcp.models import (
+    ContractSearchRequest,
+    ProductCoverage,
+    ProductSummaryBatch,
+    ProductSummaryRequest,
+)
 
 
 @pytest.fixture
@@ -76,6 +82,64 @@ def _add_products(fixture, count: int, *, launch: str | None = "2026.08.12") -> 
                 )
 
 
+def _set_source_bound_split_launch_date(fixture) -> None:
+    """Put a Hyundai-style split label/date across the fixture's two leaf parents."""
+
+    label = "카드 이용 시 제공되는 부가서비스는 카드 신규 출시\n"
+    value = "(2024년 1월 19일) 이후 3년 이상 유지됩니다.\n"
+    with sqlite3.connect(fixture.database) as connection:
+        node_ids = dict(
+            connection.execute(
+                "SELECT ordinal,node_id FROM structure_nodes "
+                "WHERE contract_revision_id=? AND ordinal IN (3,5)",
+                (fixture.current_revision_id,),
+            )
+        )
+        connection.execute(
+            "UPDATE document_pages SET text=?,text_sha256=? "
+            "WHERE contract_revision_id=? AND page=1",
+            (
+                label + value,
+                hashlib.sha256((label + value).encode()).hexdigest(),
+                fixture.current_revision_id,
+            ),
+        )
+        for ordinal, text, start in ((3, label, 0), (5, value, len(label))):
+            node_id = str(node_ids[ordinal])
+            connection.execute(
+                "UPDATE structure_nodes SET display_text=? "
+                "WHERE contract_revision_id=? AND node_id=?",
+                (text, fixture.current_revision_id, node_id),
+            )
+            connection.execute(
+                "UPDATE node_spans SET source_start=?,source_end=?,text_sha256=? "
+                "WHERE contract_revision_id=? AND node_id=? AND span_ordinal=0",
+                (
+                    start,
+                    start + len(text),
+                    hashlib.sha256(text.encode()).hexdigest(),
+                    fixture.current_revision_id,
+                    node_id,
+                ),
+            )
+        for row_index, source_start in connection.execute(
+            "SELECT row_index,source_start FROM embedding_view_spans "
+            "WHERE contract_revision_id=? ORDER BY row_index",
+            (fixture.current_revision_id,),
+        ):
+            text, start = (label, 0) if int(source_start) == 0 else (value, len(label))
+            text_sha256 = hashlib.sha256(text.encode()).hexdigest()
+            connection.execute(
+                "UPDATE embedding_views SET display_text=?,input_sha256=? WHERE row_index=?",
+                (text, text_sha256, int(row_index)),
+            )
+            connection.execute(
+                "UPDATE embedding_view_spans SET source_start=?,source_end=?,text_sha256=? "
+                "WHERE row_index=? AND span_ordinal=0",
+                (start, start + len(text), text_sha256, int(row_index)),
+            )
+
+
 @pytest.mark.asyncio
 async def test_exact_past_period_and_multiple_issuer_aliases(v5_runtime) -> None:
     _, repository, fixture = v5_runtime
@@ -88,6 +152,30 @@ async def test_exact_past_period_and_multiple_issuer_aliases(v5_runtime) -> None
     assert page.items[0].launch_date == date(2026, 8, 12)
     assert page.items[0].contract_revision_id == fixture.current_revision_id
     assert page.items[0].launch_date_status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_legacy_v5_repository_resolves_source_bound_split_launch_date(v5_runtime) -> None:
+    _, repository, fixture = v5_runtime
+    _set_source_bound_split_launch_date(fixture)
+
+    catalog = await repository.find_products(mode="catalog", issuer="hyundai")
+    assert catalog.items == ()
+    catalog = await repository.find_products(mode="catalog", issuer="kb")
+    assert len(catalog.items) == 1
+    assert catalog.items[0].launch_date == date(2024, 1, 19)
+    assert catalog.items[0].launch_date_status == "confirmed"
+
+    search = await repository.search_contracts(
+        ContractSearchRequest(
+            query="혜택",
+            launch_start_date=date(2024, 1, 19),
+            launch_end_date=date(2024, 1, 19),
+        )
+    )
+    assert [bundle.contract.contract_revision_id for bundle in search.bundles] == [
+        fixture.current_revision_id
+    ]
 
 
 @pytest.mark.asyncio

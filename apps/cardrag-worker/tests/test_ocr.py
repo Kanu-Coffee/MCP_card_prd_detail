@@ -123,6 +123,11 @@ async def test_full_document_provider_uses_existing_native_artifact_contract(tmp
         assert resolver.contract.processor_version == "cardrag-worker-paddleocr/1.0.0"
         assert resolver.contract.segmentation_strategy_id == "cardrag.ocr.full-document.v1"
         assert resolver.contract.render_scale_milli == 4167
+        # This is the production v1.0.28 cache identity. Launch-date parser and
+        # package-version changes in v1.0.29 must not invalidate sealed OCR.
+        assert resolver.contract.contract_sha256 == (
+            "873a628ea7a4a91d217cebf2fb94489c4bc93fb7055607099a9e7933991c83ed"
+        )
     finally:
         state.close()
 

@@ -49,8 +49,10 @@ disposition을, v4는 검증된 PDF와 실패 상태만 있고 OCR page/evidence
 
 v6의 `contract_revisions.launch_date`와 `launch_date_status`는 해당 revision에서만 추출한
 결과입니다. `derived_field_evidence`는 parser version, 후보 순서, 일치 종류와 정확한
-node/page/source span/hash를 결속합니다. 같은 구조 group 또는 명시적 continuation link 안에서만
-분리된 label·날짜를 결합하고, 2자리 연도나 개정일·시행일·효력일을 출시일로 승격하지 않습니다.
+node/page/source span/hash를 결속합니다. 같은 구조 group 또는 명시적 continuation link 안에서
+분리된 label·날짜를 결합합니다. 구조 parent만 달라진 경우에도 한 페이지에서 source span이
+정확히 맞닿고 앞 span이 출시 label로, 뒤 span이 날짜로 끝·시작할 때만 결합합니다. 2자리 연도나
+개정일·시행일·효력일을 출시일로 승격하지 않습니다.
 MCP가 표시하는 상품 출시일은 이 revision 결과들을 lineage 단위로 합성한 값입니다.
 
 ```text

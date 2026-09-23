@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cardrag_core import canonical_json_bytes, canonical_sha256
+from cardrag_core import LAUNCH_DATE_PARSER_VERSION, canonical_json_bytes, canonical_sha256
 from cardrag_core.embedding import (
     QWEN3_DOCUMENT_POLICY,
     QWEN3_EMBEDDING_DIMENSION,
@@ -21,6 +21,8 @@ from cardrag_core.embedding import (
     QWEN3_QUERY_POLICY,
     qwen3_embedding_profile_id,
 )
+from cardrag_mcp.schema_v5 import ServingDatabaseV5Error as MCPServingDatabaseV5Error
+from cardrag_mcp.schema_v5 import validate_schema_v5
 
 import cardrag_worker.exporter_v5 as exporter_module
 from cardrag_worker.exporter_v5 import (
@@ -174,6 +176,96 @@ def _export(tmp_path: Path) -> tuple[Path, Path, Any]:
     return database, vectors, result
 
 
+def _export_for_reader_validation(tmp_path: Path) -> tuple[Path, Path, Any]:
+    records = _records()
+    lineage = records["product_lineages"][0]
+    lineage_id = "lineage_" + canonical_sha256(
+        {
+            "document_type": lineage.document_type,
+            "issuer": lineage.issuer,
+            "product_code": lineage.product_code,
+        }
+    )
+    source_id = "source_" + "2" * 64
+    revision = records["contract_revisions"][0]
+    revision_id = "revision_" + canonical_sha256(
+        {
+            "pdf_sha256": revision.pdf_sha256,
+            "product_lineage_id": lineage_id,
+            "source_id": source_id,
+        }
+    )
+    records["product_lineages"] = (replace(lineage, product_lineage_id=lineage_id),)
+    records["contract_revisions"] = (
+        replace(
+            revision,
+            contract_revision_id=revision_id,
+            product_lineage_id=lineage_id,
+            document_id="doc_" + "3" * 64,
+            source_id=source_id,
+        ),
+    )
+    records["document_pages"] = tuple(
+        replace(row, contract_revision_id=revision_id) for row in records["document_pages"]
+    )
+    records["structure_nodes"] = tuple(
+        replace(
+            row,
+            contract_revision_id=revision_id,
+            parent_contract_revision_id=(None if row.parent_contract_revision_id is None else revision_id),
+        )
+        for row in records["structure_nodes"]
+    )
+    records["node_spans"] = tuple(
+        replace(row, contract_revision_id=revision_id) for row in records["node_spans"]
+    )
+    records["embedding_views"] = tuple(
+        replace(row, contract_revision_id=revision_id) for row in records["embedding_views"]
+    )
+    records["extra_metadata"] = {
+        "embedding_policy_sha256": "d" * 64,
+        "parser_policy_sha256": "e" * 64,
+        "parser_profile_id.kb": "cardrag.issuer-profile.kb.v1",
+        "parser_profile_sha256.kb": "f" * 64,
+        "retrieval_policy_sha256": "1" * 64,
+    }
+    database = tmp_path / "index.sqlite3"
+    vectors = tmp_path / "vectors.f32"
+    result = ServingDatabaseExporterV5().export(database, vectors, **records)
+    return database, vectors, result
+
+
+@pytest.mark.parametrize(
+    "parser_version",
+    ["cardrag.launch-date.v2", LAUNCH_DATE_PARSER_VERSION],
+)
+def test_v6_reader_accepts_supported_launch_date_parser_versions(tmp_path: Path, parser_version: str) -> None:
+    database, _vectors, _result = _export_for_reader_validation(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='launch_date_parser_version'",
+            (parser_version,),
+        )
+        connection.commit()
+        assert validate_schema_v5(connection).schema_id == "cardrag.serving-db.v6"
+
+
+@pytest.mark.parametrize("parser_version", ["cardrag.launch-date.v4", "unknown"])
+def test_v6_reader_rejects_unknown_launch_date_parser_versions(tmp_path: Path, parser_version: str) -> None:
+    database, _vectors, _result = _export_for_reader_validation(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='launch_date_parser_version'",
+            (parser_version,),
+        )
+        connection.commit()
+        with pytest.raises(
+            MCPServingDatabaseV5Error,
+            match="launch-date parser version is missing or unsupported",
+        ):
+            validate_schema_v5(connection)
+
+
 def test_v5_export_writes_bound_database_and_little_endian_sidecar(tmp_path: Path) -> None:
     database, vectors, result = _export(tmp_path)
     assert result.database_path == database
@@ -195,7 +287,7 @@ def test_v5_export_writes_bound_database_and_little_endian_sidecar(tmp_path: Pat
     try:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
         assert metadata["schema_id"] == SERVING_SCHEMA_ID_V5
-        assert metadata["launch_date_parser_version"] == "cardrag.launch-date.v2"
+        assert metadata["launch_date_parser_version"] == LAUNCH_DATE_PARSER_VERSION
         assert metadata["derived_field_evidence_count"] == "0"
         assert metadata["embedding_dimension"] == "4096"
         assert metadata["embedding_count"] == "1"

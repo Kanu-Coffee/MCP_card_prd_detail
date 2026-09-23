@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 from cardrag_core import (
+    LAUNCH_DATE_PARSER_VERSION,
     ArtifactRef,
     DocumentAggregationBootstrap,
     DocumentAggregationProfile,
@@ -1214,7 +1215,7 @@ async def test_v5_pipeline_seals_publishes_resumes_and_reuses_profile_cache(
         with sqlite3.connect(f"{local_database.as_uri()}?mode=ro&immutable=1", uri=True) as connection:
             metadata = dict(connection.execute("SELECT key,value FROM metadata"))
             assert metadata["schema_id"] == "cardrag.serving-db.v6"
-            assert metadata["launch_date_parser_version"] == "cardrag.launch-date.v2"
+            assert metadata["launch_date_parser_version"] == LAUNCH_DATE_PARSER_VERSION
             assert metadata["derived_field_evidence_count"] == "0"
             assert metadata["embedding_dimension"] == "4096"
             assert metadata["vector_sidecar_sha256"] == manifest.vector_sidecar.artifact.sha256

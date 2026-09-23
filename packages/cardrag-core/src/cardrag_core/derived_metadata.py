@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
-LAUNCH_DATE_PARSER_VERSION = "cardrag.launch-date.v2"
+LAUNCH_DATE_PARSER_VERSION = "cardrag.launch-date.v3"
 
 LaunchDateStatus = Literal["confirmed", "missing", "invalid", "conflicting"]
 LaunchDateMatchKind = Literal["explicit_label", "date_before_launch"]
@@ -58,6 +58,8 @@ _LABEL_PATTERN = re.compile(_LABEL + r"[\s:：()\[\]{}\-–—•·|]*" + _DATE)
 _BEFORE_PATTERN = re.compile(r"(?<![0-9A-Za-z가-힣])" + _DATE + r"\s*(?:신규\s*)?출시")
 _NEGATIVE_DATE_LABEL = re.compile(r"(?:개정|시행|효력|약관\s*변경|서비스\s*시작)\s*일자?\s*[:：]?\s*$")
 _TWO_DIGIT_EXPLICIT = re.compile(_LABEL + r"[\s:：()\[\]{}\-–—•·|]*[’'`]?[0-9]{2}[.\-/]")
+_SPLIT_LABEL_END = re.compile(_LABEL + r"[\s:：()\[\]{}\-–—•·|]*$")
+_SPLIT_DATE_START = re.compile(r"^[\s:：()\[\]{}\-–—•·|]*" + _DATE)
 
 
 def _normalized(value: str) -> str:
@@ -78,7 +80,26 @@ def _candidate(match: re.Match[str]) -> date | None:
 def _can_join(left: DerivedTextSegment, right: DerivedTextSegment) -> bool:
     if left.group_id is not None and left.group_id == right.group_id:
         return True
-    return right.continuation_from_previous
+    if right.continuation_from_previous:
+        return True
+
+    # Some issuer PDFs put the launch label at the end of one visual block and
+    # its parenthesized value at the start of the next.  The structure parser
+    # intentionally keeps those blocks under different parents, so use a
+    # lexical continuation only for this exact label -> date boundary.  This
+    # remains narrower than joining arbitrary adjacent structure nodes.  The
+    # source coordinates must also prove the blocks are contiguous on one page
+    # so a footer label cannot absorb a date from the following page/section.
+    if (
+        left.page is None
+        or right.page != left.page
+        or left.source_end is None
+        or right.source_start != left.source_end
+    ):
+        return False
+    left_text = _normalized(left.text).strip()
+    right_text = _normalized(right.text).strip()
+    return bool(_SPLIT_LABEL_END.search(left_text) and _SPLIT_DATE_START.search(right_text))
 
 
 def _windows(segments: Sequence[DerivedTextSegment]) -> Iterable[tuple[DerivedTextSegment, ...]]:

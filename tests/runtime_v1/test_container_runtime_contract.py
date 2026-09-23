@@ -34,15 +34,15 @@ def test_runtime_sources_and_build_tool_are_digest_pinned() -> None:
         "f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332"
     ) in DOCKERFILE
     assert (
-        "ARG PADDLE_PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:"
-        "2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26"
+        "ARG WOLFI_BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:"
+        "1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d"
     ) in DOCKERFILE
     assert (
         "ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:"
         "e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1"
     ) in DOCKERFILE
     assert "FROM ${PYTHON_DEV_IMAGE} AS source" in DOCKERFILE
-    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker" in DOCKERFILE
+    assert "FROM ${WOLFI_BASE_IMAGE} AS worker" in DOCKERFILE
     assert "FROM ${PYTHON_RUNTIME_IMAGE} AS runtime" in DOCKERFILE
     assert 'test "$(uv --version)" = "uv 0.8.17"' in _stage("source")
     assert "UV_PYTHON=3.14" in _stage("source")
@@ -58,11 +58,13 @@ def test_optional_paddle_worker_is_pinned_nonroot_and_has_persistent_model_cache
     worker_build = _stage("worker-build")
     worker = _stage("worker")
 
-    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker-build" in worker_build
-    assert "UV_PYTHON=3.13" in worker_build
+    assert "FROM ${WOLFI_BASE_IMAGE} AS worker-build" in worker_build
+    assert "UV_PYTHON=/usr/bin/python3.13" in worker_build
     assert "--extra paddleocr" in worker_build
-    assert "FROM ${PADDLE_PYTHON_IMAGE} AS worker" in worker
-    assert "useradd --uid 10001 --gid 10001" in worker
+    assert "python-3.13-dev" in worker_build
+    assert "FROM ${WOLFI_BASE_IMAGE} AS worker" in worker
+    assert "COPY --from=worker-build /usr/local /usr/local" not in worker
+    assert "adduser -S -D -H -u 10001" in worker
     assert "USER 10001:10001" in worker
     assert "PADDLE_PDX_CACHE_HOME=/var/lib/cardrag-paddle" in worker
     assert (
@@ -100,12 +102,12 @@ def test_mcp_final_is_minimal_nonroot_and_has_no_run_instruction() -> None:
 def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     worker = _stage("worker")
 
-    assert "useradd --uid 10001 --gid 10001" in worker
+    assert "adduser -S -D -H -u 10001" in worker
     assert "/var/lib/cardrag-codex-home/home" in worker
     assert "chown -R 10001:10001 /var/lib/cardrag-worker" in worker
     assert "chmod 0700 /var/lib/cardrag-worker /var/lib/cardrag-codex-home" in worker
     assert "bubblewrap" in worker
-    assert "libcap2-bin" in worker
+    assert "libcap-utils" in worker
     assert "--ignore-unfixed" not in DOCKERFILE
     assert "ARG CODEX_VERSION=0.151.0" in DOCKERFILE
     assert ("ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6") in DOCKERFILE

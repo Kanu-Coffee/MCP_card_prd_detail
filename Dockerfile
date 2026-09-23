@@ -2,7 +2,7 @@
 
 ARG PYTHON_DEV_IMAGE=cgr.dev/chainguard/python:latest-dev@sha256:4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2
 ARG PYTHON_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest@sha256:f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332
-ARG PADDLE_PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+ARG WOLFI_BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1
 ARG CODEX_VERSION=0.151.0
 ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6
@@ -33,16 +33,19 @@ RUN test "$(uv --version)" = "uv 0.8.17" && \
     python -c 'import sys; assert sys.version_info[:2] == (3, 14)'
 
 
-FROM ${PADDLE_PYTHON_IMAGE} AS worker-build
+FROM ${WOLFI_BASE_IMAGE} AS worker-build
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON=3.13 \
+    UV_PYTHON=/usr/bin/python3.13 \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/opt/cardrag
 WORKDIR /workspace
+# The repository snapshot is bound by the digest-pinned Wolfi base image.
+# hadolint ignore=DL3018
+RUN apk add --no-cache python-3.13 python-3.13-dev
 COPY --from=uv /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock README.md ./
 COPY packages/cardrag-core ./packages/cardrag-core
@@ -96,7 +99,9 @@ WORKDIR /app
 USER 10001:10001
 
 
-FROM ${PADDLE_PYTHON_IMAGE} AS worker
+# Keep the Python 3.13 Paddle runtime on the rolling Wolfi security stream.
+# The final stage installs only runtime packages; build headers stay behind.
+FROM ${WOLFI_BASE_IMAGE} AS worker
 ARG CODEX_VERSION
 ARG CODEX_SHA256
 ARG APP_VERSION=dev
@@ -120,22 +125,22 @@ ENV PATH="/opt/cardrag/bin:${PATH}" \
     MODELSCOPE_CACHE=/var/lib/cardrag-paddle/modelscope \
     PADDLE_PDX_CACHE_HOME=/var/lib/cardrag-paddle
 
-# Debian security revisions move independently of the digest-pinned base;
-# package names are limited to runtime libraries and the apt index is removed.
-# hadolint ignore=DL3008
-RUN apt-get update && \
-    apt-get install --yes --no-install-recommends \
+# The repository snapshot is bound by the digest-pinned Wolfi base image.
+# hadolint ignore=DL3018
+RUN apk add --no-cache \
       bubblewrap \
       ca-certificates \
-      libcap2-bin \
-      libgl1 \
-      libglib2.0-0 \
-      libgomp1 && \
-    rm -rf /var/lib/apt/lists/* && \
-    groupadd --gid 10001 cardrag && \
-    useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent \
-      --shell /usr/sbin/nologin cardrag && \
-    mkdir -p /usr/share/doc/cardrag /var/lib/cardrag-worker \
+      glib \
+      libcap-utils \
+      libgomp \
+      libstdc++ \
+      mesa-gl \
+      python-3.13 \
+      tzdata && \
+    addgroup -S -g 10001 cardrag && \
+    adduser -S -D -H -u 10001 -G cardrag -h /nonexistent \
+      -s /sbin/nologin cardrag && \
+    mkdir -p /usr/local/bin /usr/share/doc/cardrag /var/lib/cardrag-worker \
       /var/lib/cardrag-codex-home/home /var/lib/cardrag-paddle/home \
       /var/lib/cardrag-paddle/xdg-cache /var/lib/cardrag-paddle/huggingface \
       /var/lib/cardrag-paddle/modelscope && \

@@ -476,6 +476,28 @@ def test_v5_promotion_rejects_temporal_policy_table_and_view_provenance_tamper(
         )
 
 
+def test_v5_promotion_accepts_backdated_superseding_revision(tmp_path: Path) -> None:
+    fixture = build_v5_fixture(
+        tmp_path / "gen-v5-backdated-supersession",
+        generation_id="gen-v5-backdated-supersession",
+    )
+    with sqlite3.connect(fixture.database) as connection:
+        connection.execute(
+            "UPDATE contract_revisions SET effective_date='2023-01-01' "
+            "WHERE contract_revision_id=?",
+            (fixture.current_revision_id,),
+        )
+        connection.commit()
+
+    handle = load_generation_handle(
+        fixture.database.parent,
+        tmp_path / "objects",
+        maximum_vector_bytes=2 * 1024 * 1024,
+    )
+
+    assert handle.generation_id == fixture.generation_id
+
+
 @pytest.mark.asyncio
 async def test_exact_search_scores_every_active_view_in_blocks_without_rank_fusion(
     v5_runtime: tuple[GenerationStore, ServingRepository, FakeEmbedder, V5Fixture],
@@ -611,6 +633,55 @@ async def test_as_of_equal_latest_revision_dates_fail_before_provider_call(
 
     assert embedder.calls == []
     assert embedder.profile_calls == []
+
+
+@pytest.mark.asyncio
+async def test_as_of_backdated_successor_uses_supersession_order(tmp_path: Path) -> None:
+    store = GenerationStore(tmp_path / "state", maximum_vector_bytes=2 * 1024 * 1024)
+    fixture = build_v5_fixture(
+        store.generations / "gen-v5-as-of-backdated-successor",
+        generation_id="gen-v5-as-of-backdated-successor",
+    )
+    with sqlite3.connect(fixture.database) as connection:
+        connection.execute(
+            "UPDATE contract_revisions SET effective_date='2023-01-01' "
+            "WHERE contract_revision_id=?",
+            (fixture.current_revision_id,),
+        )
+        connection.commit()
+    for digest, body in fixture.pdf_objects:
+        destination = cas_path(store.objects, digest)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(body)
+    handle = load_generation_handle(
+        fixture.database.parent,
+        store.objects,
+        maximum_vector_bytes=store.maximum_vector_bytes,
+        maximum_vector_sidecar_bytes=store.maximum_vector_sidecar_bytes,
+        maximum_resident_vector_bytes=store.maximum_resident_vector_bytes,
+        expected_generation_id=fixture.generation_id,
+        expected_embedding_model="qwen/qwen3-embedding-8b",
+        expected_embedding_count=fixture.vector_count,
+    )
+    store.verify_handle_pdfs(handle)
+    store.activate(handle)
+    query = np.zeros((4096,), dtype=np.float32)
+    query[0] = 1.0
+    repository = ServingRepository(
+        store,
+        FakeEmbedder(query),
+        cursor_secret=b"as-of-backdated-test-cursor-secret",
+        maximum_candidates=20,
+    )
+
+    result = await repository.search_contracts(
+        ContractSearchRequest(query="혜택", as_of=date(2025, 1, 1))
+    )
+
+    assert {bundle.contract.contract_revision_id for bundle in result.bundles} == {
+        fixture.current_revision_id,
+        fixture.ambiguous_revision_id,
+    }
 
 
 @pytest.mark.asyncio

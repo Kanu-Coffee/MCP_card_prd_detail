@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/\($image_repository)"
-  + "@candidate-v1.0.28-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.29-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -19,7 +19,7 @@ def exact_subject:
 
 def expected_build_args:
   {
-    "build-arg:APP_VERSION": "1.0.28",
+    "build-arg:APP_VERSION": "1.0.29",
     "build-arg:SOURCE_URL": "https://github.com/\($source_repository)",
     "build-arg:CODEX_SHA256":
       "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
@@ -28,6 +28,8 @@ def expected_build_args:
       "cgr.dev/chainguard/python:latest-dev@sha256:4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2",
     "build-arg:PYTHON_RUNTIME_IMAGE":
       "cgr.dev/chainguard/python:latest@sha256:f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332",
+    "build-arg:WOLFI_BASE_IMAGE":
+      "cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d",
     "build-arg:UV_IMAGE":
       "ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1",
     "build-arg:VCS_REF": $source_commit

@@ -17,6 +17,7 @@ from typing import Literal, cast
 
 import numpy as np
 from cardrag_core import (
+    LAUNCH_DATE_PARSER_VERSION,
     canonical_sha256,
     qwen3_embedding_profile_id,
     v5_exact_row_corpus_sha256,
@@ -60,6 +61,9 @@ _CONTAINER_TYPES = _NODE_TYPES - _CANONICAL_LEAF_TYPES
 _LINK_TYPES = frozenset({"CONTINUATION_OF", "FOOTNOTE_OF", "APPLIES_TO", "PREVIOUS", "NEXT"})
 _UNSUPPORTED_DOCUMENTS_SCHEMA = "cardrag.unsupported-documents.v1"
 _OCR_FAILED_DOCUMENTS_SCHEMA = "cardrag.ocr-failed-products.v1"
+_SUPPORTED_LAUNCH_DATE_PARSER_VERSIONS = frozenset(
+    {"cardrag.launch-date.v2", LAUNCH_DATE_PARSER_VERSION}
+)
 _SOURCE_FIELDS = frozenset(
     {
         "category",
@@ -711,16 +715,14 @@ def _validate_structure(connection: sqlite3.Connection, values: Mapping[str, str
         revisions[revision_id] = (lineage_id, effective_date, supersedes, temporal_status)
         statuses_by_lineage[lineage_id].append(temporal_status)
 
-    for revision_id, (lineage_id, effective_date, supersedes, _status) in revisions.items():
+    for revision_id, (lineage_id, _effective_date, supersedes, _status) in revisions.items():
         if supersedes is None:
             continue
         predecessor = revisions.get(supersedes)
-        if (
-            predecessor is None
-            or predecessor[0] != lineage_id
-            or predecessor[1] > effective_date
-            or supersedes == revision_id
-        ):
+        # Supersession records the upstream observation sequence. Issuers may
+        # later correct an effective date backwards without reverting that
+        # sequence, so date monotonicity is not a lineage invariant.
+        if predecessor is None or predecessor[0] != lineage_id or supersedes == revision_id:
             raise ServingDatabaseV5Error("revision supersedes relation is invalid")
         seen = {revision_id}
         current: str | None = supersedes
@@ -1115,7 +1117,7 @@ def _validate_v6_launch_dates(
     connection: sqlite3.Connection,
     values: Mapping[str, str],
 ) -> None:
-    if values.get("launch_date_parser_version") != "cardrag.launch-date.v2":
+    if values.get("launch_date_parser_version") not in _SUPPORTED_LAUNCH_DATE_PARSER_VERSIONS:
         raise ServingDatabaseV5Error("v6 launch-date parser version is missing or unsupported")
     evidence_count = int(
         connection.execute("SELECT count(*) FROM derived_field_evidence").fetchone()[0]

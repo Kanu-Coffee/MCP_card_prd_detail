@@ -16,6 +16,7 @@ from datetime import date, datetime
 from typing import Literal, cast
 
 import numpy as np
+from cardrag_core import resolve_launch_date_segments
 from numpy.typing import NDArray
 
 from cardrag_mcp.aggregation import aggregate_document_view_scores, exhaustive_profile_id
@@ -29,6 +30,7 @@ from cardrag_mcp.audit import (
     ExpectedContract,
     LoadedAudit,
 )
+from cardrag_mcp.catalog import legacy_revision_segments
 from cardrag_mcp.compact import clause_group, seal_compact_page
 from cardrag_mcp.embeddings import OpenRouterEmbedder
 from cardrag_mcp.launch_date import PARSER_VERSION, resolve_launch_date_details
@@ -687,20 +689,24 @@ class V5ExactRepository:
                 missing.append(revision)
         for start in range(0, len(missing), 500):
             batch = missing[start : start + 500]
-            texts: dict[str, list[str]] = defaultdict(list)
-            placeholders = ",".join("?" for _ in batch)
             with handle.connect() as connection:
-                rows = connection.execute(
-                    "SELECT contract_revision_id,display_text FROM structure_nodes "  # noqa: S608
-                    f"WHERE contract_revision_id IN ({placeholders}) "
-                    "AND instr(display_text,'출시')>0 ORDER BY contract_revision_id,ordinal",
-                    tuple(revision.contract_revision_id for revision in batch),
+                segments_by_revision = legacy_revision_segments(
+                    connection,
+                    [revision.contract_revision_id for revision in batch],
                 )
-                for row in rows:
-                    texts[str(row[0])].append(str(row[1]))
             for revision in batch:
-                details = resolve_launch_date_details(texts.get(revision.contract_revision_id, ()))
-                values[revision.contract_revision_id] = details.launch_date
+                segments = segments_by_revision[revision.contract_revision_id]
+                if any(segment.page is not None for segment in segments):
+                    resolution = resolve_launch_date_segments(tuple(segments))
+                    launch_date = resolution.launch_date
+                    status = resolution.status
+                    evidence = [item.excerpt for item in resolution.evidence]
+                else:
+                    details = resolve_launch_date_details(segment.text for segment in segments)
+                    launch_date = details.launch_date
+                    status = details.status
+                    evidence = list(details.evidence)
+                values[revision.contract_revision_id] = launch_date
                 self.metadata_cache.set(
                     (
                         handle.generation_id,
@@ -710,11 +716,9 @@ class V5ExactRepository:
                         PARSER_VERSION,
                     ),
                     {
-                        "launch_date": None
-                        if details.launch_date is None
-                        else details.launch_date.isoformat(),
-                        "status": details.status,
-                        "evidence": list(details.evidence),
+                        "launch_date": None if launch_date is None else launch_date.isoformat(),
+                        "status": status,
+                        "evidence": evidence,
                     },
                 )
         return tuple(
@@ -1377,6 +1381,17 @@ class V5ExactRepository:
                 for item in summaries
                 if item.effective_date is not None and item.effective_date <= request.as_of
             ]
+            summaries_by_id = {item.contract_revision_id: item for item in summaries}
+            non_monotonic_lineages = {
+                item.product_lineage_id
+                for item in summaries
+                if item.supersedes_revision_id is not None
+                and item.effective_date is not None
+                and (predecessor := summaries_by_id.get(item.supersedes_revision_id)) is not None
+                and predecessor.product_lineage_id == item.product_lineage_id
+                and predecessor.effective_date is not None
+                and predecessor.effective_date > item.effective_date
+            }
             latest_by_lineage: dict[str, date] = {}
             for item in eligible:
                 effective_date = item.effective_date
@@ -1386,10 +1401,27 @@ class V5ExactRepository:
                     latest_by_lineage.get(item.product_lineage_id, effective_date),
                     effective_date,
                 )
+            superseded_eligible_ids = {
+                item.supersedes_revision_id
+                for item in eligible
+                if item.product_lineage_id in non_monotonic_lineages
+                and item.supersedes_revision_id is not None
+            }
+            # Preserve the historical max-date rule for ordinary lineages.
+            # When an issuer backdates a successor, effective-date ordering no
+            # longer identifies the active revision; the terminal eligible
+            # node in the sealed supersession graph does.
             selected = ambiguous + [
                 item
                 for item in eligible
-                if item.effective_date == latest_by_lineage[item.product_lineage_id]
+                if (
+                    item.product_lineage_id in non_monotonic_lineages
+                    and item.contract_revision_id not in superseded_eligible_ids
+                )
+                or (
+                    item.product_lineage_id not in non_monotonic_lineages
+                    and item.effective_date == latest_by_lineage[item.product_lineage_id]
+                )
             ]
             selected_by_lineage: defaultdict[str, list[ContractRevisionSummary]] = defaultdict(list)
             for item in selected:

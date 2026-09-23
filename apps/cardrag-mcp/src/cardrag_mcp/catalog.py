@@ -84,6 +84,65 @@ def _rows(connection: sqlite3.Connection, scope: tuple[str, ...] | None) -> list
     ).fetchall()
 
 
+def legacy_revision_segments(
+    connection: sqlite3.Connection,
+    revision_ids: list[str],
+) -> dict[str, list[DerivedTextSegment]]:
+    """Load source-bound leaf segments for legacy v5 launch-date derivation."""
+
+    per_revision: dict[str, list[DerivedTextSegment]] = {
+        revision_id: [] for revision_id in revision_ids
+    }
+    if not revision_ids:
+        return per_revision
+    placeholders = ",".join("?" for _ in revision_ids)
+    continuations = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            "SELECT from_contract_revision_id,from_node_id FROM node_links "  # noqa: S608
+            "WHERE from_contract_revision_id IN ("
+            + placeholders
+            + ") AND link_type='CONTINUATION_OF'",
+            revision_ids,
+        )
+    }
+    spans_by_node: dict[tuple[str, str], list[tuple[int, int, int, str]]] = {}
+    for row in connection.execute(
+        "SELECT contract_revision_id,node_id,page,source_start,source_end,text_sha256 "  # noqa: S608
+        "FROM node_spans WHERE contract_revision_id IN ("
+        + placeholders
+        + ") ORDER BY contract_revision_id,node_id,span_ordinal",
+        revision_ids,
+    ):
+        spans_by_node.setdefault((str(row[0]), str(row[1])), []).append(
+            (int(row[2]), int(row[3]), int(row[4]), str(row[5]))
+        )
+    for row in connection.execute(
+        "SELECT contract_revision_id,node_id,parent_id,display_text FROM structure_nodes "  # noqa: S608
+        "WHERE contract_revision_id IN ("
+        + placeholders
+        + ") AND node_type IN ('PARAGRAPH','LIST_ITEM','TABLE_ROW','FOOTNOTE','UNCLASSIFIED') "
+        "ORDER BY contract_revision_id,ordinal",
+        revision_ids,
+    ):
+        revision_id, node_id = str(row[0]), str(row[1])
+        spans = spans_by_node.get((revision_id, node_id), [])
+        same_page = bool(spans) and all(span[0] == spans[0][0] for span in spans)
+        per_revision[revision_id].append(
+            DerivedTextSegment(
+                text=str(row[3]),
+                node_id=node_id,
+                page=spans[0][0] if same_page else None,
+                source_start=spans[0][1] if same_page else None,
+                source_end=spans[-1][2] if same_page else None,
+                text_sha256=spans[0][3] if spans else None,
+                group_id=str(row[2]) if row[2] is not None else node_id,
+                continuation_from_previous=(revision_id, node_id) in continuations,
+            )
+        )
+    return per_revision
+
+
 def revision_resolutions(
     connection: sqlite3.Connection,
     generation_id: str,
@@ -181,38 +240,7 @@ def revision_resolutions(
         for revision_id in revision_ids
         if revision_to_lineage[revision_id] in missing_lineages
     ]
-    per_revision: dict[str, list[DerivedTextSegment]] = {
-        revision_id: [] for revision_id in wanted_revisions
-    }
-    if wanted_revisions:
-        revision_placeholders = ",".join("?" for _ in wanted_revisions)
-        continuations = {
-            (str(row[0]), str(row[1]))
-            for row in connection.execute(
-                "SELECT from_contract_revision_id,from_node_id FROM node_links "  # noqa: S608
-                "WHERE from_contract_revision_id IN ("
-                + revision_placeholders
-                + ") AND link_type='CONTINUATION_OF'",
-                wanted_revisions,
-            )
-        }
-        for row in connection.execute(
-            "SELECT contract_revision_id,node_id,parent_id,display_text FROM structure_nodes "  # noqa: S608
-            "WHERE contract_revision_id IN ("
-            + revision_placeholders
-            + ") AND node_type IN ('PARAGRAPH','LIST_ITEM','TABLE_ROW','FOOTNOTE','UNCLASSIFIED') "
-            "ORDER BY contract_revision_id,ordinal",
-            wanted_revisions,
-        ):
-            revision_id, node_id = str(row[0]), str(row[1])
-            per_revision[revision_id].append(
-                DerivedTextSegment(
-                    text=str(row[3]),
-                    node_id=node_id,
-                    group_id=str(row[2]) if row[2] is not None else node_id,
-                    continuation_from_previous=(revision_id, node_id) in continuations,
-                )
-            )
+    per_revision = legacy_revision_segments(connection, wanted_revisions)
     core_by_lineage: dict[str, list[CoreLaunchDateResolution]] = {
         lineage_id: [] for lineage_id in missing_lineages
     }

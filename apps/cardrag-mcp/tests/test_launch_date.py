@@ -3,8 +3,13 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+from cardrag_core import LAUNCH_DATE_PARSER_VERSION
 
-from cardrag_mcp.launch_date import parse_launch_date, resolve_launch_date
+from cardrag_mcp.launch_date import PARSER_VERSION, parse_launch_date, resolve_launch_date
+
+
+def test_launch_date_parser_version_tracks_core_semantics() -> None:
+    assert PARSER_VERSION == LAUNCH_DATE_PARSER_VERSION == "cardrag.launch-date.v3"
 
 
 @pytest.mark.parametrize(

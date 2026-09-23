@@ -100,6 +100,8 @@ search_contracts(query="연회비, 전월 실적과 적립 제외 조건",
 함께 지정하면 확정 출시일로 대상을 먼저 제한하고 점수를 계산합니다.
 `as_of`와 `include_history`는 계약 개정의 시점·이력 선택입니다. 두 인자는 서로
 배타적이며, 출시일 기간 필터와 함께 지정할 수도 없습니다.
+발행사가 후속 revision의 효력일을 과거로 정정한 lineage는 날짜 최댓값 대신 sealed
+supersession graph에서 해당 시점에 유효한 terminal revision을 선택합니다.
 
 ## 응답 크기와 근거
 
