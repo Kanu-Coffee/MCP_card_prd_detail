@@ -132,6 +132,10 @@ def expected_materials:
     }
   ] + if $role == "worker" then [
     {
+      "uri": "pkg:docker/cgr.dev/chainguard/wolfi-base@latest?digest=sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d&platform=linux%2Famd64",
+      "digest": {"sha256": "1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d"}
+    },
+    {
       "uri": "https://github.com/openai/codex/releases/download/rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
       "digest": {"sha256": "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"}
     }

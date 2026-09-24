@@ -139,6 +139,15 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
     if role == "worker":
         materials.append(
             _material(
+                "pkg:docker/cgr.dev/chainguard/wolfi-base@latest?digest=sha256:"
+                "1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d"
+                "&platform=linux%2Famd64",
+                "sha256",
+                "1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d",
+            )
+        )
+        materials.append(
+            _material(
                 "https://github.com/openai/codex/releases/download/"
                 "rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
                 "sha256",
@@ -547,6 +556,13 @@ def test_provenance_policy_rejects_unsealed_source_frontend_args_and_materials()
         )
     ]
     mutations.append(missing_platform_frontend_material)
+    missing_worker_wolfi_material = _provenance()
+    missing_worker_wolfi_material["predicate"]["materials"] = [
+        material
+        for material in missing_worker_wolfi_material["predicate"]["materials"]
+        if not material["uri"].startswith("pkg:docker/cgr.dev/chainguard/wolfi-base@")
+    ]
+    mutations.append(missing_worker_wolfi_material)
     extra_git_secret = _provenance()
     extra_git_secret["predicate"]["invocation"]["parameters"]["secrets"].append(
         {"id": "DEPLOY_TOKEN", "optional": True}

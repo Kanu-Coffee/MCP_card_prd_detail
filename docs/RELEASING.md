@@ -62,7 +62,8 @@ fallback을 제거합니다. `CARDRAG_CANDIDATE_IMAGE_REPOSITORY`로 사용할 G
 
 후보 빌드는 로컬 작업 디렉터리 대신 `https://github.com/<owner>/<repo>.git#<commit>`의
 정확한 Git context를 사용합니다. `linux/amd64`, 대상 `worker` 또는 `mcp`, SBOM과
-`mode=max,version=v0.2` provenance가 필요합니다. 검증 계약은 BuildKit 0.32.2와 Syft 1.51.0 및
+`--attest type=provenance,mode=max,version=v0.2` provenance가 필요합니다. `--provenance`
+축약형의 기본 schema version에 의존하지 마십시오. 검증 계약은 BuildKit 0.32.2와 Syft 1.51.0 및
 고정한 `docker/buildkit-syft-scanner` digest를 요구합니다. Scanner digest와
 OCI index·linux/amd64 image·별도 attestation manifest 형식도 아래 검증기를 따릅니다. Tag는
 `candidate-v1.0.29-<role>-<40자리 commit>` 형식을 사용합니다.
