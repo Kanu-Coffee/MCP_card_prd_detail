@@ -107,10 +107,6 @@ def exact_git_source_without_secret_mounts:
 def expected_materials:
   ([
     {
-      "uri": "pkg:docker/cgr.dev/chainguard/python@latest-dev?digest=sha256:4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2&platform=linux%2Famd64",
-      "digest": {"sha256": "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2"}
-    },
-    {
       "uri": "pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9",
       "digest": {"sha256": "ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9"}
     },
@@ -140,6 +136,10 @@ def expected_materials:
       "digest": {"sha256": "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"}
     }
   ] elif $role == "mcp" then [
+    {
+      "uri": "pkg:docker/cgr.dev/chainguard/python@latest-dev?digest=sha256:4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2&platform=linux%2Famd64",
+      "digest": {"sha256": "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2"}
+    },
     {
       "uri": "pkg:docker/cgr.dev/chainguard/python@latest?digest=sha256:f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332&platform=linux%2Famd64",
       "digest": {"sha256": "f47d995d001c1f949d560b1158d7f3ae556aad75a1044e72a125c900c1f05332"}

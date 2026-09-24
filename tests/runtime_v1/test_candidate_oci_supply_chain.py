@@ -123,13 +123,6 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
             "e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1",
         ),
         _material(
-            "pkg:docker/cgr.dev/chainguard/python@latest-dev?digest=sha256:"
-            "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2"
-            "&platform=linux%2Famd64",
-            "sha256",
-            "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2",
-        ),
-        _material(
             "pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:"
             "ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9",
             "sha256",
@@ -155,6 +148,15 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
             )
         )
     else:
+        materials.append(
+            _material(
+                "pkg:docker/cgr.dev/chainguard/python@latest-dev?digest=sha256:"
+                "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2"
+                "&platform=linux%2Famd64",
+                "sha256",
+                "4e2adecf67a1d18773c55b5526b47436392b9816ae6b8d92575979a2ab9de8b2",
+            )
+        )
         materials.append(
             _material(
                 "pkg:docker/cgr.dev/chainguard/python@latest?digest=sha256:"
