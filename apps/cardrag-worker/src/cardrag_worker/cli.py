@@ -47,6 +47,7 @@ from .capacity_v5 import (
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
 )
+from .corpus_diff import CorpusDiffError
 from .embedding_v5 import (
     OpenRouterQwenEmbeddingProviderV5,
     preflight_openrouter_qwen_providers,
@@ -67,6 +68,11 @@ from .pipeline import (
 from .providers import OCRProvider, PaddleOCRVLProvider, make_ocr_provider
 from .settings import PublicationResumeSettings, WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
+from .state_seed_v122 import (
+    StateSeedError,
+    apply_state_seed_v122,
+    build_state_seed_v122_plan,
+)
 from .tokenizer_v5 import ensure_qwen_tokenizer
 from .webdav import WebDAVClient
 
@@ -176,6 +182,20 @@ def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = N
             payload["status_code"] = exc.failure.status_code
         if exc.failure.errno is not None:
             payload["errno"] = exc.failure.errno
+    _echo(payload)
+
+
+def _echo_corpus_diff_error(exc: CorpusDiffError) -> None:
+    payload: dict[str, Any] = {
+        "missing_count": exc.missing_count,
+        "reason": f"Corpus diff check failed: {exc.missing_count} seed documents disappeared without justification.",
+        "reason_code": exc.reason_code,
+        "report": exc.report,
+        "run_id": exc.run_id,
+        "status": "failed",
+    }
+    if exc.sample:
+        payload["sample"] = list(exc.sample)
     _echo(payload)
 
 
@@ -434,6 +454,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 retained_incomplete_runs=settings.retained_incomplete_runs,
                 garbage_grace_days=settings.garbage_grace_days,
                 pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
+                pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
                 document_aggregation=document_aggregation,
                 capacity_policy_v5=V5CapacityPolicy(
                     maximum_state_bytes=settings.maximum_state_bytes,
@@ -573,6 +594,9 @@ def run_command(
     except OCRSystemicFailureError as exc:
         _echo_ocr_systemic_failure(exc)
         raise typer.Exit(code=1) from None
+    except CorpusDiffError as exc:
+        _echo_corpus_diff_error(exc)
+        raise typer.Exit(code=1) from None
     except AlreadyRunning:
         _echo_worker_busy()
     except WorkerUnexpectedFailureError as exc:
@@ -631,6 +655,9 @@ def resume_command(run_id: str = typer.Argument(..., help="Failed finite run ID.
         raise typer.Exit(code=1) from None
     except OCRSystemicFailureError as exc:
         _echo_ocr_systemic_failure(exc)
+        raise typer.Exit(code=1) from None
+    except CorpusDiffError as exc:
+        _echo_corpus_diff_error(exc)
         raise typer.Exit(code=1) from None
     except AlreadyRunning:
         _echo_worker_busy()
@@ -857,6 +884,95 @@ def seed_cache_v109_command(
                 "dry_run": not apply,
                 "reason_code": exc.code,
                 "schema_version": "cardrag.cache-seed-v109-report.v1",
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=1) from None
+
+
+def _seed_v122_state(
+    source_state_root: Path,
+    generation_id: str,
+    *,
+    apply: bool,
+    expected_documents: int | None = None,
+) -> dict[str, Any]:
+    plan = build_state_seed_v122_plan(
+        source_state_root,
+        generation_id=generation_id,
+        expected_documents=expected_documents,
+    )
+    if not apply:
+        return plan.report(applied=False)
+    settings = WorkerSettings.from_env()
+    if settings.channel != "candidate-v1.0.11":
+        raise StateSeedError("candidate_channel_required")
+    if paths_overlap(plan.source_root, settings.state_dir):
+        raise StateSeedError("source_destination_overlap")
+    settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with (
+            worker_lock(settings.lock_file),
+            WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state,
+        ):
+            first = apply_state_seed_v122(plan, state, settings.state_dir)
+            second = apply_state_seed_v122(plan, state, settings.state_dir)
+    except AlreadyRunning as exc:
+        raise StateSeedError("destination_busy") from exc
+    if (
+        second["imported_pdf_objects"] != 0
+        or second["imported_revisions"] != 0
+        or second["imported_ocr_files"] != 0
+    ):
+        raise StateSeedError("idempotence_verification_failed")
+    return {
+        **first,
+        "idempotence_imported_pdf_objects": second["imported_pdf_objects"],
+        "idempotence_imported_revisions": second["imported_revisions"],
+        "idempotence_imported_ocr_files": second["imported_ocr_files"],
+        "idempotence_verified": True,
+    }
+
+
+@app.command("seed-state-v122")
+def seed_state_v122_command(
+    source_state_root: Path = typer.Argument(
+        ...,
+        help="Absolute read-only v1.0.28 Worker state root.",
+    ),
+    generation_id: str = typer.Option(
+        ...,
+        "--generation-id",
+        help="Explicit generation ID to import (e.g. g-bd9a4c513041462886d347af-9b84c2e38c14).",
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Apply state seed to destination; default is dry-run."),
+    expected_documents: int | None = typer.Option(
+        None,
+        "--expected-documents",
+        help="Optional expected manifest document count to strictly enforce.",
+    ),
+) -> None:
+    """Audit and idempotently import v1.0.28 lineage and OCR cache into destination."""
+    try:
+        _echo(
+            _seed_v122_state(
+                source_state_root,
+                generation_id,
+                apply=apply,
+                expected_documents=expected_documents,
+            )
+        )
+    except StateSeedError as exc:
+        _echo(
+            {
+                "applied": False,
+                "dry_run": not apply,
+                "reason_code": exc.code,
+                "schema_version": "cardrag.state-seed-report.v1",
                 "status": "blocked",
             }
         )

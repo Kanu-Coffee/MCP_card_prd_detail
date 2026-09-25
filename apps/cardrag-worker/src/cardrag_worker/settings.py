@@ -283,6 +283,8 @@ class WorkerSettings:
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
     webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
+    external_ocr_allowed: bool = False
+    pdf_cache_force_revalidate: bool = False
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
@@ -313,10 +315,20 @@ class WorkerSettings:
         webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL")
         if require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
-        ocr_provider = os.environ.get("CARDRAG_OCR_PROVIDER", "codex-exec").strip().casefold()
+        ocr_provider = os.environ.get("CARDRAG_OCR_PROVIDER", "local-paddleocr").strip().casefold()
         if ocr_provider in {"paddleocr", "paddleocr-vl"}:
             ocr_provider = "local-paddleocr"
         fallback_provider = os.environ.get("CARDRAG_OCR_FALLBACK_PROVIDER")
+        external_ocr_allowed = _boolean("CARDRAG_EXTERNAL_OCR_ALLOWED", False)
+        for prov_label, prov_name in (
+            ("primary", ocr_provider),
+            ("fallback", fallback_provider.strip().casefold() if fallback_provider else None),
+        ):
+            if prov_name in {"codex-exec", "openrouter"} and not external_ocr_allowed:
+                raise ValueError(
+                    f"External OCR provider '{prov_name}' ({prov_label}) is not allowed "
+                    "when CARDRAG_EXTERNAL_OCR_ALLOWED=false"
+                )
         is_openrouter_ocr = ocr_provider == "openrouter" or (
             fallback_provider is not None and fallback_provider.strip().casefold() == "openrouter"
         )
@@ -510,6 +522,8 @@ class WorkerSettings:
             sqlite_mmap_mib=_bounded_int("CARDRAG_STATE_SQLITE_MMAP_MIB", 2048, minimum=0, maximum=4096),
             webdav_upload_chunk_mib=_bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16),
             webdav_verification=WebDAVVerificationSettings.from_env(),
+            external_ocr_allowed=external_ocr_allowed,
+            pdf_cache_force_revalidate=_boolean("CARDRAG_PDF_CACHE_FORCE_REVALIDATE", False),
         )
 
     @property

@@ -1098,6 +1098,7 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
+        "CARDRAG_OCR_PROVIDER",
         "CARDRAG_OCR_MODEL",
         "CARDRAG_OCR_REASONING_EFFORT",
         "CARDRAG_OCR_PROMPT_VERSION",
@@ -1106,11 +1107,15 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
         "CARDRAG_OCR_WHOLE_DOCUMENT_MAX_PAGES",
         "CARDRAG_OCR_CONTEXT_PAGES_BEFORE",
         "CARDRAG_OCR_CONTEXT_PAGES_AFTER",
+        "CARDRAG_EXTERNAL_OCR_ALLOWED",
+        "CARDRAG_PDF_CACHE_FORCE_REVALIDATE",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = WorkerSettings.from_env()
-    assert settings.ocr_provider == "codex-exec"
-    assert settings.ocr_model == "gpt-5.6-sol"
+    assert settings.ocr_provider == "local-paddleocr"
+    assert settings.ocr_model == "PaddleOCR-VL-1.6"
+    assert settings.external_ocr_allowed is False
+    assert settings.pdf_cache_force_revalidate is False
     assert settings.ocr_reasoning_effort == "high"
     assert settings.ocr_prompt_version == "cardrag-ocr.ko.v2"
     assert settings.ocr_provider_timeout_seconds == 1800
@@ -1119,6 +1124,30 @@ def test_ocr_quality_defaults_and_configuration_are_validated(
     assert settings.ocr_render_scale_milli == 6000
     assert settings.ocr_whole_document_max_pages == 4
     assert (settings.ocr_context_pages_before, settings.ocr_context_pages_after) == (1, 1)
+
+    # External OCR without allowance flag is rejected
+    monkeypatch.setenv("CARDRAG_OCR_PROVIDER", "codex-exec")
+    with pytest.raises(ValueError, match="CARDRAG_EXTERNAL_OCR_ALLOWED=false"):
+        WorkerSettings.from_env()
+
+    # External OCR with allowance flag is accepted
+    monkeypatch.setenv("CARDRAG_EXTERNAL_OCR_ALLOWED", "true")
+    ext_settings = WorkerSettings.from_env()
+    assert ext_settings.ocr_provider == "codex-exec"
+    assert ext_settings.ocr_model == "gpt-5.6-sol"
+    assert ext_settings.external_ocr_allowed is True
+
+    # Fallback external OCR without allowance flag is rejected
+    monkeypatch.delenv("CARDRAG_OCR_PROVIDER", raising=False)
+    monkeypatch.setenv("CARDRAG_EXTERNAL_OCR_ALLOWED", "false")
+    monkeypatch.setenv("CARDRAG_OCR_FALLBACK_PROVIDER", "openrouter")
+    with pytest.raises(ValueError, match="CARDRAG_EXTERNAL_OCR_ALLOWED=false"):
+        WorkerSettings.from_env()
+    monkeypatch.delenv("CARDRAG_OCR_FALLBACK_PROVIDER", raising=False)
+
+    monkeypatch.setenv("CARDRAG_PDF_CACHE_FORCE_REVALIDATE", "true")
+    assert WorkerSettings.from_env().pdf_cache_force_revalidate is True
+    monkeypatch.delenv("CARDRAG_PDF_CACHE_FORCE_REVALIDATE", raising=False)
 
     monkeypatch.setenv("CARDRAG_OCR_RENDER_SCALE_MILLI", "999")
     with pytest.raises(ValueError, match="CARDRAG_OCR_RENDER_SCALE_MILLI"):

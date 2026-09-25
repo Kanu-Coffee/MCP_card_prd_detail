@@ -92,6 +92,7 @@ from .contracts import (
     SourceSnapshot,
     UnsupportedProductRecord,
 )
+from .corpus_diff import CorpusDiffError, generate_corpus_diff_report
 from .downloader import (
     DownloadedPDF,
     DownloadPolicy,
@@ -133,6 +134,7 @@ from .ocr import (
     OCRCachePublicationError,
     OCRResolver,
     OCRResult,
+    OCRSeedPreflightError,
     OCRValidationError,
     PriorLocalNativeSource,
     page_records,
@@ -158,6 +160,7 @@ from .revision_history_v5 import (
     unresolved_revision_ledger_sha256_v5,
 )
 from .state import WorkerState, WorkerStateWALCapacityError, retry_delay, worker_lock
+from .state_seed_v122 import StateSeedLedger, load_state_seed_ledger
 from .structure import (
     DerivedView,
     StructureArtifact,
@@ -1587,6 +1590,8 @@ def _known_snapshot_sources(
     state: WorkerState,
     adapters: Sequence[IssuerAdapter],
     current_records: Sequence[SourceRecord],
+    *,
+    seed_ledger: StateSeedLedger | None = None,
 ) -> dict[str, SourceRecord]:
     """Restore only canonical source payloads retained in durable snapshots."""
 
@@ -1607,6 +1612,12 @@ def _known_snapshot_sources(
                 if existing is not None and existing.discovery_payload != source.discovery_payload:
                     raise RuntimeError("stored snapshots disagree on a source identity")
                 known[source.source_id] = source
+    if seed_ledger is not None:
+        for source_id, source in seed_ledger.source_records.items():
+            existing = known.get(source_id)
+            if existing is not None and existing.discovery_payload != source.discovery_payload:
+                raise RuntimeError("seed ledger source conflicts with stored snapshot history")
+            known[source_id] = source
     for source in current_records:
         existing = known.get(source.source_id)
         if existing is not None and existing.discovery_payload != source.discovery_payload:
@@ -1797,6 +1808,7 @@ class WorkerPipeline:
         maximum_attempts: int = 4,
         retry_cap_seconds: float = 30,
         pdf_cache_refresh_hours: float = 168,
+        pdf_cache_force_revalidate: bool = False,
         collect_remote_garbage: bool = False,
         stable_publication_approved: bool = False,
         ocr_cache_publication_approved: bool = False,
@@ -1879,6 +1891,7 @@ class WorkerPipeline:
         self.maximum_attempts = maximum_attempts
         self.retry_cap_seconds = retry_cap_seconds
         self.pdf_cache_refresh_interval = pdf_cache_refresh_interval
+        self.pdf_cache_force_revalidate = pdf_cache_force_revalidate
         self.collect_remote_garbage = collect_remote_garbage
         self.stable_publication_approved = stable_publication_approved
         self.ocr_cache_publication_approved = ocr_cache_publication_approved
@@ -2202,6 +2215,7 @@ class WorkerPipeline:
                 "pdf_concurrency": self.pdf_concurrency,
                 "pdf_concurrency_per_issuer": self.pdf_concurrency_per_issuer,
                 "local_processing_workers": self.local_processing_workers,
+                "pdf_cache_force_revalidate": self.pdf_cache_force_revalidate,
                 "sqlite": self.state.sqlite_settings,
                 "webdav_verification": (
                     asdict(self.webdav.verification_settings)
@@ -2310,6 +2324,8 @@ class WorkerPipeline:
                 OCRDocumentFailuresError,
                 OCRFailureBookkeepingError,
                 OCRSystemicFailureError,
+                OCRSeedPreflightError,
+                CorpusDiffError,
                 StructureDocumentFailuresError,
                 V5CapacityError,
             ) as exc:
@@ -2753,7 +2769,8 @@ class WorkerPipeline:
                     checked_at = datetime.now(UTC)
                     cache_age = None if cached is None else checked_at - cached.origin_checked_at
                     if (
-                        cached is not None
+                        not self.pdf_cache_force_revalidate
+                        and cached is not None
                         and cache_age is not None
                         and timedelta(0) <= cache_age < self.pdf_cache_refresh_interval
                     ):
@@ -2948,6 +2965,7 @@ class WorkerPipeline:
         self.performance.set("pdf_acquired_count", len(acquired))
         self.performance.set("pdf_unsupported_count", len(unsupported))
 
+        seed_ledger = load_state_seed_ledger(self.state_dir)
         unresolved_revision_entries: list[UnresolvedRevisionIdentityV5] = []
         historical_pdf_cache_hits = 0
         with self.performance.measure("pdf_revision_expansion_seconds"):
@@ -2957,6 +2975,7 @@ class WorkerPipeline:
                     self.state,
                     self.adapters,
                     tuple(item.source for item in current_acquired),
+                    seed_ledger=seed_ledger,
                 )
                 materialized_by_document: dict[str, _AcquiredDocument] = {}
                 for current_document in current_acquired:
@@ -3060,6 +3079,15 @@ class WorkerPipeline:
         document_ids = tuple(item.source.document_id(item.pdf.sha256) for item in acquired)
         if len(document_ids) != len(set(document_ids)):
             raise RuntimeError("PDF acquisition produced duplicate document identities")
+
+        with self.performance.measure("corpus_diff_seconds"):
+            generate_corpus_diff_report(
+                run_id=run_id,
+                acquired_documents=acquired,
+                seed_ledger=seed_ledger,
+                output_path=run_dir / "reports" / "corpus-diff.json",
+                fail_on_missing=True,
+            )
         # This receipt records the completed acquisition barrier, never a promise
         # that resumed runs can skip revalidating the underlying PDF cache.
         acquisition_payload = {

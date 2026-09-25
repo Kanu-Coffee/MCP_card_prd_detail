@@ -4,7 +4,7 @@ services:
   worker:
     image: ${CARDRAG_CANDIDATE_IMAGE_REPOSITORY:-ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate}@${CARDRAG_CANDIDATE_WORKER_IMAGE_DIGEST:?receipt-bound Worker sha256 index digest is required}
     build: !reset null
-    pull_policy: always
+    pull_policy: ${CARDRAG_PULL_POLICY:-always}
     environment:
       # Channel identifies the compatible data contract, not the application version.
       CARDRAG_CHANNEL: candidate-v1.0.11
@@ -25,6 +25,11 @@ services:
       CARDRAG_ENABLED_ISSUERS: bc,hana,hyundai,kb,lotte,samsung,shinhan,woori
       CARDRAG_OCR_CACHE_MODE: "read-only"
       CARDRAG_OCR_CACHE_REQUIRE_HIT: "false"
+      CARDRAG_OCR_PROVIDER: local-paddleocr
+      CARDRAG_OCR_MODEL: PaddleOCR-VL-1.6
+      CARDRAG_EXTERNAL_OCR_ALLOWED: "false"
+      CARDRAG_PDF_CACHE_FORCE_REVALIDATE: "true"
+      CARDRAG_PADDLEOCR_CACHE_DIR: /var/lib/cardrag-paddle
       CARDRAG_EMBEDDING_MODEL: qwen/qwen3-embedding-8b
       CARDRAG_EMBEDDING_DIMENSION: "4096"
       CARDRAG_EMBEDDING_PROVIDER_ID: ${CARDRAG_EMBEDDING_PROVIDER_ID:-deepinfra}
@@ -33,9 +38,15 @@ services:
       CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS: "12"
       CARDRAG_EMBEDDING_RETRY_BASE_SECONDS: "1"
       CARDRAG_EMBEDDING_RETRY_CAP_SECONDS: "60"
+    volumes:
+      - worker-state:/var/lib/cardrag-worker
+      - codex-home:/var/lib/cardrag-codex-home
+      - paddle-models:/var/lib/cardrag-paddle
 
 volumes:
   worker-state:
-    name: cardrag-worker-v122-candidate-state
+    name: ${CARDRAG_WORKER_STATE_VOLUME:-cardrag-worker-v122-candidate-state}
   codex-home:
     name: cardrag-worker-v122-candidate-codex-home
+  paddle-models:
+    name: ${CARDRAG_PADDLEOCR_MODEL_VOLUME:-cardrag-worker-paddleocr-models}

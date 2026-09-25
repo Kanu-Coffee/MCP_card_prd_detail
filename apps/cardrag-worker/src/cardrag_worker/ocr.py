@@ -60,9 +60,15 @@ from .providers import (
     reject_credential_bearing_ocr,
 )
 from .state import WorkerState
+from .state_seed_v122 import StateSeedLedger, StateSeedOCREntry, load_state_seed_ledger
 from .webdav import CONTROL_OBJECT_MAX_BYTES, WebDAVClient
 
 LOGGER = logging.getLogger(__name__)
+
+
+class OCRSeedPreflightError(RuntimeError):
+    """Seed generation document missed cache; refusing mass provider re-processing."""
+
 PAGE_MARKER = re.compile(r"^## Page ([1-9][0-9]*)$", re.MULTILINE)
 OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS = 12
 OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
@@ -803,6 +809,7 @@ class OCRResolver:
         cache_mode: OCRCacheMode = "read-write",
         require_cache_hit: bool = False,
         compatible_contracts: Sequence[NativeOCRContract] = (),
+        seed_ledger: StateSeedLedger | None = None,
     ) -> None:
         if chunk_pages < 1:
             raise ValueError("chunk_pages must be positive")
@@ -829,6 +836,9 @@ class OCRResolver:
         self._cache_mode = cache_mode
         self._require_cache_hit = require_cache_hit
         self._state_root = Path(os.path.abspath(os.fspath(state.path.parent)))
+        self._seed_ledger = (
+            seed_ledger if seed_ledger is not None else load_state_seed_ledger(self._state_root)
+        )
         self._local_prefetch = _NativeSealMemo()
         self._native_run_locks: dict[tuple[str, str], asyncio.Lock] = state._ocr_native_run_locks
         self._run_local_manifest_indexes: dict[tuple[str, str], dict[str, tuple[Path, ...]]] = (
@@ -872,6 +882,78 @@ class OCRResolver:
     def set_compatible_contracts(self, compatible_contracts: Sequence[NativeOCRContract]) -> None:
         self._compatible_contracts = tuple(
             c for c in compatible_contracts if c.contract_sha256 != self.contract.contract_sha256
+        )
+
+    def _lookup_seed_entry(
+        self,
+        *,
+        entry: StateSeedOCREntry,
+        source: OCRInput,
+        output_dir: Path,
+    ) -> OCRResult | None:
+        if (
+            entry.pdf_sha256 != source.pdf_sha256
+            or entry.pdf_size_bytes != source.pdf_size_bytes
+            or entry.page_count != source.page_count
+        ):
+            raise OCRValidationError("seed OCR entry PDF identity mismatch")
+
+        ocr_path = entry.source_ocr_path
+        if not ocr_path.is_file() or ocr_path.is_symlink():
+            raise OCRValidationError("seed OCR file missing or unsafe")
+        if ocr_path.stat().st_size != entry.ocr_size_bytes:
+            raise OCRValidationError("seed OCR file size mismatch")
+
+        body = ocr_path.read_bytes()
+        if hashlib.sha256(body).hexdigest() != entry.ocr_sha256:
+            raise OCRValidationError("seed OCR file SHA-256 mismatch")
+
+        reject_credential_bearing_ocr(body)
+        try:
+            verified = verify_ocr_bytes(
+                body,
+                expected_page_count=source.page_count,
+                expected_sha256=entry.ocr_sha256,
+                expected_size_bytes=entry.ocr_size_bytes,
+            )
+        except Exception as exc:
+            raise OCRValidationError("seed OCR bytes failed verification") from exc
+
+        # Materialize to output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        target_ocr = output_dir / "ocr.md"
+        if not target_ocr.is_file() or target_ocr.read_bytes() != body:
+            tmp = output_dir / f".ocr.{secrets.token_hex(8)}.tmp"
+            tmp.write_bytes(body)
+            os.chmod(tmp, 0o600)
+            tmp.replace(target_ocr)
+
+        # If native and manifest exists, materialize native-manifest.json
+        if entry.kind == "native" and entry.source_manifest_path is not None and entry.source_manifest_path.is_file():
+            man_bytes = entry.source_manifest_path.read_bytes()
+            if entry.manifest_sha256 and hashlib.sha256(man_bytes).hexdigest() != entry.manifest_sha256:
+                raise OCRValidationError("seed native manifest hash mismatch")
+            target_man = output_dir / "native-manifest.json"
+            if not target_man.is_file() or target_man.read_bytes() != man_bytes:
+                tmp_man = output_dir / f".man.{secrets.token_hex(8)}.tmp"
+                tmp_man.write_bytes(man_bytes)
+                os.chmod(tmp_man, 0o600)
+                tmp_man.replace(target_man)
+
+        return OCRResult(
+            pages=tuple(_page_body(page) for page in verified.pages),
+            ocr_bytes=body,
+            ocr_text=verified.text,
+            ocr_sha256=verified.sha256,
+            size_bytes=verified.size_bytes,
+            provenance=entry.kind,
+            provider="paddleocr" if entry.model == "PaddleOCR-VL-1.6" else self.provider.provider,
+            model=entry.model,
+            reuse_key=entry.reuse_key,
+            cache_kind=entry.kind,
+            cache_reuse_key=entry.reuse_key,
+            cache_reused=True,
+            provider_called=False,
         )
 
     @property
@@ -1935,6 +2017,18 @@ class OCRResolver:
             page_count=page_count,
         )
         native_key = native_ocr_reuse_key(self.contract, source)
+
+        # 1. State Seed Ledger Lookup (Fast immutable local cache)
+        if self._seed_ledger is not None and document_id in self._seed_ledger.entries_by_doc_id:
+            seed_entry = self._seed_ledger.entries_by_doc_id[document_id]
+            seed_result = self._lookup_seed_entry(
+                entry=seed_entry,
+                source=source,
+                output_dir=output_dir,
+            )
+            if seed_result is not None:
+                return seed_result
+
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
             adopted_policies.append(LEGACY_ADOPTION_POLICY_V1)
@@ -2076,6 +2170,14 @@ class OCRResolver:
             return committed
         if self._require_cache_hit:
             raise OCRCacheMissError("OCR cache miss in cache-only mode")
+        if self._seed_ledger is not None and (
+            document_id in self._seed_ledger.seed_doc_ids
+            or pdf_sha256 in self._seed_ledger.seed_pdf_shas
+        ):
+            raise OCRSeedPreflightError(
+                f"Seed document {document_id} (pdf_sha256={pdf_sha256}) was not found in OCR cache/seed; "
+                "failing closed to prevent mass OCR re-processing."
+            )
         if isinstance(self.provider, DocumentOCRProvider):
             raw_pages = await self.provider.recognize_document(
                 pdf_path,

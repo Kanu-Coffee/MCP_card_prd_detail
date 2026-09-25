@@ -44,8 +44,14 @@ services:
       - CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS=${CARDRAG_EMBEDDING_REQUEST_MAX_ATTEMPTS:-12}
       - CARDRAG_EMBEDDING_RETRY_BASE_SECONDS=${CARDRAG_EMBEDDING_RETRY_BASE_SECONDS:-1}
       - CARDRAG_EMBEDDING_RETRY_CAP_SECONDS=${CARDRAG_EMBEDDING_RETRY_CAP_SECONDS:-60}
-      - CARDRAG_OCR_PROVIDER=${CARDRAG_OCR_PROVIDER:-codex-exec}
-      - CARDRAG_OCR_MODEL=${CARDRAG_OCR_MODEL:-gpt-5.6-sol}
+      - CARDRAG_OCR_PROVIDER=${CARDRAG_OCR_PROVIDER:-local-paddleocr}
+      - CARDRAG_OCR_MODEL=${CARDRAG_OCR_MODEL:-PaddleOCR-VL-1.6}
+      - CARDRAG_EXTERNAL_OCR_ALLOWED=${CARDRAG_EXTERNAL_OCR_ALLOWED:-false}
+      - CARDRAG_PADDLEOCR_PIPELINE_VERSION=${CARDRAG_PADDLEOCR_PIPELINE_VERSION:-v1.6}
+      - CARDRAG_PADDLEOCR_CACHE_DIR=/var/lib/cardrag-paddle
+      - CARDRAG_PADDLEOCR_PDF_DPI=${CARDRAG_PADDLEOCR_PDF_DPI:-300}
+      - CARDRAG_PADDLEOCR_CPU_THREADS=${CARDRAG_PADDLEOCR_CPU_THREADS:-8}
+      - CARDRAG_PADDLEOCR_TIMEOUT_SECONDS=${CARDRAG_PADDLEOCR_TIMEOUT_SECONDS:-14400}
       - CARDRAG_OCR_FALLBACK_PROVIDER
       - CARDRAG_OCR_FALLBACK_MODEL
       - CARDRAG_OPENROUTER_OCR_MODEL
@@ -88,6 +94,7 @@ services:
     volumes:
       - worker-state:/var/lib/cardrag-worker
       - codex-home:/var/lib/cardrag-codex-home
+      - paddle-models:/var/lib/cardrag-paddle
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g
@@ -108,3 +115,5 @@ volumes:
     name: ${CARDRAG_WORKER_STATE_VOLUME:-cardrag-worker-v122-state}
   codex-home:
     name: ${CARDRAG_WORKER_CODEX_HOME_VOLUME:-cardrag-worker-v122-codex-home}
+  paddle-models:
+    name: ${CARDRAG_PADDLEOCR_MODEL_VOLUME:-cardrag-worker-paddleocr-models}
