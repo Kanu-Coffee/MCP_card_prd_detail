@@ -652,7 +652,10 @@ def build_state_seed_v122_plan(
                 adoc.get("pdf_sha256") != pdf_ref.get("sha256")
                 or int(adoc.get("pdf_size_bytes", -1)) != int(pdf_ref.get("size_bytes", -2))
                 or int(adoc.get("page_count", -1)) != int(mdoc.get("page_count", -2))
-                or bool(adoc.get("is_historical", False)) != bool(mdoc.get("is_historical", False))
+                or (
+                    "is_historical" in mdoc
+                    and bool(adoc.get("is_historical", False)) != bool(mdoc.get("is_historical", False))
+                )
             ):
                 raise StateSeedError(f"acquisition_manifest_mismatch: {doc_id}")
             src_id = adoc.get("source_id")
