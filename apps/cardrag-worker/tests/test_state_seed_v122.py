@@ -1235,4 +1235,3 @@ def test_destination_collision_and_safety_checks(tmp_path: Path) -> None:
         with pytest.raises(StateSeedError) as exc_rev:
             apply_state_seed_v122(plan, dest_state, dest)
         assert exc_rev.value.code == "destination_revision_conflict"
-

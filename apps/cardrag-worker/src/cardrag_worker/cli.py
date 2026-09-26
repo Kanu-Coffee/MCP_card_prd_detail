@@ -48,6 +48,10 @@ from .capacity_v5 import (
     revalidate_worker_start_capacity,
 )
 from .corpus_diff import CorpusDiffError
+from .embedding_seed_v122 import (
+    apply_embedding_cache_seed_v122,
+    build_embedding_cache_seed_v122_plan,
+)
 from .embedding_v5 import (
     OpenRouterQwenEmbeddingProviderV5,
     preflight_openrouter_qwen_providers,
@@ -936,6 +940,85 @@ def _seed_v122_state(
         "idempotence_imported_ocr_files": second["imported_ocr_files"],
         "idempotence_verified": True,
     }
+
+
+def _seed_embedding_cache_v122(
+    source_state_root: Path,
+    *,
+    apply: bool,
+    expected_rows: int | None = None,
+) -> dict[str, Any]:
+    plan = build_embedding_cache_seed_v122_plan(
+        source_state_root,
+        expected_rows=expected_rows,
+    )
+    if not apply:
+        return plan.report(applied=False)
+    settings = WorkerSettings.from_env()
+    if settings.channel != "candidate-v1.0.11":
+        raise StateSeedError("candidate_channel_required")
+    if paths_overlap(plan.source_root, settings.state_dir):
+        raise StateSeedError("source_destination_overlap")
+    settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with (
+            worker_lock(settings.lock_file),
+            WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state,
+        ):
+            first = apply_embedding_cache_seed_v122(plan, state, settings.state_dir)
+            second = apply_embedding_cache_seed_v122(plan, state, settings.state_dir)
+    except AlreadyRunning as exc:
+        raise StateSeedError("destination_busy") from exc
+    if second["imported_rows"] != 0:
+        raise StateSeedError("idempotence_verification_failed")
+    return {
+        **first,
+        "idempotence_imported_rows": second["imported_rows"],
+        "idempotence_verified": True,
+    }
+
+
+@app.command("seed-embedding-cache-v122")
+def seed_embedding_cache_v122_command(
+    source_state_root: Path = typer.Argument(
+        ...,
+        help="Absolute read-only v1.0.28 Worker state root.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply the embedding-cache seed to the destination; default is dry-run.",
+    ),
+    expected_rows: int | None = typer.Option(
+        None,
+        "--expected-rows",
+        help="Optional expected embedding_cache_v5 row count to strictly enforce.",
+    ),
+) -> None:
+    """Audit and idempotently import v1.0.28 embedding_cache_v5 rows into destination."""
+    try:
+        _echo(
+            _seed_embedding_cache_v122(
+                source_state_root,
+                apply=apply,
+                expected_rows=expected_rows,
+            )
+        )
+    except StateSeedError as exc:
+        _echo(
+            {
+                "applied": False,
+                "dry_run": not apply,
+                "reason_code": exc.code,
+                "schema_version": "cardrag.embedding-seed-report.v1",
+                "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=1) from None
 
 
 @app.command("seed-state-v122")
