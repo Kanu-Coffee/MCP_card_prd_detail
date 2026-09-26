@@ -29,7 +29,7 @@
 2. `seed-embedding-cache-v122 … --apply --expected-rows 381361` → 381,361행 전부 임포트, 재적용 0건, ledger `69822cfaf7784aac90eaf51a83cbdfc5ba6cae9029c071fb355a24e7043f299d.json`, row root `5dd2a5e398ffdd42a959d0876903875353102971894bb4641d04e3425ec823c9`. 생성자 min/max `2026-09-02T00:46:32.752622+00:00` / `2026-09-22T23:58:30.268216+00:00`, 단일 프로파일 `cardrag.qwen3-embedding-8b.deepinfra.2d5edd29…` dim 4096 — Reviewer가 r3/source에서 측정한 값과 정확히 일치.
 3. **r3 sealed ledger와 내용 동일성**: r4 v122 ledger(`eeb7dea3…`)와 r3 ledger(`8ffdcd8e…`)를 필드별 대조한 결과 유일한 차이는 `source_root.path_sha256`(바인드 마운트 경로 선택 차이; device/inode 동일 2050)였다. `source_database`, OCR entries, `source_records`, revisions, prior partition 등 봉인 내용은 완전 일치. 따라서 **커밋된 시드 명령이 r3의 시드 상태를 재생산함**이 증명되었다.
 
-로그: `attestations/embedding-seed-r4-apply.log` (전문), 컨테이너는 `docker compose run --rm` 종료로 자연 정리됨(재현은 위 커맨드로 가능).
+로그: `attestations/embedding-seed-r4-apply.out` (전문), 컨테이너는 `docker compose run --rm` 종료로 자연 정리됨(재현은 위 커맨드로 가능).
 
 ### 1.3 r3 아웃오브밴드 사본 비준 (Option 2 방식의 온전성 증빙)
 
