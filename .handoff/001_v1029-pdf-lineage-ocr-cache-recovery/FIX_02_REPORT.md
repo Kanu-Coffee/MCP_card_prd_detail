@@ -93,7 +93,7 @@
 
 - 검증 중 provider transient("OpenRouter embedding request failed") 1회 발생 → 리트라이로 해결, 데이터 정합성 문제 아님(증거 JSON에 최종 성공만 기록).
 
-### 3.3 머지/태그/스테이블 배포 — **유보(사용자 승인 대기)**
+### 3.3 머지/태그/스테이블 배포 — 사용자 승인 후 실행 완료 (§6 참조)
 
 모든 기술 게이트가 통과했으나, `main` 머지·`v1.0.29` 태그·`/opt/cardrag` 스테이블 전환은 운영 서비스(worker systemd timer, stable pointer, 운영 MCP v1.0.26)를 교체하는 파괴적 릴리스 작업이라 FIX_02 closure 기준("or the user explicitly defers them")에 따라 **직접 승인 대기 상태로 유보**한다. 준비 완료 사항:
 
@@ -129,3 +129,15 @@
 4. ghcr candidate 패키지 공개 전환 여부(anonymous release 검증 절차)는 운영자 릴리스 정책 판단.
 5. 디스크: `docker buildx prune`(cache 전용 49.91GB 회수) 수행 — 재빌드로 복원 가능, 증거 아님. 신규 볼륨 `cardrag-worker-v122-candidate-state-r4`(13GB)·`cardrag-mcp-v129-candidate-state`(15GB)는 검증 용도, Reviewer 승인 후 삭제 가능. `cardrag-worker-v122-candidate-state-r3`과 v1.0.28 source 볼륨은 본 내내 **read-only로만** 접근, 무결.
 6. 컨테이너 `cardrag-v122-candidate-mcp-1`은 검증용으로 가동 유지(health 200). 배포 승인이 없으면 stable에는 영향 없음.
+
+---
+
+## 6. 배포 실행 (2026-09-27 05:15~05:35 KST, 사용자 승인 후)
+
+1. **worker release 이미지**: git-context(`fdf87e6`)+provenance(max/v0.2)+pinned SBOM generator 로 빌드·push → `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@sha256:80eb7aa2…1a03`, jq 공급망 검증 5종 전부 PASS, revision/version 라벨 확인 (`attestations/mcp-evidence/*-w.json`, `provenance-worker.json`, `sbom-worker.json`).
+2. **`/opt/cardrag/v1.0.29`**: release 커밋 트리(`git archive fdf87e6`)로 materialize; `deployment/`에 stable 배포용 env·README·근무자(root)용 `worker.env.v1.0.29.proposed` 스테이징.
+3. **`/opt/cardrag/current` → v1.0.29** 전환. systemd worker compose는 새 트리에서 `config --quiet` 렌더 PASS.
+4. **stable MCP**: 호스트 관례(librechat nginx 프록시가 컨테이너 이름 `cardrag-stable-v1026-mcp-1` 하드코딩)를 존중해 동일 compose project `cardrag-stable-v1026`을 v1.0.29 트리+이미지(`53382bc3…`)로 재창건. state volume은 검증 완료 번들을 서빙 중인 `cardrag-mcp-v129-candidate-state`로 지정(기존 `cardrag-mcp-v114-candidate-hashcompat-state`는 무손상 보관, 롤백 시 재지정). 채널·포트(127.0.0.1:18015)·Bearer·시크릿 구성은 기존과 동일 유지.
+5. **검증**: `/health/ready` 200 + 컨테이너 healthy, librechat 프록시 healthy 회복, `tools/list`=12, coverage generation=`g-0928dee8e6f04af9ae41fdb7-f916d1c475e0`(products 5,053), 발급사/DRM/출시일 수치는 §3.2와 동일.
+6. **root-only 잔여 1건**: `/etc/cardrag` 는 root:cardrag 0750 이라 비대화형 권한으로 수정 불가. `worker.env.v1.0.29.proposed` 적용(이미지 다이제스트 고정 + `local-paddleocr`/`PaddleOCR-VL-1.6`/`CARDRAG_EXTERNAL_OCR_ALLOWED=false`)을 `deployment/README-deployment.md` 의 명령으로 스테이징. **systemd worker 실행 전 root 적용 필요** (timer 는 기존처럼 disabled 유지되어 즉시 실행 없음).
+7. `/etc/cardrag/*` 는本轮 어디에서도 기록된 변경이 없음(backup/write 시도는 권한 거부로 무효, 원본 무변경 확인).
