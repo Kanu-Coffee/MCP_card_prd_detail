@@ -1,0 +1,258 @@
+{
+  "expected_generation_id": "g-0928dee8e6f04af9ae41fdb7-f916d1c475e0",
+  "server_info": {
+    "name": "CardRAG",
+    "version": ""
+  },
+  "tools_list_count": 12,
+  "tools_list": [
+    "find_cards_by_merchant",
+    "find_products",
+    "get_contract_bundle",
+    "get_evidence",
+    "get_product",
+    "get_product_summary",
+    "get_source_page",
+    "get_source_pdf",
+    "list_product_revisions",
+    "list_recent_products",
+    "search_contracts",
+    "search_evidence"
+  ],
+  "find_products_catalog": {
+    "count": 5,
+    "total": 748,
+    "generation_bound": true
+  },
+  "get_product": {
+    "keys": [
+      "availability",
+      "document",
+      "issuer",
+      "name",
+      "product_code"
+    ],
+    "generation_bound": false
+  },
+  "get_product_summary": {
+    "count": 1
+  },
+  "list_product_revisions": {
+    "keys": [
+      "_generation_ok",
+      "generation_id",
+      "issuer",
+      "product_lineage_id",
+      "revisions"
+    ],
+    "count": 1
+  },
+  "get_contract_bundle": {
+    "keys": [
+      "_generation_ok",
+      "contract",
+      "generation_id",
+      "nodes",
+      "scope"
+    ]
+  },
+  "get_source_page": {
+    "keys": [
+      "document_id",
+      "page",
+      "page_count",
+      "pdf_sha256",
+      "text",
+      "text_sha256"
+    ],
+    "chars": 1892
+  },
+  "get_source_pdf": {
+    "keys": [
+      "document_id",
+      "mime_type",
+      "range_supported",
+      "sha256",
+      "size_bytes",
+      "url"
+    ]
+  },
+  "search_evidence": {
+    "count": 5,
+    "degraded": false,
+    "retrieval_mode": "exact"
+  },
+  "get_evidence": {
+    "keys": [
+      "_generation_ok",
+      "document_id",
+      "evidence_id",
+      "generation_id",
+      "items",
+      "next_cursor"
+    ]
+  },
+  "find_cards_by_merchant": {
+    "count": 1428,
+    "total": 1428
+  },
+  "search_contracts": {
+    "bundles": 3,
+    "coverage_keys": [
+      "approximate",
+      "catalog_candidate_count",
+      "catalog_resolution_status",
+      "catalog_resolved_product_lineage_id",
+      "catalog_resolved_product_name",
+      "document_aggregation_policy",
+      "document_aggregation_status",
+      "exact_blocks"
+    ]
+  },
+  "search_contracts_past_as_of_2026-01-05": {
+    "typed_error": "tool search_contracts isError: {\"content\": [{\"text\": \"Error executing tool search_contracts: as_of revision selection is ambiguous\", \"type\": \"text\"}], \"isError\": true}"
+  },
+  "search_contracts_past_as_of_2026-09-01": {
+    "typed_error": "tool search_contracts isError: {\"content\": [{\"text\": \"Error executing tool search_contracts: as_of revision selection is ambiguous\", \"type\": \"text\"}], \"isError\": true}"
+  },
+  "search_contracts_include_history": {
+    "bundles": 3
+  },
+  "as_of_include_history_exclusive": "rejected as documented",
+  "per_issuer_launch_dates": {
+    "bc": {
+      "returned": 4,
+      "with_launch_date": 4,
+      "unknown_launch_date_count": 65,
+      "generation_bound": true
+    },
+    "hana": {
+      "returned": 10,
+      "with_launch_date": 10,
+      "unknown_launch_date_count": 20,
+      "generation_bound": true
+    },
+    "hyundai": {
+      "returned": 10,
+      "with_launch_date": 10,
+      "unknown_launch_date_count": 134,
+      "generation_bound": true
+    },
+    "kb": {
+      "returned": 8,
+      "with_launch_date": 8,
+      "unknown_launch_date_count": 167,
+      "generation_bound": true
+    },
+    "lotte": {
+      "returned": 10,
+      "with_launch_date": 10,
+      "unknown_launch_date_count": 58,
+      "generation_bound": true
+    },
+    "samsung": {
+      "returned": 10,
+      "with_launch_date": 10,
+      "unknown_launch_date_count": 72,
+      "generation_bound": true
+    },
+    "shinhan": {
+      "returned": 10,
+      "with_launch_date": 10,
+      "unknown_launch_date_count": 68,
+      "generation_bound": true
+    },
+    "woori": {
+      "returned": 10,
+      "with_launch_date": 10,
+      "unknown_launch_date_count": 43,
+      "generation_bound": true
+    }
+  },
+  "recent_products_coverage": {
+    "items_12m": 100,
+    "total_count": 264,
+    "unknown_launch_date_count": 627,
+    "next_cursor_present": true
+  },
+  "unknown_launch_date_samples": [],
+  "unknown_items_report_without_date": true,
+  "coverage_report": {
+    "product_count": 5053,
+    "coverage_scope": "loaded_generation_only"
+  },
+  "coverage_by_issuer": [
+    {
+      "issuer": "bc",
+      "product_count": 121,
+      "confirmed_launch_date_count": 56,
+      "unknown_launch_date_count": 65,
+      "unsupported_drm_count": 0
+    },
+    {
+      "issuer": "hana",
+      "product_count": 723,
+      "confirmed_launch_date_count": 703,
+      "unknown_launch_date_count": 20,
+      "unsupported_drm_count": 0
+    },
+    {
+      "issuer": "hyundai",
+      "product_count": 575,
+      "confirmed_launch_date_count": 440,
+      "unknown_launch_date_count": 134,
+      "unsupported_drm_count": 1
+    },
+    {
+      "issuer": "kb",
+      "product_count": 751,
+      "confirmed_launch_date_count": 581,
+      "unknown_launch_date_count": 167,
+      "unsupported_drm_count": 3
+    },
+    {
+      "issuer": "lotte",
+      "product_count": 529,
+      "confirmed_launch_date_count": 471,
+      "unknown_launch_date_count": 58,
+      "unsupported_drm_count": 0
+    },
+    {
+      "issuer": "samsung",
+      "product_count": 564,
+      "confirmed_launch_date_count": 492,
+      "unknown_launch_date_count": 72,
+      "unsupported_drm_count": 0
+    },
+    {
+      "issuer": "shinhan",
+      "product_count": 877,
+      "confirmed_launch_date_count": 809,
+      "unknown_launch_date_count": 68,
+      "unsupported_drm_count": 0
+    },
+    {
+      "issuer": "woori",
+      "product_count": 913,
+      "confirmed_launch_date_count": 866,
+      "unknown_launch_date_count": 43,
+      "unsupported_drm_count": 4
+    }
+  ],
+  "tools_called": [
+    "find_cards_by_merchant",
+    "find_products",
+    "get_contract_bundle",
+    "get_evidence",
+    "get_product",
+    "get_product_summary",
+    "get_source_page",
+    "get_source_pdf",
+    "list_product_revisions",
+    "list_recent_products",
+    "search_contracts",
+    "search_evidence"
+  ],
+  "tools_not_called": [],
+  "all_12_tools_responded": true
+}

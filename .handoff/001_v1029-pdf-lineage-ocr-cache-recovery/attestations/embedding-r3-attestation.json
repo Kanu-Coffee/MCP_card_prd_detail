@@ -1,0 +1,48 @@
+{
+  "candidate_r3": {
+    "invalid_violations": {},
+    "rows_scanned": 382871,
+    "rows_valid": 382871,
+    "seconds": 205.0
+  },
+  "completed_at": "2026-09-26T17:59:16.112108+00:00",
+  "destination_database_sha256": "6bff627905d4335cd26a43a2618710ce9ab748c724ede270757bfea1785c6c6a",
+  "equivalence": {
+    "destination_rows": 382871,
+    "extra_row_created_at_bounds": [
+      "2026-09-26T09:38:39.949969+00:00",
+      "2026-09-26T09:44:44.875419+00:00"
+    ],
+    "extra_row_profiles": [
+      "cardrag.qwen3-embedding-8b.deepinfra.2d5edd2931057babbbbc45736aac6ed268a54a469b82c1d5e848866abee0188f"
+    ],
+    "extra_rows_created_outside_run_window": [],
+    "extra_rows_in_destination": 1510,
+    "only_in_source_keys": [],
+    "source_rows": 381361,
+    "verbatim_copied_rows": 381361,
+    "verbatim_mismatch_keys": []
+  },
+  "run_window": {
+    "finished_at": "2026-09-26T11:21:49.048250+00:00",
+    "started_at": "2026-09-25T05:36:19.687385+00:00"
+  },
+  "schema_version": "cardrag.embedding-r3-attestation.v1",
+  "source_database_sha256": "bb9e878c40b34a3dbfeb8cfa7d677309e511ae85dfef9ae46f52a07c9d43e72c",
+  "source_v114": {
+    "invalid_violations": {},
+    "rows_scanned": 381361,
+    "rows_valid": 381361,
+    "seconds": 102.6
+  },
+  "started_at": "2026-09-26T17:53:28.146337+00:00",
+  "vectors_derivation": {
+    "expected_chunk_count_from_seal": 582380,
+    "rows_equal_to_an_r3_cache_blob": 582380,
+    "rows_without_cache_evidence": 0,
+    "vector_rows_checked": 582380,
+    "vectors_file_sha256": "212ac7e81abb3cf3152ae9efd7d6c43a1bea7712ffb20e0f2bcb95f314248321",
+    "vectors_file_sha256_matches_seal": true
+  },
+  "vectors_file_bytes": 9541713920
+}

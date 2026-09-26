@@ -50,6 +50,13 @@ Worker 종료 코드와 terminal 결과, 게시 완료 여부를 확인합니다
 후보는 선택한 canonical WebDAV root의 별도 포인터를 사용하며 stable에 게시하지 않습니다.
 공유 OCR cache는 읽기 전용이고 원격 GC도 금지됩니다. 읽기 seed가 필요한 경우에도
 source writer가 종료하고 검증된 호환 상태만 read-only로 연결합니다.
+
+v1.0.29 계열 후보는 라인업/OCR 시드(`seed-state-v122`)와 임베딩 캐시 시드
+(`seed-embedding-cache-v122`)를 별도로 실행합니다. 임베딩 캐시는 커밋된 이 명령 외
+그 어떤 방법(수동 SQLite 복사 등)으로도 상태 볼륨에 넣지 않습니다. 시드 볼륨은
+항상 빈 볼륨에서 두 명령을 순서대로 적용해 구성하며, 임베딩 캐시가 이미 있다고
+가정하지 않습니다. v1.0.29 r3 후보 볼륨의 임베딩 캐시 복사본은 FIX_02에서 전체 행
+무결성 검증으로 1회성 예외로 비준(ratify)된 것이며 재생산 경로가 아닙니다.
 v1.0.29의 출시일 parser v3는 OCR 계약과 재사용 키를 변경하지 않습니다. v1.0.28의
 PaddleOCR 계약 SHA-256 `873a628ea7a4a91d217cebf2fb94489c4bc93fb7055607099a9e7933991c83ed`를
 유지하고, 기존 PDF identity에서 provider가 다시 호출되거나 OCR SHA가 달라지면 후보를
