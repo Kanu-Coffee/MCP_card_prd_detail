@@ -140,4 +140,4 @@
 4. **stable MCP**: 호스트 관례(librechat nginx 프록시가 컨테이너 이름 `cardrag-stable-v1026-mcp-1` 하드코딩)를 존중해 동일 compose project `cardrag-stable-v1026`을 v1.0.29 트리+이미지(`53382bc3…`)로 재창건. state volume은 검증 완료 번들을 서빙 중인 `cardrag-mcp-v129-candidate-state`로 지정(기존 `cardrag-mcp-v114-candidate-hashcompat-state`는 무손상 보관, 롤백 시 재지정). 채널·포트(127.0.0.1:18015)·Bearer·시크릿 구성은 기존과 동일 유지.
 5. **검증**: `/health/ready` 200 + 컨테이너 healthy, librechat 프록시 healthy 회복, `tools/list`=12, coverage generation=`g-0928dee8e6f04af9ae41fdb7-f916d1c475e0`(products 5,053), 발급사/DRM/출시일 수치는 §3.2와 동일.
 6. **root-only 잔여 1건**: `/etc/cardrag` 는 root:cardrag 0750 이라 비대화형 권한으로 수정 불가. `worker.env.v1.0.29.proposed` 적용(이미지 다이제스트 고정 + `local-paddleocr`/`PaddleOCR-VL-1.6`/`CARDRAG_EXTERNAL_OCR_ALLOWED=false`)을 `deployment/README-deployment.md` 의 명령으로 스테이징. **systemd worker 실행 전 root 적용 필요** (timer 는 기존처럼 disabled 유지되어 즉시 실행 없음).
-7. `/etc/cardrag/*` 는本轮 어디에서도 기록된 변경이 없음(backup/write 시도는 권한 거부로 무효, 원본 무변경 확인).
+7. `/etc/cardrag/*` 는이번 라운드 어디에서도 기록된 변경이 없음(backup/write 시도는 권한 거부로 무효, 원본 무변경 확인).
