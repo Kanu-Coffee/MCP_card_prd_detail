@@ -108,3 +108,24 @@ systemctl list-timers cardrag-worker.timer         # LAST 14:31:34 / NEXT 03:00 
 2. `seed-embedding-cache-v122`의 candidate-channel 게이트: stable 채널 프로덕션 볼륨 운용 시 shell override 필요(문서화) 또는 게이트 재설계 검토
 3. `gc_status=failed`(remote GC) 원인조사 — 다음 daily batch까지 반복 관찰
 4. ghcr candidate 패키지 visibility(anonymous CI) — 릴리스 정책 결정 이월(기존 carry-over)
+
+## 8. 최종 마감 (run-3 + MCP 전이 검증, 2026-09-27 18:50 KST)
+
+### run-3 (systemd 실경로 발화, `2c03669cd7b947ccb3f2ca36cd11e5f9`) ✅
+- 발화: timer enable 시 `Persistent` catch-up(14:31:34) → 종료 17:08, service `Result=success / ExecMainStatus=0`
+- terminal payload: `status=succeeded`, OCR 5,206/5,206 reuse · **external 0** · **embedding provider calls 0**
+- publish `g-2c03669cd7b947ccb3f2ca36-f916d1c475e0` = **ready**, stable 포인터 갱신, corpus-diff `missing_unjustified: 0`(5,045/161/5,206, r3과 동일 분류 재현), source_coverage 100%
+- ⚠️ `gc_status=failed` **반복 재현**(run-2·3 공통) — 게시·봉인과 무관, remote GC 전용 실패. §7.3 원인조사 승격 필수
+- 재현성: run-2(감독, 2h)→run-3(systemd, 2.5h) 모두 외부 유료호출 0 — 일일 원가 ≈ 0 + Paddle CPU(신규분)
+
+### served MCP 최종 검증 (`attestations/mcp-stable-final-verification.json`)
+- `tools=12`, **serving = run-3 generation `g-2c03669…` (generation_bound true)**, products 5,053, 미확인 출시일 627 카운트(추정 없음), search_contracts 정상
+- 활성 경로: 구 gen(g-0928→g-dd76) 서빙 유지 상태에서 신 gen 동기화·전이가 2회 자동 순차 발생 — 무중동
+
+### 스케줄/디스크
+- `list-timers`: NEXT `2026-09-28 03:00 KST`(8h) — 데일리 배치 가동 확정
+- free: 124G(B2 후) → **97G**(run-3 sealed 14.1G + MCP 전이 약 13G 반영). B4 트리거(80G) 대비 여유, 차기 리뷰 포인트
+- 볼륨 잔존: v129-state(프로덕션)·v114(B3 유지)·mcp-v129(서빙)·hashcompat(롤백)·paddle-models·codex-home·r1~r4/레거시 회수 완료
+
+### Closure 정리
+본 FIX_03의MANDATE A(1~5)·B(1~4)·게이트·권한 시정·네이밍 노트 전부 증거와 함께 달성. 잔여 추적 4건(§7 + GC 재현)은 릴리스-blocking 아님.

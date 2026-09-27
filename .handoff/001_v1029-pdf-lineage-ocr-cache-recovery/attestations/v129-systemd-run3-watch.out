@@ -1,0 +1,34 @@
+worker container gone at 2026-09-27T17:09:30+09:00
+ActiveState=inactive
+Result=success
+ExecMainStatus=0
+Sep 27 15:33:34 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:33:34,976 INFO cardrag_worker.pipeline OCR progress completed=4750 total=5206 succeeded=4750 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:33:42 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:33:42,840 INFO cardrag_worker.pipeline OCR progress completed=4775 total=5206 succeeded=4775 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:33:49 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:33:49,482 INFO cardrag_worker.pipeline OCR progress completed=4800 total=5206 succeeded=4800 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:33:56 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:33:56,614 INFO cardrag_worker.pipeline OCR progress completed=4825 total=5206 succeeded=4825 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:02 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:02,014 INFO cardrag_worker.pipeline OCR progress completed=4850 total=5206 succeeded=4850 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:08 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:08,275 INFO cardrag_worker.pipeline OCR progress completed=4875 total=5206 succeeded=4875 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:14 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:14,504 INFO cardrag_worker.pipeline OCR progress completed=4900 total=5206 succeeded=4900 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:18 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:18,873 INFO cardrag_worker.pipeline OCR progress completed=4925 total=5206 succeeded=4925 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:24 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:24,919 INFO cardrag_worker.pipeline OCR progress completed=4950 total=5206 succeeded=4950 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:31 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:31,291 INFO cardrag_worker.pipeline OCR progress completed=4975 total=5206 succeeded=4975 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:36 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:36,510 INFO cardrag_worker.pipeline OCR progress completed=5000 total=5206 succeeded=5000 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:40 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:40,875 INFO cardrag_worker.pipeline OCR progress completed=5025 total=5206 succeeded=5025 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:46 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:46,523 INFO cardrag_worker.pipeline OCR progress completed=5050 total=5206 succeeded=5050 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:51 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:51,903 INFO cardrag_worker.pipeline OCR progress completed=5075 total=5206 succeeded=5075 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:34:58 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:34:58,051 INFO cardrag_worker.pipeline OCR progress completed=5100 total=5206 succeeded=5100 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:35:03 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:35:03,290 INFO cardrag_worker.pipeline OCR progress completed=5125 total=5206 succeeded=5125 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:35:08 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:35:08,785 INFO cardrag_worker.pipeline OCR progress completed=5150 total=5206 succeeded=5150 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:35:14 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:35:14,256 INFO cardrag_worker.pipeline OCR progress completed=5175 total=5206 succeeded=5175 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:35:18 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:35:18,996 INFO cardrag_worker.pipeline OCR progress completed=5200 total=5206 succeeded=5200 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 15:35:19 4700u-ubuntu-desktop cardrag-worker[3804903]: 2026-09-27 15:35:19,211 INFO cardrag_worker.pipeline OCR progress completed=5206 total=5206 succeeded=5206 failed=0 structure_failed=0 cache_publication_deferred=0
+Sep 27 17:08:27 4700u-ubuntu-desktop cardrag-worker[3804903]:   "gc_error": "remote_gc_failed: Remote garbage collection failed after durable run completion.",
+Sep 27 17:08:27 4700u-ubuntu-desktop cardrag-worker[3804903]:   "gc_status": "failed",
+Sep 27 17:08:27 4700u-ubuntu-desktop cardrag-worker[3804903]:   "pdf_cache_prune_error": null,
+Sep 27 17:08:27 4700u-ubuntu-desktop cardrag-worker[3804903]:   "pdf_cache_prune_status": "succeeded",
+Sep 27 17:08:27 4700u-ubuntu-desktop cardrag-worker[3804903]:   "status": "succeeded",
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+    for r in c.execute('SELECT run_id,status,started_at,finished_at FROM run ORDER BY started_at DESC LIMIT 2'): print(tuple(r))
+             ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.OperationalError: unable to open database file
