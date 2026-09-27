@@ -1,0 +1,28 @@
+watch started: 2026-09-27T12:08:59+09:00
+container exit code: 0  at 2026-09-27T14:20:20+09:00
+=== final stage logs ===
+2026-09-27 12:41:32,666 INFO cardrag_worker.pipeline OCR progress completed=4775 total=5206 succeeded=4775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:41:39,366 INFO cardrag_worker.pipeline OCR progress completed=4800 total=5206 succeeded=4800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:41:46,438 INFO cardrag_worker.pipeline OCR progress completed=4825 total=5206 succeeded=4825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:41:51,995 INFO cardrag_worker.pipeline OCR progress completed=4850 total=5206 succeeded=4850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:41:58,475 INFO cardrag_worker.pipeline OCR progress completed=4875 total=5206 succeeded=4875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:04,541 INFO cardrag_worker.pipeline OCR progress completed=4900 total=5206 succeeded=4900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:08,861 INFO cardrag_worker.pipeline OCR progress completed=4925 total=5206 succeeded=4925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:15,063 INFO cardrag_worker.pipeline OCR progress completed=4950 total=5206 succeeded=4950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:21,761 INFO cardrag_worker.pipeline OCR progress completed=4975 total=5206 succeeded=4975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:27,130 INFO cardrag_worker.pipeline OCR progress completed=5000 total=5206 succeeded=5000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:31,536 INFO cardrag_worker.pipeline OCR progress completed=5025 total=5206 succeeded=5025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:37,287 INFO cardrag_worker.pipeline OCR progress completed=5050 total=5206 succeeded=5050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:43,078 INFO cardrag_worker.pipeline OCR progress completed=5075 total=5206 succeeded=5075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:48,986 INFO cardrag_worker.pipeline OCR progress completed=5100 total=5206 succeeded=5100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:54,160 INFO cardrag_worker.pipeline OCR progress completed=5125 total=5206 succeeded=5125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:42:59,742 INFO cardrag_worker.pipeline OCR progress completed=5150 total=5206 succeeded=5150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:43:05,192 INFO cardrag_worker.pipeline OCR progress completed=5175 total=5206 succeeded=5175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:43:09,941 INFO cardrag_worker.pipeline OCR progress completed=5200 total=5206 succeeded=5200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-09-27 12:43:10,149 INFO cardrag_worker.pipeline OCR progress completed=5206 total=5206 succeeded=5206 failed=0 structure_failed=0 cache_publication_deferred=0
+  "corpus_sha256": "f916d1c475e078750602c43ce2e378b02515b215df2bd2a6df76d130d67677ea",
+  "gc_deleted": 0,
+  "gc_error": "remote_gc_failed: Remote garbage collection failed after durable run completion.",
+  "gc_status": "failed",
+  "pdf_cache_prune_status": "succeeded",
+  "status": "succeeded",

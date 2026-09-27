@@ -1,0 +1,10 @@
+#!/bin/bash
+OUT=/home/lee/projects/MCP_card_prd_detail/.handoff/001_v1029-pdf-lineage-ocr-cache-recovery/attestations/v129-production-run-watch.out
+{
+  echo "watch started: $(date -Is)"
+  RC=$(docker wait cardrag-v129-production-run-2)
+  echo "container exit code: $RC  at $(date -Is)"
+  echo "=== final stage logs ==="
+  docker logs cardrag-v129-production-run-2 2>&1 | grep -E "run completed|succeeded|publish|gc_|terminal|corpus|OCR progress|embedding batches|worker finished" | tail -25
+} > "$OUT" 2>&1
+touch /tmp/v129-run-complete.flag

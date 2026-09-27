@@ -1,0 +1,4 @@
+2026-09-27 12:16:35,956 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12942: no published PDF attachment
+  "gc_deleted": 0,
+  "gc_error": "remote_gc_failed: Remote garbage collection failed after durable run completion.",
+  "gc_status": "failed",

@@ -1,0 +1,39 @@
+time="2026-09-27T08:55:25+09:00" level=warning msg="volume \"cardrag-worker-v120-recovery-auth-20260910\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+time="2026-09-27T08:55:25+09:00" level=warning msg="volume \"cardrag-worker-paddleocr-models\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+time="2026-09-27T08:55:25+09:00" level=warning msg="volume \"cardrag-worker-v129-state\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+ Network cardrag-worker_default Creating 
+ Network cardrag-worker_default Creating 
+ Network cardrag-worker_default Created 
+ Network cardrag-worker_default Created 
+ Container cardrag-worker-worker-run-e6baa3b3338c Creating 
+ Container cardrag-worker-worker-run-e6baa3b3338c Created 
+{
+  "accepted_ocr_documents": 5192,
+  "accepted_pdf_objects": 4710,
+  "accepted_revisions": 5208,
+  "accepted_sources": 5203,
+  "adopted_ocr_count": 1510,
+  "applied": true,
+  "dry_run": false,
+  "generation_id": "g-bd9a4c513041462886d347af-9b84c2e38c14",
+  "idempotence_imported_ocr_files": 0,
+  "idempotence_imported_pdf_objects": 0,
+  "idempotence_imported_revisions": 0,
+  "idempotence_verified": true,
+  "imported_ocr_files": 8874,
+  "imported_pdf_objects": 4710,
+  "imported_revisions": 5208,
+  "ledger_path": "audit-reports/state-seed/eeb7dea3b83d4c6f5560c8ffbe71a71ab44f48cedada4815d0677c45dbd1eeb1.json",
+  "ledger_sha256": "eeb7dea3b83d4c6f5560c8ffbe71a71ab44f48cedada4815d0677c45dbd1eeb1",
+  "ledger_size_bytes": 7464339,
+  "native_ocr_count": 3682,
+  "prior_current_count": 5044,
+  "prior_historical_count": 148,
+  "reused_ocr_files": 0,
+  "reused_pdf_objects": 0,
+  "reused_revisions": 0,
+  "run_id": "bd9a4c513041462886d347afd5c46c47",
+  "schema_version": "cardrag.state-seed-report.v1",
+  "source_database_sha256": "bb9e878c40b34a3dbfeb8cfa7d677309e511ae85dfef9ae46f52a07c9d43e72c",
+  "status": "applied"
+}

@@ -1,0 +1,31 @@
+time="2026-09-27T09:19:50+09:00" level=warning msg="volume \"cardrag-worker-v129-state\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+time="2026-09-27T09:19:50+09:00" level=warning msg="volume \"cardrag-worker-v120-recovery-auth-20260910\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+time="2026-09-27T09:19:50+09:00" level=warning msg="volume \"cardrag-worker-paddleocr-models\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+ Container cardrag-worker-worker-run-69a7690cacb2 Creating 
+ Container cardrag-worker-worker-run-69a7690cacb2 Created 
+{
+  "applied": true,
+  "dry_run": false,
+  "idempotence_imported_rows": 0,
+  "idempotence_verified": true,
+  "imported_rows": 381361,
+  "ledger_path": "audit-reports/embedding-seed/69822cfaf7784aac90eaf51a83cbdfc5ba6cae9029c071fb355a24e7043f299d.json",
+  "ledger_sha256": "69822cfaf7784aac90eaf51a83cbdfc5ba6cae9029c071fb355a24e7043f299d",
+  "ledger_size_bytes": 557,
+  "profile_rollup": {
+    "cardrag.qwen3-embedding-8b.deepinfra.2d5edd2931057babbbbc45736aac6ed268a54a469b82c1d5e848866abee0188f": {
+      "dimensions": [
+        4096
+      ],
+      "max_created_at": "2026-09-22T23:58:30.268216+00:00",
+      "min_created_at": "2026-09-02T00:46:32.752622+00:00",
+      "row_count": 381361
+    }
+  },
+  "reused_rows": 0,
+  "row_count": 381361,
+  "row_root_sha256": "5dd2a5e398ffdd42a959d0876903875353102971894bb4641d04e3425ec823c9",
+  "schema_version": "cardrag.embedding-seed-report.v1",
+  "source_database_sha256": "bb9e878c40b34a3dbfeb8cfa7d677309e511ae85dfef9ae46f52a07c9d43e72c",
+  "status": "applied"
+}
