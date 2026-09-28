@@ -54,7 +54,7 @@ class OCRRecoveryResult:
     total_documents: int
     total_ocr_documents: int
     unique_ocr_cas_objects: int
-    paddleocr_documents: int
+    unbound_cache_documents: int
     imported_ocr_files: int
     reused_ocr_files: int
     total_bytes_transferred: int
@@ -70,7 +70,7 @@ class OCRRecoveryResult:
             "total_documents": self.total_documents,
             "total_ocr_documents": self.total_ocr_documents,
             "unique_ocr_cas_objects": self.unique_ocr_cas_objects,
-            "paddleocr_documents": self.paddleocr_documents,
+            "unbound_cache_documents": self.unbound_cache_documents,
             "imported_ocr_files": self.imported_ocr_files,
             "reused_ocr_files": self.reused_ocr_files,
             "total_bytes_transferred": self.total_bytes_transferred,
@@ -177,7 +177,7 @@ async def restore_ocr_seed_from_generation(
     ocr_docs = []
     # cas_sha -> set of documents referencing it
     cas_to_docs: dict[str, list[Any]] = defaultdict(list)
-    paddle_count = 0
+    unbound_cache_count = 0
 
     for doc in manifest.documents:
         if doc.ocr is None:
@@ -185,17 +185,17 @@ async def restore_ocr_seed_from_generation(
         ocr_docs.append(doc)
         cas_to_docs[doc.ocr.sha256].append(doc)
         if doc.ocr_cache_kind is None:
-            paddle_count += 1
+            unbound_cache_count += 1
 
     total_ocr_docs = len(ocr_docs)
     unique_cas = len(cas_to_docs)
     LOGGER.info(
-        "Recovering OCR seed for generation %s: %d total docs, %d OCR docs, %d unique OCR CAS, %d PaddleOCR docs",
+        "Recovering OCR seed for generation %s: %d total docs, %d OCR docs, %d unique OCR CAS, %d unbound cache docs (unverified provenance)",
         target_gen_id,
         len(manifest.documents),
         total_ocr_docs,
         unique_cas,
-        paddle_count,
+        unbound_cache_count,
     )
 
     ocr_seed_root = destination / _OCR_SEED_DIRECTORY
@@ -289,7 +289,7 @@ async def restore_ocr_seed_from_generation(
                 _atomic_write_file(target_ocr, body, mode=0o600)
                 imported_count += 1
 
-        is_paddle = doc.ocr_cache_kind is None
+        has_remote_cache = doc.ocr_cache_kind is not None
         ledger_entries.append(
             {
                 "document_id": doc.document_id,
@@ -302,7 +302,7 @@ async def restore_ocr_seed_from_generation(
                 "ocr_size_bytes": doc.ocr.size_bytes,
                 "kind": doc.ocr_cache_kind or "native",
                 "reuse_key": doc.ocr_reuse_key or doc.pdf.sha256,
-                "model": "PaddleOCR-VL-1.6" if is_paddle else "restored-native",
+                "model": "restored-native" if has_remote_cache else "unverified",
             }
         )
 
@@ -336,7 +336,7 @@ async def restore_ocr_seed_from_generation(
         total_documents=len(manifest.documents),
         total_ocr_documents=total_ocr_docs,
         unique_ocr_cas_objects=unique_cas,
-        paddleocr_documents=paddle_count,
+        unbound_cache_documents=unbound_cache_count,
         imported_ocr_files=imported_count,
         reused_ocr_files=reused_count,
         total_bytes_transferred=total_bytes_transferred,

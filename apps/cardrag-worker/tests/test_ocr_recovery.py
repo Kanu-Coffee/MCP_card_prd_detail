@@ -169,7 +169,7 @@ async def test_restore_ocr_seed_dry_run_and_apply_idempotent(tmp_path: Path) -> 
     assert dry_result.total_documents == 3
     assert dry_result.total_ocr_documents == 3
     assert dry_result.unique_ocr_cas_objects == 2  # doc 1 and 2 share the same CAS
-    assert dry_result.paddleocr_documents == 1
+    assert dry_result.unbound_cache_documents == 1
     assert dry_result.ledger_path is None
     # No files written during dry run
     assert not (dest / "ocr-seed").exists()
@@ -264,9 +264,14 @@ async def test_restored_seed_enables_zero_provider_ocr_resolution(tmp_path: Path
             )
             assert res.ocr_sha256 == verified.sha256
             assert res.ocr_bytes == body_bytes
+            assert res.provider_called is False
+            assert res.cache_reused is True
             if spec["is_paddle"]:
-                assert res.provider == "paddleocr"
-                assert res.model == "PaddleOCR-VL-1.6"
+                assert res.provider == "unverified"
+                assert res.model == "unverified"
+            else:
+                assert res.provider == "external-forbidden"
+                assert res.model == "restored-native"
 
 
 @pytest.mark.asyncio

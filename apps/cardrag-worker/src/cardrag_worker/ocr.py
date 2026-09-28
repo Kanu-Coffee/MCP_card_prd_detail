@@ -940,6 +940,13 @@ class OCRResolver:
                 os.chmod(tmp_man, 0o600)
                 tmp_man.replace(target_man)
 
+        if entry.model == "unverified":
+            provider = "unverified"
+        elif entry.model == "PaddleOCR-VL-1.6":
+            provider = "paddleocr"
+        else:
+            provider = self.provider.provider
+
         return OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -947,7 +954,7 @@ class OCRResolver:
             ocr_sha256=verified.sha256,
             size_bytes=verified.size_bytes,
             provenance=entry.kind,
-            provider="paddleocr" if entry.model == "PaddleOCR-VL-1.6" else self.provider.provider,
+            provider=provider,
             model=entry.model,
             reuse_key=entry.reuse_key,
             cache_kind=entry.kind,
