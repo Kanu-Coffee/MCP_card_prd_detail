@@ -476,7 +476,9 @@ def build_state_seed_v122_plan(
             finished_at=str(run_row["finished_at"]) if run_row["finished_at"] is not None else None,
             status=str(run_row["status"]),
             corpus_sha256=str(run_row["corpus_sha256"]) if run_row["corpus_sha256"] is not None else None,
-            contract_sha256=str(run_row["contract_sha256"]) if run_row["contract_sha256"] is not None else None,
+            contract_sha256=str(run_row["contract_sha256"])
+            if run_row["contract_sha256"] is not None
+            else None,
             error=str(run_row["error"]) if run_row["error"] is not None else None,
         )
 
@@ -503,15 +505,11 @@ def build_state_seed_v122_plan(
         ).fetchall()
 
         # PDF Sources and Revisions
-        source_db_rows = connection.execute(
-            "SELECT * FROM pdf_cache_source ORDER BY source_id"
-        ).fetchall()
+        source_db_rows = connection.execute("SELECT * FROM pdf_cache_source ORDER BY source_id").fetchall()
         revision_db_rows = connection.execute(
             "SELECT * FROM pdf_cache_source_revision ORDER BY source_id, revision_id"
         ).fetchall()
-        object_db_rows = connection.execute(
-            "SELECT * FROM pdf_cache_object ORDER BY pdf_sha256"
-        ).fetchall()
+        object_db_rows = connection.execute("SELECT * FROM pdf_cache_object ORDER BY pdf_sha256").fetchall()
 
         if (
             len(source_db_rows) > MAX_SOURCES
@@ -564,9 +562,7 @@ def build_state_seed_v122_plan(
     if not isinstance(manifest_docs, list) or len(manifest_docs) < 1:
         raise StateSeedError("source_seal_manifest_invalid")
     if expected_documents is not None and len(manifest_docs) != expected_documents:
-        raise StateSeedError(
-            f"expected {expected_documents} manifest documents, got {len(manifest_docs)}"
-        )
+        raise StateSeedError(f"expected {expected_documents} manifest documents, got {len(manifest_docs)}")
 
     # Search complete snapshot history for canonical SourceRecords
     all_snapshot_sources: dict[str, SourceRecord] = {}
@@ -670,10 +666,7 @@ def build_state_seed_v122_plan(
                 prior_historical_set.add(doc_id)
             else:
                 prior_current_set.add(doc_id)
-            matching_sources = [
-                s for s in all_snapshot_sources.values()
-                if s.document_id(pdf_sha) == doc_id
-            ]
+            matching_sources = [s for s in all_snapshot_sources.values() if s.document_id(pdf_sha) == doc_id]
             if len(matching_sources) == 0:
                 raise StateSeedError(f"source_metadata_missing: {doc_id}")
             if len(matching_sources) > 1:
@@ -736,7 +729,9 @@ def build_state_seed_v122_plan(
             first_observed_at=_parse_timestamp(s_row["first_observed_at"]),  # type: ignore[arg-type]
             last_observed_at=_parse_timestamp(s_row["last_observed_at"]),  # type: ignore[arg-type]
             last_verified_at=_parse_timestamp(s_row["last_verified_at"]),  # type: ignore[arg-type]
-            superseded_by_source_id=str(s_row["superseded_by_source_id"]) if s_row["superseded_by_source_id"] is not None else None,
+            superseded_by_source_id=str(s_row["superseded_by_source_id"])
+            if s_row["superseded_by_source_id"] is not None
+            else None,
             superseded_at=_parse_timestamp(s_row["superseded_at"], optional=True),
         )
 
@@ -745,7 +740,9 @@ def build_state_seed_v122_plan(
         revisions_list.append(
             StateSeedRevision(
                 revision_id=int(r_row["revision_id"]),
-                previous_revision_id=int(r_row["previous_revision_id"]) if r_row["previous_revision_id"] is not None else None,
+                previous_revision_id=int(r_row["previous_revision_id"])
+                if r_row["previous_revision_id"] is not None
+                else None,
                 source_id=str(r_row["source_id"]),
                 pdf_sha256=str(r_row["pdf_sha256"]),
                 pdf_size_bytes=int(r_row["pdf_size_bytes"]),
@@ -1024,7 +1021,9 @@ def _persist_ledger(state_dir: Path, plan: StateSeedV122Plan) -> Path:
     temp_name = f".{plan.ledger_sha256}.{uuid.uuid4().hex}.tmp"
     temp_fd = -1
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         temp_fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
         view = memoryview(plan.ledger_bytes)
         while view:
@@ -1039,7 +1038,11 @@ def _persist_ledger(state_dir: Path, plan: StateSeedV122Plan) -> Path:
             os.link(temp_name, final_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
         except FileExistsError:
             listed = os.stat(final_name, dir_fd=dir_fd, follow_symlinks=False)
-            if stat.S_ISLNK(listed.st_mode) or not stat.S_ISREG(listed.st_mode) or listed.st_size != len(plan.ledger_bytes):
+            if (
+                stat.S_ISLNK(listed.st_mode)
+                or not stat.S_ISREG(listed.st_mode)
+                or listed.st_size != len(plan.ledger_bytes)
+            ):
                 raise StateSeedError("seed_ledger_conflict") from None
         os.unlink(temp_name, dir_fd=dir_fd)
         os.fsync(dir_fd)
@@ -1274,7 +1277,10 @@ def apply_state_seed_v122(
 
         target_ocr = doc_dir / "ocr.md"
         if target_ocr.is_file():
-            if target_ocr.stat().st_size == entry.ocr_size_bytes and hashlib.sha256(target_ocr.read_bytes()).hexdigest() == entry.ocr_sha256:
+            if (
+                target_ocr.stat().st_size == entry.ocr_size_bytes
+                and hashlib.sha256(target_ocr.read_bytes()).hexdigest() == entry.ocr_sha256
+            ):
                 reused_ocr_files += 1
             else:
                 raise StateSeedError(f"destination_ocr_conflict for {entry.document_id}")

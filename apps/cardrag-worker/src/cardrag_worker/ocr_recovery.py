@@ -142,7 +142,9 @@ async def restore_ocr_seed_from_generation(
     except Exception as exc:
         raise OCRRecoveryError("manifest_invalid", str(exc)) from exc
     if manifest.canonical_bytes() != manifest_bytes:
-        raise OCRRecoveryError("manifest_not_canonical", f"Manifest JSON is not canonical for generation {target_gen_id}")
+        raise OCRRecoveryError(
+            "manifest_not_canonical", f"Manifest JSON is not canonical for generation {target_gen_id}"
+        )
     if manifest.generation_id != target_gen_id:
         raise OCRRecoveryError(
             "generation_id_mismatch",
@@ -158,7 +160,9 @@ async def restore_ocr_seed_from_generation(
     except Exception as exc:
         raise OCRRecoveryError("ready_invalid", str(exc)) from exc
     if ready.canonical_bytes() != ready_bytes:
-        raise OCRRecoveryError("ready_not_canonical", f"READY JSON is not canonical for generation {target_gen_id}")
+        raise OCRRecoveryError(
+            "ready_not_canonical", f"READY JSON is not canonical for generation {target_gen_id}"
+        )
     if ready.generation_id != target_gen_id:
         raise OCRRecoveryError(
             "generation_id_mismatch",
@@ -169,9 +173,13 @@ async def restore_ocr_seed_from_generation(
 
     if target_gen_id == pointer.generation_id:
         if pointer.manifest_sha256 != ready.manifest_sha256:
-            raise OCRRecoveryError("pointer_manifest_sha_mismatch", "Pointer manifest SHA-256 does not match READY")
+            raise OCRRecoveryError(
+                "pointer_manifest_sha_mismatch", "Pointer manifest SHA-256 does not match READY"
+            )
         if pointer.ready_sha256 != hashlib.sha256(ready_bytes).hexdigest():
-            raise OCRRecoveryError("pointer_ready_sha_mismatch", "Pointer ready SHA-256 does not match READY bytes")
+            raise OCRRecoveryError(
+                "pointer_ready_sha_mismatch", "Pointer ready SHA-256 does not match READY bytes"
+            )
 
     # 2. Collect OCR documents
     ocr_docs = []
@@ -213,7 +221,11 @@ async def restore_ocr_seed_from_generation(
         sample_bytes: bytes | None = None
         for d in docs:
             local_file = ocr_seed_root / d.document_id / "ocr.md"
-            if local_file.is_file() and not local_file.is_symlink() and local_file.stat().st_size == size_bytes:
+            if (
+                local_file.is_file()
+                and not local_file.is_symlink()
+                and local_file.stat().st_size == size_bytes
+            ):
                 content = local_file.read_bytes()
                 if hashlib.sha256(content).hexdigest() == cas_sha:
                     sample_bytes = content

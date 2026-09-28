@@ -93,7 +93,9 @@ def build_test_remote() -> tuple[FakeWebDAV, str, list[dict[str, Any]]]:
         pdf_path = object_path(pdf_sha).as_posix()
         webdav.objects[pdf_path] = pdf_body
         pdf_ref = ArtifactRef.for_cas(sha256=pdf_sha, size_bytes=len(pdf_body), media_type="application/pdf")
-        ocr_ref = ArtifactRef.for_cas(sha256=ocr_sha, size_bytes=ocr_size, media_type="text/markdown; charset=utf-8")
+        ocr_ref = ArtifactRef.for_cas(
+            sha256=ocr_sha, size_bytes=ocr_size, media_type="text/markdown; charset=utf-8"
+        )
 
         reuse_key = sha256_bytes(f"reuse_{spec['id']}".encode()) if not spec["is_paddle"] else None
         gen_doc = GenerationDocument(
@@ -121,7 +123,9 @@ def build_test_remote() -> tuple[FakeWebDAV, str, list[dict[str, Any]]]:
         serving_database=db_ref,
         corpus_sha256="c" * 64,
         contract_sha256="d" * 64,
-        embedding_contract=EmbeddingContract(provider="openrouter", model="embed", dimension=1536, count=len(gen_docs)),
+        embedding_contract=EmbeddingContract(
+            provider="openrouter", model="embed", dimension=1536, count=len(gen_docs)
+        ),
         issuer_codes=("kb", "shinhan"),
         counts=GenerationCounts(
             documents=len(gen_docs),

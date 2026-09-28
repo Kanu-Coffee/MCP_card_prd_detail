@@ -325,7 +325,9 @@ async def _mark_ocr_caches(
                     continue
                 if manifest_body is None:
                     if retained_bindings is not None:
-                        raise GCMarkVerificationError(f"retained {kind} OCR cache {reuse_key} has no manifest")
+                        raise GCMarkVerificationError(
+                            f"retained {kind} OCR cache {reuse_key} has no manifest"
+                        )
                     inactive.add(reuse_root.as_posix())
                     continue
                 try:
@@ -337,7 +339,9 @@ async def _mark_ocr_caches(
                     ready = OCRReady.model_validate_json(ready_body)
                 except Exception as exc:
                     if retained_bindings is not None:
-                        raise GCMarkVerificationError(f"invalid retained {kind} OCR cache {reuse_key}") from exc
+                        raise GCMarkVerificationError(
+                            f"invalid retained {kind} OCR cache {reuse_key}"
+                        ) from exc
                     inactive.add(reuse_root.as_posix())
                     continue
                 if manifest.canonical_bytes() != manifest_body or ready.canonical_bytes() != ready_body:

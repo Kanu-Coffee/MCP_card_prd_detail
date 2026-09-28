@@ -76,6 +76,7 @@ _SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._+-]{0,511}$")
 
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingSeedRow:
     """Validated source row metadata; the embedding blob itself is never held."""
@@ -265,7 +266,9 @@ def _iter_validated_rows(connection: sqlite3.Connection) -> Iterator[EmbeddingSe
         yield row
 
 
-def _profile_rollup(rows: Iterator[EmbeddingSeedRow]) -> tuple[list[EmbeddingSeedRow], dict[str, dict[str, Any]]]:
+def _profile_rollup(
+    rows: Iterator[EmbeddingSeedRow],
+) -> tuple[list[EmbeddingSeedRow], dict[str, dict[str, Any]]]:
     collected: list[EmbeddingSeedRow] = []
     rollup: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -362,7 +365,9 @@ def _persist_ledger_bytes(ledger_dir: Path, *, ledger_sha256: str, payload_bytes
     temp_name = f".{ledger_sha256}.{uuid.uuid4().hex}.tmp"
     temp_fd = -1
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         temp_fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
         view = memoryview(payload_bytes)
         while view:

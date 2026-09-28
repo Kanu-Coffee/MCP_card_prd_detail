@@ -89,12 +89,8 @@ def generate_corpus_diff_report(
     current_docs = [d for d in acquired_documents if not getattr(d, "is_historical", False)]
     historical_docs = [d for d in acquired_documents if getattr(d, "is_historical", False)]
 
-    current_map = {
-        d.source.document_id(d.pdf.sha256): d for d in current_docs
-    }
-    historical_map = {
-        d.source.document_id(d.pdf.sha256): d for d in historical_docs
-    }
+    current_map = {d.source.document_id(d.pdf.sha256): d for d in current_docs}
+    historical_map = {d.source.document_id(d.pdf.sha256): d for d in historical_docs}
     all_acquired_ids = set(current_map.keys()) | set(historical_map.keys())
 
     if seed_ledger is None:
@@ -143,9 +139,7 @@ def generate_corpus_diff_report(
         # Prior source IDs and prior product lineages
         if getattr(seed_ledger, "source_records", None):
             prior_source_ids = set(seed_ledger.source_records.keys())
-            prior_products = {
-                (s.issuer, s.product_code) for s in seed_ledger.source_records.values()
-            }
+            prior_products = {(s.issuer, s.product_code) for s in seed_ledger.source_records.values()}
         else:
             prior_source_ids = {pe.source_id for pe in prior_entries.values()}
             prior_products = {
@@ -190,12 +184,19 @@ def generate_corpus_diff_report(
                 )
             elif (
                 superseded_id is not None
-                and (superseded_id in replaced_predecessors or superseded_id in prior_entries or superseded_id in prior_all)
+                and (
+                    superseded_id in replaced_predecessors
+                    or superseded_id in prior_entries
+                    or superseded_id in prior_all
+                )
             ) or (source.issuer, source.product_code) in prior_products:
                 # New source ID replaces a prior source/product lineage
                 if superseded_id is None:
                     for pe in prior_entries.values():
-                        if pe.issuer == source.issuer and getattr(pe, "product_code", None) == source.product_code:
+                        if (
+                            pe.issuer == source.issuer
+                            and getattr(pe, "product_code", None) == source.product_code
+                        ):
                             superseded_id = pe.document_id
                             break
                 successor_sources.append(

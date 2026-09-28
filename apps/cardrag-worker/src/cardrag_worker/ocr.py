@@ -69,6 +69,7 @@ LOGGER = logging.getLogger(__name__)
 class OCRSeedPreflightError(RuntimeError):
     """Seed generation document missed cache; refusing mass provider re-processing."""
 
+
 PAGE_MARKER = re.compile(r"^## Page ([1-9][0-9]*)$", re.MULTILINE)
 OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS = 12
 OCR_PROCESSOR_VERSION = "cardrag-worker/1.0.4"
@@ -929,7 +930,11 @@ class OCRResolver:
             tmp.replace(target_ocr)
 
         # If native and manifest exists, materialize native-manifest.json
-        if entry.kind == "native" and entry.source_manifest_path is not None and entry.source_manifest_path.is_file():
+        if (
+            entry.kind == "native"
+            and entry.source_manifest_path is not None
+            and entry.source_manifest_path.is_file()
+        ):
             man_bytes = entry.source_manifest_path.read_bytes()
             if entry.manifest_sha256 and hashlib.sha256(man_bytes).hexdigest() != entry.manifest_sha256:
                 raise OCRValidationError("seed native manifest hash mismatch")
@@ -2178,8 +2183,7 @@ class OCRResolver:
         if self._require_cache_hit:
             raise OCRCacheMissError("OCR cache miss in cache-only mode")
         if self._seed_ledger is not None and (
-            document_id in self._seed_ledger.seed_doc_ids
-            or pdf_sha256 in self._seed_ledger.seed_pdf_shas
+            document_id in self._seed_ledger.seed_doc_ids or pdf_sha256 in self._seed_ledger.seed_pdf_shas
         ):
             raise OCRSeedPreflightError(
                 f"Seed document {document_id} (pdf_sha256={pdf_sha256}) was not found in OCR cache/seed; "

@@ -29,7 +29,7 @@ _DIMENSION = 8
 
 def _unit_values(label: str) -> list[float]:
     digest = hashlib.sha256(label.encode()).hexdigest()
-    raw = [int(digest[i : i + 2], 16) / 255.0 + 0.01 for i in range(0, 32, 4)][: _DIMENSION]
+    raw = [int(digest[i : i + 2], 16) / 255.0 + 0.01 for i in range(0, 32, 4)][:_DIMENSION]
     norm = math.sqrt(sum(value * value for value in raw))
     return [value / norm for value in raw]
 
@@ -82,7 +82,15 @@ def _rows(state: WorkerState) -> dict[str, tuple[str, str, int, str, str, bytes,
         """SELECT cache_key,profile_id,input_sha256,dimension,dtype,normalization,embedding,created_at
            FROM embedding_cache_v5"""
     ):
-        result[str(raw[0])] = (str(raw[1]), str(raw[2]), int(raw[3]), str(raw[4]), str(raw[5]), bytes(raw[6]), str(raw[7]))
+        result[str(raw[0])] = (
+            str(raw[1]),
+            str(raw[2]),
+            int(raw[3]),
+            str(raw[4]),
+            str(raw[5]),
+            bytes(raw[6]),
+            str(raw[7]),
+        )
     return result
 
 

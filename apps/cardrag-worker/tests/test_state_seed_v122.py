@@ -458,15 +458,7 @@ def test_active_writer_sidecars_blocked(tmp_path: Path) -> None:
 
 def test_corrupted_ocr_body_blocked(tmp_path: Path) -> None:
     fixture = _create_v122_source_fixture(tmp_path)
-    ocr_file = (
-        fixture.root
-        / "runs"
-        / fixture.run_id
-        / "documents"
-        / fixture.native_doc_id
-        / "ocr"
-        / "ocr.md"
-    )
+    ocr_file = fixture.root / "runs" / fixture.run_id / "documents" / fixture.native_doc_id / "ocr" / "ocr.md"
     ocr_file.write_bytes(b"tampered content")
 
     with pytest.raises(StateSeedError) as exc_info:
@@ -778,8 +770,18 @@ def test_historical_document_source_record_from_earlier_snapshot_materializes(tm
                     "issuer": "kb",
                     "product_code": "CARD-CURRENT",
                     "page_count": 1,
-                    "pdf": {"path": f"cas/pdf/{pdf_sha1[:2]}/{pdf_sha1}", "sha256": pdf_sha1, "size_bytes": len(pdf_content1), "media_type": "application/pdf"},
-                    "ocr": {"path": f"cas/ocr/{ocr_sha1[:2]}/{ocr_sha1}", "sha256": ocr_sha1, "size_bytes": len(ocr_body1), "media_type": "text/markdown; charset=utf-8"},
+                    "pdf": {
+                        "path": f"cas/pdf/{pdf_sha1[:2]}/{pdf_sha1}",
+                        "sha256": pdf_sha1,
+                        "size_bytes": len(pdf_content1),
+                        "media_type": "application/pdf",
+                    },
+                    "ocr": {
+                        "path": f"cas/ocr/{ocr_sha1[:2]}/{ocr_sha1}",
+                        "sha256": ocr_sha1,
+                        "size_bytes": len(ocr_body1),
+                        "media_type": "text/markdown; charset=utf-8",
+                    },
                     "ocr_cache_kind": "adopted",
                     "ocr_reuse_key": "rk-1",
                 },
@@ -789,16 +791,36 @@ def test_historical_document_source_record_from_earlier_snapshot_materializes(tm
                     "issuer": "kb",
                     "product_code": "CARD-HISTORICAL-ONLY",
                     "page_count": 2,
-                    "pdf": {"path": f"cas/pdf/{pdf_sha2[:2]}/{pdf_sha2}", "sha256": pdf_sha2, "size_bytes": len(pdf_content2), "media_type": "application/pdf"},
-                    "ocr": {"path": f"cas/ocr/{ocr_sha2[:2]}/{ocr_sha2}", "sha256": ocr_sha2, "size_bytes": len(ocr_body2), "media_type": "text/markdown; charset=utf-8"},
+                    "pdf": {
+                        "path": f"cas/pdf/{pdf_sha2[:2]}/{pdf_sha2}",
+                        "sha256": pdf_sha2,
+                        "size_bytes": len(pdf_content2),
+                        "media_type": "application/pdf",
+                    },
+                    "ocr": {
+                        "path": f"cas/ocr/{ocr_sha2[:2]}/{ocr_sha2}",
+                        "sha256": ocr_sha2,
+                        "size_bytes": len(ocr_body2),
+                        "media_type": "text/markdown; charset=utf-8",
+                    },
                     "ocr_cache_kind": "adopted",
                     "ocr_reuse_key": "rk-2",
                     "is_historical": True,
                 },
             ],
             "objects": [
-                {"path": f"runs/{run_id_term}/documents/{doc_id1}/ocr/ocr.md", "sha256": ocr_sha1, "size_bytes": len(ocr_body1), "media_type": "text/markdown; charset=utf-8"},
-                {"path": f"runs/{run_id_term}/documents/{doc_id2}/ocr/ocr.md", "sha256": ocr_sha2, "size_bytes": len(ocr_body2), "media_type": "text/markdown; charset=utf-8"},
+                {
+                    "path": f"runs/{run_id_term}/documents/{doc_id1}/ocr/ocr.md",
+                    "sha256": ocr_sha1,
+                    "size_bytes": len(ocr_body1),
+                    "media_type": "text/markdown; charset=utf-8",
+                },
+                {
+                    "path": f"runs/{run_id_term}/documents/{doc_id2}/ocr/ocr.md",
+                    "sha256": ocr_sha2,
+                    "size_bytes": len(ocr_body2),
+                    "media_type": "text/markdown; charset=utf-8",
+                },
             ],
         },
     }
@@ -815,8 +837,22 @@ def test_historical_document_source_record_from_earlier_snapshot_materializes(tm
             {"source_id": source_rec2.source_id, "status": "succeeded", "pdf_sha256": pdf_sha2},
         ],
         "documents": [
-            {"document_id": doc_id1, "source_id": source_rec1.source_id, "pdf_sha256": pdf_sha1, "pdf_size_bytes": len(pdf_content1), "page_count": 1, "is_historical": False},
-            {"document_id": doc_id2, "source_id": source_rec2.source_id, "pdf_sha256": pdf_sha2, "pdf_size_bytes": len(pdf_content2), "page_count": 2, "is_historical": True},
+            {
+                "document_id": doc_id1,
+                "source_id": source_rec1.source_id,
+                "pdf_sha256": pdf_sha1,
+                "pdf_size_bytes": len(pdf_content1),
+                "page_count": 1,
+                "is_historical": False,
+            },
+            {
+                "document_id": doc_id2,
+                "source_id": source_rec2.source_id,
+                "pdf_sha256": pdf_sha2,
+                "pdf_size_bytes": len(pdf_content2),
+                "page_count": 2,
+                "is_historical": True,
+            },
         ],
     }
     acq_dir = root / "runs" / run_id_term / "checkpoints"
@@ -1008,8 +1044,18 @@ def test_two_sources_sharing_same_pdf_sha_bound_exactly(tmp_path: Path) -> None:
                     "issuer": "kb",
                     "product_code": "CARD-PROD-A",
                     "page_count": 1,
-                    "pdf": {"path": f"cas/pdf/{shared_pdf_sha[:2]}/{shared_pdf_sha}", "sha256": shared_pdf_sha, "size_bytes": len(pdf_content), "media_type": "application/pdf"},
-                    "ocr": {"path": f"cas/ocr/{ocr_sha_A[:2]}/{ocr_sha_A}", "sha256": ocr_sha_A, "size_bytes": len(ocr_body_A), "media_type": "text/markdown; charset=utf-8"},
+                    "pdf": {
+                        "path": f"cas/pdf/{shared_pdf_sha[:2]}/{shared_pdf_sha}",
+                        "sha256": shared_pdf_sha,
+                        "size_bytes": len(pdf_content),
+                        "media_type": "application/pdf",
+                    },
+                    "ocr": {
+                        "path": f"cas/ocr/{ocr_sha_A[:2]}/{ocr_sha_A}",
+                        "sha256": ocr_sha_A,
+                        "size_bytes": len(ocr_body_A),
+                        "media_type": "text/markdown; charset=utf-8",
+                    },
                     "ocr_cache_kind": "adopted",
                     "ocr_reuse_key": "rk-A",
                 },
@@ -1019,15 +1065,35 @@ def test_two_sources_sharing_same_pdf_sha_bound_exactly(tmp_path: Path) -> None:
                     "issuer": "kb",
                     "product_code": "CARD-PROD-B",
                     "page_count": 1,
-                    "pdf": {"path": f"cas/pdf/{shared_pdf_sha[:2]}/{shared_pdf_sha}", "sha256": shared_pdf_sha, "size_bytes": len(pdf_content), "media_type": "application/pdf"},
-                    "ocr": {"path": f"cas/ocr/{ocr_sha_B[:2]}/{ocr_sha_B}", "sha256": ocr_sha_B, "size_bytes": len(ocr_body_B), "media_type": "text/markdown; charset=utf-8"},
+                    "pdf": {
+                        "path": f"cas/pdf/{shared_pdf_sha[:2]}/{shared_pdf_sha}",
+                        "sha256": shared_pdf_sha,
+                        "size_bytes": len(pdf_content),
+                        "media_type": "application/pdf",
+                    },
+                    "ocr": {
+                        "path": f"cas/ocr/{ocr_sha_B[:2]}/{ocr_sha_B}",
+                        "sha256": ocr_sha_B,
+                        "size_bytes": len(ocr_body_B),
+                        "media_type": "text/markdown; charset=utf-8",
+                    },
                     "ocr_cache_kind": "adopted",
                     "ocr_reuse_key": "rk-B",
                 },
             ],
             "objects": [
-                {"path": f"runs/{run_id}/documents/{doc_id_A}/ocr/ocr.md", "sha256": ocr_sha_A, "size_bytes": len(ocr_body_A), "media_type": "text/markdown; charset=utf-8"},
-                {"path": f"runs/{run_id}/documents/{doc_id_B}/ocr/ocr.md", "sha256": ocr_sha_B, "size_bytes": len(ocr_body_B), "media_type": "text/markdown; charset=utf-8"},
+                {
+                    "path": f"runs/{run_id}/documents/{doc_id_A}/ocr/ocr.md",
+                    "sha256": ocr_sha_A,
+                    "size_bytes": len(ocr_body_A),
+                    "media_type": "text/markdown; charset=utf-8",
+                },
+                {
+                    "path": f"runs/{run_id}/documents/{doc_id_B}/ocr/ocr.md",
+                    "sha256": ocr_sha_B,
+                    "size_bytes": len(ocr_body_B),
+                    "media_type": "text/markdown; charset=utf-8",
+                },
             ],
         },
     }
@@ -1044,8 +1110,22 @@ def test_two_sources_sharing_same_pdf_sha_bound_exactly(tmp_path: Path) -> None:
             {"source_id": source_B.source_id, "status": "succeeded", "pdf_sha256": shared_pdf_sha},
         ],
         "documents": [
-            {"document_id": doc_id_A, "source_id": source_A.source_id, "pdf_sha256": shared_pdf_sha, "pdf_size_bytes": len(pdf_content), "page_count": 1, "is_historical": False},
-            {"document_id": doc_id_B, "source_id": source_B.source_id, "pdf_sha256": shared_pdf_sha, "pdf_size_bytes": len(pdf_content), "page_count": 1, "is_historical": False},
+            {
+                "document_id": doc_id_A,
+                "source_id": source_A.source_id,
+                "pdf_sha256": shared_pdf_sha,
+                "pdf_size_bytes": len(pdf_content),
+                "page_count": 1,
+                "is_historical": False,
+            },
+            {
+                "document_id": doc_id_B,
+                "source_id": source_B.source_id,
+                "pdf_sha256": shared_pdf_sha,
+                "pdf_size_bytes": len(pdf_content),
+                "page_count": 1,
+                "is_historical": False,
+            },
         ],
     }
     acq_dir = root / "runs" / run_id / "checkpoints"
@@ -1143,7 +1223,9 @@ def test_tampered_or_conflicting_source_records_fail_closed(tmp_path: Path) -> N
             "records": [tampered_rec],
         },
     )
-    state_c.finish_run(run_id="run-conflict", status="succeeded", corpus_sha256="c" * 64, contract_sha256="d" * 64)
+    state_c.finish_run(
+        run_id="run-conflict", status="succeeded", corpus_sha256="c" * 64, contract_sha256="d" * 64
+    )
     _checkpoint_and_close(state_c)
 
     with pytest.raises(StateSeedError) as exc_c:
@@ -1211,7 +1293,10 @@ def test_destination_collision_and_safety_checks(tmp_path: Path) -> None:
     plan = build_state_seed_v122_plan(fixture.root, generation_id=fixture.generation_id)
 
     # 1. Source and destination overlap rejected
-    with pytest.raises(StateSeedError) as exc_overlap, WorkerState(fixture.root / "worker-state.sqlite3") as s:
+    with (
+        pytest.raises(StateSeedError) as exc_overlap,
+        WorkerState(fixture.root / "worker-state.sqlite3") as s,
+    ):
         apply_state_seed_v122(plan, s, fixture.root)
     assert exc_overlap.value.code == "source_destination_overlap"
 
