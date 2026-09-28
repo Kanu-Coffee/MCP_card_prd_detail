@@ -20,7 +20,7 @@ CardRAG v1.0.29 is a production-hardened stable release featuring launch-date pa
 
 ---
 
-## Operational Hotfix: v1.0.29-patch1 (Commit ffc3124)
+## Operational Hotfix: v1.0.29-patch1 / v1.0.29-patch2 (Commits ffc3124 .. b4c1489)
 
 Subsequent production operations and recovery hardening are delivered via immutable hotfix container image and tracked in `main` / `release/v1.0.29`:
 
@@ -33,14 +33,18 @@ Subsequent production operations and recovery hardening are delivered via immuta
 - Resolves `GCError: retained generations disagree on OCR cache` by admitting multiple valid OCR CAS bindings per reuse key across retained generations.
 - Gracefully handles absent un-published OCR caches on WebDAV while maintaining 100% CAS object mark protection for active documents.
 
+### 3. Unbound Cache Provenance Neutrality
+- Documents without remote cache bindings (`ocr_cache_kind is None`) are recorded with neutral provenance (`model="unverified"`, `provider="unverified"`, `unbound_cache_documents`).
+- Guarantees byte-level CAS integrity and zero-provider-call resolution without asserting unverified OCR provider claims.
+
 ---
 
 ## Verified Artifacts & Deployment Digests
 
 - **Tag `v1.0.29` Source Commit**: `fdf87e602335d27b3e381e6e8648fec7fd0d0beb` (immutable Git tag)
-- **Hotfix `v1.0.29-patch1` Source Commit**: `ffc31247c09684efd1588f0af4751ca9fd448e9b`
+- **Hotfix Source Commits**: `ffc31247c09684efd1588f0af4751ca9fd448e9b` .. `b4c1489`
 - **Active Operational Worker Image Digest**:
-  `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@sha256:25de74b83429ac588cb6e8136c7288364a1f3d9c68c19f8443178ed37ca61235`
+  `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@sha256:b42dfb6144da4f7a5877ca2e5d1a8ab517132af271f90d9f239cb3e8dfe80bca` (tags: `v1.0.29-patch1`, `v1.0.29-patch2`)
 - **Active MCP Image Digest**:
   `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate@sha256:53382bc35c12758b05a39bedd80d525db91ff66eff20d4e7e0731eb8905a3e30`
 - **Production Serving Generation**: `g-7ea0625531c447a8a3ae4368-7a7b0b5057d0` (5,207 documents, healthy on port 18015)
