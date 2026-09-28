@@ -35,7 +35,13 @@ from cardrag_core import (
     verify_ocr_bytes,
 )
 
-from cardrag_worker.gc import GCError, GCPartialFailure, collect_garbage
+from cardrag_worker.gc import (
+    GCDeletionError,
+    GCError,
+    GCMarkVerificationError,
+    GCPartialFailure,
+    collect_garbage,
+)
 from cardrag_worker.state import WorkerState
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
@@ -646,4 +652,140 @@ async def test_gc_rejects_generation_predecessor_cycle_before_delete(tmp_path: P
             retain_generations=3,
             now=NOW,
         )
+    assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_gc_retained_generations_multiple_ocr_bindings_for_same_reuse_key_succeeds(
+    tmp_path: Path,
+) -> None:
+    webdav, active_key, inactive_key, unused_sha = build_remote()
+    stable_path = STABLE_POINTER_PATH.as_posix()
+    pointer = GenerationPointer.model_validate_json(webdav.objects[stable_path])
+    current_manifest_path = generation_manifest_path(pointer.generation_id).as_posix()
+    current_ready_path = generation_ready_path(pointer.generation_id).as_posix()
+    original_manifest = GenerationManifest.model_validate_json(webdav.objects[current_manifest_path])
+
+    # Second document sharing the exact same active_key but referencing a second distinct OCR artifact
+    ocr2_body = "## Page 1\n\n두 번째 서로 다른 OCR 본문 내용입니다. 충분한 길이를 갖습니다.\n".encode()
+    _, _, _, ocr2 = cache_control(cache_epoch=0, body=ocr2_body)
+    pdf2 = ArtifactRef.for_cas(sha256=sha256_bytes(b"pdf2"), size_bytes=4, media_type="application/pdf")
+    doc2 = GenerationDocument(
+        document_id="doc_kb_2",
+        issuer="kb",
+        pdf=pdf2,
+        ocr=ocr2,
+        ocr_cache_kind="native",
+        ocr_reuse_key=active_key,
+        page_count=1,
+    )
+
+    new_manifest = original_manifest.model_copy(
+        update={
+            "counts": GenerationCounts(documents=2, pdf_objects=2, ocr_objects=2, chunks=2),
+            "embedding_contract": original_manifest.embedding_contract.model_copy(update={"count": 2}),
+            "documents": (*original_manifest.documents, doc2),
+        }
+    )
+    new_manifest_body = new_manifest.canonical_bytes()
+    new_ready = GenerationReady(
+        generation_id=pointer.generation_id,
+        manifest_sha256=sha256_bytes(new_manifest_body),
+        serving_database_sha256=new_manifest.serving_database.sha256,
+        serving_database_size_bytes=new_manifest.serving_database.size_bytes,
+    )
+    new_ready_body = new_ready.canonical_bytes()
+    new_pointer = GenerationPointer(
+        generation_id=pointer.generation_id,
+        manifest_sha256=new_ready.manifest_sha256,
+        ready_sha256=sha256_bytes(new_ready_body),
+    )
+
+    # Register in fake WebDAV
+    webdav.objects[current_manifest_path] = new_manifest_body
+    webdav.objects[current_ready_path] = new_ready_body
+    webdav.objects[stable_path] = new_pointer.canonical_bytes()
+
+    # Add second PDF and second OCR to CAS
+    cas_root = PurePosixPath("v1/objects/sha256")
+    for artifact in (pdf2, ocr2):
+        path = object_path(artifact.sha256)
+        prefix = cas_root / artifact.sha256[:2]
+        existing_children = list(webdav.children.get(prefix.as_posix(), ()))
+        if path not in existing_children:
+            existing_children.append(path)
+            webdav.children[prefix.as_posix()] = tuple(existing_children)
+        existing_prefixes = list(webdav.children.get(cas_root.as_posix(), ()))
+        if prefix not in existing_prefixes:
+            existing_prefixes.append(prefix)
+            webdav.children[cas_root.as_posix()] = tuple(sorted(existing_prefixes, key=str))
+
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        # Dry-run must succeed without raising "retained generations disagree on OCR cache"
+        result = await collect_garbage(webdav=webdav, state=state, now=NOW)
+        # Verify both OCR artifacts are marked (not candidates)
+        ocr1_path = original_manifest.documents[0].ocr.path
+        ocr2_path = ocr2.path
+        assert ocr1_path not in result.candidates
+        assert ocr2_path not in result.candidates
+        # Active cache directory is preserved
+        assert f"v1/ocr-cache/native/{active_key[:2]}/{active_key}" not in result.candidates
+
+        # Apply deletion after grace period
+        second = await collect_garbage(
+            webdav=webdav,
+            state=state,
+            apply=True,
+            now=NOW + timedelta(days=31),
+        )
+        assert ocr1_path not in second.deleted
+        assert ocr2_path not in second.deleted
+        assert f"v1/ocr-cache/native/{active_key[:2]}/{active_key}" not in second.deleted
+
+
+@pytest.mark.asyncio
+async def test_gc_retained_generations_ocr_cache_mismatch_fails_closed(tmp_path: Path) -> None:
+    webdav, active_key, _, _ = build_remote()
+    # Mutate the active cache manifest on WebDAV to point to a completely unreferenced OCR artifact
+    cache_man_path = ocr_manifest_path(active_key).as_posix()
+    cache_ready_path = ocr_ready_path(active_key).as_posix()
+    different_body = "## Page 1\n\n완전히 다른 OCR 내용입니다. 캐시 불일치 테스트용입니다.\n".encode()
+    _, different_manifest, different_ready, _ = cache_control(cache_epoch=0, body=different_body)
+    # Give it active_key reuse_key so it appears to be for active_key but has mismatched output
+    different_manifest = different_manifest.model_copy(update={"reuse_key": active_key})
+    different_man_body = different_manifest.canonical_bytes()
+    different_ready = OCRReady(
+        reuse_key=active_key,
+        manifest_sha256=sha256_bytes(different_man_body),
+        ocr_sha256=different_manifest.output.sha256,
+    )
+    webdav.objects[cache_man_path] = different_man_body
+    webdav.objects[cache_ready_path] = different_ready.canonical_bytes()
+
+    with (
+        WorkerState(tmp_path / "state.sqlite3") as state,
+        pytest.raises(GCMarkVerificationError, match="retained generation/cache binding differs"),
+    ):
+        await collect_garbage(webdav=webdav, state=state, now=NOW)
+    assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_gc_first_delete_failure_raises_gc_deletion_error(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        first = await collect_garbage(webdav=webdav, state=state, now=NOW)
+        assert len(first.candidates) > 0
+        # Configure fake WebDAV to fail on the very first delete
+        first_candidate = sorted(first.candidates)[0]
+        webdav.delete_failures[first_candidate] = WebDAVHTTPError(
+            "DELETE", PurePosixPath(first_candidate), 500
+        )
+        with pytest.raises(GCDeletionError, match="first remote DELETE failed"):
+            await collect_garbage(
+                webdav=webdav,
+                state=state,
+                apply=True,
+                now=NOW + timedelta(days=31),
+            )
     assert webdav.deleted == []

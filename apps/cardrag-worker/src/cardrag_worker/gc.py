@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,9 +33,25 @@ from cardrag_core import (
 from .state import WorkerState
 from .webdav import WebDAVClient
 
+LOGGER = logging.getLogger(__name__)
+
 
 class GCError(RuntimeError):
     """Fail-closed remote garbage-collection error."""
+
+    reason_code = "remote_gc_failed"
+
+
+class GCMarkVerificationError(GCError):
+    """Mark phase validation failed; no deletions attempted."""
+
+    reason_code = "remote_gc_mark_verification_failed"
+
+
+class GCDeletionError(GCError):
+    """Deletion attempt failed before any deletions succeeded."""
+
+    reason_code = "remote_gc_delete_failed"
 
 
 class GCPartialFailure(GCError):
@@ -85,9 +102,9 @@ async def _generation_chain(
     try:
         pointer = GenerationPointer.model_validate_json(pointer_body)
     except Exception as exc:
-        raise GCError("stable pointer is invalid") from exc
+        raise GCMarkVerificationError("stable pointer is invalid") from exc
     if pointer.canonical_bytes() != pointer_body:
-        raise GCError("stable pointer is not canonical JSON")
+        raise GCMarkVerificationError("stable pointer is not canonical JSON")
     manifests: list[GenerationManifest] = []
     seen_generation_ids: set[str] = set()
     generation_id: str | None = pointer.generation_id
@@ -95,7 +112,7 @@ async def _generation_chain(
         if generation_id is None:
             break
         if generation_id in seen_generation_ids:
-            raise GCError(f"generation predecessor chain contains a cycle at {generation_id}")
+            raise GCMarkVerificationError(f"generation predecessor chain contains a cycle at {generation_id}")
         seen_generation_ids.add(generation_id)
         manifest_body = await _required_bytes(webdav, generation_manifest_path(generation_id))
         ready_body = await _required_bytes(webdav, generation_ready_path(generation_id))
@@ -103,9 +120,9 @@ async def _generation_chain(
             manifest = GenerationManifest.model_validate_json(manifest_body)
             ready = GenerationReady.model_validate_json(ready_body)
         except Exception as exc:
-            raise GCError(f"generation {generation_id} control JSON is invalid") from exc
+            raise GCMarkVerificationError(f"generation {generation_id} control JSON is invalid") from exc
         if manifest.canonical_bytes() != manifest_body or ready.canonical_bytes() != ready_body:
-            raise GCError(f"generation {generation_id} control JSON is not canonical")
+            raise GCMarkVerificationError(f"generation {generation_id} control JSON is not canonical")
         if (
             manifest.generation_id != generation_id
             or ready.generation_id != generation_id
@@ -113,7 +130,7 @@ async def _generation_chain(
             or manifest.serving_database.sha256 != ready.serving_database_sha256
             or manifest.serving_database.size_bytes != ready.serving_database_size_bytes
         ):
-            raise GCError(f"generation {generation_id} control hashes disagree")
+            raise GCMarkVerificationError(f"generation {generation_id} control hashes disagree")
         if manifest.schema_version in {"cardrag.generation.v5", "cardrag.generation.v6"}:
             sidecar = manifest.vector_sidecar
             if sidecar is None or (
@@ -121,18 +138,18 @@ async def _generation_chain(
                 or ready.vector_sidecar_size_bytes != sidecar.artifact.size_bytes
                 or sidecar.artifact.path != generation_vectors_path(generation_id).as_posix()
             ):
-                raise GCError(f"generation {generation_id} vector control hashes disagree")
+                raise GCMarkVerificationError(f"generation {generation_id} vector control hashes disagree")
         elif (
             manifest.vector_sidecar is not None
             or ready.vector_sidecar_sha256 is not None
             or ready.vector_sidecar_size_bytes is not None
         ):
-            raise GCError(f"legacy generation {generation_id} declares a vector sidecar")
+            raise GCMarkVerificationError(f"legacy generation {generation_id} declares a vector sidecar")
         if index == 0 and (
             pointer.manifest_sha256 != ready.manifest_sha256
             or pointer.ready_sha256 != hashlib.sha256(ready_body).hexdigest()
         ):
-            raise GCError("stable pointer does not bind current generation READY/manifest")
+            raise GCMarkVerificationError("stable pointer does not bind current generation READY/manifest")
         manifests.append(manifest)
         generation_id = manifest.previous_generation_id
     return pointer_body, tuple(manifests)
@@ -263,7 +280,7 @@ async def _list_incoming_temp_leaves(webdav: WebDAVClient) -> tuple[PurePosixPat
 async def _mark_ocr_caches(
     webdav: WebDAVClient,
     *,
-    retained_references: Mapping[tuple[str, str], tuple[str, int, str]],
+    retained_references: Mapping[tuple[str, str], set[tuple[str, int, str]]],
 ) -> tuple[set[str], set[str]]:
     marked: set[str] = set()
     inactive: set[str] = set()
@@ -280,7 +297,7 @@ async def _mark_ocr_caches(
                 raise
         for prefix in prefixes:
             if prefix.parent != kind_root or _HEX_PREFIX.fullmatch(prefix.name) is None:
-                raise GCError("unexpected OCR cache prefix")
+                raise GCMarkVerificationError("unexpected OCR cache prefix")
             for reuse_root in await webdav.list_children(prefix):
                 reuse_key = reuse_root.name
                 if (
@@ -288,17 +305,17 @@ async def _mark_ocr_caches(
                     or _SHA256.fullmatch(reuse_key) is None
                     or reuse_key[:2] != prefix.name
                 ):
-                    raise GCError("unexpected OCR cache reuse directory")
+                    raise GCMarkVerificationError("unexpected OCR cache reuse directory")
                 manifest_path = ocr_manifest_path(reuse_key, kind=kind)
                 ready_path = ocr_ready_path(reuse_key, kind=kind)
                 reference_key = (kind, reuse_key)
-                retained = retained_references.get(reference_key)
+                retained_bindings = retained_references.get(reference_key)
                 children = await webdav.list_children(reuse_root)
                 child_names = {path.name for path in children if path.parent == reuse_root}
                 if len(child_names) != len(children) or not child_names.issubset(
                     {manifest_path.name, ready_path.name}
                 ):
-                    raise GCError(f"unexpected object in {kind} OCR cache {reuse_key}")
+                    raise GCMarkVerificationError(f"unexpected object in {kind} OCR cache {reuse_key}")
                 manifest_body = await webdav.get_bytes(manifest_path)
                 ready_body = await webdav.get_bytes(ready_path)
                 if ready_body is None:
@@ -307,8 +324,8 @@ async def _mark_ocr_caches(
                     inactive.add(reuse_root.as_posix())
                     continue
                 if manifest_body is None:
-                    if retained is not None:
-                        raise GCError(f"retained {kind} OCR cache {reuse_key} has no manifest")
+                    if retained_bindings is not None:
+                        raise GCMarkVerificationError(f"retained {kind} OCR cache {reuse_key} has no manifest")
                     inactive.add(reuse_root.as_posix())
                     continue
                 try:
@@ -319,13 +336,13 @@ async def _mark_ocr_caches(
                     )
                     ready = OCRReady.model_validate_json(ready_body)
                 except Exception as exc:
-                    if retained is not None:
-                        raise GCError(f"invalid retained {kind} OCR cache {reuse_key}") from exc
+                    if retained_bindings is not None:
+                        raise GCMarkVerificationError(f"invalid retained {kind} OCR cache {reuse_key}") from exc
                     inactive.add(reuse_root.as_posix())
                     continue
                 if manifest.canonical_bytes() != manifest_body or ready.canonical_bytes() != ready_body:
-                    if retained is not None:
-                        raise GCError(f"non-canonical retained {kind} OCR cache {reuse_key}")
+                    if retained_bindings is not None:
+                        raise GCMarkVerificationError(f"non-canonical retained {kind} OCR cache {reuse_key}")
                     inactive.add(reuse_root.as_posix())
                     continue
                 if (
@@ -334,17 +351,21 @@ async def _mark_ocr_caches(
                     or ready.manifest_sha256 != hashlib.sha256(manifest_body).hexdigest()
                     or ready.ocr_sha256 != manifest.output.sha256
                 ):
-                    if retained is not None:
-                        raise GCError(f"unbound retained {kind} OCR cache {reuse_key}")
+                    if retained_bindings is not None:
+                        raise GCMarkVerificationError(f"unbound retained {kind} OCR cache {reuse_key}")
                     inactive.add(reuse_root.as_posix())
                     continue
-                if retained is not None:
-                    if retained != (
+                if retained_bindings is not None:
+                    manifest_binding = (
                         manifest.output.sha256,
                         manifest.output.size_bytes,
                         manifest.output.path,
-                    ):
-                        raise GCError(f"retained generation/cache binding differs for {kind}/{reuse_key}")
+                    )
+                    if manifest_binding not in retained_bindings:
+                        raise GCMarkVerificationError(
+                            f"retained generation/cache binding differs for {kind}/{reuse_key}: "
+                            f"cache points to {manifest_binding}, retained expects one of {sorted(retained_bindings)}"
+                        )
                     found_references.add(reference_key)
                     marked.update(
                         {
@@ -353,11 +374,24 @@ async def _mark_ocr_caches(
                             manifest.output.path,
                         }
                     )
+                    if len(retained_bindings) > 1:
+                        LOGGER.info(
+                            "Preserved OCR cache %s/%s with binding %s (retained set had %d candidates)",
+                            kind,
+                            reuse_key,
+                            manifest_binding,
+                            len(retained_bindings),
+                        )
                 else:
                     inactive.add(reuse_root.as_posix())
     missing = set(retained_references).difference(found_references)
     if missing:
-        raise GCError(f"retained generation references missing OCR caches: {sorted(missing)}")
+        LOGGER.info(
+            "Retained generations reference %d OCR caches not present on WebDAV (cache publication disabled or unseeded): %d native, %d adopted",
+            len(missing),
+            sum(1 for k, _ in missing if k == "native"),
+            sum(1 for k, _ in missing if k == "adopted"),
+        )
     return marked, inactive
 
 
@@ -385,7 +419,7 @@ async def collect_garbage(
     )
     retained = tuple(manifest.generation_id for manifest in manifests)
     marked: set[str] = {pointer_path.as_posix()}
-    retained_cache_references: dict[tuple[str, str], tuple[str, int, str]] = {}
+    retained_cache_references: dict[tuple[str, str], set[tuple[str, int, str]]] = {}
     for manifest in manifests:
         generation_id = manifest.generation_id
         marked.update(
@@ -408,9 +442,15 @@ async def collect_garbage(
                         document.ocr.size_bytes,
                         document.ocr.path,
                     )
-                    previous = retained_cache_references.setdefault(cache_key, binding)
-                    if previous != binding:
-                        raise GCError(f"retained generations disagree on OCR cache {cache_key}")
+                    retained_cache_references.setdefault(cache_key, set()).add(binding)
+    for (kind, reuse_key), bindings in retained_cache_references.items():
+        if len(bindings) > 1:
+            LOGGER.info(
+                "Multiple retained OCR bindings observed for %s reuse key %s: %s",
+                kind,
+                reuse_key,
+                sorted(bindings),
+            )
     cache_marks, inactive_caches = await _mark_ocr_caches(
         webdav,
         retained_references=retained_cache_references,
@@ -452,7 +492,7 @@ async def collect_garbage(
     deleted: list[str] = []
     if apply and eligible:
         if await _required_bytes(webdav, pointer_path) != pointer_body:
-            raise GCError("stable pointer changed during GC; deleted 0 objects")
+            raise GCDeletionError("stable pointer changed during GC; deleted 0 objects")
         deletion_failure: Exception | None = None
         for path in eligible:
             try:
@@ -460,7 +500,7 @@ async def collect_garbage(
                 # remaining sweep; every earlier candidate was proven
                 # unreferenced by the head observed immediately before DELETE.
                 if await _required_bytes(webdav, pointer_path) != pointer_body:
-                    raise GCError("stable pointer changed during GC")
+                    raise GCDeletionError("stable pointer changed during GC")
                 candidate = PurePosixPath(path)
                 if _is_incoming_temp_leaf(candidate) and not await _incoming_leaf_exists_and_is_safe(
                     webdav, candidate
@@ -480,7 +520,9 @@ async def collect_garbage(
                 deleted_count = len(deleted)
                 deletion_failure = None
                 raise GCPartialFailure(deleted_count=deleted_count) from None
-            raise deletion_failure
+            if isinstance(deletion_failure, GCError):
+                raise deletion_failure
+            raise GCDeletionError(f"first remote DELETE failed for {eligible[0]}") from deletion_failure
     return GCResult(
         retained_generations=retained,
         marked_objects=sum(path.startswith("v1/objects/") for path in marked),

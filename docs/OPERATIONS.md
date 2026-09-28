@@ -188,9 +188,14 @@ SIGTERM 이후 Worker는 진행 중인 변경을 정리하고 게시 정합성�
 | `LOCAL_PROCESSING_WORKERS` | 4 |
 | `PDF_CACHE_REFRESH_HOURS` | 168시간 |
 
-표의 설정명에는 `CARDRAG_` 접두사가 붙습니다. 용량은 여유 공간의 자동 확보를 뜻하지
-않으며, 부족하면 작업을 거부합니다. MCP의 지속 quota 정책을 바꾸거나 남은 reservation을
-정리할 때는 [RECOVERY](RECOVERY.md)를 따릅니다.
+표의 설정명에는 `CARDRAG_` 접두사가 붙습니다.
+운영 Worker의 시작 하한은 기본 **2 GiB**(`WORKER_MINIMUM_START_FREE_BYTES=2147483648`)이며,
+후보 검증 overlay(`deploy/worker/compose.candidate.yaml`)에서만 격리 및 중복 구동을 위해 32 GiB를 강제합니다.
+실제 런타임 디스크 보호는 고정 하한이 아닌 파생 뷰·캐시 miss 기반의
+**동적 `peak_growth + 2 GiB reserve` preflight** 및 작업 진행 중 재검사로 이루어집니다.
+호스트 여유 공간(`< 80 GB`) 도달 시 수행하는 유지보수 점검은 런타임 거부 preflight 오류와 구분되는
+운영자 점검 기준입니다. 용량 부족 시 작업을 거부하며 여유 공간을 자동으로 확보하지 않습니다.
+MCP의 지속 quota 정책을 바꾸거나 남은 reservation을 정리할 때는 [RECOVERY](RECOVERY.md)를 따릅니다.
 
 WebDAV는 검증 이력이 있는 기존 객체를 재사용하고 성공 실행 14회·7일·신규 CAS 10 GiB 중
 먼저 도달한 조건에서 전체 검증합니다. 신규 DB·vector는 최종 경로에서 크기·해시를

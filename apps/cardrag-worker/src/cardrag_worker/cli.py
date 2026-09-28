@@ -59,6 +59,7 @@ from .embedding_v5 import (
 from .gc import GCPartialFailure, collect_garbage
 from .issuers import enabled_adapters
 from .ocr import FailoverOCRResolver, OCRResolver, discover_compatible_contracts
+from .ocr_recovery import OCRRecoveryError, restore_ocr_seed_from_generation
 from .pdf_cache import PDFCache
 from .pipeline import (
     OCRDocumentFailuresError,
@@ -1057,6 +1058,98 @@ def seed_state_v122_command(
                 "reason_code": exc.code,
                 "schema_version": "cardrag.state-seed-report.v1",
                 "status": "blocked",
+            }
+        )
+        raise typer.Exit(code=1) from None
+
+
+async def _restore_ocr_seed(
+    settings: WorkerSettings,
+    *,
+    generation_id: str | None,
+    apply: bool,
+    concurrency: int,
+) -> dict[str, Any]:
+    WorkerSettings.from_env(require_webdav=True)
+    client = WebDAVClient.from_env()
+    try:
+        if apply:
+            settings.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with worker_lock(settings.lock_file):
+                result = await restore_ocr_seed_from_generation(
+                    webdav=client,
+                    destination=settings.state_dir,
+                    generation_id=generation_id,
+                    pointer_path=client.pointer_path,
+                    dry_run=False,
+                    concurrency=concurrency,
+                )
+        else:
+            result = await restore_ocr_seed_from_generation(
+                webdav=client,
+                destination=settings.state_dir,
+                generation_id=generation_id,
+                pointer_path=client.pointer_path,
+                dry_run=True,
+                concurrency=concurrency,
+            )
+        return result.to_dict()
+    finally:
+        await client.close()
+
+
+@app.command("restore-ocr-seed")
+def restore_ocr_seed_command(
+    generation_id: str | None = typer.Option(
+        None,
+        "--generation-id",
+        help="Optional generation ID to restore from; defaults to current channel pointer.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Download OCR files and commit seed ledger; default is dry-run verification.",
+    ),
+    concurrency: int = typer.Option(
+        16,
+        "--concurrency",
+        min=1,
+        max=64,
+        help="Maximum concurrent WebDAV downloads.",
+    ),
+) -> None:
+    """Restore and seed OCR markdown results directly from WebDAV generation manifest into empty state."""
+    settings = WorkerSettings.from_env()
+    try:
+        result = asyncio.run(
+            _restore_ocr_seed(
+                settings=settings,
+                generation_id=generation_id,
+                apply=apply,
+                concurrency=concurrency,
+            )
+        )
+        _echo(result)
+    except OCRRecoveryError as exc:
+        _echo(
+            {
+                "applied": False,
+                "dry_run": not apply,
+                "reason_code": exc.code,
+                "detail": str(exc),
+                "schema_version": "cardrag.ocr-recovery-report.v1",
+                "status": "failed",
+            }
+        )
+        raise typer.Exit(code=1) from None
+    except AlreadyRunning:
+        _echo(
+            {
+                "applied": False,
+                "dry_run": not apply,
+                "reason_code": "destination_busy",
+                "schema_version": "cardrag.ocr-recovery-report.v1",
+                "status": "failed",
             }
         )
         raise typer.Exit(code=1) from None

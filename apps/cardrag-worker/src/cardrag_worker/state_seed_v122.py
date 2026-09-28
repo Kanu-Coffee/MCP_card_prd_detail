@@ -1359,43 +1359,50 @@ def load_state_seed_ledger(state_dir: Path) -> StateSeedLedger | None:
     except Exception as exc:
         raise StateSeedError("seed_ledger_invalid_json") from exc
 
-    if data.get("schema_version") != LEDGER_SCHEMA_VERSION or data.get("status") != "applied":
+    schema_version = data.get("schema_version")
+    if (
+        schema_version not in (LEDGER_SCHEMA_VERSION, "cardrag.ocr-recovery-ledger.v1")
+        or data.get("status") != "applied"
+    ):
         raise StateSeedError("seed_ledger_schema_mismatch")
 
     source_records_list = data.get("source_records")
-    if not isinstance(source_records_list, list) or not source_records_list:
+    if schema_version == LEDGER_SCHEMA_VERSION and (
+        not isinstance(source_records_list, list) or not source_records_list
+    ):
         raise StateSeedError("seed_ledger_source_records_missing")
 
     source_records: dict[str, SourceRecord] = {}
-    for item in source_records_list:
-        if not isinstance(item, dict):
-            raise StateSeedError("seed_ledger_invalid_source_record")
-        sid = item.get("source_id")
-        if not sid or not isinstance(sid, str) or not _SOURCE_ID.fullmatch(sid):
-            raise StateSeedError("seed_ledger_invalid_source_record")
-        disc_at = _parse_timestamp(item.get("discovered_at"))
-        assert disc_at is not None
-        try:
-            s_eff_date = date.fromisoformat(str(item["effective_date"]))
-        except Exception as exc:
-            raise StateSeedError("seed_ledger_invalid_source_record") from exc
-        rec = SourceRecord(
-            issuer=str(item["issuer"]),
-            product_code=str(item["product_code"]),
-            product_name=str(item["product_name"]),
-            effective_date=s_eff_date,
-            source_version=str(item["source_version"]),
-            source_url=str(item["source_url"]),
-            source_post_id=str(item.get("source_post_id") or ""),
-            file_name=str(item["file_name"]),
-            category=str(item.get("category", "credit")),
-            discovered_at=disc_at,
-            metadata=item.get("metadata", {}),
-            document_type=str(item.get("document_type", "product_description")),
-        )
-        if rec.source_id != sid:
-            raise StateSeedError("seed_ledger_source_id_mismatch")
-        source_records[sid] = rec
+    if source_records_list is not None:
+        for item in source_records_list:
+            if not isinstance(item, dict):
+                raise StateSeedError("seed_ledger_invalid_source_record")
+            sid = item.get("source_id")
+            if not sid or not isinstance(sid, str) or not _SOURCE_ID.fullmatch(sid):
+                raise StateSeedError("seed_ledger_invalid_source_record")
+            disc_at = _parse_timestamp(item.get("discovered_at"))
+            assert disc_at is not None
+            try:
+                s_eff_date = date.fromisoformat(str(item["effective_date"]))
+            except Exception as exc:
+                raise StateSeedError("seed_ledger_invalid_source_record") from exc
+            rec = SourceRecord(
+                issuer=str(item["issuer"]),
+                product_code=str(item["product_code"]),
+                product_name=str(item["product_name"]),
+                effective_date=s_eff_date,
+                source_version=str(item["source_version"]),
+                source_url=str(item["source_url"]),
+                source_post_id=str(item.get("source_post_id") or ""),
+                file_name=str(item["file_name"]),
+                category=str(item.get("category", "credit")),
+                discovered_at=disc_at,
+                metadata=item.get("metadata", {}),
+                document_type=str(item.get("document_type", "product_description")),
+            )
+            if rec.source_id != sid:
+                raise StateSeedError("seed_ledger_source_id_mismatch")
+            source_records[sid] = rec
 
     ocr_entries_by_id: dict[str, StateSeedOCREntry] = {}
     ocr_seed_root = root / _OCR_SEED_DIRECTORY
@@ -1406,11 +1413,12 @@ def load_state_seed_ledger(state_dir: Path) -> StateSeedLedger | None:
         doc_id = item["document_id"]
         pdf_sha = item["pdf_sha256"]
         sid = item.get("source_id")
-        if not sid or sid not in source_records:
-            raise StateSeedError(f"seed_ledger_source_missing: {doc_id}")
-        rec = source_records[sid]
-        if rec.document_id(pdf_sha) != doc_id:
-            raise StateSeedError(f"seed_ledger_source_binding_mismatch: {doc_id}")
+        if source_records:
+            if not sid or sid not in source_records:
+                raise StateSeedError(f"seed_ledger_source_missing: {doc_id}")
+            rec = source_records[sid]
+            if rec.document_id(pdf_sha) != doc_id:
+                raise StateSeedError(f"seed_ledger_source_binding_mismatch: {doc_id}")
 
         seed_pdf_shas.add(pdf_sha)
         seed_doc_ids.add(doc_id)

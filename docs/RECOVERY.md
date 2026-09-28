@@ -174,3 +174,46 @@ control 파일·SQLite inventory·master/OCR metadata·PDF·OCR와 전체 export
 독립적인 권한·설정입니다. 기본 read-only cache 설정은 adoption 게시를 허용하지 않습니다.
 `adoption-audit`는 봉인 export에 대응하는 remote READY/manifest/OCR CAS를 전체 hash·size로
 확인하는 읽기 전용 검사입니다. 예상 수량은 해당 export에서 가져오며 특정 환경의 수를 고정하지 않습니다.
+
+## 재해 복구: WebDAV generation 기반 OCR 직접 복원 (`restore-ocr-seed`)
+
+호스트가 완전히 폐기되거나 로컬 state volume이 모두 유실되었을 때, 전체 복구에서 가장 많은
+시간이 소요되는 작업은 기존 5,207건의 OCR 재처리입니다. 환경변수, WebDAV 인증, PDF discovery,
+source lineage, 임베딩 및 MCP 색인은 새 호스트에서 재구성·재계산할 수 있습니다.
+
+Worker의 `restore-ocr-seed` 명령은 WebDAV의 최신 generation manifest(또는 지정된 generation ID)로부터
+문서별 OCR contract 및 CAS 객체를 직접 읽어 빈 state volume에 즉시 재사용 가능한 OCR seed를 구성합니다.
+
+### 1. 복구 계약과 안전 보장
+
+- **OCR 공급자 호출 0건 보장**: 복원 적용 후 Worker가 실행되면 `OCRResolver`가 seed ledger를 통해
+  기존 문서를 100% 캐시 히트로 해석하며, 외부 OCR provider 호출이 발생하지 않습니다.
+- **PaddleOCR 및 모델 계약 보존**: 로컬 PaddleOCR로 처리된 15건(`model="PaddleOCR-VL-1.6"`)과
+  기존 클라우드 모델 처리본의 문서별 결속을 그대로 보존합니다.
+- **CAS 다운로드 중복 제거**: 최신 세대 5,207건의 문서는 4,922개의 고유 OCR CAS를 참조하며,
+  동일 CAS 객체는 1회만 다운로드하여 전송량을 최소화합니다(약 71.2 MB).
+- **무결성 전수 검증**: 다운로드 시 SHA-256 및 크기 검증, 마크다운 페이지 구조(`## Page N`) 확인,
+  자격증명 및 비정규 포맷 유출 차단을 수행하며, 각 파일은 `ocr-seed/<document_id>/ocr.md`에
+  `0600` 권한으로 격리 생성됩니다.
+- **원장 봉인**: 복원 완료 시 `audit-reports/state-seed/<ledger_sha256>.json`에
+  `cardrag.ocr-recovery-ledger.v1` 규격의 감사 원장을 영속화합니다.
+
+### 2. 복구 실행 절차
+
+```bash
+# 1. 신규 또는 빈 Worker state 디렉터리 준비
+export CARDRAG_WORKER_STATE_DIR=/var/lib/cardrag-worker
+
+# 2. 사전 dry-run 검증 (쓰기 없이 WebDAV 매니페스트 및 CAS 객체 무결성 전수 점검)
+cardrag-worker restore-ocr-seed --dry-run
+
+# 3. 실제 복원 실행 (concurrency 8~16 권장)
+cardrag-worker restore-ocr-seed --apply --concurrency 8
+```
+
+### 3. 소요 시간 및 용량
+
+- **전송량**: 약 71.2 MB (4,922개 고유 CAS 객체)
+- **복원 소요 시간**: 네트워크 상태에 따라 약 1~2분 소요
+- **주의사항**: 이 복구 경로는 OCR 데이터의 온전한 보존과 재사용만을 보장하며,
+  임베딩 재계산 및 전체 배치 완주 시간은 호스트 사양과 GPU/CPU 자원에 따라 달라집니다.
