@@ -267,3 +267,156 @@ async def test_restored_seed_enables_zero_provider_ocr_resolution(tmp_path: Path
             if spec["is_paddle"]:
                 assert res.provider == "paddleocr"
                 assert res.model == "PaddleOCR-VL-1.6"
+
+
+@pytest.mark.asyncio
+async def test_restore_ocr_seed_rejects_missing_ready(tmp_path: Path) -> None:
+    webdav, gen_id, _ = build_test_remote()
+    del webdav.objects[generation_ready_path(gen_id).as_posix()]
+
+    with pytest.raises(OCRRecoveryError) as exc_info:
+        await restore_ocr_seed_from_generation(
+            webdav=webdav,
+            destination=tmp_path / "worker-state",
+            dry_run=True,
+        )
+    assert exc_info.value.code == "ready_missing"
+
+
+@pytest.mark.asyncio
+async def test_restore_ocr_seed_rejects_non_canonical_control_json(tmp_path: Path) -> None:
+    # 1. Non-canonical pointer
+    webdav, gen_id, _ = build_test_remote()
+    webdav.objects[STABLE_POINTER_PATH.as_posix()] += b"  \n"
+    with pytest.raises(OCRRecoveryError) as exc_info:
+        await restore_ocr_seed_from_generation(
+            webdav=webdav,
+            destination=tmp_path / "worker-state",
+            dry_run=True,
+        )
+    assert exc_info.value.code == "pointer_not_canonical"
+
+    # 2. Non-canonical manifest
+    webdav, gen_id, _ = build_test_remote()
+    webdav.objects[generation_manifest_path(gen_id).as_posix()] += b"  \n"
+    with pytest.raises(OCRRecoveryError) as exc_info:
+        await restore_ocr_seed_from_generation(
+            webdav=webdav,
+            destination=tmp_path / "worker-state",
+            dry_run=True,
+        )
+    assert exc_info.value.code == "manifest_not_canonical"
+
+    # 3. Non-canonical READY
+    webdav, gen_id, _ = build_test_remote()
+    webdav.objects[generation_ready_path(gen_id).as_posix()] += b"  \n"
+    with pytest.raises(OCRRecoveryError) as exc_info:
+        await restore_ocr_seed_from_generation(
+            webdav=webdav,
+            destination=tmp_path / "worker-state",
+            dry_run=True,
+        )
+    assert exc_info.value.code == "ready_not_canonical"
+
+
+@pytest.mark.asyncio
+async def test_restore_ocr_seed_rejects_hash_and_identity_mismatches(tmp_path: Path) -> None:
+    # 1. Manifest / READY hash mismatch
+    webdav, gen_id, _ = build_test_remote()
+    ready = GenerationReady.model_validate_json(webdav.objects[generation_ready_path(gen_id).as_posix()])
+    tampered_ready = GenerationReady(
+        generation_id=ready.generation_id,
+        manifest_sha256="0" * 64,
+        serving_database_sha256=ready.serving_database_sha256,
+        serving_database_size_bytes=ready.serving_database_size_bytes,
+    )
+    webdav.objects[generation_ready_path(gen_id).as_posix()] = tampered_ready.canonical_bytes()
+    with pytest.raises(OCRRecoveryError) as exc_info:
+        await restore_ocr_seed_from_generation(
+            webdav=webdav,
+            destination=tmp_path / "worker-state",
+            dry_run=True,
+        )
+    assert exc_info.value.code == "manifest_ready_sha_mismatch"
+
+    # 2. Generation ID mismatch between manifest and requested
+    webdav, gen_id, _ = build_test_remote()
+    with pytest.raises(OCRRecoveryError) as exc_info:
+        await restore_ocr_seed_from_generation(
+            webdav=webdav,
+            destination=tmp_path / "worker-state",
+            generation_id="g-other-id",
+            dry_run=True,
+        )
+    assert exc_info.value.code == "manifest_missing"
+
+
+@pytest.mark.asyncio
+async def test_ocr_recovery_ledger_does_not_abort_corpus_diff_on_unacquired_items(tmp_path: Path) -> None:
+    from dataclasses import dataclass
+
+    from cardrag_worker.contracts import SourceRecord
+    from cardrag_worker.corpus_diff import generate_corpus_diff_report
+    from cardrag_worker.downloader import DownloadedPDF
+    from cardrag_worker.state_seed_v122 import load_state_seed_ledger
+
+    @dataclass(frozen=True)
+    class MockAcqDoc:
+        source: SourceRecord
+        pdf: DownloadedPDF
+        is_historical: bool = False
+        temporal_status: str = "current"
+        supersedes_document_id: str | None = None
+
+    webdav, gen_id, doc_specs = build_test_remote()
+    dest = tmp_path / "worker-state"
+
+    # Restore 3 documents into empty state
+    await restore_ocr_seed_from_generation(webdav=webdav, destination=dest, dry_run=False)
+
+    seed_ledger = load_state_seed_ledger(dest)
+    assert seed_ledger is not None
+    assert seed_ledger.is_ocr_recovery_only is True
+    assert len(seed_ledger.entries_by_doc_id) == 3
+
+    # Now simulate a crawler run that only discovers 2 current documents (1 document was historical/retired)
+    acquired = []
+    for spec in doc_specs[:2]:
+        source = SourceRecord(
+            issuer=spec["issuer"],
+            product_code=spec["id"],
+            product_name=spec["id"],
+            document_type="product-manual",
+            source_url=f"https://example.com/{spec['id']}.pdf",
+            source_version="2026-01",
+            effective_date=datetime(2026, 1, 1, tzinfo=UTC).date(),
+            source_post_id="",
+            file_name="guide.pdf",
+            category="credit",
+            discovered_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        pdf_body = f"pdf_content_for_{spec['id']}".encode()
+        pdf_sha = hashlib.sha256(pdf_body).hexdigest()
+        pdf_path = tmp_path / f"{pdf_sha}.pdf"
+        pdf_path.write_bytes(pdf_body)
+        pdf = DownloadedPDF(
+            path=pdf_path,
+            sha256=pdf_sha,
+            size_bytes=len(pdf_body),
+            page_count=1,
+            final_url=f"https://example.com/{spec['id']}.pdf",
+        )
+        acquired.append(MockAcqDoc(source=source, pdf=pdf))
+
+    out_report = tmp_path / "reports" / "corpus-diff.json"
+    # This MUST NOT raise CorpusDiffError despite only 2 of 3 ledger items being acquired!
+    report = generate_corpus_diff_report(
+        run_id="run-recovery-corpus-test",
+        acquired_documents=acquired,
+        seed_ledger=seed_ledger,
+        output_path=out_report,
+        fail_on_missing=True,
+    )
+    assert report.counts["missing_unjustified"] == 0
+    assert report.counts["final_current"] == 2
+    assert out_report.is_file()

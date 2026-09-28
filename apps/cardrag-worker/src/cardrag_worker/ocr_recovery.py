@@ -20,8 +20,11 @@ from cardrag_core import (
     STABLE_POINTER_PATH,
     GenerationManifest,
     GenerationPointer,
+    GenerationReady,
     canonical_json_bytes,
     generation_manifest_path,
+    generation_ready_path,
+    validate_identifier,
     verify_ocr_bytes,
 )
 
@@ -113,7 +116,7 @@ async def restore_ocr_seed_from_generation(
     if concurrency < 1:
         raise ValueError("concurrency must be positive")
 
-    # 1. Resolve generation manifest and pointer
+    # 1. Resolve and strictly bind generation control files (pointer -> READY -> manifest)
     pointer_body = await webdav.get_bytes(pointer_path)
     if pointer_body is None:
         raise OCRRecoveryError("pointer_missing", f"Pointer not found at {pointer_path}")
@@ -121,23 +124,54 @@ async def restore_ocr_seed_from_generation(
         pointer = GenerationPointer.model_validate_json(pointer_body)
     except Exception as exc:
         raise OCRRecoveryError("pointer_invalid", str(exc)) from exc
+    if pointer.canonical_bytes() != pointer_body:
+        raise OCRRecoveryError("pointer_not_canonical", f"Pointer JSON is not canonical at {pointer_path}")
 
     target_gen_id = generation_id or pointer.generation_id
+    try:
+        validate_identifier(target_gen_id, label="generation_id")
+    except ValueError as exc:
+        raise OCRRecoveryError("generation_id_invalid", f"Unsafe generation ID {target_gen_id}") from exc
+
     manifest_rel_path = generation_manifest_path(target_gen_id)
     manifest_bytes = await webdav.get_bytes(manifest_rel_path)
     if manifest_bytes is None:
         raise OCRRecoveryError("manifest_missing", f"Manifest not found for generation {target_gen_id}")
-
     try:
         manifest = GenerationManifest.model_validate_json(manifest_bytes)
     except Exception as exc:
         raise OCRRecoveryError("manifest_invalid", str(exc)) from exc
+    if manifest.canonical_bytes() != manifest_bytes:
+        raise OCRRecoveryError("manifest_not_canonical", f"Manifest JSON is not canonical for generation {target_gen_id}")
+    if manifest.generation_id != target_gen_id:
+        raise OCRRecoveryError(
+            "generation_id_mismatch",
+            f"Manifest generation_id {manifest.generation_id} != requested {target_gen_id}",
+        )
 
-    if (
-        target_gen_id == pointer.generation_id
-        and hashlib.sha256(manifest_bytes).hexdigest() != pointer.manifest_sha256
-    ):
-        raise OCRRecoveryError("manifest_sha_mismatch", "Manifest SHA-256 does not match channel pointer")
+    ready_rel_path = generation_ready_path(target_gen_id)
+    ready_bytes = await webdav.get_bytes(ready_rel_path)
+    if ready_bytes is None:
+        raise OCRRecoveryError("ready_missing", f"READY not found for generation {target_gen_id}")
+    try:
+        ready = GenerationReady.model_validate_json(ready_bytes)
+    except Exception as exc:
+        raise OCRRecoveryError("ready_invalid", str(exc)) from exc
+    if ready.canonical_bytes() != ready_bytes:
+        raise OCRRecoveryError("ready_not_canonical", f"READY JSON is not canonical for generation {target_gen_id}")
+    if ready.generation_id != target_gen_id:
+        raise OCRRecoveryError(
+            "generation_id_mismatch",
+            f"READY generation_id {ready.generation_id} != requested {target_gen_id}",
+        )
+    if hashlib.sha256(manifest_bytes).hexdigest() != ready.manifest_sha256:
+        raise OCRRecoveryError("manifest_ready_sha_mismatch", "Manifest SHA-256 does not match READY")
+
+    if target_gen_id == pointer.generation_id:
+        if pointer.manifest_sha256 != ready.manifest_sha256:
+            raise OCRRecoveryError("pointer_manifest_sha_mismatch", "Pointer manifest SHA-256 does not match READY")
+        if pointer.ready_sha256 != hashlib.sha256(ready_bytes).hexdigest():
+            raise OCRRecoveryError("pointer_ready_sha_mismatch", "Pointer ready SHA-256 does not match READY bytes")
 
     # 2. Collect OCR documents
     ocr_docs = []
@@ -268,7 +302,7 @@ async def restore_ocr_seed_from_generation(
                 "ocr_size_bytes": doc.ocr.size_bytes,
                 "kind": doc.ocr_cache_kind or "native",
                 "reuse_key": doc.ocr_reuse_key or doc.pdf.sha256,
-                "model": "PaddleOCR-VL-1.6" if is_paddle else "gpt-5.4",
+                "model": "PaddleOCR-VL-1.6" if is_paddle else "restored-native",
             }
         )
 
@@ -284,7 +318,7 @@ async def restore_ocr_seed_from_generation(
             "run_id": f"recovery_{target_gen_id}",
             "corpus_sha256": manifest.corpus_sha256,
             "contract_sha256": manifest.contract_sha256,
-            "prior_current_doc_ids": [doc.document_id for doc in manifest.documents],
+            "prior_current_doc_ids": [],
             "prior_historical_doc_ids": [],
             "ocr_documents": ledger_entries,
             "applied_at": datetime.now(UTC).isoformat(),

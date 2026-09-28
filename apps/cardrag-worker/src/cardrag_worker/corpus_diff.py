@@ -258,7 +258,7 @@ def generate_corpus_diff_report(
         os.chmod(tmp, 0o600)
         tmp.replace(output_path)
 
-    if seed_ledger is not None and missing and fail_on_missing:
+    if seed_ledger is not None and not seed_ledger.is_ocr_recovery_only and missing and fail_on_missing:
         raise CorpusDiffError(
             run_id=run_id,
             missing_count=len(missing),

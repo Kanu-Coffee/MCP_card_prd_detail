@@ -1329,6 +1329,11 @@ class StateSeedLedger:
     prior_current_doc_ids: frozenset[str]
     prior_historical_doc_ids: frozenset[str]
     source_records: dict[str, SourceRecord] = field(default_factory=dict)
+    schema_version: str = LEDGER_SCHEMA_VERSION
+
+    @property
+    def is_ocr_recovery_only(self) -> bool:
+        return self.schema_version == "cardrag.ocr-recovery-ledger.v1"
 
 
 def load_state_seed_ledger(state_dir: Path) -> StateSeedLedger | None:
@@ -1455,4 +1460,5 @@ def load_state_seed_ledger(state_dir: Path) -> StateSeedLedger | None:
         prior_current_doc_ids=frozenset(data.get("prior_current_doc_ids", [])),
         prior_historical_doc_ids=frozenset(data.get("prior_historical_doc_ids", [])),
         source_records=source_records,
+        schema_version=schema_version,
     )
