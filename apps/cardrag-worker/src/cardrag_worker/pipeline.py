@@ -92,7 +92,22 @@ from .contracts import (
     SourceSnapshot,
     UnsupportedProductRecord,
 )
-from .corpus_diff import CorpusDiffError, generate_corpus_diff_report
+from .corpus_baseline import (
+    CorpusBaseline,
+    CorpusBaselineDocument,
+    load_corpus_baseline,
+    prune_corpus_baselines,
+    record_corpus_baseline,
+)
+from .corpus_diff import (
+    CorpusDiffError,
+    CorpusPriorView,
+    PriorEntry,
+    RetirementRequest,
+    RetirementResolver,
+    generate_corpus_diff_report,
+    prior_view_from_seed_ledger,
+)
 from .downloader import (
     DownloadedPDF,
     DownloadPolicy,
@@ -148,6 +163,19 @@ from .providers import (
     ProviderSystemicError,
 )
 from .rate_limit import HostConcurrencyLimiter, IssuerRateLimiter, RateLimitedClient
+from .retirement import (
+    RETIREMENT_MAX_RATIO,
+    AbsentDocument,
+    LineageKey,
+    RetirementLedger,
+    RetirementOutcome,
+    RetirementPolicy,
+    evaluate_retirements,
+    ledger_bytes,
+    load_retirement_ledger,
+    prune_retirement_ledgers,
+    write_retirement_ledger,
+)
 from .revision_history_v5 import (
     REVISION_HISTORY_POLICY_VERSION,
     UNRESOLVED_REVISION_LEDGER_SCHEMA,
@@ -194,6 +222,8 @@ V5_RETRIEVAL_POLICY = {
     "schema_version": "cardrag.retrieval-policy.v1",
     "temporal_scope": "current",
 }
+_CORPUS_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
 LOGGER = logging.getLogger(__name__)
 LOCAL_RUN_CLEANUP_ERROR = (
     "local_run_cleanup_failed: Local diagnostic run cleanup failed after bounded retention."
@@ -659,6 +689,8 @@ class PipelineResult:
     pdf_cache_pruned_bytes: int = 0
     pdf_cache_prune_error: str | None = None
     ocr_cache_publication_deferred: int = 0
+    retired_count: int = 0
+    retirement_candidate_count: int = 0
     v5_metrics: Mapping[str, Any] | None = None
 
 
@@ -1816,6 +1848,9 @@ class WorkerPipeline:
         retained_generations: int = 2,
         garbage_grace_days: int = 30,
         retained_incomplete_runs: int = 2,
+        retirement_grace_runs: int = 2,
+        retirement_grace_days: int = 3,
+        retirement_max_per_run: int = 25,
         document_aggregation: VerifiedAggregationProfileV5 | None = None,
         capacity_policy_v5: V5CapacityPolicy | None = None,
         pdf_concurrency: int = 8,
@@ -1872,6 +1907,8 @@ class WorkerPipeline:
             elif webdav.channel != "stable" or not stable_publication_approved or not remote_gc_approved:
                 raise ValueError("remote GC requires stable channel plus publication and remote-GC approvals")
         if retained_generations < 1 or garbage_grace_days < 1 or retained_incomplete_runs < 1:
+            raise ValueError("retention settings must be positive")
+        if retirement_grace_runs < 2 or retirement_grace_days < 1 or retirement_max_per_run < 1:
             raise ValueError("garbage retention and grace must be positive")
         if not math.isfinite(pdf_cache_refresh_hours) or pdf_cache_refresh_hours <= 0:
             raise ValueError("PDF cache refresh hours must be positive and finite")
@@ -1899,6 +1936,13 @@ class WorkerPipeline:
         self.retained_generations = retained_generations
         self.garbage_grace_days = garbage_grace_days
         self.retained_incomplete_runs = retained_incomplete_runs
+        self.retirement_grace_runs = retirement_grace_runs
+        self.retirement_grace_days = retirement_grace_days
+        self.retirement_max_per_run = retirement_max_per_run
+        self._pending_retirement_ledger: RetirementLedger | None = None
+        self._corpus_gate_counts: dict[str, int] = {}
+        self._corpus_baseline_documents: tuple[CorpusBaselineDocument, ...] = ()
+        self._corpus_issuer_counts: dict[str, int] = {}
         self.exporter = ServingDatabaseExporter()
         self.exporter_v5 = ServingDatabaseExporterV5()
         self.capacity_policy_v5 = None if v5_profile is None else capacity_policy_v5 or V5CapacityPolicy()
@@ -2406,14 +2450,18 @@ class WorkerPipeline:
                     LOGGER.error("Remote garbage collection failed after durable run completion")
             elif self.collect_remote_garbage:
                 gc_status = "skipped_candidate"
-            self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="after_run")
-            return replace(
+            result = replace(
                 result,
                 unsupported_document_count=self.state.stage_status_count(run_id, "download", "skipped"),
                 gc_status=gc_status,
                 gc_deleted=gc_deleted,
                 gc_error=gc_error,
+                retired_count=self._corpus_gate_counts.get("retired", 0),
+                retirement_candidate_count=self._corpus_gate_counts.get("candidates", 0),
             )
+            self._record_corpus_baseline(result)
+            self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="after_run")
+            return result
 
     def _cleanup_local_runs_safely(self, *, exclude_run_id: str, phase: str) -> None:
         try:
@@ -2447,6 +2495,145 @@ class WorkerPipeline:
             if resolved.parent != runs_root.resolve(strict=True):
                 continue
             shutil.rmtree(resolved)
+        keep = max(3, self.retained_generations + 1)
+        prune_corpus_baselines(self.state_dir, keep=keep)
+        prune_retirement_ledgers(self.state_dir, keep=keep)
+
+    def _record_corpus_baseline(self, result: PipelineResult) -> None:
+        """Advance the rolling corpus baseline immediately after a sealed success.
+
+        A baseline-record failure never invalidates the durable publication:
+        the next run then falls back to the seed ledger, and retired lineages
+        remain justified through the sealed retirement ledger.
+        """
+
+        if result.status != "succeeded" or result.generation_id is None or not self._corpus_baseline_documents:
+            return
+        try:
+            record_corpus_baseline(
+                self.state_dir,
+                generation_id=result.generation_id,
+                run_id=result.run_id,
+                corpus_sha256=result.corpus_sha256,
+                contract_sha256=result.contract_sha256,
+                documents=self._corpus_baseline_documents,
+                issuer_counts=self._corpus_issuer_counts,
+            )
+        except Exception:
+            LOGGER.error("reason_code=corpus_baseline_record_failed; continuing after durable publication")
+
+    def _retirement_evidence_ok(self, candidate_doc: AbsentDocument, prior: CorpusPriorView) -> bool:
+        if not candidate_doc.source_id or not _CORPUS_SHA256.fullmatch(candidate_doc.pdf_sha256 or ""):
+            return False
+        if not self.state.pdf_cache_source_exists(candidate_doc.source_id):
+            return False
+        if self.state.pdf_cache_revision_count(candidate_doc.source_id) < 1:
+            return False
+        cached = self.state.pdf_cache_object(candidate_doc.pdf_sha256)
+        if cached is None:
+            return False
+        cas_root = (self.state_dir / "pdf-cache").resolve(strict=True)
+        cas_path = self.state_dir / "pdf-cache" / cached.relative_path
+        try:
+            resolved = cas_path.resolve(strict=True)
+        except FileNotFoundError:
+            return False
+        if resolved.parent != (cas_root / "objects" / "sha256" / candidate_doc.pdf_sha256[:2]).resolve():
+            return False
+        digest = hashlib.sha256()
+        try:
+            with resolved.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError:
+            return False
+        if digest.hexdigest() != candidate_doc.pdf_sha256:
+            return False
+        if candidate_doc.ocr_sha256 is not None:
+            return True
+        # A document present in the verified prior corpus completed OCR in the
+        # run that sealed that baseline; its retained artifacts are resolvable.
+        return candidate_doc.document_id in prior.entries
+
+    def _build_retirement_resolver(
+        self,
+        *,
+        run_id: str,
+        prior: CorpusPriorView,
+        seed_ledger: StateSeedLedger | None,
+    ) -> RetirementResolver:
+        policy = RetirementPolicy(
+            grace_runs=self.retirement_grace_runs,
+            grace_days=self.retirement_grace_days,
+            max_per_run=self.retirement_max_per_run,
+            max_ratio=RETIREMENT_MAX_RATIO,
+        )
+
+        def resolve(
+            requests: Sequence[RetirementRequest], discovered_lineages: frozenset[LineageKey]
+        ) -> RetirementOutcome | None:
+            ledger = load_retirement_ledger(self.state_dir)
+            absent: dict[str, AbsentDocument] = {}
+            for request in requests:
+                absent[request.document_id] = AbsentDocument(
+                    document_id=request.document_id,
+                    source_id=request.source_id,
+                    issuer=request.issuer,
+                    product_code=request.product_code,
+                    document_type=request.document_type,
+                    pdf_sha256=request.pdf_sha256,
+                    ocr_sha256=request.ocr_sha256,
+                    last_observed_run_id=prior.run_id,
+                    last_observed_at=prior.observed_at,
+                )
+            prior_ids = set(prior.entries)
+            for entry in ledger.entries if ledger is not None else ():
+                if entry.status != "candidate" or entry.document_id in absent:
+                    continue
+                if entry.lineage_key in discovered_lineages or entry.document_id in prior_ids:
+                    continue
+                absent[entry.document_id] = AbsentDocument(
+                    document_id=entry.document_id,
+                    source_id=entry.source_id,
+                    issuer=entry.issuer,
+                    product_code=entry.product_code,
+                    document_type=entry.document_type,
+                    pdf_sha256=entry.pdf_sha256,
+                    ocr_sha256=entry.ocr_sha256,
+                    last_observed_run_id=entry.last_observed_run_id,
+                    last_observed_at=entry.last_observed_at,
+                )
+            durable: dict[str, bool] = {}
+            lineage_absent: dict[str, bool] = {}
+            evidence_budget = policy.max_per_run + 10
+            budget_used = 0
+            for document in sorted(absent.values(), key=lambda item: (item.issuer, item.product_code, item.document_id)):
+                lineage_absent[document.document_id] = document.lineage_key not in discovered_lineages
+                if budget_used < evidence_budget:
+                    budget_used += 1
+                    durable[document.document_id] = self._retirement_evidence_ok(document, prior)
+                else:
+                    durable[document.document_id] = False
+            outcome = evaluate_retirements(
+                run_id=run_id,
+                run_started_at=datetime.now(UTC),
+                policy=policy,
+                baseline_total=len(prior.entries),
+                ledger=ledger,
+                absent=tuple(absent.values()),
+                durable_ok=durable,
+                lineage_absent=lineage_absent,
+                discovered_lineages=set(discovered_lineages),
+            )
+            self._corpus_gate_counts = {
+                "retired": len(outcome.retired),
+                "candidates": len(outcome.candidates),
+            }
+            if outcome.ledger.entries and (ledger is None or ledger_bytes(ledger) != ledger_bytes(outcome.ledger)):
+                self._pending_retirement_ledger = outcome.ledger
+            return outcome
+
+        return resolve
 
     async def _reconcile_cancelled_publication(self, run_id: str) -> bool:
         """Record an exact stable commit completed immediately before cancellation."""
@@ -3080,14 +3267,92 @@ class WorkerPipeline:
         if len(document_ids) != len(set(document_ids)):
             raise RuntimeError("PDF acquisition produced duplicate document identities")
 
+        unresolved_revision_ledger = canonical_unresolved_revision_ledger_v5(unresolved_revision_entries)
+        unresolved_revision_sha256 = unresolved_revision_ledger_sha256_v5(unresolved_revision_ledger)
+        # FIX_03 C1: persist the unresolved revision ledger before the corpus
+        # gate so a failed run remains diagnosable from reports/ alone.
+        _atomic_write(
+            run_dir / "reports" / "unresolved-revisions.json",
+            canonical_json_bytes(
+                {
+                    "entries": list(unresolved_revision_ledger),
+                    "run_id": run_id,
+                    "schema_version": "cardrag.unresolved-revisions.v1",
+                }
+            ),
+        )
+        corpus_baseline: CorpusBaseline | None = load_corpus_baseline(self.state_dir, self.state)
+        prior_observed_at = ""
+        if corpus_baseline is None and seed_ledger is not None:
+            prior_observed_at = self.state.run_finished_at(seed_ledger.run_id) or ""
+        retirement_prior: CorpusPriorView | None = None
+        if corpus_baseline is not None:
+            baseline_entries: dict[str, PriorEntry] = {}
+            for baseline_document in corpus_baseline.documents:
+                seed_entry = (
+                    seed_ledger.entries_by_doc_id.get(baseline_document.document_id)
+                    if seed_ledger is not None
+                    else None
+                )
+                baseline_entries[baseline_document.document_id] = PriorEntry(
+                    document_id=baseline_document.document_id,
+                    source_id=baseline_document.source_id,
+                    issuer=baseline_document.issuer,
+                    product_code=baseline_document.product_code,
+                    document_type=baseline_document.document_type,
+                    pdf_sha256=baseline_document.pdf_sha256,
+                    ocr_sha256=seed_entry.ocr_sha256 if seed_entry is not None else None,
+                )
+            retirement_prior = CorpusPriorView(
+                kind="rolling-baseline",
+                generation_id=corpus_baseline.generation_id,
+                run_id=corpus_baseline.run_id,
+                observed_at=self.state.run_finished_at(corpus_baseline.run_id) or "",
+                current_doc_ids=corpus_baseline.current_doc_ids,
+                historical_doc_ids=corpus_baseline.historical_doc_ids,
+                entries=baseline_entries,
+            )
+        if retirement_prior is None and seed_ledger is not None:
+            retirement_prior = prior_view_from_seed_ledger(seed_ledger, prior_observed_at)
+        self._corpus_baseline_documents = tuple(
+            CorpusBaselineDocument(
+                document_id=item.source.document_id(item.pdf.sha256),
+                source_id=item.source.source_id,
+                issuer=item.source.issuer,
+                product_code=item.source.product_code,
+                document_type=item.source.document_type,
+                temporal_status="historical" if item.is_historical else "current",
+                pdf_sha256=item.pdf.sha256,
+            )
+            for item in acquired
+        )
+        self._corpus_issuer_counts = {}
+        for item in acquired:
+            if not item.is_historical:
+                self._corpus_issuer_counts[item.source.issuer] = self._corpus_issuer_counts.get(item.source.issuer, 0) + 1
+        self._corpus_gate_counts = {}
+        self._pending_retirement_ledger = None
         with self.performance.measure("corpus_diff_seconds"):
-            generate_corpus_diff_report(
+            corpus_report = generate_corpus_diff_report(
                 run_id=run_id,
                 acquired_documents=acquired,
                 seed_ledger=seed_ledger,
+                prior=retirement_prior,
+                retirement_resolver=(
+                    self._build_retirement_resolver(run_id=run_id, prior=retirement_prior, seed_ledger=seed_ledger)
+                    if retirement_prior is not None
+                    else None
+                ),
                 output_path=run_dir / "reports" / "corpus-diff.json",
                 fail_on_missing=True,
             )
+        if self._pending_retirement_ledger is not None:
+            write_retirement_ledger(self.state_dir, self._pending_retirement_ledger)
+            self._pending_retirement_ledger = None
+        if self._corpus_gate_counts:
+            self.performance.set("retired_lineage_count", self._corpus_gate_counts.get("retired", 0))
+            self.performance.set("retirement_candidate_count", self._corpus_gate_counts.get("candidates", 0))
+        del corpus_report
         # This receipt records the completed acquisition barrier, never a promise
         # that resumed runs can skip revalidating the underlying PDF cache.
         acquisition_payload = {
@@ -3120,8 +3385,6 @@ class WorkerPipeline:
                 for document_id, item in zip(document_ids, acquired, strict=True)
             ],
         }
-        unresolved_revision_ledger = canonical_unresolved_revision_ledger_v5(unresolved_revision_entries)
-        unresolved_revision_sha256 = unresolved_revision_ledger_sha256_v5(unresolved_revision_ledger)
         unsupported_payload = sorted(
             (item.payload for item in unsupported),
             key=canonical_json_bytes,

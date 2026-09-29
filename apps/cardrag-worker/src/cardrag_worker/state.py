@@ -1131,6 +1131,34 @@ class WorkerState:
         ).fetchone()
         return cast(sqlite3.Row | None, row)
 
+    def run_status(self, run_id: str) -> str | None:
+        row = self.connection.execute("SELECT status FROM run WHERE run_id=?", (run_id,)).fetchone()
+        return None if row is None else str(row["status"])
+
+    def run_finished_at(self, run_id: str) -> str | None:
+        row = self.connection.execute("SELECT finished_at FROM run WHERE run_id=?", (run_id,)).fetchone()
+        return None if row is None or row["finished_at"] is None else str(row["finished_at"])
+
+    def publish_by_generation(self, generation_id: str) -> sqlite3.Row | None:
+        row = self.connection.execute(
+            "SELECT * FROM publish WHERE generation_id=?", (generation_id,)
+        ).fetchone()
+        return cast(sqlite3.Row | None, row)
+
+    def pdf_cache_source_exists(self, source_id: str) -> bool:
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM pdf_cache_source WHERE source_id=? LIMIT 1", (source_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def pdf_cache_revision_count(self, source_id: str) -> int:
+        row = self.connection.execute(
+            "SELECT count(*) FROM pdf_cache_source_revision WHERE source_id=?", (source_id,)
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
     def record_publish(
         self,
         *,

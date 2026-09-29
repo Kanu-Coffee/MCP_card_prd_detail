@@ -47,6 +47,7 @@ from .capacity_v5 import (
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
 )
+from .corpus_baseline import CorpusBaselineError
 from .corpus_diff import CorpusDiffError
 from .embedding_seed_v122 import (
     apply_embedding_cache_seed_v122,
@@ -71,6 +72,7 @@ from .pipeline import (
     validate_document_aggregation_head,
 )
 from .providers import OCRProvider, PaddleOCRVLProvider, make_ocr_provider
+from .retirement import RetirementError
 from .settings import PublicationResumeSettings, WorkerSettings
 from .state import AlreadyRunning, WorkerState, worker_lock
 from .state_seed_v122 import (
@@ -192,8 +194,13 @@ def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = N
 
 def _echo_corpus_diff_error(exc: CorpusDiffError) -> None:
     payload: dict[str, Any] = {
+        "candidate_count": exc.candidate_count,
         "missing_count": exc.missing_count,
-        "reason": f"Corpus diff check failed: {exc.missing_count} seed documents disappeared without justification.",
+        "reason": (
+            f"Corpus diff check failed: {exc.missing_count} prior documents disappeared without "
+            f"justification (retired={exc.retired_count}, candidates={exc.candidate_count})."
+        ),
+        "retired_count": exc.retired_count,
         "reason_code": exc.reason_code,
         "report": exc.report,
         "run_id": exc.run_id,
@@ -254,6 +261,8 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "pdf_downloads": result.pdf_downloads,
         "pdf_revisions": result.pdf_revisions,
         "ocr_cache_publication_deferred": result.ocr_cache_publication_deferred,
+        "retired_count": result.retired_count,
+        "retirement_candidate_count": result.retirement_candidate_count,
         "v5_metrics": result.v5_metrics,
     }
 
@@ -457,6 +466,9 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 remote_gc_approved=settings.remote_gc_approved,
                 retained_generations=settings.retain_generations,
                 retained_incomplete_runs=settings.retained_incomplete_runs,
+                retirement_grace_runs=settings.retirement_grace_runs,
+                retirement_grace_days=settings.retirement_grace_days,
+                retirement_max_per_run=settings.retirement_max_per_run,
                 garbage_grace_days=settings.garbage_grace_days,
                 pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
                 pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
@@ -601,6 +613,15 @@ def run_command(
         raise typer.Exit(code=1) from None
     except CorpusDiffError as exc:
         _echo_corpus_diff_error(exc)
+        raise typer.Exit(code=1) from None
+    except (CorpusBaselineError, RetirementError) as exc:
+        _echo(
+            {
+                "reason": "Corpus gate control state failed validation; refusing to compare or retire.",
+                "reason_code": exc.code,
+                "status": "blocked",
+            }
+        )
         raise typer.Exit(code=1) from None
     except AlreadyRunning:
         _echo_worker_busy()
