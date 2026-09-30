@@ -2339,6 +2339,7 @@ class WorkerPipeline:
             self.state.mark_stale_running_runs_interrupted(exclude_run_id=run_id)
             if resume_run_id:
                 self.state.assert_resumable(run_id)
+                self._sweep_stale_paddle_input_symlinks(run_id)
             self.performance.set("run_id", run_id)
             if isinstance(self.webdav, WebDAVClient):
                 self.webdav.begin_verification_run(run_id)
@@ -2509,6 +2510,36 @@ class WorkerPipeline:
         keep = max(3, self.retained_generations + 1)
         prune_corpus_baselines(self.state_dir, keep=keep)
         prune_retirement_ledgers(self.state_dir, keep=keep)
+
+    def _sweep_stale_paddle_input_symlinks(self, run_id: str) -> None:
+        """Remove orphaned private Paddle input aliases from an interrupted run.
+
+        ``_paddle_input_path`` creates a per-process symlink next to the OCR
+        checkpoint directory; a force-cancelled child can leave it behind, and
+        the capacity preflight (correctly) refuses any symlink in the state
+        tree.  Only exact ``.paddle-input-*`` symlinks under the resuming
+        run's document checkpoint directories are unlinked.
+        """
+
+        documents_root = self.state_dir / "runs" / run_id / "documents"
+        try:
+            if not documents_root.is_dir() or documents_root.is_symlink():
+                return
+            for child in documents_root.iterdir():
+                checkpoints = child / "ocr" / "checkpoints"
+                try:
+                    if not checkpoints.is_dir() or checkpoints.is_symlink():
+                        continue
+                    for stale in checkpoints.glob(".paddle-input-*"):
+                        try:
+                            if stale.lstat().st_mode & 0o170000 == 0o120000:
+                                stale.unlink(missing_ok=True)
+                        except FileNotFoundError:
+                            continue
+                except OSError:
+                    continue
+        except OSError:
+            LOGGER.error("reason_code=paddle_input_sweep_failed; continuing")
 
     def _record_corpus_baseline(self, result: PipelineResult) -> None:
         """Advance the rolling corpus baseline immediately after a sealed success.

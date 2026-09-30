@@ -78,6 +78,15 @@ def _paddle_input_path(input_path: Path, *, output_path: Path) -> Iterator[Path]
         yield input_path
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # A cancelled child process can orphan its private input alias; any
+    # surviving .paddle-input-* symlink is stale by construction because only
+    # this context manager creates that name in this directory.
+    for stale in output_path.parent.glob(".paddle-input-*"):
+        try:
+            if stale.lstat().st_mode & 0o170000 == 0o120000:
+                stale.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
     link = output_path.parent / f".paddle-input-{os.getpid()}.pdf"
     link.unlink(missing_ok=True)
     try:
