@@ -69,6 +69,7 @@ from .pipeline import (
     WorkerPipeline,
     WorkerUnexpectedFailureError,
     resume_sealed_publication,
+    sweep_stale_paddle_input_symlinks,
     validate_document_aggregation_head,
 )
 from .providers import OCRProvider, PaddleOCRVLProvider, make_ocr_provider
@@ -337,6 +338,11 @@ async def _run(resume: str | None) -> dict[str, Any]:
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
     _guard_v114_publication_channel(settings)
+    if resume:
+        # An orphaned private Paddle input symlink from a force-cancelled run
+        # must not permanently block resuming it through the capacity
+        # preflight's symlink refusal.
+        sweep_stale_paddle_input_symlinks(settings.state_dir, resume)
     startup_capacity = preflight_worker_start_capacity(
         settings.state_dir,
         minimum_free_bytes=settings.minimum_start_free_bytes,
