@@ -1687,6 +1687,54 @@ async def test_generation_bound_conflicting_document_seals_preserve_each_exact_h
 
 
 @pytest.mark.asyncio
+async def test_republished_identical_bytes_reuse_prior_identity_artifact(tmp_path: Path) -> None:
+    """FIX_03: same PDF bytes under a new document identity must reuse the retained artifact."""
+
+    provider = FakeProvider()
+    resolver, state = make_resolver(tmp_path, provider, None, cache_mode="read-only")
+    body = "## Page 1\n\n재게시되었지만 바이트가 동일한 카드 상품설명 본문입니다.\n".encode()
+    try:
+        state.start_run(run_id="run")
+        runs_root = tmp_path / "runs"
+        documents_root = runs_root / "run" / "documents"
+        pdf = tmp_path / "pdf-pages.txt"
+        pdf.write_text("1", encoding="utf-8")
+        prior_document_id = f"doc_{'a' * 64}"
+        new_document_id = f"doc_{'f' * 64}"
+        write_document_local_native(resolver, documents_root / prior_document_id / "ocr", body=body)
+        verified = verify_ocr_bytes(body, expected_page_count=1)
+        prior = PriorLocalNativeSource(
+            runs_root=runs_root,
+            run_id="run",
+            generation_id="g-repub",
+            corpus_sha256="b" * 64,
+            contract_sha256="c" * 64,
+            document_id=prior_document_id,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            ocr_sha256=verified.sha256,
+            ocr_size_bytes=verified.size_bytes,
+        )
+        result = await resolver.resolve(
+            run_id="run",
+            document_id=new_document_id,
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=documents_root / new_document_id / "ocr",
+            prior_local_native=prior,
+        )
+        assert result.provider_called is False
+        assert result.ocr_bytes == body
+        assert (documents_root / new_document_id / "ocr" / "ocr.md").is_file()
+        assert provider.calls == []
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
 async def test_credential_bearing_document_local_seal_fails_systemically_without_provider(
     tmp_path: Path,
 ) -> None:

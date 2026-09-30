@@ -1125,7 +1125,7 @@ class OCRResolver:
             )
         if prior_local_native is not None:
             prior = prior_local_native
-            prior_dir = prior.runs_root / prior.run_id / "documents" / document_id / "ocr"
+            prior_dir = prior.runs_root / prior.run_id / "documents" / prior.document_id / "ocr"
             if prior.resolver_subdir is not None:
                 prior_dir = prior_dir / prior.resolver_subdir
             # Passing the identical retained path takes the existing strict
@@ -1731,8 +1731,7 @@ class OCRResolver:
         """Strictly verify and atomically seed a new run from a retained run."""
 
         if (
-            prior.document_id != document_id
-            or prior.pdf_sha256 != source.pdf_sha256
+            prior.pdf_sha256 != source.pdf_sha256
             or prior.pdf_size_bytes != source.pdf_size_bytes
             or prior.page_count != source.page_count
             or not re.fullmatch(r"[0-9a-f]{64}", prior.corpus_sha256)
@@ -1746,7 +1745,11 @@ class OCRResolver:
             raise OCRValidationError("prior local native OCR identity is invalid")
 
         run_root = prior.runs_root / prior.run_id
-        document_root = run_root / "documents" / document_id
+        # The retained artifact lives under the PRIOR document identity; a
+        # republication of identical PDF bytes under a new source identity is
+        # still the same content-addressed OCR input (bytes, size, page count
+        # and the sealed native manifest are all re-verified below).
+        document_root = run_root / "documents" / prior.document_id
         outer_output_dir = document_root / "ocr"
         prior_output_dir = (
             outer_output_dir / prior.resolver_subdir
@@ -1858,7 +1861,7 @@ class OCRResolver:
                 page_count=page_count,
             )
             reuse_key = native_ocr_reuse_key(self.contract, source)
-            run_root = prior.runs_root / prior.run_id / "documents" / document_id / "ocr"
+            run_root = prior.runs_root / prior.run_id / "documents" / prior.document_id / "ocr"
             prior_output_dir = (
                 run_root / prior.resolver_subdir if prior.resolver_subdir is not None else run_root
             )

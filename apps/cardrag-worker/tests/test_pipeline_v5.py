@@ -1597,7 +1597,9 @@ async def test_v5_pipeline_cross_run_local_ocr_cache_lookup_on_corpus_change(
         assert res2.generation_id is not None
         assert res2.generation_id != res1.generation_id
         assert res2.document_count == 2
-        # card-a was looked up and reused from run 1 without calling provider
-        assert ocr.prior_hits == 1
-        # only card-b triggered the provider call in run 2
-        assert ocr.provider_calls == 2
+        # card-a was looked up and reused from run 1 without calling provider.
+        # FIX_03: card-b was republished under a new source identity with
+        # identical PDF bytes, so the content-addressed fallback reuses its
+        # retained artifact too — run 2 makes no provider call at all.
+        assert ocr.prior_hits == 2
+        assert ocr.provider_calls == 1

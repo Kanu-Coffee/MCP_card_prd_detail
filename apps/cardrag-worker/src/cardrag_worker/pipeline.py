@@ -3777,6 +3777,13 @@ class WorkerPipeline:
                 }
 
                 c_docs_by_id = {d.document_id: d for d in c_manifest.documents}
+                c_docs_by_sha: dict[tuple[str, int, int], Any] = {}
+                for c_document in c_manifest.documents:
+                    if c_document.availability == "available" and c_document.ocr is not None:
+                        c_docs_by_sha.setdefault(
+                            (c_document.pdf.sha256, c_document.pdf.size_bytes, c_document.page_count),
+                            c_document,
+                        )
                 matched_in_this_run = 0
                 for doc_id in list(unbound_doc_ids):
                     c_doc = c_docs_by_id.get(doc_id)
@@ -3822,6 +3829,55 @@ class WorkerPipeline:
                         corpus_sha256=c_manifest.corpus_sha256,
                         contract_sha256=c_manifest.contract_sha256,
                         document_id=doc_id,
+                        pdf_sha256=c_doc.pdf.sha256,
+                        pdf_size_bytes=c_doc.pdf.size_bytes,
+                        page_count=c_doc.page_count,
+                        ocr_sha256=c_doc.ocr.sha256,
+                        ocr_size_bytes=c_doc.ocr.size_bytes,
+                    )
+                    unbound_doc_ids.remove(doc_id)
+                    matched_in_this_run += 1
+
+                # Content-addressed fallback: a republication of identical PDF
+                # bytes under a new source identity yields a new document_id
+                # that never appears in any prior manifest.  Bind those
+                # documents to the prior artifact by exact (sha, size, pages)
+                # under the same issuer; the resolver re-verifies the sealed
+                # native manifest, reuse key, and byte digests before use.
+                for doc_id in list(unbound_doc_ids):
+                    acquired_item = acquired_by_doc_id[doc_id]
+                    pdf = acquired_item.pdf
+                    source = acquired_item.source
+                    c_doc = c_docs_by_sha.get((pdf.sha256, pdf.size_bytes, pdf.page_count))
+                    if c_doc is None or c_doc.issuer != source.issuer:
+                        continue
+                    prior_doc_id = c_doc.document_id
+                    if prior_doc_id == doc_id:
+                        continue
+                    prior_ocr_path = runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "ocr.md"
+                    prior_manifest_path = (
+                        runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "native-manifest.json"
+                    )
+                    if (
+                        not prior_manifest_path.is_file()
+                        or prior_manifest_path.is_symlink()
+                        or not prior_ocr_path.is_file()
+                        or prior_ocr_path.is_symlink()
+                    ):
+                        continue
+                    try:
+                        resolved_prior_ocr = prior_ocr_path.resolve(strict=True)
+                    except (OSError, RuntimeError):
+                        continue
+                    if (resolved_prior_ocr, c_doc.ocr.sha256) not in sealed_ocr_objects:
+                        continue
+                    prior_local_native_sources[doc_id] = PriorLocalNativeSource(
+                        runs_root=runs_root,
+                        run_id=candidate_run_id,
+                        generation_id=c_manifest.generation_id,
+                        corpus_sha256=c_manifest.corpus_sha256,
+                        contract_sha256=c_manifest.contract_sha256,
+                        document_id=prior_doc_id,
                         pdf_sha256=c_doc.pdf.sha256,
                         pdf_size_bytes=c_doc.pdf.size_bytes,
                         page_count=c_doc.page_count,
