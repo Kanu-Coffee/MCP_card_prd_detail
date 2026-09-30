@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import time
 import uuid
@@ -48,6 +49,8 @@ from .webdav_verification import (
     ObservedPublisher,
     VerificationPolicy,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 class WebDAVError(RuntimeError):
@@ -206,7 +209,40 @@ class WebDAVClient:
                 policy.observed_pointer = None
                 return None
             reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
-            current = await to_thread_fenced(reader.read_current_generation)
+            try:
+                current = await to_thread_fenced(reader.read_current_generation)
+            except WebDAVHTTPError as exc:
+                if exc.status_code != 404:
+                    raise
+                # A channel pointer whose generation bundle was fully reclaimed
+                # (READY and manifest both 404) is remote GC residue, not a
+                # live binding: treat it exactly like an absent pointer so the
+                # next publication re-binds it. Partial absence stays
+                # fail-closed corruption.
+                pointer_body = await self.get_bytes(self.pointer_path)
+                pointed: str | None = None
+                if pointer_body is not None:
+                    pointed = GenerationPointer.model_validate_json(pointer_body).generation_id
+                    ready_missing = not await self.exists(generation_ready_path(pointed))
+                    manifest_missing = not await self.exists(generation_manifest_path(pointed))
+                    if not (ready_missing and manifest_missing):
+                        raise
+                if pointed is None:
+                    raise
+                LOGGER.warning(
+                    "reason_code=channel_pointer_dangling channel=%s generation_id=%s; "
+                    "treating the reclaimed generation as an absent current for the next publication",
+                    self.channel,
+                    pointed,
+                )
+                if not policy.pointer_checked or policy.observed_pointer is not None:
+                    policy.audit["pending"] = True
+                    policy.put("audit", policy.channel, policy.audit)
+                    if policy.observed_pointer is not None:
+                        policy.memo.clear()
+                policy.pointer_checked = True
+                policy.observed_pointer = None
+                return None
             due = bool(policy.due())
             if due:
                 policy.start_audit()
