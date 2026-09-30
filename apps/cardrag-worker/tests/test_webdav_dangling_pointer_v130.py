@@ -90,6 +90,18 @@ async def test_fully_reclaimed_generation_is_absent_current(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_dangling_pointer_bytes_are_effectively_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch, raise_status=404, manifest_exists=False)
+    assert await client.validated_current_generation() is None
+    raw = await client.get_bytes(client.pointer_path)
+    assert raw is not None
+    assert await client.observed_pointer_bytes() is None
+    # After the next publication rebinds the pointer, the new bytes surface.
+    client._dangling_pointer_bytes = None
+    assert await client.observed_pointer_bytes() == raw
+
+
+@pytest.mark.asyncio
 async def test_partially_present_generation_stays_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(monkeypatch, raise_status=404, manifest_exists=True)
     with pytest.raises(WebDAVHTTPError):

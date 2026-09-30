@@ -126,6 +126,7 @@ class WebDAVClient:
         self.channel = channel
         self.stable_publication_approved = stable_publication_approved
         self.pointer_path = channel_pointer_path(channel)
+        self._dangling_pointer_bytes: bytes | None = None
         self.immutable = ImmutablePublisher(client, upload_chunk_size_bytes=upload_chunk_size_bytes)
         self.cas = CASPublisher(client, upload_chunk_size_bytes=upload_chunk_size_bytes)
         self.stable = StablePointerPublisher(client, channel=channel)
@@ -207,6 +208,7 @@ class WebDAVClient:
                         policy.memo.clear()
                 policy.pointer_checked = True
                 policy.observed_pointer = None
+                self._dangling_pointer_bytes = None
                 return None
             reader = MCPArtifactReader(self.core.read_only(), channel=self.channel)
             try:
@@ -229,6 +231,7 @@ class WebDAVClient:
                         raise
                 if pointed is None:
                     raise
+                self._dangling_pointer_bytes = pointer_body
                 LOGGER.warning(
                     "reason_code=channel_pointer_dangling channel=%s generation_id=%s; "
                     "treating the reclaimed generation as an absent current for the next publication",
@@ -253,6 +256,7 @@ class WebDAVClient:
                 raise WebDAVError("channel pointer changed during verification")
             policy.pointer_checked = True
             policy.observed_pointer = current.pointer.canonical_bytes()
+            self._dangling_pointer_bytes = None
             if due:
                 policy.complete_audit(
                     generation_id=current.manifest.generation_id,
@@ -277,7 +281,7 @@ class WebDAVClient:
             return
         started = time.monotonic()
         due = bool(policy.due())
-        pointer_before = await self.get_bytes(self.pointer_path)
+        pointer_before = await self.observed_pointer_bytes()
         if policy.pointer_checked and pointer_before != policy.observed_pointer:
             policy.audit["pending"] = True
             policy.put("audit", policy.channel, policy.audit)
@@ -290,7 +294,7 @@ class WebDAVClient:
         if candidate is not None and due:
             policy.start_audit()
             await self._verify_manifest_members(candidate, force=True, reason="full_audit")
-            if await self.get_bytes(self.pointer_path) != pointer_before:
+            if await self.observed_pointer_bytes() != pointer_before:
                 raise WebDAVError("channel pointer changed before generation sealing")
             policy.complete_audit(
                 generation_id=candidate.generation_id, manifest_sha256=candidate.manifest_sha256
@@ -445,6 +449,14 @@ class WebDAVClient:
                 return None
             raise
         return response.content
+
+    async def observed_pointer_bytes(self) -> bytes | None:
+        """Channel pointer bytes, treating a fully reclaimed binding as absent."""
+
+        body = await self.get_bytes(self.pointer_path)
+        if body is not None and self._dangling_pointer_bytes == body:
+            return None
+        return body
 
     async def exists(self, path: str | PurePosixPath) -> bool:
         """Check object existence through the capability-limited read-only facade."""

@@ -3425,7 +3425,7 @@ class WorkerPipeline:
             ),
         )
         current_remote = await self.webdav.validated_current_generation()
-        stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
+        stable_body = await self.webdav.observed_pointer_bytes()
         cache_healing_generation_id: str | None = None
         cache_healing_seal: dict[str, Any] | None = None
         cache_healing_seal_path: Path | None = None
@@ -6412,7 +6412,7 @@ class WorkerPipeline:
         elif canonical_sha256(sealed) != validated.seal_sha256:
             raise RuntimeError("validated worker publication seal identity changed")
         current = await self.webdav.validated_current_generation()
-        stable_body = await self.webdav.get_bytes(self.webdav.pointer_path)
+        stable_body = await self.webdav.observed_pointer_bytes()
         if current is None and stable_body is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing sealed publication")
         sealed_manifest = validated.manifest
