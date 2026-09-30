@@ -1383,6 +1383,17 @@ class _WorkerPhaseFailure(RuntimeError):
         super().__init__("Worker pipeline phase failed.")
 
 
+async def _observed_pointer_bytes(webdav: Any) -> bytes | None:
+    """Pointer bytes with reclaimed-binding normalization when the client supports it."""
+
+    reader = getattr(webdav, "observed_pointer_bytes", None)
+    if callable(reader):
+        result: bytes | None = await reader()
+        return result
+    raw: bytes | None = await webdav.get_bytes(webdav.pointer_path)
+    return raw
+
+
 def _classify_worker_failure(exc: Exception) -> tuple[str, int | None, int | None]:
     """Return only allowlisted diagnostic categories and bounded integers."""
 
@@ -3425,7 +3436,7 @@ class WorkerPipeline:
             ),
         )
         current_remote = await self.webdav.validated_current_generation()
-        stable_body = await self.webdav.observed_pointer_bytes()
+        stable_body = await _observed_pointer_bytes(self.webdav)
         cache_healing_generation_id: str | None = None
         cache_healing_seal: dict[str, Any] | None = None
         cache_healing_seal_path: Path | None = None
@@ -6412,7 +6423,7 @@ class WorkerPipeline:
         elif canonical_sha256(sealed) != validated.seal_sha256:
             raise RuntimeError("validated worker publication seal identity changed")
         current = await self.webdav.validated_current_generation()
-        stable_body = await self.webdav.observed_pointer_bytes()
+        stable_body = await _observed_pointer_bytes(self.webdav)
         if current is None and stable_body is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing sealed publication")
         sealed_manifest = validated.manifest
