@@ -4784,7 +4784,7 @@ class WorkerPipeline:
             ocr_failed_products=[item.record for item in failed_documents],
         )
         current_remote = await self.webdav.validated_current_generation()
-        if current_remote is None and await self.webdav.get_bytes(self.webdav.pointer_path) is not None:
+        if current_remote is None and await _observed_pointer_bytes(self.webdav) is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing publication")
         previous_id = current_remote.generation_id if current_remote is not None else None
         generation_documents = tuple(
@@ -5695,7 +5695,7 @@ class WorkerPipeline:
             previous_id = current_aggregation_head.generation_id
         else:
             current_remote = await self.webdav.validated_current_generation()
-            if current_remote is None and await self.webdav.get_bytes(self.webdav.pointer_path) is not None:
+            if current_remote is None and await _observed_pointer_bytes(self.webdav) is not None:
                 raise RuntimeError("remote stable generation is corrupt; refusing publication")
             previous_id = current_remote.generation_id if current_remote is not None else None
         generation_documents = tuple(

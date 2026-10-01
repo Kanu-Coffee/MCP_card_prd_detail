@@ -1,0 +1,51 @@
+run-3r10 exit code: 1 at 2026-10-02T02:39:39+09:00
+2026-10-02 01:55:41,489 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:41,490 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:45,365 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:45,365 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:49,907 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:49,907 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:56,651 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:55:56,651 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:00,164 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:00,164 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:04,662 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:04,662 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:08,986 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:08,987 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:31,095 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:31,095 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:35,280 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:56:35,280 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:03,134 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:03,134 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:16,838 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:16,838 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:27,435 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:27,436 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:39,996 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:57:39,997 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:58:01,516 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:58:01,516 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:58:40,230 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:58:40,230 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:58:49,721 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:58:49,721 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:59:17,455 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:59:17,455 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:59:29,272 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:59:29,272 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:59:54,387 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 01:59:54,387 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 02:00:00,611 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 02:00:00,612 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 02:00:05,835 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 02:00:05,835 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 02:00:14,464 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4181832 wal_size_bytes=4181832 wal_limit_bytes=417779528
+2026-10-02 02:38:23,460 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+2026-10-02 02:38:23,490 ERROR cardrag_worker.pipeline Worker pipeline failed unexpectedly during run c622d3c4b1fb4df5a74a4b139591028f: remote stable generation is corrupt; refusing publication
+    published_result = await self._build_v5_generation(
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "run_id": "c622d3c4b1fb4df5a74a4b139591028f",
+  "status": "failed"
