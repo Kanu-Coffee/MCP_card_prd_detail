@@ -3845,6 +3845,14 @@ class WorkerPipeline:
                 # under the same issuer; the resolver re-verifies the sealed
                 # native manifest, reuse key, and byte digests before use.
                 for doc_id in list(unbound_doc_ids):
+                    # A document whose own run directory already seals bytes is
+                    # self-retained: seeding it from the seed ledger or its own
+                    # native artifacts is authoritative. Binding it to a
+                    # same-content partner under a *different* document identity
+                    # would pit two retained seals against each other and trip
+                    # the per-document healing identity guard downstream.
+                    if (run_dir / "documents" / doc_id / "ocr" / "ocr.md").is_file():
+                        continue
                     acquired_item = acquired_by_doc_id[doc_id]
                     pdf = acquired_item.pdf
                     source = acquired_item.source

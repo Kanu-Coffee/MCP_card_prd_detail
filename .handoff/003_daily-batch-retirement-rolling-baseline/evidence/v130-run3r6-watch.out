@@ -1,0 +1,31 @@
+run-3r6 exit code: 1 at 2026-10-01T13:17:42+09:00
+2026-10-01 12:32:12,277 INFO cardrag_worker.pipeline OCR progress completed=1050 total=5298 succeeded=1050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 12:32:20,752 INFO cardrag_worker.pipeline OCR progress completed=1075 total=5298 succeeded=1075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 12:43:16,605 INFO cardrag_worker.pipeline OCR progress completed=1100 total=5298 succeeded=1100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 12:51:08,337 INFO cardrag_worker.pipeline OCR progress completed=1125 total=5298 succeeded=1125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 12:51:15,000 INFO cardrag_worker.pipeline OCR progress completed=1150 total=5298 succeeded=1150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 12:51:20,896 INFO cardrag_worker.pipeline OCR progress completed=1175 total=5298 succeeded=1175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 12:56:30,099 INFO cardrag_worker.pipeline OCR progress completed=1200 total=5298 succeeded=1200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:15:48,941 INFO cardrag_worker.pipeline OCR progress completed=1225 total=5298 succeeded=1225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:02,414 INFO cardrag_worker.pipeline OCR progress completed=1250 total=5298 succeeded=1250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:08,736 INFO cardrag_worker.pipeline OCR progress completed=1275 total=5298 succeeded=1275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:19,816 INFO cardrag_worker.pipeline OCR progress completed=1300 total=5298 succeeded=1300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:31,392 INFO cardrag_worker.pipeline OCR progress completed=1325 total=5298 succeeded=1325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:40,118 INFO cardrag_worker.pipeline OCR progress completed=1350 total=5298 succeeded=1350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:47,061 INFO cardrag_worker.pipeline OCR progress completed=1375 total=5298 succeeded=1375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:16:53,394 INFO cardrag_worker.pipeline OCR progress completed=1400 total=5298 succeeded=1400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:00,811 INFO cardrag_worker.pipeline OCR progress completed=1425 total=5298 succeeded=1425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:04,508 INFO cardrag_worker.pipeline OCR progress completed=1450 total=5298 succeeded=1450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:06,989 INFO cardrag_worker.pipeline OCR progress completed=1475 total=5298 succeeded=1475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:09,352 INFO cardrag_worker.pipeline OCR progress completed=1500 total=5298 succeeded=1500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:11,861 INFO cardrag_worker.pipeline OCR progress completed=1525 total=5298 succeeded=1525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:15,691 INFO cardrag_worker.pipeline OCR progress completed=1550 total=5298 succeeded=1550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:20,246 INFO cardrag_worker.pipeline OCR progress completed=1575 total=5298 succeeded=1575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:25,707 INFO cardrag_worker.pipeline OCR progress completed=1600 total=5298 succeeded=1600 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:29,189 INFO cardrag_worker.pipeline OCR progress completed=1625 total=5298 succeeded=1625 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:32,738 INFO cardrag_worker.pipeline OCR progress completed=1650 total=5298 succeeded=1650 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:36,010 INFO cardrag_worker.pipeline OCR progress completed=1675 total=5298 succeeded=1675 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 13:17:38,595 INFO cardrag_worker.pipeline OCR progress completed=1700 total=5298 succeeded=1700 failed=0 structure_failed=0 cache_publication_deferred=0
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "status": "failed"

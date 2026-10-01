@@ -1,0 +1,196 @@
+diff --git a/apps/cardrag-worker/src/cardrag_worker/ocr.py b/apps/cardrag-worker/src/cardrag_worker/ocr.py
+index 186d694..4b90caf 100644
+--- a/apps/cardrag-worker/src/cardrag_worker/ocr.py
++++ b/apps/cardrag-worker/src/cardrag_worker/ocr.py
+@@ -2067,6 +2067,11 @@ class OCRResolver:
+                 )
+             )
+         cache_candidates = tuple(cache_candidate_list)
++        expected_ocr_identity = (
++            (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
++            if prior_local_native is not None
++            else None
++        )
+         for kind, lookup_key, candidate_policy in cache_candidates:
+             try:
+                 found = await self._lookup_cache(
+@@ -2084,6 +2089,24 @@ class OCRResolver:
+                     stacklevel=2,
+                 )
+                 found = None
++            if (
++                found is not None
++                and kind == "native"
++                and expected_ocr_identity is not None
++                and (found.ocr_sha256, found.size_bytes) != expected_ocr_identity
++            ):
++                # Generation cache healing is identity-bound per document.
++                # When a document is bound to a retained generation seal, a
++                # remote entry that disagrees with that seal must never be
++                # adopted, even under a compatible contract: treating it as a
++                # strict miss lets retained materialization rebind the exact
++                # sealed bytes instead of aborting the run downstream.
++                warnings.warn(
++                    "ignoring remote OCR cache entry that differs from the retained generation seal",
++                    RuntimeWarning,
++                    stacklevel=2,
++                )
++                found = None
+             if found is not None:
+                 if kind == "native":
+                     local_remote = self._load_local_native(
+@@ -2099,11 +2122,6 @@ class OCRResolver:
+                             output_dir=output_dir,
+                         )
+                 return found
+-        expected_ocr_identity = (
+-            (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
+-            if prior_local_native is not None
+-            else None
+-        )
+         local = self._load_local_native(
+             output_dir=output_dir,
+             source=source,
+diff --git a/apps/cardrag-worker/tests/test_ocr.py b/apps/cardrag-worker/tests/test_ocr.py
+index bf7c94f..0fc3ecc 100644
+--- a/apps/cardrag-worker/tests/test_ocr.py
++++ b/apps/cardrag-worker/tests/test_ocr.py
+@@ -3896,3 +3896,138 @@ async def test_openrouter_ocr_multi_model_fallback(tmp_path: Path, respx_mock: A
+     assert len(respx_mock.calls) == 2
+     req2_payload = json.loads(respx_mock.calls[1].request.content)
+     assert req2_payload["model"] == "anthropic/claude-opus-5"
++
++
++def _divergent_remote_setup(tmp_path: Path):
++    from cardrag_worker.state import WorkerState
++
++    state = WorkerState(tmp_path / "state.sqlite3")
++    retained_body = "## Page 1\n\n생성 실드에 결속된 retain 카드 상품설명 본문입니다.\n".encode()
++    divergent_body = "## Page 1\n\n원격 덮어쓰기가 보관한 다른 바이트의 카드 상품설명 본문입니다.\n".encode()
++    sol_provider = FakeProvider()
++    sol_resolver = OCRResolver(
++        provider=sol_provider,
++        state=state,
++        webdav=None,
++        chunk_pages=1,
++    )
++
++    class CurrentProvider(FakeProvider):
++        model = "gpt-5.6-terra"
++        reasoning_effort = "ultra"
++
++    webdav = FakeWebDAV()
++    provider = CurrentProvider()
++    resolver = OCRResolver(
++        provider=provider,
++        state=state,
++        webdav=webdav,  # type: ignore[arg-type]
++        chunk_pages=1,
++        cache_mode="read-only",
++        compatible_contracts=[sol_resolver.contract],
++    )
++    state.start_run(run_id="run")
++    runs_root = tmp_path / "runs"
++    documents_root = runs_root / "run" / "documents"
++    prior_document_id = f"doc_{'a' * 64}"
++    new_document_id = f"doc_{'e' * 64}"
++    write_document_local_native(
++        sol_resolver,
++        runs_root / "run-prior" / "documents" / prior_document_id / "ocr",
++        body=retained_body,
++    )
++    verified_retained = verify_ocr_bytes(retained_body, expected_page_count=1)
++    prior = PriorLocalNativeSource(
++        runs_root=runs_root,
++        run_id="run-prior",
++        generation_id="g-divergent",
++        corpus_sha256="b" * 64,
++        contract_sha256="c" * 64,
++        document_id=prior_document_id,
++        pdf_sha256=PDF_SHA,
++        pdf_size_bytes=3,
++        page_count=1,
++        ocr_sha256=verified_retained.sha256,
++        ocr_size_bytes=verified_retained.size_bytes,
++    )
++    pdf = tmp_path / "pdf-pages.txt"
++    pdf.write_text("1", encoding="utf-8")
++    output_dir = documents_root / new_document_id / "ocr"
++    compat_key = cache_native(sol_resolver, webdav, body=divergent_body)
++    return {
++        "state": state,
++        "resolver": resolver,
++        "provider": provider,
++        "webdav": webdav,
++        "prior": prior,
++        "pdf": pdf,
++        "output_dir": output_dir,
++        "new_document_id": new_document_id,
++        "retained_body": retained_body,
++        "divergent_body": divergent_body,
++        "compat_key": compat_key,
++    }
++
++
++def _divergent_kwargs(fx, prior=None):
++    kwargs = {
++        "run_id": "run",
++        "document_id": fx["new_document_id"],
++        "pdf_path": fx["pdf"],
++        "pdf_sha256": PDF_SHA,
++        "pdf_size_bytes": 3,
++        "page_count": 1,
++        "output_dir": fx["output_dir"],
++    }
++    if prior is not None:
++        kwargs["prior_local_native"] = prior
++    return kwargs
++
++
++@pytest.mark.asyncio
++async def test_divergent_compatible_remote_hit_cannot_displace_bound_retained_seal(tmp_path: Path) -> None:
++    fx = _divergent_remote_setup(tmp_path)
++    try:
++        result = await fx["resolver"].resolve(**_divergent_kwargs(fx, prior=fx["prior"]))
++        assert result.ocr_bytes == fx["retained_body"]
++        assert result.ocr_sha256 == verify_ocr_bytes(fx["retained_body"], expected_page_count=1).sha256
++        assert fx["provider"].calls == []
++        assert any(fx["compat_key"] in call for call in fx["webdav"].read_calls)
++        assert (fx["output_dir"] / "ocr.md").read_bytes() == fx["retained_body"]
++    finally:
++        fx["state"].close()
++
++
++class _ContractHolder:
++    """Minimal stand-in exposing the contract attribute required by cache_native."""
++
++    def __init__(self, contract) -> None:
++        self.contract = contract
++
++
++@pytest.mark.asyncio
++async def test_matching_compatible_remote_hit_still_resolves_bound_document(tmp_path: Path) -> None:
++    fx = _divergent_remote_setup(tmp_path)
++    try:
++        fx["webdav"].objects.clear()
++        sol_resolver_probe = OCRResolver.__new__(OCRResolver)
++        compat_contract = fx["resolver"]._compatible_contracts[0]
++        from dataclasses import dataclass as _dc  # noqa: F401
++        same_key = cache_native(_ContractHolder(compat_contract), fx["webdav"], body=fx["retained_body"])
++        result = await fx["resolver"].resolve(**_divergent_kwargs(fx, prior=fx["prior"]))
++        assert result.ocr_bytes == fx["retained_body"]
++        assert fx["provider"].calls == []
++        assert any(same_key in call for call in fx["webdav"].read_calls)
++    finally:
++        fx["state"].close()
++
++
++@pytest.mark.asyncio
++async def test_unbound_document_still_adopts_compatible_remote_hit(tmp_path: Path) -> None:
++    fx = _divergent_remote_setup(tmp_path)
++    try:
++        result = await fx["resolver"].resolve(**_divergent_kwargs(fx, prior=None))
++        assert result.ocr_bytes == fx["divergent_body"]
++        assert fx["provider"].calls == []
++    finally:
++        fx["state"].close()
