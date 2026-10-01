@@ -1982,3 +1982,175 @@ async def test_openrouter_invalid_ocr_contract_is_typed_systemic(
     assert error.scope == "systemic"
     assert error.__cause__ is None
     assert "RAW_PRIVATE_RESPONSE_TOKEN" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_codex_ocr_token_plan_provider_config_is_injected_and_key_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    images = tuple(tmp_path / f"page-{page}.png" for page in (1, 2))
+    for image in images:
+        image.write_bytes(b"png")
+    captured: dict[str, Any] = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            captured["stdin"] = body
+            return ("## Page 1\n\ntoken-plan transcription body\n".encode()), b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def create(*args: str, **kwargs: Any) -> Process:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-plan-secret")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    provider = CodexOCRProvider(
+        executable="codex",
+        model="qwen3.8-flash",
+        auth_root=tmp_path / "codex-auth",
+        reasoning_effort="xhigh",
+        provider_id="bailian-cli",
+        provider_base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        provider_env_key="ALIBABA_TOKEN_PLAN_API_KEY",
+        provider_wire_api="responses",
+        model_catalog_json="/var/lib/cardrag-codex-home/model-catalog.local.json",
+    )
+    result = await provider.recognize(
+        images,
+        page_numbers=(1, 2),
+        target_page_numbers=(1, 2),
+        total_pages=2,
+        prompt="transcribe",
+    )
+    arguments = captured["args"]
+    config_values = tuple(
+        arguments[index + 1] for index, argument in enumerate(arguments) if argument == "--config"
+    )
+    assert config_values == (
+        'model_reasoning_effort="xhigh"',
+        'model_provider="bailian-cli"',
+        'model_providers.bailian-cli.name="bailian-cli"',
+        'model_providers.bailian-cli.base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"',
+        'model_providers.bailian-cli.env_key="ALIBABA_TOKEN_PLAN_API_KEY"',
+        'model_providers.bailian-cli.wire_api="responses"',
+        'model_catalog_json="/var/lib/cardrag-codex-home/model-catalog.local.json"',
+        *providers_module.CODEX_OCR_CONFIG_OVERRIDES,
+    )
+    assert captured["env"]["ALIBABA_TOKEN_PLAN_API_KEY"] == "test-plan-secret"
+    assert captured["env"]["CODEX_HOME"] == str(tmp_path / "codex-auth")
+    assert result.startswith("## Page 1")
+
+
+@pytest.mark.asyncio
+async def test_codex_ocr_token_plan_missing_api_key_fails_systemically_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    spawned: list[str] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            return b"## Page 1\n\nbody\n", b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def create(*args: str, **kwargs: Any) -> Process:
+        spawned.append(args[0])
+        return Process()
+
+    monkeypatch.delenv("ALIBABA_TOKEN_PLAN_API_KEY", raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    provider = CodexOCRProvider(
+        executable="codex",
+        model="qwen3.8-flash",
+        provider_id="bailian-cli",
+        provider_base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        provider_env_key="ALIBABA_TOKEN_PLAN_API_KEY",
+    )
+    with pytest.raises(ProviderSystemicError) as captured:
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="transcribe",
+        )
+    assert captured.value.reason_code == "provider_systemic_failure"
+    assert spawned == []
+
+
+def test_codex_ocr_provider_rejects_malformed_token_plan_configuration() -> None:
+    base = dict(executable="codex", model="qwen3.8-flash")
+    with pytest.raises(ValueError):
+        CodexOCRProvider(**base, provider_id="Bad ID", provider_base_url="https://ok", provider_env_key="KEY")
+    with pytest.raises(ValueError):
+        CodexOCRProvider(
+            **base, provider_id="bailian-cli", provider_base_url="http://insecure", provider_env_key="KEY"
+        )
+    with pytest.raises(ValueError):
+        CodexOCRProvider(
+            **base,
+            provider_id="bailian-cli",
+            provider_base_url="https://ok",
+            provider_env_key="lowercase_key",
+        )
+    with pytest.raises(ValueError):
+        CodexOCRProvider(
+            **base,
+            provider_id="bailian-cli",
+            provider_base_url="https://ok",
+            provider_env_key="KEY",
+            provider_wire_api="grpc",
+        )
+
+
+def test_worker_settings_parses_token_plan_provider_knobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(tmp_path / "worker-state"))
+    monkeypatch.setenv("CARDRAG_OCR_PROVIDER", "codex-exec")
+    monkeypatch.setenv("CARDRAG_EXTERNAL_OCR_ALLOWED", "true")
+    monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER", "bailian-cli")
+    monkeypatch.setenv(
+        "CARDRAG_CODEX_MODEL_PROVIDER_BASE_URL",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY")
+    monkeypatch.setenv("CARDRAG_CODEX_MODEL_CATALOG_JSON", "/var/lib/cardrag-codex-home/model-catalog.local.json")
+
+    settings = WorkerSettings.from_env()
+
+    assert settings.codex_model_provider == "bailian-cli"
+    assert settings.codex_model_provider_base_url == (
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+    )
+    assert settings.codex_model_provider_env_key == "ALIBABA_TOKEN_PLAN_API_KEY"
+    assert settings.codex_model_provider_wire_api == "responses"
+    assert settings.codex_model_catalog_json == "/var/lib/cardrag-codex-home/model-catalog.local.json"
+
+
+def test_worker_settings_rejects_unsafe_token_plan_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(tmp_path / "worker-state"))
+    monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER", "bailian-cli")
+    monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER_BASE_URL", "https://exa mple.com/v1")
+    monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY")
+    with pytest.raises(ValueError, match="BASE_URL"):
+        WorkerSettings.from_env()

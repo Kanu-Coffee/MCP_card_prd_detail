@@ -1,0 +1,7 @@
+run-2 exit code: 1 at 2026-09-30T09:24:17+09:00
+2026-09-30 09:24:17,089 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+2026-09-30 09:24:17,109 ERROR cardrag_worker.pipeline Worker pipeline failed unexpectedly during run 4a87bd56130f4d90a2ba11d711f4f807: remote stable generation is corrupt; refusing publication
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "run_id": "4a87bd56130f4d90a2ba11d711f4f807",
+  "status": "failed"

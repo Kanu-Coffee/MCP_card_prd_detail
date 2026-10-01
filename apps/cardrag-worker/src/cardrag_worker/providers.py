@@ -661,6 +661,11 @@ class CodexOCRProvider:
         auth_root: Path | None = None,
         timeout_seconds: float = 1800,
         reasoning_effort: str = "high",
+        provider_id: str = "",
+        provider_base_url: str = "",
+        provider_env_key: str = "",
+        provider_wire_api: str = "responses",
+        model_catalog_json: str = "",
     ) -> None:
         self.executable = executable
         self.model = model
@@ -669,6 +674,29 @@ class CodexOCRProvider:
             raise ValueError("OCR provider timeout must be positive")
         self.timeout_seconds = timeout_seconds
         self.reasoning_effort: str | None = reasoning_effort
+        self.provider_id = provider_id
+        self.provider_env_key = provider_env_key
+        self.provider_config: tuple[tuple[str, str], ...] = ()
+        if provider_id:
+            if provider_wire_api not in {"chat", "responses"}:
+                raise ValueError("Codex OCR provider wire API must be chat or responses")
+            if (
+                not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", provider_id)
+                or not provider_base_url.startswith("https://")
+                or not provider_env_key
+                or provider_env_key.upper() != provider_env_key
+            ):
+                raise ValueError("Codex OCR provider base URL and env key are invalid")
+            table = f"model_providers.{provider_id}"
+            self.provider_config = (
+                ("model_provider", provider_id),
+                (f"{table}.name", provider_id),
+                (f"{table}.base_url", provider_base_url),
+                (f"{table}.env_key", provider_env_key),
+                (f"{table}.wire_api", provider_wire_api),
+            )
+            if model_catalog_json:
+                self.provider_config += (("model_catalog_json", model_catalog_json),)
 
     async def recognize(
         self,
@@ -694,9 +722,19 @@ class CodexOCRProvider:
         }
         if self.auth_root is not None:
             environment["CODEX_HOME"] = str(self.auth_root)
+        if self.provider_config:
+            secret = os.environ.get(self.provider_env_key, "") if self.provider_env_key else ""
+            if not secret:
+                raise ProviderSystemicError("provider_systemic_failure")
+            environment[self.provider_env_key] = secret
         security_arguments = [
-            value for override in CODEX_OCR_CONFIG_OVERRIDES for value in ("--config", override)
+            token
+            for key, value in self.provider_config
+            for token in ("--config", f'{key}="{value}"')
         ]
+        security_arguments.extend(
+            value for override in CODEX_OCR_CONFIG_OVERRIDES for value in ("--config", override)
+        )
         security_arguments.extend(
             value for feature in CODEX_OCR_DISABLED_FEATURES for value in ("--disable", feature)
         )
@@ -955,6 +993,11 @@ def make_ocr_provider(
     base_url: str,
     codex_executable: str,
     codex_auth_root: Path | None,
+    codex_provider_id: str = "",
+    codex_provider_base_url: str = "",
+    codex_provider_env_key: str = "",
+    codex_provider_wire_api: str = "responses",
+    codex_model_catalog_json: str = "",
     reasoning_effort: str = "high",
     timeout_seconds: float = 1800,
     openrouter_fallback_model: str | None = None,
@@ -980,6 +1023,11 @@ def make_ocr_provider(
             auth_root=codex_auth_root,
             timeout_seconds=timeout_seconds,
             reasoning_effort=reasoning_effort,
+            provider_id=codex_provider_id,
+            provider_base_url=codex_provider_base_url,
+            provider_env_key=codex_provider_env_key,
+            provider_wire_api=codex_provider_wire_api,
+            model_catalog_json=codex_model_catalog_json,
         )
     if normalized in {"local-paddleocr", "paddleocr", "paddleocr-vl"}:
         if paddleocr_cache_dir is None:

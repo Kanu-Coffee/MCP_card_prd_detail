@@ -1,0 +1,8 @@
+run-1 exit code: 1 at 2026-09-30T08:24:46+09:00
+2026-09-30 08:24:46,063 ERROR cardrag_worker.pipeline Worker pipeline failed unexpectedly during run 380d0212db684478a89b271756c23827: WebDAV GET v1/generations/g-0928dee8e6f04af9ae41fdb7-f916d1c475e0/READY.json returned HTTP 404
+    ready, ready_bytes = self.read_generation_ready(pointer.generation_id)
+        generation_ready_path(generation_id),
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "run_id": "380d0212db684478a89b271756c23827",
+  "status": "failed",

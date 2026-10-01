@@ -1,0 +1,15 @@
+run-3r5 exit code: 1 at 2026-10-01T11:24:48+09:00
+2026-10-01 11:11:40,606 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12942: no published PDF attachment
+2026-10-01 11:14:42,191 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+2026-10-01 11:19:14,994 INFO cardrag_worker.pipeline Discovered 3726 reusable local OCR artifacts from prior run 5f74295db4b64f10837eba3e06d6c6be (remaining unbound: 1571)
+2026-10-01 11:24:04,808 INFO cardrag_worker.pipeline OCR progress completed=25 total=5297 succeeded=25 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:08,071 INFO cardrag_worker.pipeline OCR progress completed=50 total=5297 succeeded=50 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:11,933 INFO cardrag_worker.pipeline OCR progress completed=75 total=5297 succeeded=75 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:14,964 INFO cardrag_worker.pipeline OCR progress completed=100 total=5297 succeeded=100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:18,567 INFO cardrag_worker.pipeline OCR progress completed=125 total=5297 succeeded=125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:21,316 INFO cardrag_worker.pipeline OCR progress completed=150 total=5297 succeeded=150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:24,149 INFO cardrag_worker.pipeline OCR progress completed=175 total=5297 succeeded=175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 11:24:34,222 INFO cardrag_worker.pipeline OCR progress completed=200 total=5297 succeeded=200 failed=0 structure_failed=0 cache_publication_deferred=0
+  "reason_code": "provider_process_configuration_failed",
+  "run_id": "c622d3c4b1fb4df5a74a4b139591028f",
+  "status": "failed",

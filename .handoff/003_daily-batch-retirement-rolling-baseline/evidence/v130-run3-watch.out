@@ -1,0 +1,4 @@
+run-3r exit code: 1 at 2026-09-30T12:26:17+09:00
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "status": "failed"

@@ -211,6 +211,9 @@ class PublicationResumeSettings:
         return self.state_dir / "worker-state.sqlite3"
 
 
+_UNSAFE_TOML_VALUE_CHARACTERS = frozenset((chr(34), chr(39), chr(92), chr(9), chr(10), chr(32)))
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     state_dir: Path
@@ -259,6 +262,11 @@ class WorkerSettings:
     ocr_prompt_version: str
     codex_executable: str
     codex_auth_root: Path | None
+    codex_model_provider: str
+    codex_model_provider_base_url: str
+    codex_model_provider_env_key: str
+    codex_model_provider_wire_api: str
+    codex_model_catalog_json: str
     paddleocr_pipeline_version: str
     paddleocr_cache_dir: Path
     paddleocr_pdf_dpi: int
@@ -348,6 +356,46 @@ class WorkerSettings:
                 or resolved_auth_root in resolved_state_dir.parents
             ):
                 raise ValueError("CARDRAG_CODEX_AUTH_ROOT must not overlap CARDRAG_WORKER_STATE_DIR")
+        codex_model_provider = os.environ.get("CARDRAG_CODEX_MODEL_PROVIDER", "").strip()
+        codex_provider_base_url = os.environ.get("CARDRAG_CODEX_MODEL_PROVIDER_BASE_URL", "").strip()
+        codex_provider_env_key = os.environ.get("CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY", "").strip()
+        codex_provider_wire_api = (
+            os.environ.get("CARDRAG_CODEX_MODEL_PROVIDER_WIRE_API", "responses").strip().casefold()
+            or "responses"
+        )
+        codex_model_catalog_json = os.environ.get("CARDRAG_CODEX_MODEL_CATALOG_JSON", "").strip()
+        if codex_model_provider:
+            if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", codex_model_provider):
+                raise ValueError(
+                    "CARDRAG_CODEX_MODEL_PROVIDER must be a lowercase bare provider identifier"
+                )
+            if not codex_provider_base_url.startswith("https://") or any(
+                character in codex_provider_base_url for character in _UNSAFE_TOML_VALUE_CHARACTERS
+            ):
+                raise ValueError(
+                    "CARDRAG_CODEX_MODEL_PROVIDER_BASE_URL must be a quoted-safe https URL"
+                )
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", codex_provider_env_key):
+                raise ValueError(
+                    "CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY must name an uppercase environment variable"
+                )
+            if codex_provider_wire_api not in {"chat", "responses"}:
+                raise ValueError("CARDRAG_CODEX_MODEL_PROVIDER_WIRE_API must be chat or responses")
+            if codex_model_catalog_json and not (
+                codex_model_catalog_json.startswith("/")
+                and not any(
+                    character in codex_model_catalog_json for character in _UNSAFE_TOML_VALUE_CHARACTERS
+                )
+            ):
+                raise ValueError("CARDRAG_CODEX_MODEL_CATALOG_JSON must be an absolute quoted-safe path")
+            if require_providers and (
+                ocr_provider == "codex-exec"
+                or (fallback_provider is not None and fallback_provider.strip().casefold() in {"codex", "codex-exec"})
+            ):
+                if not os.environ.get(codex_provider_env_key, "").strip():
+                    raise ValueError(
+                        f"{codex_provider_env_key} must be set when CARDRAG_CODEX_MODEL_PROVIDER is configured"
+                    )
         ca_file = os.environ.get("CARDRAG_WEBDAV_CA_FILE")
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
@@ -484,6 +532,11 @@ class WorkerSettings:
             ocr_prompt_version=os.environ.get("CARDRAG_OCR_PROMPT_VERSION", "cardrag-ocr.ko.v2"),
             codex_executable=os.environ.get("CARDRAG_CODEX_EXECUTABLE", "codex"),
             codex_auth_root=resolved_auth_root,
+            codex_model_provider=codex_model_provider,
+            codex_model_provider_base_url=codex_provider_base_url,
+            codex_model_provider_env_key=codex_provider_env_key,
+            codex_model_provider_wire_api=codex_provider_wire_api,
+            codex_model_catalog_json=codex_model_catalog_json,
             paddleocr_pipeline_version=os.environ.get("CARDRAG_PADDLEOCR_PIPELINE_VERSION", "v1.6").strip(),
             paddleocr_cache_dir=Path(
                 os.path.abspath(
