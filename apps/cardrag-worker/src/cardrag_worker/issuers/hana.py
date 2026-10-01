@@ -167,12 +167,24 @@ class HanaAdapter:
                 raise IssuerMarkupChanged("Hana disclosure total changed during pagination")
             # The API can publish the same product/PDF twice with distinct
             # registration dates. Count those raw rows, but reject a replay of
-            # an identical raw row even when the rest of its page is new.
+            # an identical raw row *within one page*: that is structural
+            # damage. A cross-page replay of an identical row is cursor drift
+            # (observed on 2026-10-02: one row redelivered on the next page
+            # while listCount kept counting uniques), so it is deduplicated
+            # and the unique-total and full-page-loop guards below keep the
+            # pagination exactly verifiable.
             page_ids = set(page.row_fingerprints)
-            if len(page_ids) != len(page.row_fingerprints) or page_ids.intersection(seen_records):
+            if len(page_ids) != len(page.row_fingerprints):
                 raise IssuerMarkupChanged("Hana pagination repeated an identical raw record")
-            seen_records.update(page_ids)
-            records.extend(page.records)
+            kept = 0
+            for record, fingerprint in zip(page.records, page.row_fingerprints, strict=True):
+                if fingerprint in seen_records:
+                    continue
+                seen_records.add(fingerprint)
+                records.append(record)
+                kept += 1
+            if kept == 0 and page.records and (page.has_more or page.next_cursor):
+                raise IssuerMarkupChanged("Hana pagination replayed an entire page")
             if len(records) > total_count:
                 raise IssuerMarkupChanged("Hana disclosure exceeded the reported total")
             if page.has_more is False or not page.next_cursor:

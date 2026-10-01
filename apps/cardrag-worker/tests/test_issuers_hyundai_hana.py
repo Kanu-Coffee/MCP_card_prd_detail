@@ -323,6 +323,15 @@ async def test_hana_latest_selection_ignores_older_conflicts_in_any_order() -> N
     assert snapshot.snapshot_id == reversed_snapshot.snapshot_id
 
 
+async def test_hana_deduplicates_single_row_cursor_drift_across_pages() -> None:
+    drift_pages = [
+        hana_payload([hana_record()], cursor="next", count="3"),
+        hana_payload([hana_record(), hana_record("2"), hana_record("3")], count="0"),
+    ]
+    snapshot = await hana_discover(drift_pages)
+    assert len(snapshot.records) == 3
+
+
 async def test_hana_rejects_conflicting_latest_documents() -> None:
     with pytest.raises(IssuerMarkupChanged, match="conflicting latest"):
         await hana_discover([hana_payload([hana_record(), hana_record(APN_FILE_NM="other.pdf")], count="2")])
@@ -347,7 +356,7 @@ async def test_hana_rejects_conflicting_latest_documents() -> None:
                 hana_payload([hana_record()], cursor="next", count="3"),
                 hana_payload([hana_record()], cursor="different", count="0"),
             ],
-            "identical raw record",
+            "replayed an entire page",
         ),
         (
             [
@@ -425,17 +434,25 @@ async def test_hana_accepts_distinct_publications_of_same_stable_source_across_p
 
 
 @pytest.mark.parametrize(
-    "pages",
+    ("pages", "message"),
     [
-        [hana_payload([hana_record(), hana_record(), hana_record("2")], count="3")],
-        [
-            hana_payload([hana_record(), hana_record("2")], cursor="next", count="4"),
-            hana_payload([hana_record("2"), hana_record("3")], count="0"),
-        ],
+        (
+            [hana_payload([hana_record(), hana_record(), hana_record("2")], count="3")],
+            "identical raw record",
+        ),
+        (
+            [
+                hana_payload([hana_record(), hana_record("2")], cursor="next", count="4"),
+                hana_payload([hana_record("2"), hana_record("3")], count="0"),
+            ],
+            "ended before",
+        ),
     ],
 )
-async def test_hana_rejects_partial_raw_row_replay(pages: list[dict[str, Any]]) -> None:
-    with pytest.raises(IssuerMarkupChanged, match="identical raw record"):
+async def test_hana_rejects_partial_raw_row_replay(
+    pages: list[dict[str, Any]], message: str
+) -> None:
+    with pytest.raises(IssuerMarkupChanged, match=message):
         await hana_discover(pages)
 
 

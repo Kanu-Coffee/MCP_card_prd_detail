@@ -1,0 +1,7 @@
+run-3r11 exit code: 1 at 2026-10-02T07:19:35+09:00
+2026-10-02 07:17:24,422 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12942: no published PDF attachment
+2026-10-02 07:19:35,577 ERROR cardrag_worker.pipeline Worker pipeline failed unexpectedly during run c622d3c4b1fb4df5a74a4b139591028f: Hana pagination repeated an identical raw record
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "run_id": "c622d3c4b1fb4df5a74a4b139591028f",
+  "status": "failed"
