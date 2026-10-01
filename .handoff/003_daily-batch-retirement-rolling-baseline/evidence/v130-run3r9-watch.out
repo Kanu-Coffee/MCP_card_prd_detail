@@ -1,0 +1,41 @@
+run-3r9 exit code: 1 at 2026-10-01T22:26:20+09:00
+2026-10-01 20:54:52,626 INFO cardrag_worker.pipeline OCR progress completed=3700 total=5319 succeeded=3700 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:54:57,360 INFO cardrag_worker.pipeline OCR progress completed=3725 total=5319 succeeded=3725 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:55:02,592 INFO cardrag_worker.pipeline OCR progress completed=3750 total=5319 succeeded=3750 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:55:08,175 INFO cardrag_worker.pipeline OCR progress completed=3775 total=5319 succeeded=3775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:09,512 INFO cardrag_worker.pipeline OCR progress completed=3800 total=5319 succeeded=3800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:14,703 INFO cardrag_worker.pipeline OCR progress completed=3825 total=5319 succeeded=3825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:19,983 INFO cardrag_worker.pipeline OCR progress completed=3850 total=5319 succeeded=3850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:25,742 INFO cardrag_worker.pipeline OCR progress completed=3875 total=5319 succeeded=3875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:30,466 INFO cardrag_worker.pipeline OCR progress completed=3900 total=5319 succeeded=3900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:37,835 INFO cardrag_worker.pipeline OCR progress completed=3925 total=5319 succeeded=3925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 20:58:41,588 INFO cardrag_worker.pipeline OCR progress completed=3950 total=5319 succeeded=3950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:00:04,323 INFO cardrag_worker.pipeline OCR progress completed=3975 total=5319 succeeded=3975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:02:32,466 INFO cardrag_worker.pipeline OCR progress completed=4000 total=5319 succeeded=4000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:02:37,703 INFO cardrag_worker.pipeline OCR progress completed=4025 total=5319 succeeded=4025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:04:06,471 INFO cardrag_worker.pipeline OCR progress completed=4050 total=5319 succeeded=4050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:04:12,892 INFO cardrag_worker.pipeline OCR progress completed=4075 total=5319 succeeded=4075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:19:48,751 INFO cardrag_worker.pipeline OCR progress completed=4100 total=5319 succeeded=4100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:26:16,389 INFO cardrag_worker.pipeline OCR progress completed=4125 total=5319 succeeded=4125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:26:21,318 INFO cardrag_worker.pipeline OCR progress completed=4150 total=5319 succeeded=4150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:26:25,681 INFO cardrag_worker.pipeline OCR progress completed=4175 total=5319 succeeded=4175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:35:02,404 INFO cardrag_worker.pipeline OCR progress completed=4200 total=5319 succeeded=4200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:47:33,481 INFO cardrag_worker.pipeline OCR progress completed=4225 total=5319 succeeded=4225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:47:39,231 INFO cardrag_worker.pipeline OCR progress completed=4250 total=5319 succeeded=4250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:47:43,504 INFO cardrag_worker.pipeline OCR progress completed=4275 total=5319 succeeded=4275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:47:48,399 INFO cardrag_worker.pipeline OCR progress completed=4300 total=5319 succeeded=4300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 21:47:53,919 INFO cardrag_worker.pipeline OCR progress completed=4325 total=5319 succeeded=4325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:15,689 INFO cardrag_worker.pipeline OCR progress completed=4350 total=5319 succeeded=4350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:21,279 INFO cardrag_worker.pipeline OCR progress completed=4375 total=5319 succeeded=4375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:26,780 INFO cardrag_worker.pipeline OCR progress completed=4400 total=5319 succeeded=4400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:32,361 INFO cardrag_worker.pipeline OCR progress completed=4425 total=5319 succeeded=4425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:40,653 INFO cardrag_worker.pipeline OCR progress completed=4450 total=5319 succeeded=4450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:45,851 INFO cardrag_worker.pipeline OCR progress completed=4475 total=5319 succeeded=4475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:51,448 INFO cardrag_worker.pipeline OCR progress completed=4500 total=5319 succeeded=4500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:25:56,005 INFO cardrag_worker.pipeline OCR progress completed=4525 total=5319 succeeded=4525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:26:00,839 INFO cardrag_worker.pipeline OCR progress completed=4550 total=5319 succeeded=4550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:26:05,229 INFO cardrag_worker.pipeline OCR progress completed=4575 total=5319 succeeded=4575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-01 22:26:09,894 INFO cardrag_worker.pipeline OCR progress completed=4600 total=5319 succeeded=4600 failed=0 structure_failed=0 cache_publication_deferred=0
+  "reason_code": "ocr_cache_healing_identity_mismatch",
+  "run_id": "c622d3c4b1fb4df5a74a4b139591028f",
+  "status": "failed"

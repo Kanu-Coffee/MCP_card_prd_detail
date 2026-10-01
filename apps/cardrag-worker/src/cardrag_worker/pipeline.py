@@ -3784,6 +3784,18 @@ class WorkerPipeline:
                             (c_document.pdf.sha256, c_document.pdf.size_bytes, c_document.page_count),
                             c_document,
                         )
+                def _retained_identity_conflict(candidate_doc_id: str, partner_seal_sha: str) -> bool:
+                    """True when the document's own retained bytes disagree with a
+                    candidate bind source and its own identity is already retained."""
+                    own = run_dir / "documents" / candidate_doc_id / "ocr" / "ocr.md"
+                    if own.is_file():
+                        return True
+                    if seed_ledger is not None:
+                        entry = seed_ledger.entries_by_doc_id.get(candidate_doc_id)
+                        if entry is not None and entry.ocr_sha256 != partner_seal_sha:
+                            return True
+                    return False
+
                 matched_in_this_run = 0
                 for doc_id in list(unbound_doc_ids):
                     c_doc = c_docs_by_id.get(doc_id)
@@ -3800,6 +3812,8 @@ class WorkerPipeline:
                         or c_doc.pdf.size_bytes != pdf.size_bytes
                         or c_doc.page_count != pdf.page_count
                     ):
+                        continue
+                    if _retained_identity_conflict(doc_id, c_doc.ocr.sha256 if c_doc.ocr is not None else ""):
                         continue
 
                     prior_ocr_path = runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
@@ -3845,19 +3859,18 @@ class WorkerPipeline:
                 # under the same issuer; the resolver re-verifies the sealed
                 # native manifest, reuse key, and byte digests before use.
                 for doc_id in list(unbound_doc_ids):
-                    # A document whose own run directory already seals bytes is
-                    # self-retained: seeding it from the seed ledger or its own
-                    # native artifacts is authoritative. Binding it to a
-                    # same-content partner under a *different* document identity
-                    # would pit two retained seals against each other and trip
-                    # the per-document healing identity guard downstream.
-                    if (run_dir / "documents" / doc_id / "ocr" / "ocr.md").is_file():
-                        continue
+                    # A document whose own bytes are retained (run directory or
+                    # state seed) is authoritative for its identity. Binding it
+                    # to a same-content partner under a *different* document
+                    # identity would pit two retained seals against each other
+                    # and trip the per-document healing identity guard.
                     acquired_item = acquired_by_doc_id[doc_id]
                     pdf = acquired_item.pdf
                     source = acquired_item.source
                     c_doc = c_docs_by_sha.get((pdf.sha256, pdf.size_bytes, pdf.page_count))
                     if c_doc is None or c_doc.issuer != source.issuer:
+                        continue
+                    if _retained_identity_conflict(doc_id, c_doc.ocr.sha256):
                         continue
                     prior_doc_id = c_doc.document_id
                     if prior_doc_id == doc_id:
