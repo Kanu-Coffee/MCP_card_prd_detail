@@ -1,0 +1,41 @@
+run-3r12 exit code: 0 at 2026-10-02T10:37:33+09:00
+2026-10-02 08:44:10,487 INFO cardrag_worker.pipeline OCR progress completed=5350 total=5499 succeeded=5350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:44:16,514 INFO cardrag_worker.pipeline OCR progress completed=5375 total=5499 succeeded=5375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:44:26,146 INFO cardrag_worker.pipeline OCR progress completed=5400 total=5499 succeeded=5400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:44:31,533 INFO cardrag_worker.pipeline OCR progress completed=5425 total=5499 succeeded=5425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:44:36,644 INFO cardrag_worker.pipeline OCR progress completed=5450 total=5499 succeeded=5450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:44:41,556 INFO cardrag_worker.pipeline OCR progress completed=5475 total=5499 succeeded=5475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:44:44,845 INFO cardrag_worker.pipeline OCR progress completed=5499 total=5499 succeeded=5499 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 08:52:35,368 INFO cardrag_worker.pipeline V5 capacity preflight passed derived_views=614909 unique_cache_misses=44 wal_baseline_bytes=4128272 sidecar_bytes=10074669056 database_bytes=15282880512 logical_growth_bytes=25372950032 peak_growth_bytes=71221591568 state_usage_bytes=65810839086 filesystem_free_bytes=74655027200
+2026-10-02 08:52:35,369 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4128272 wal_size_bytes=4128272 wal_limit_bytes=13958672
+2026-10-02 08:52:38,809 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4128272 wal_size_bytes=4128272 wal_limit_bytes=13958672
+2026-10-02 09:32:32,780 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+2026-10-02 09:35:34,724 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+2026-10-02 10:24:01,799 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+2026-10-02 10:24:05,827 WARNING cardrag_worker.webdav reason_code=channel_pointer_dangling channel=candidate-v1.0.11 generation_id=g-0928dee8e6f04af9ae41fdb7-f916d1c475e0; treating the reclaimed generation as an absent current for the next publication
+  "gc_status": "succeeded",
+  "generation_id": "g-c622d3c4b1fb4df5a74a4b13-e95cb9ce7d7f",
+  "pdf_cache_prune_status": "succeeded",
+  "retired_count": 1,
+  "run_id": "c622d3c4b1fb4df5a74a4b139591028f",
+  "status": "succeeded",
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+        "reason_codes": [
+    "structure_failed_document_count": 0,
+    "structure_failed_documents_sha256": "bb9b5943f7e96dc4261b871650fcd42848a54510720ad393d7125436ccb5dd6a",
+        "reason_code": "parser_failed",
+        "reason_code": "parser_failed",
