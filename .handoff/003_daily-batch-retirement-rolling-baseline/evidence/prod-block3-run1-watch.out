@@ -1,0 +1,830 @@
+prod-block3-run1 exit code: 1 at 2026-10-03T03:02:07+09:00
+2026-10-02 15:05:20,657 INFO cardrag_worker.cli Worker startup capacity preflight passed filesystem_free_bytes=121369157632 minimum_free_bytes=2147483648
+2026-10-02 15:05:23,157 INFO cardrag_worker.cli OCR discovered 6 compatible contracts: gpt-5.6-sol, gpt-5.4, gpt-5.6-terra, anthropic/claude-sonnet-5, PaddleOCR-VL-1.6, PaddleOCR-VL-1.6
+2026-10-02 15:05:23,157 INFO cardrag_worker.cli Remote OCR cache access mode=read-write require_hit=False
+2026-10-02 15:05:24,763 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=1/12 retry_seconds=1.000
+2026-10-02 15:05:26,063 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=2/12 retry_seconds=2.000
+2026-10-02 15:05:28,321 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=3/12 retry_seconds=4.000
+2026-10-02 15:05:32,603 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=4/12 retry_seconds=8.000
+2026-10-02 15:05:40,871 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=5/12 retry_seconds=16.000
+2026-10-02 15:06:14,075 INFO cardrag_worker.cli Qwen provider preflight passed provider=deepinfra samples=24 minimum_repeat_cosine=1.000000 minimum_cross_provider_cosine=0.999864 tokenizer_sha256=83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d
+2026-10-02 15:06:14,075 INFO cardrag_worker.cli Worker startup completed elapsed_seconds=54.371
+2026-10-02 15:10:10,457 INFO cardrag_worker.pipeline discovery completed issuer=woori records=915 warnings=0
+2026-10-02 15:10:30,498 INFO cardrag_worker.pipeline discovery completed issuer=kb records=751 warnings=0
+2026-10-02 15:10:52,931 INFO cardrag_worker.pipeline discovery completed issuer=shinhan records=883 warnings=0
+2026-10-02 15:11:07,252 INFO cardrag_worker.pipeline discovery completed issuer=samsung records=565 warnings=0
+2026-10-02 15:13:36,636 INFO cardrag_worker.pipeline discovery completed issuer=hyundai records=577 warnings=4
+2026-10-02 15:13:36,649 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 13843: source effective date unavailable (99999999)
+2026-10-02 15:13:36,649 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12662: source effective date unavailable (99999999)
+2026-10-02 15:13:36,649 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12518: source effective date unavailable (99999999)
+2026-10-02 15:13:36,649 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12942: no published PDF attachment
+2026-10-02 15:14:11,245 INFO cardrag_worker.pipeline discovery completed issuer=hana records=724 warnings=0
+2026-10-02 15:14:13,348 INFO cardrag_worker.pipeline discovery completed issuer=lotte records=529 warnings=2
+2026-10-02 15:14:13,359 WARNING cardrag_worker.pipeline discovery warning issuer=lotte: source_unavailable issuer=lotte product_code=1678 source_id=source_29e7ea5b8261cb950be7fbc614afbbb5089d3c9ad32d12a4b1119ac6c17c1d49 status=404 source_version=20210930 source_url=https://image.lottecard.co.kr/UploadFiles/cardProvisionPath/%EC%BA%90%EC%8B%9C%EB%85%B8%ED%8A%B8%20%EC%83%81%ED%92%88%EC%95%88%EB%82%B4%EC%9E%A5%20_230310OL.pdf
+2026-10-02 15:14:13,359 WARNING cardrag_worker.pipeline discovery warning issuer=lotte: source_unavailable issuer=lotte product_code=1603 source_id=source_3942b85e984b704350f7f60e93cf89cd820439a68bacdf5c7f2c9890065c9195 status=404 source_version=20190730 source_url=https://image.lottecard.co.kr/UploadFiles/cardProvisionPath/%EC%9D%B4%EC%97%A0%EC%9D%B4%EC%BD%94%EB%A6%AC%EC%95%84%20Wonderful_%EA%B0%80%EC%9D%B4%EB%93%9C%EB%B6%81_220120OL.pdf
+2026-10-02 15:14:13,611 INFO cardrag_worker.pipeline discovery completed issuer=bc records=122 warnings=1
+2026-10-02 15:14:13,617 WARNING cardrag_worker.pipeline discovery warning issuer=bc: BC disclosure parsed 113 product rows; selected 122 guides; excluded 1 application forms and 1 corporate guides
+2026-10-02 15:14:14,461 INFO cardrag_worker.pipeline PDF progress completed=25 total=5066 cache_hits=25 cache_misses=0 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:15,078 INFO cardrag_worker.pipeline PDF progress completed=50 total=5066 cache_hits=50 cache_misses=0 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:15,667 INFO cardrag_worker.pipeline PDF progress completed=75 total=5066 cache_hits=75 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:16,512 INFO cardrag_worker.pipeline PDF progress completed=100 total=5066 cache_hits=100 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:17,165 INFO cardrag_worker.pipeline PDF progress completed=125 total=5066 cache_hits=125 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:17,793 INFO cardrag_worker.pipeline PDF progress completed=150 total=5066 cache_hits=150 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:18,377 INFO cardrag_worker.pipeline PDF progress completed=175 total=5066 cache_hits=175 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:19,155 INFO cardrag_worker.pipeline PDF progress completed=200 total=5066 cache_hits=200 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:19,756 INFO cardrag_worker.pipeline PDF progress completed=225 total=5066 cache_hits=225 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:20,439 INFO cardrag_worker.pipeline PDF progress completed=250 total=5066 cache_hits=250 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:21,032 INFO cardrag_worker.pipeline PDF progress completed=275 total=5066 cache_hits=275 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:21,780 INFO cardrag_worker.pipeline PDF progress completed=300 total=5066 cache_hits=300 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:22,388 INFO cardrag_worker.pipeline PDF progress completed=325 total=5066 cache_hits=325 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:23,007 INFO cardrag_worker.pipeline PDF progress completed=350 total=5066 cache_hits=350 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:24,136 INFO cardrag_worker.pipeline PDF progress completed=375 total=5066 cache_hits=375 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:24,700 INFO cardrag_worker.pipeline PDF progress completed=400 total=5066 cache_hits=400 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:25,280 INFO cardrag_worker.pipeline PDF progress completed=425 total=5066 cache_hits=425 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:26,070 INFO cardrag_worker.pipeline PDF progress completed=450 total=5066 cache_hits=450 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:26,740 INFO cardrag_worker.pipeline PDF progress completed=475 total=5066 cache_hits=475 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:27,298 INFO cardrag_worker.pipeline PDF progress completed=500 total=5066 cache_hits=500 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:27,967 INFO cardrag_worker.pipeline PDF progress completed=525 total=5066 cache_hits=525 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:28,731 INFO cardrag_worker.pipeline PDF progress completed=550 total=5066 cache_hits=550 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:29,374 INFO cardrag_worker.pipeline PDF progress completed=575 total=5066 cache_hits=575 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:30,166 INFO cardrag_worker.pipeline PDF progress completed=600 total=5066 cache_hits=600 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:31,205 INFO cardrag_worker.pipeline PDF progress completed=625 total=5066 cache_hits=625 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:31,998 INFO cardrag_worker.pipeline PDF progress completed=650 total=5066 cache_hits=650 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:32,611 INFO cardrag_worker.pipeline PDF progress completed=675 total=5066 cache_hits=675 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:33,221 INFO cardrag_worker.pipeline PDF progress completed=700 total=5066 cache_hits=700 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:34,221 INFO cardrag_worker.pipeline PDF progress completed=725 total=5066 cache_hits=725 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:34,889 INFO cardrag_worker.pipeline PDF progress completed=750 total=5066 cache_hits=750 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:35,636 INFO cardrag_worker.pipeline PDF progress completed=775 total=5066 cache_hits=775 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:36,390 INFO cardrag_worker.pipeline PDF progress completed=800 total=5066 cache_hits=800 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:37,210 INFO cardrag_worker.pipeline PDF progress completed=825 total=5066 cache_hits=825 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:37,916 INFO cardrag_worker.pipeline PDF progress completed=850 total=5066 cache_hits=850 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:38,514 INFO cardrag_worker.pipeline PDF progress completed=875 total=5066 cache_hits=875 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:39,227 INFO cardrag_worker.pipeline PDF progress completed=900 total=5066 cache_hits=900 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:39,830 INFO cardrag_worker.pipeline PDF progress completed=925 total=5066 cache_hits=925 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:40,463 INFO cardrag_worker.pipeline PDF progress completed=950 total=5066 cache_hits=950 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:41,077 INFO cardrag_worker.pipeline PDF progress completed=975 total=5066 cache_hits=975 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:41,684 INFO cardrag_worker.pipeline PDF progress completed=1000 total=5066 cache_hits=1000 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:42,360 INFO cardrag_worker.pipeline PDF progress completed=1025 total=5066 cache_hits=1025 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:42,957 INFO cardrag_worker.pipeline PDF progress completed=1050 total=5066 cache_hits=1050 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:43,624 INFO cardrag_worker.pipeline PDF progress completed=1075 total=5066 cache_hits=1075 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:44,208 INFO cardrag_worker.pipeline PDF progress completed=1100 total=5066 cache_hits=1100 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:44,954 INFO cardrag_worker.pipeline PDF progress completed=1125 total=5066 cache_hits=1125 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:45,580 INFO cardrag_worker.pipeline PDF progress completed=1150 total=5066 cache_hits=1150 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:46,201 INFO cardrag_worker.pipeline PDF progress completed=1175 total=5066 cache_hits=1175 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:46,740 INFO cardrag_worker.pipeline PDF progress completed=1200 total=5066 cache_hits=1200 cache_misses=6 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:47,376 INFO cardrag_worker.pipeline PDF progress completed=1225 total=5066 cache_hits=1225 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:47,942 INFO cardrag_worker.pipeline PDF progress completed=1250 total=5066 cache_hits=1250 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:48,550 INFO cardrag_worker.pipeline PDF progress completed=1275 total=5066 cache_hits=1275 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:49,145 INFO cardrag_worker.pipeline PDF progress completed=1300 total=5066 cache_hits=1300 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:49,650 INFO cardrag_worker.pipeline PDF progress completed=1325 total=5066 cache_hits=1325 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:50,605 INFO cardrag_worker.pipeline PDF progress completed=1350 total=5066 cache_hits=1350 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:51,073 INFO cardrag_worker.pipeline PDF progress completed=1375 total=5066 cache_hits=1375 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:51,599 INFO cardrag_worker.pipeline PDF progress completed=1400 total=5066 cache_hits=1400 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:52,085 INFO cardrag_worker.pipeline PDF progress completed=1425 total=5066 cache_hits=1425 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:52,637 INFO cardrag_worker.pipeline PDF progress completed=1450 total=5066 cache_hits=1450 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:53,421 INFO cardrag_worker.pipeline PDF progress completed=1475 total=5066 cache_hits=1474 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:54,035 INFO cardrag_worker.pipeline PDF progress completed=1500 total=5066 cache_hits=1499 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:54,575 INFO cardrag_worker.pipeline PDF progress completed=1525 total=5066 cache_hits=1524 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:55,306 INFO cardrag_worker.pipeline PDF progress completed=1550 total=5066 cache_hits=1548 cache_misses=9 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:55,940 INFO cardrag_worker.pipeline PDF progress completed=1575 total=5066 cache_hits=1573 cache_misses=9 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:56,779 INFO cardrag_worker.pipeline PDF progress completed=1600 total=5066 cache_hits=1598 cache_misses=9 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:57,433 INFO cardrag_worker.pipeline PDF progress completed=1625 total=5066 cache_hits=1623 cache_misses=9 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:57,860 INFO cardrag_worker.pipeline PDF progress completed=1650 total=5066 cache_hits=1648 cache_misses=9 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:58,265 INFO cardrag_worker.pipeline PDF progress completed=1675 total=5066 cache_hits=1673 cache_misses=9 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-02 15:14:58,786 INFO cardrag_worker.pipeline PDF progress completed=1700 total=5066 cache_hits=1697 cache_misses=10 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:14:59,469 INFO cardrag_worker.pipeline PDF progress completed=1725 total=5066 cache_hits=1722 cache_misses=10 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:00,322 INFO cardrag_worker.pipeline PDF progress completed=1750 total=5066 cache_hits=1746 cache_misses=11 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:01,431 INFO cardrag_worker.pipeline PDF progress completed=1775 total=5066 cache_hits=1770 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:02,072 INFO cardrag_worker.pipeline PDF progress completed=1800 total=5066 cache_hits=1795 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:02,621 INFO cardrag_worker.pipeline PDF progress completed=1825 total=5066 cache_hits=1820 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:03,273 INFO cardrag_worker.pipeline PDF progress completed=1850 total=5066 cache_hits=1845 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:03,937 INFO cardrag_worker.pipeline PDF progress completed=1875 total=5066 cache_hits=1870 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:04,566 INFO cardrag_worker.pipeline PDF progress completed=1900 total=5066 cache_hits=1895 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:05,274 INFO cardrag_worker.pipeline PDF progress completed=1925 total=5066 cache_hits=1920 cache_misses=12 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:06,238 INFO cardrag_worker.pipeline PDF progress completed=1950 total=5066 cache_hits=1943 cache_misses=14 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-02 15:15:06,888 INFO cardrag_worker.pipeline PDF progress completed=1975 total=5066 cache_hits=1967 cache_misses=15 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-02 15:15:07,559 INFO cardrag_worker.pipeline PDF progress completed=2000 total=5066 cache_hits=1992 cache_misses=15 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-02 15:15:08,647 INFO cardrag_worker.pipeline PDF progress completed=2025 total=5066 cache_hits=2016 cache_misses=16 downloads=7 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-02 15:15:09,465 INFO cardrag_worker.pipeline PDF progress completed=2050 total=5066 cache_hits=2041 cache_misses=16 downloads=7 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-02 15:15:10,164 INFO cardrag_worker.pipeline PDF progress completed=2075 total=5066 cache_hits=2063 cache_misses=19 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:10,669 INFO cardrag_worker.pipeline PDF progress completed=2100 total=5066 cache_hits=2088 cache_misses=19 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:11,183 INFO cardrag_worker.pipeline PDF progress completed=2125 total=5066 cache_hits=2113 cache_misses=19 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:11,911 INFO cardrag_worker.pipeline PDF progress completed=2150 total=5066 cache_hits=2138 cache_misses=19 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:12,439 INFO cardrag_worker.pipeline PDF progress completed=2175 total=5066 cache_hits=2163 cache_misses=19 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:13,118 INFO cardrag_worker.pipeline PDF progress completed=2200 total=5066 cache_hits=2188 cache_misses=19 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:14,288 INFO cardrag_worker.pipeline PDF progress completed=2225 total=5066 cache_hits=2210 cache_misses=22 downloads=12 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:14,953 INFO cardrag_worker.pipeline PDF progress completed=2250 total=5066 cache_hits=2235 cache_misses=22 downloads=12 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:15,451 INFO cardrag_worker.pipeline PDF progress completed=2275 total=5066 cache_hits=2260 cache_misses=22 downloads=12 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:16,111 INFO cardrag_worker.pipeline PDF progress completed=2300 total=5066 cache_hits=2283 cache_misses=24 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:16,660 INFO cardrag_worker.pipeline PDF progress completed=2325 total=5066 cache_hits=2308 cache_misses=24 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:17,230 INFO cardrag_worker.pipeline PDF progress completed=2350 total=5066 cache_hits=2333 cache_misses=24 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:17,814 INFO cardrag_worker.pipeline PDF progress completed=2375 total=5066 cache_hits=2358 cache_misses=24 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:18,550 INFO cardrag_worker.pipeline PDF progress completed=2400 total=5066 cache_hits=2382 cache_misses=25 downloads=15 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:19,361 INFO cardrag_worker.pipeline PDF progress completed=2425 total=5066 cache_hits=2406 cache_misses=26 downloads=16 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:19,889 INFO cardrag_worker.pipeline PDF progress completed=2450 total=5066 cache_hits=2431 cache_misses=26 downloads=16 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:20,589 INFO cardrag_worker.pipeline PDF progress completed=2475 total=5066 cache_hits=2455 cache_misses=27 downloads=17 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-02 15:15:21,548 INFO cardrag_worker.pipeline PDF progress completed=2500 total=5066 cache_hits=2478 cache_misses=29 downloads=18 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-02 15:15:22,164 INFO cardrag_worker.pipeline PDF progress completed=2525 total=5066 cache_hits=2503 cache_misses=29 downloads=18 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-02 15:15:22,674 INFO cardrag_worker.pipeline PDF progress completed=2550 total=5066 cache_hits=2528 cache_misses=29 downloads=18 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-02 15:15:23,513 INFO cardrag_worker.pipeline PDF progress completed=2575 total=5066 cache_hits=2550 cache_misses=32 downloads=21 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-02 15:15:24,091 INFO cardrag_worker.pipeline PDF progress completed=2600 total=5066 cache_hits=2575 cache_misses=32 downloads=21 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-02 15:15:24,611 INFO cardrag_worker.pipeline PDF progress completed=2625 total=5066 cache_hits=2600 cache_misses=32 downloads=21 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-02 15:15:25,184 INFO cardrag_worker.pipeline PDF progress completed=2650 total=5066 cache_hits=2623 cache_misses=34 downloads=22 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:25,739 INFO cardrag_worker.pipeline PDF progress completed=2675 total=5066 cache_hits=2648 cache_misses=34 downloads=22 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:26,289 INFO cardrag_worker.pipeline PDF progress completed=2700 total=5066 cache_hits=2673 cache_misses=34 downloads=22 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:26,824 INFO cardrag_worker.pipeline PDF progress completed=2725 total=5066 cache_hits=2698 cache_misses=34 downloads=22 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:27,421 INFO cardrag_worker.pipeline PDF progress completed=2750 total=5066 cache_hits=2723 cache_misses=34 downloads=22 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:28,596 INFO cardrag_worker.pipeline PDF progress completed=2775 total=5066 cache_hits=2745 cache_misses=37 downloads=25 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:29,298 INFO cardrag_worker.pipeline PDF progress completed=2800 total=5066 cache_hits=2770 cache_misses=37 downloads=25 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:29,915 INFO cardrag_worker.pipeline PDF progress completed=2825 total=5066 cache_hits=2795 cache_misses=37 downloads=25 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:30,871 INFO cardrag_worker.pipeline PDF progress completed=2850 total=5066 cache_hits=2820 cache_misses=37 downloads=25 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:31,799 INFO cardrag_worker.pipeline PDF progress completed=2875 total=5066 cache_hits=2844 cache_misses=38 downloads=26 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:32,647 INFO cardrag_worker.pipeline PDF progress completed=2900 total=5066 cache_hits=2865 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:33,286 INFO cardrag_worker.pipeline PDF progress completed=2925 total=5066 cache_hits=2890 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:33,951 INFO cardrag_worker.pipeline PDF progress completed=2950 total=5066 cache_hits=2915 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:34,510 INFO cardrag_worker.pipeline PDF progress completed=2975 total=5066 cache_hits=2940 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:35,654 INFO cardrag_worker.pipeline PDF progress completed=3000 total=5066 cache_hits=2965 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:37,073 INFO cardrag_worker.pipeline PDF progress completed=3025 total=5066 cache_hits=2990 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:37,620 INFO cardrag_worker.pipeline PDF progress completed=3050 total=5066 cache_hits=3015 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:38,145 INFO cardrag_worker.pipeline PDF progress completed=3075 total=5066 cache_hits=3040 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:38,967 INFO cardrag_worker.pipeline PDF progress completed=3100 total=5066 cache_hits=3065 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:39,538 INFO cardrag_worker.pipeline PDF progress completed=3125 total=5066 cache_hits=3090 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:40,497 INFO cardrag_worker.pipeline PDF progress completed=3150 total=5066 cache_hits=3115 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:41,128 INFO cardrag_worker.pipeline PDF progress completed=3175 total=5066 cache_hits=3140 cache_misses=42 downloads=30 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:42,008 INFO cardrag_worker.pipeline PDF progress completed=3200 total=5066 cache_hits=3162 cache_misses=45 downloads=33 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-02 15:15:43,011 INFO cardrag_worker.pipeline PDF progress completed=3225 total=5066 cache_hits=3184 cache_misses=48 downloads=35 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:43,955 INFO cardrag_worker.pipeline PDF progress completed=3250 total=5066 cache_hits=3209 cache_misses=48 downloads=35 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:44,718 INFO cardrag_worker.pipeline PDF progress completed=3275 total=5066 cache_hits=3234 cache_misses=48 downloads=35 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:45,417 INFO cardrag_worker.pipeline PDF progress completed=3300 total=5066 cache_hits=3259 cache_misses=48 downloads=35 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:46,116 INFO cardrag_worker.pipeline PDF progress completed=3325 total=5066 cache_hits=3283 cache_misses=49 downloads=36 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:46,676 INFO cardrag_worker.pipeline PDF progress completed=3350 total=5066 cache_hits=3307 cache_misses=50 downloads=37 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:47,304 INFO cardrag_worker.pipeline PDF progress completed=3375 total=5066 cache_hits=3330 cache_misses=52 downloads=39 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:48,379 INFO cardrag_worker.pipeline PDF progress completed=3400 total=5066 cache_hits=3354 cache_misses=53 downloads=40 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:49,000 INFO cardrag_worker.pipeline PDF progress completed=3425 total=5066 cache_hits=3378 cache_misses=54 downloads=41 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:49,865 INFO cardrag_worker.pipeline PDF progress completed=3450 total=5066 cache_hits=3403 cache_misses=54 downloads=41 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:50,525 INFO cardrag_worker.pipeline PDF progress completed=3475 total=5066 cache_hits=3428 cache_misses=54 downloads=41 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:51,072 INFO cardrag_worker.pipeline PDF progress completed=3500 total=5066 cache_hits=3453 cache_misses=54 downloads=41 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:51,602 INFO cardrag_worker.pipeline PDF progress completed=3525 total=5066 cache_hits=3478 cache_misses=54 downloads=41 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:52,074 INFO cardrag_worker.pipeline PDF progress completed=3550 total=5066 cache_hits=3503 cache_misses=54 downloads=41 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:52,632 INFO cardrag_worker.pipeline PDF progress completed=3575 total=5066 cache_hits=3526 cache_misses=56 downloads=43 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:53,274 INFO cardrag_worker.pipeline PDF progress completed=3600 total=5066 cache_hits=3551 cache_misses=56 downloads=43 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:53,687 INFO cardrag_worker.pipeline PDF progress completed=3625 total=5066 cache_hits=3576 cache_misses=56 downloads=43 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:54,208 INFO cardrag_worker.pipeline PDF progress completed=3650 total=5066 cache_hits=3601 cache_misses=56 downloads=43 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:54,682 INFO cardrag_worker.pipeline PDF progress completed=3675 total=5066 cache_hits=3626 cache_misses=56 downloads=43 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:55,236 INFO cardrag_worker.pipeline PDF progress completed=3700 total=5066 cache_hits=3651 cache_misses=56 downloads=43 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:56,010 INFO cardrag_worker.pipeline PDF progress completed=3725 total=5066 cache_hits=3675 cache_misses=57 downloads=44 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:56,893 INFO cardrag_worker.pipeline PDF progress completed=3750 total=5066 cache_hits=3700 cache_misses=57 downloads=44 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:57,559 INFO cardrag_worker.pipeline PDF progress completed=3775 total=5066 cache_hits=3725 cache_misses=57 downloads=44 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:58,256 INFO cardrag_worker.pipeline PDF progress completed=3800 total=5066 cache_hits=3750 cache_misses=57 downloads=44 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:15:59,217 INFO cardrag_worker.pipeline PDF progress completed=3825 total=5066 cache_hits=3775 cache_misses=57 downloads=44 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:00,087 INFO cardrag_worker.pipeline PDF progress completed=3850 total=5066 cache_hits=3797 cache_misses=60 downloads=47 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:00,896 INFO cardrag_worker.pipeline PDF progress completed=3875 total=5066 cache_hits=3822 cache_misses=60 downloads=47 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:01,680 INFO cardrag_worker.pipeline PDF progress completed=3900 total=5066 cache_hits=3847 cache_misses=60 downloads=47 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:02,315 INFO cardrag_worker.pipeline PDF progress completed=3925 total=5066 cache_hits=3872 cache_misses=60 downloads=47 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:03,029 INFO cardrag_worker.pipeline PDF progress completed=3950 total=5066 cache_hits=3895 cache_misses=62 downloads=49 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:03,731 INFO cardrag_worker.pipeline PDF progress completed=3975 total=5066 cache_hits=3919 cache_misses=63 downloads=50 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:04,303 INFO cardrag_worker.pipeline PDF progress completed=4000 total=5066 cache_hits=3944 cache_misses=63 downloads=50 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:04,911 INFO cardrag_worker.pipeline PDF progress completed=4025 total=5066 cache_hits=3969 cache_misses=63 downloads=50 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:05,812 INFO cardrag_worker.pipeline PDF progress completed=4050 total=5066 cache_hits=3992 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:06,587 INFO cardrag_worker.pipeline PDF progress completed=4075 total=5066 cache_hits=4017 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:07,359 INFO cardrag_worker.pipeline PDF progress completed=4100 total=5066 cache_hits=4042 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:08,247 INFO cardrag_worker.pipeline PDF progress completed=4125 total=5066 cache_hits=4067 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:08,933 INFO cardrag_worker.pipeline PDF progress completed=4150 total=5066 cache_hits=4092 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:09,774 INFO cardrag_worker.pipeline PDF progress completed=4175 total=5066 cache_hits=4117 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:10,431 INFO cardrag_worker.pipeline PDF progress completed=4200 total=5066 cache_hits=4142 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:11,595 INFO cardrag_worker.pipeline PDF progress completed=4225 total=5066 cache_hits=4167 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:12,322 INFO cardrag_worker.pipeline PDF progress completed=4250 total=5066 cache_hits=4192 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:12,986 INFO cardrag_worker.pipeline PDF progress completed=4275 total=5066 cache_hits=4217 cache_misses=65 downloads=52 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:13,877 INFO cardrag_worker.pipeline PDF progress completed=4300 total=5066 cache_hits=4241 cache_misses=66 downloads=53 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:15,851 INFO cardrag_worker.pipeline PDF progress completed=4325 total=5066 cache_hits=4263 cache_misses=69 downloads=56 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:16,734 INFO cardrag_worker.pipeline PDF progress completed=4350 total=5066 cache_hits=4288 cache_misses=69 downloads=56 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:17,689 INFO cardrag_worker.pipeline PDF progress completed=4375 total=5066 cache_hits=4313 cache_misses=69 downloads=56 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:18,551 INFO cardrag_worker.pipeline PDF progress completed=4400 total=5066 cache_hits=4338 cache_misses=69 downloads=56 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:19,462 INFO cardrag_worker.pipeline PDF progress completed=4425 total=5066 cache_hits=4362 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:20,169 INFO cardrag_worker.pipeline PDF progress completed=4450 total=5066 cache_hits=4387 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:21,099 INFO cardrag_worker.pipeline PDF progress completed=4475 total=5066 cache_hits=4412 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:22,129 INFO cardrag_worker.pipeline PDF progress completed=4500 total=5066 cache_hits=4437 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:22,894 INFO cardrag_worker.pipeline PDF progress completed=4525 total=5066 cache_hits=4462 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:24,632 INFO cardrag_worker.pipeline PDF progress completed=4550 total=5066 cache_hits=4487 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:25,380 INFO cardrag_worker.pipeline PDF progress completed=4575 total=5066 cache_hits=4512 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:26,108 INFO cardrag_worker.pipeline PDF progress completed=4600 total=5066 cache_hits=4537 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:26,871 INFO cardrag_worker.pipeline PDF progress completed=4625 total=5066 cache_hits=4562 cache_misses=70 downloads=57 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:27,872 INFO cardrag_worker.pipeline PDF progress completed=4650 total=5066 cache_hits=4586 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:28,999 INFO cardrag_worker.pipeline PDF progress completed=4675 total=5066 cache_hits=4611 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:29,854 INFO cardrag_worker.pipeline PDF progress completed=4700 total=5066 cache_hits=4636 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:30,816 INFO cardrag_worker.pipeline PDF progress completed=4725 total=5066 cache_hits=4661 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:31,774 INFO cardrag_worker.pipeline PDF progress completed=4750 total=5066 cache_hits=4686 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:32,550 INFO cardrag_worker.pipeline PDF progress completed=4775 total=5066 cache_hits=4711 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:33,322 INFO cardrag_worker.pipeline PDF progress completed=4800 total=5066 cache_hits=4736 cache_misses=71 downloads=58 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:34,327 INFO cardrag_worker.pipeline PDF progress completed=4825 total=5066 cache_hits=4759 cache_misses=72 downloads=60 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:37,402 INFO cardrag_worker.pipeline PDF progress completed=4850 total=5066 cache_hits=4769 cache_misses=84 downloads=75 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:44,295 INFO cardrag_worker.pipeline PDF progress completed=4875 total=5066 cache_hits=4769 cache_misses=107 downloads=100 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:50,825 INFO cardrag_worker.pipeline PDF progress completed=4900 total=5066 cache_hits=4769 cache_misses=132 downloads=125 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:16:58,269 INFO cardrag_worker.pipeline PDF progress completed=4925 total=5066 cache_hits=4769 cache_misses=157 downloads=150 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:17:04,861 INFO cardrag_worker.pipeline PDF progress completed=4950 total=5066 cache_hits=4769 cache_misses=182 downloads=175 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:17:12,622 INFO cardrag_worker.pipeline PDF progress completed=4975 total=5066 cache_hits=4769 cache_misses=207 downloads=200 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:17:16,176 INFO cardrag_worker.pipeline PDF progress completed=5000 total=5066 cache_hits=4782 cache_misses=219 downloads=212 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:17:16,901 INFO cardrag_worker.pipeline PDF progress completed=5025 total=5066 cache_hits=4807 cache_misses=219 downloads=212 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:17:18,112 INFO cardrag_worker.pipeline PDF progress completed=5050 total=5066 cache_hits=4832 cache_misses=219 downloads=212 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:17:20,414 INFO cardrag_worker.pipeline PDF progress completed=5066 total=5066 cache_hits=4838 cache_misses=228 downloads=222 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-02 15:36:11,423 INFO cardrag_worker.pipeline Discovered 3874 reusable local OCR artifacts from prior run 5f74295db4b64f10837eba3e06d6c6be (remaining unbound: 1626)
+2026-10-02 15:46:22,785 INFO cardrag_worker.pipeline OCR progress completed=25 total=5500 succeeded=25 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:46:25,913 INFO cardrag_worker.pipeline OCR progress completed=50 total=5500 succeeded=50 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:46:30,080 INFO cardrag_worker.pipeline OCR progress completed=75 total=5500 succeeded=75 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:46:33,172 INFO cardrag_worker.pipeline OCR progress completed=100 total=5500 succeeded=100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:46:36,880 INFO cardrag_worker.pipeline OCR progress completed=125 total=5500 succeeded=125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:46:39,985 INFO cardrag_worker.pipeline OCR progress completed=150 total=5500 succeeded=150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:46:43,051 INFO cardrag_worker.pipeline OCR progress completed=175 total=5500 succeeded=175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 15:53:34,085 INFO cardrag_worker.pipeline OCR progress completed=200 total=5500 succeeded=200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:00:15,328 INFO cardrag_worker.pipeline OCR progress completed=225 total=5500 succeeded=225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:00:19,836 INFO cardrag_worker.pipeline OCR progress completed=250 total=5500 succeeded=250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:02:57,325 INFO cardrag_worker.pipeline OCR progress completed=275 total=5500 succeeded=275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:00,602 INFO cardrag_worker.pipeline OCR progress completed=300 total=5500 succeeded=300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:05,029 INFO cardrag_worker.pipeline OCR progress completed=325 total=5500 succeeded=325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:09,094 INFO cardrag_worker.pipeline OCR progress completed=350 total=5500 succeeded=350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:12,736 INFO cardrag_worker.pipeline OCR progress completed=375 total=5500 succeeded=375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:17,034 INFO cardrag_worker.pipeline OCR progress completed=400 total=5500 succeeded=400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:21,345 INFO cardrag_worker.pipeline OCR progress completed=425 total=5500 succeeded=425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:26,137 INFO cardrag_worker.pipeline OCR progress completed=450 total=5500 succeeded=450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:30,000 INFO cardrag_worker.pipeline OCR progress completed=475 total=5500 succeeded=475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:33,619 INFO cardrag_worker.pipeline OCR progress completed=500 total=5500 succeeded=500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:37,621 INFO cardrag_worker.pipeline OCR progress completed=525 total=5500 succeeded=525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:41,886 INFO cardrag_worker.pipeline OCR progress completed=550 total=5500 succeeded=550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:45,388 INFO cardrag_worker.pipeline OCR progress completed=575 total=5500 succeeded=575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:49,084 INFO cardrag_worker.pipeline OCR progress completed=600 total=5500 succeeded=600 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:52,487 INFO cardrag_worker.pipeline OCR progress completed=625 total=5500 succeeded=625 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:03:57,487 INFO cardrag_worker.pipeline OCR progress completed=650 total=5500 succeeded=650 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:04:01,875 INFO cardrag_worker.pipeline OCR progress completed=675 total=5500 succeeded=675 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:04:06,650 INFO cardrag_worker.pipeline OCR progress completed=700 total=5500 succeeded=700 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:04:11,055 INFO cardrag_worker.pipeline OCR progress completed=725 total=5500 succeeded=725 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:04:17,600 INFO cardrag_worker.pipeline OCR progress completed=750 total=5500 succeeded=750 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:07,803 INFO cardrag_worker.pipeline OCR progress completed=775 total=5500 succeeded=775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:11,843 INFO cardrag_worker.pipeline OCR progress completed=800 total=5500 succeeded=800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:16,590 INFO cardrag_worker.pipeline OCR progress completed=825 total=5500 succeeded=825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:20,316 INFO cardrag_worker.pipeline OCR progress completed=850 total=5500 succeeded=850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:30,694 INFO cardrag_worker.pipeline OCR progress completed=875 total=5500 succeeded=875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:42,693 INFO cardrag_worker.pipeline OCR progress completed=900 total=5500 succeeded=900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:06:53,469 INFO cardrag_worker.pipeline OCR progress completed=925 total=5500 succeeded=925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:02,324 INFO cardrag_worker.pipeline OCR progress completed=950 total=5500 succeeded=950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:12,845 INFO cardrag_worker.pipeline OCR progress completed=975 total=5500 succeeded=975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:22,496 INFO cardrag_worker.pipeline OCR progress completed=1000 total=5500 succeeded=1000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:31,475 INFO cardrag_worker.pipeline OCR progress completed=1025 total=5500 succeeded=1025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:42,761 INFO cardrag_worker.pipeline OCR progress completed=1050 total=5500 succeeded=1050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:51,009 INFO cardrag_worker.pipeline OCR progress completed=1075 total=5500 succeeded=1075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:07:59,531 INFO cardrag_worker.pipeline OCR progress completed=1100 total=5500 succeeded=1100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:24:19,559 INFO cardrag_worker.pipeline OCR progress completed=1125 total=5500 succeeded=1125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:24:26,054 INFO cardrag_worker.pipeline OCR progress completed=1150 total=5500 succeeded=1150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:24:32,003 INFO cardrag_worker.pipeline OCR progress completed=1175 total=5500 succeeded=1175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 16:24:36,086 INFO cardrag_worker.pipeline OCR progress completed=1200 total=5500 succeeded=1200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 17:27:54,476 INFO cardrag_worker.pipeline OCR progress completed=1225 total=5500 succeeded=1225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 17:30:52,720 INFO cardrag_worker.pipeline OCR progress completed=1250 total=5500 succeeded=1250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 17:55:28,548 INFO cardrag_worker.pipeline OCR progress completed=1275 total=5500 succeeded=1275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:17:54,702 INFO cardrag_worker.pipeline OCR progress completed=1300 total=5500 succeeded=1300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:03,375 INFO cardrag_worker.pipeline OCR progress completed=1325 total=5500 succeeded=1325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:14,064 INFO cardrag_worker.pipeline OCR progress completed=1350 total=5500 succeeded=1350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:21,973 INFO cardrag_worker.pipeline OCR progress completed=1375 total=5500 succeeded=1375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:29,200 INFO cardrag_worker.pipeline OCR progress completed=1400 total=5500 succeeded=1400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:35,457 INFO cardrag_worker.pipeline OCR progress completed=1425 total=5500 succeeded=1425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:41,564 INFO cardrag_worker.pipeline OCR progress completed=1450 total=5500 succeeded=1450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:44,452 INFO cardrag_worker.pipeline OCR progress completed=1475 total=5500 succeeded=1475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:47,096 INFO cardrag_worker.pipeline OCR progress completed=1500 total=5500 succeeded=1500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:49,489 INFO cardrag_worker.pipeline OCR progress completed=1525 total=5500 succeeded=1525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:53,266 INFO cardrag_worker.pipeline OCR progress completed=1550 total=5500 succeeded=1550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:18:58,918 INFO cardrag_worker.pipeline OCR progress completed=1575 total=5500 succeeded=1575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:03,748 INFO cardrag_worker.pipeline OCR progress completed=1600 total=5500 succeeded=1600 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:07,611 INFO cardrag_worker.pipeline OCR progress completed=1625 total=5500 succeeded=1625 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:11,310 INFO cardrag_worker.pipeline OCR progress completed=1650 total=5500 succeeded=1650 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:15,012 INFO cardrag_worker.pipeline OCR progress completed=1675 total=5500 succeeded=1675 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:18,244 INFO cardrag_worker.pipeline OCR progress completed=1700 total=5500 succeeded=1700 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:22,085 INFO cardrag_worker.pipeline OCR progress completed=1725 total=5500 succeeded=1725 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:25,673 INFO cardrag_worker.pipeline OCR progress completed=1750 total=5500 succeeded=1750 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:28,697 INFO cardrag_worker.pipeline OCR progress completed=1775 total=5500 succeeded=1775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:32,854 INFO cardrag_worker.pipeline OCR progress completed=1800 total=5500 succeeded=1800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:19:36,793 INFO cardrag_worker.pipeline OCR progress completed=1825 total=5500 succeeded=1825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:20:38,771 INFO cardrag_worker.pipeline OCR progress completed=1850 total=5500 succeeded=1850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:20:43,732 INFO cardrag_worker.pipeline OCR progress completed=1875 total=5500 succeeded=1875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:20:47,572 INFO cardrag_worker.pipeline OCR progress completed=1900 total=5500 succeeded=1900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:20:51,201 INFO cardrag_worker.pipeline OCR progress completed=1925 total=5500 succeeded=1925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:20:54,205 INFO cardrag_worker.pipeline OCR progress completed=1950 total=5500 succeeded=1950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:03,843 INFO cardrag_worker.pipeline OCR progress completed=1975 total=5500 succeeded=1975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:11,454 INFO cardrag_worker.pipeline OCR progress completed=2000 total=5500 succeeded=2000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:19,436 INFO cardrag_worker.pipeline OCR progress completed=2025 total=5500 succeeded=2025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:27,808 INFO cardrag_worker.pipeline OCR progress completed=2050 total=5500 succeeded=2050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:34,724 INFO cardrag_worker.pipeline OCR progress completed=2075 total=5500 succeeded=2075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:40,811 INFO cardrag_worker.pipeline OCR progress completed=2100 total=5500 succeeded=2100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:45,919 INFO cardrag_worker.pipeline OCR progress completed=2125 total=5500 succeeded=2125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:52,151 INFO cardrag_worker.pipeline OCR progress completed=2150 total=5500 succeeded=2150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:21:57,427 INFO cardrag_worker.pipeline OCR progress completed=2175 total=5500 succeeded=2175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:22:00,436 INFO cardrag_worker.pipeline OCR progress completed=2200 total=5500 succeeded=2200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:22:05,782 INFO cardrag_worker.pipeline OCR progress completed=2225 total=5500 succeeded=2225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:22:10,472 INFO cardrag_worker.pipeline OCR progress completed=2250 total=5500 succeeded=2250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:22:15,844 INFO cardrag_worker.pipeline OCR progress completed=2275 total=5500 succeeded=2275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:24:11,328 INFO cardrag_worker.pipeline OCR progress completed=2300 total=5500 succeeded=2300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:24:15,364 INFO cardrag_worker.pipeline OCR progress completed=2325 total=5500 succeeded=2325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:24:19,237 INFO cardrag_worker.pipeline OCR progress completed=2350 total=5500 succeeded=2350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:24:23,624 INFO cardrag_worker.pipeline OCR progress completed=2375 total=5500 succeeded=2375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:26:20,783 INFO cardrag_worker.pipeline OCR progress completed=2400 total=5500 succeeded=2400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:38:27,640 INFO cardrag_worker.pipeline OCR progress completed=2425 total=5500 succeeded=2425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:39:08,579 INFO cardrag_worker.pipeline OCR progress completed=2450 total=5500 succeeded=2450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:39:14,949 INFO cardrag_worker.pipeline OCR progress completed=2475 total=5500 succeeded=2475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:43:01,669 INFO cardrag_worker.pipeline OCR progress completed=2500 total=5500 succeeded=2500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 18:57:36,107 INFO cardrag_worker.pipeline OCR progress completed=2525 total=5500 succeeded=2525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 19:33:50,163 INFO cardrag_worker.pipeline OCR progress completed=2550 total=5500 succeeded=2550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 19:51:54,637 INFO cardrag_worker.pipeline OCR progress completed=2575 total=5500 succeeded=2575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 20:09:40,912 INFO cardrag_worker.pipeline OCR progress completed=2600 total=5500 succeeded=2600 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 20:22:13,748 INFO cardrag_worker.pipeline OCR progress completed=2625 total=5500 succeeded=2625 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 20:47:30,633 INFO cardrag_worker.pipeline OCR progress completed=2650 total=5500 succeeded=2650 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 21:18:38,682 INFO cardrag_worker.pipeline OCR progress completed=2675 total=5500 succeeded=2675 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 21:36:48,698 INFO cardrag_worker.pipeline OCR progress completed=2700 total=5500 succeeded=2700 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 21:36:58,674 INFO cardrag_worker.pipeline OCR progress completed=2725 total=5500 succeeded=2725 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 21:37:08,075 INFO cardrag_worker.pipeline OCR progress completed=2750 total=5500 succeeded=2750 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 21:44:58,835 INFO cardrag_worker.pipeline OCR progress completed=2775 total=5500 succeeded=2775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:02:45,444 INFO cardrag_worker.pipeline OCR progress completed=2800 total=5500 succeeded=2800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:02:51,271 INFO cardrag_worker.pipeline OCR progress completed=2825 total=5500 succeeded=2825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:00,929 INFO cardrag_worker.pipeline OCR progress completed=2850 total=5500 succeeded=2850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:11,810 INFO cardrag_worker.pipeline OCR progress completed=2875 total=5500 succeeded=2875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:21,689 INFO cardrag_worker.pipeline OCR progress completed=2900 total=5500 succeeded=2900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:36,732 INFO cardrag_worker.pipeline OCR progress completed=2925 total=5500 succeeded=2925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:42,721 INFO cardrag_worker.pipeline OCR progress completed=2950 total=5500 succeeded=2950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:46,018 INFO cardrag_worker.pipeline OCR progress completed=2975 total=5500 succeeded=2975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:03:54,620 INFO cardrag_worker.pipeline OCR progress completed=3000 total=5500 succeeded=3000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:17:33,265 INFO cardrag_worker.pipeline OCR progress completed=3025 total=5500 succeeded=3025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:27:52,781 INFO cardrag_worker.pipeline OCR progress completed=3050 total=5500 succeeded=3050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:36:11,203 INFO cardrag_worker.pipeline OCR progress completed=3075 total=5500 succeeded=3075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:41:05,699 INFO cardrag_worker.pipeline OCR progress completed=3100 total=5500 succeeded=3100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:41:11,711 INFO cardrag_worker.pipeline OCR progress completed=3125 total=5500 succeeded=3125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:41:17,453 INFO cardrag_worker.pipeline OCR progress completed=3150 total=5500 succeeded=3150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:41:23,739 INFO cardrag_worker.pipeline OCR progress completed=3175 total=5500 succeeded=3175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:41:29,919 INFO cardrag_worker.pipeline OCR progress completed=3200 total=5500 succeeded=3200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:41:44,594 INFO cardrag_worker.pipeline OCR progress completed=3225 total=5500 succeeded=3225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:42:05,011 INFO cardrag_worker.pipeline OCR progress completed=3250 total=5500 succeeded=3250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:42:24,515 INFO cardrag_worker.pipeline OCR progress completed=3275 total=5500 succeeded=3275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:42:45,263 INFO cardrag_worker.pipeline OCR progress completed=3300 total=5500 succeeded=3300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:43:04,517 INFO cardrag_worker.pipeline OCR progress completed=3325 total=5500 succeeded=3325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:43:24,050 INFO cardrag_worker.pipeline OCR progress completed=3350 total=5500 succeeded=3350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:43:45,580 INFO cardrag_worker.pipeline OCR progress completed=3375 total=5500 succeeded=3375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:44:06,244 INFO cardrag_worker.pipeline OCR progress completed=3400 total=5500 succeeded=3400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:44:27,434 INFO cardrag_worker.pipeline OCR progress completed=3425 total=5500 succeeded=3425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:44:50,054 INFO cardrag_worker.pipeline OCR progress completed=3450 total=5500 succeeded=3450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:49:14,077 INFO cardrag_worker.pipeline OCR progress completed=3475 total=5500 succeeded=3475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:49:32,864 INFO cardrag_worker.pipeline OCR progress completed=3500 total=5500 succeeded=3500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:49:45,332 INFO cardrag_worker.pipeline OCR progress completed=3525 total=5500 succeeded=3525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:55:12,413 INFO cardrag_worker.pipeline OCR progress completed=3550 total=5500 succeeded=3550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:55:24,769 INFO cardrag_worker.pipeline OCR progress completed=3575 total=5500 succeeded=3575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 22:55:39,657 INFO cardrag_worker.pipeline OCR progress completed=3600 total=5500 succeeded=3600 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:02:22,129 INFO cardrag_worker.pipeline OCR progress completed=3625 total=5500 succeeded=3625 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:02:28,248 INFO cardrag_worker.pipeline OCR progress completed=3650 total=5500 succeeded=3650 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:02:33,012 INFO cardrag_worker.pipeline OCR progress completed=3675 total=5500 succeeded=3675 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:02:45,752 INFO cardrag_worker.pipeline OCR progress completed=3700 total=5500 succeeded=3700 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:06:03,869 INFO cardrag_worker.pipeline OCR progress completed=3725 total=5500 succeeded=3725 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:06:09,550 INFO cardrag_worker.pipeline OCR progress completed=3750 total=5500 succeeded=3750 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:06:15,390 INFO cardrag_worker.pipeline OCR progress completed=3775 total=5500 succeeded=3775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:06:24,213 INFO cardrag_worker.pipeline OCR progress completed=3800 total=5500 succeeded=3800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:47:17,464 INFO cardrag_worker.pipeline OCR progress completed=3825 total=5500 succeeded=3825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:57:16,327 INFO cardrag_worker.pipeline OCR progress completed=3850 total=5500 succeeded=3850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-02 23:57:21,399 INFO cardrag_worker.pipeline OCR progress completed=3875 total=5500 succeeded=3875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:13:48,787 INFO cardrag_worker.pipeline OCR progress completed=3900 total=5500 succeeded=3900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:13:54,317 INFO cardrag_worker.pipeline OCR progress completed=3925 total=5500 succeeded=3925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:13:59,521 INFO cardrag_worker.pipeline OCR progress completed=3950 total=5500 succeeded=3950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:06,582 INFO cardrag_worker.pipeline OCR progress completed=3975 total=5500 succeeded=3975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:11,939 INFO cardrag_worker.pipeline OCR progress completed=4000 total=5500 succeeded=4000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:17,023 INFO cardrag_worker.pipeline OCR progress completed=4025 total=5500 succeeded=4025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:24,975 INFO cardrag_worker.pipeline OCR progress completed=4050 total=5500 succeeded=4050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:30,237 INFO cardrag_worker.pipeline OCR progress completed=4075 total=5500 succeeded=4075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:38,282 INFO cardrag_worker.pipeline OCR progress completed=4100 total=5500 succeeded=4100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:43,966 INFO cardrag_worker.pipeline OCR progress completed=4125 total=5500 succeeded=4125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:17:47,181 INFO cardrag_worker.pipeline OCR progress completed=4150 total=5500 succeeded=4150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:25:59,733 INFO cardrag_worker.pipeline OCR progress completed=4175 total=5500 succeeded=4175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:26:05,304 INFO cardrag_worker.pipeline OCR progress completed=4200 total=5500 succeeded=4200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:28:53,960 INFO cardrag_worker.pipeline OCR progress completed=4225 total=5500 succeeded=4225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:29:00,611 INFO cardrag_worker.pipeline OCR progress completed=4250 total=5500 succeeded=4250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:45:39,356 INFO cardrag_worker.pipeline OCR progress completed=4275 total=5500 succeeded=4275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:56:17,783 INFO cardrag_worker.pipeline OCR progress completed=4300 total=5500 succeeded=4300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:56:22,375 INFO cardrag_worker.pipeline OCR progress completed=4325 total=5500 succeeded=4325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 00:56:26,722 INFO cardrag_worker.pipeline OCR progress completed=4350 total=5500 succeeded=4350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 01:05:07,226 INFO cardrag_worker.pipeline OCR progress completed=4375 total=5500 succeeded=4375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 01:24:28,048 INFO cardrag_worker.pipeline OCR progress completed=4400 total=5500 succeeded=4400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 01:24:33,813 INFO cardrag_worker.pipeline OCR progress completed=4425 total=5500 succeeded=4425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 01:24:37,996 INFO cardrag_worker.pipeline OCR progress completed=4450 total=5500 succeeded=4450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 01:24:41,787 INFO cardrag_worker.pipeline OCR progress completed=4475 total=5500 succeeded=4475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 01:24:47,744 INFO cardrag_worker.pipeline OCR progress completed=4500 total=5500 succeeded=4500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:03:50,360 INFO cardrag_worker.pipeline OCR progress completed=4525 total=5500 succeeded=4525 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:03:58,330 INFO cardrag_worker.pipeline OCR progress completed=4550 total=5500 succeeded=4550 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:03,887 INFO cardrag_worker.pipeline OCR progress completed=4575 total=5500 succeeded=4575 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:08,725 INFO cardrag_worker.pipeline OCR progress completed=4600 total=5500 succeeded=4600 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:14,474 INFO cardrag_worker.pipeline OCR progress completed=4625 total=5500 succeeded=4625 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:19,895 INFO cardrag_worker.pipeline OCR progress completed=4650 total=5500 succeeded=4650 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:25,476 INFO cardrag_worker.pipeline OCR progress completed=4675 total=5500 succeeded=4675 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:29,835 INFO cardrag_worker.pipeline OCR progress completed=4700 total=5500 succeeded=4700 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:35,151 INFO cardrag_worker.pipeline OCR progress completed=4725 total=5500 succeeded=4725 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:39,394 INFO cardrag_worker.pipeline OCR progress completed=4750 total=5500 succeeded=4750 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:44,389 INFO cardrag_worker.pipeline OCR progress completed=4775 total=5500 succeeded=4775 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:49,012 INFO cardrag_worker.pipeline OCR progress completed=4800 total=5500 succeeded=4800 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:53,809 INFO cardrag_worker.pipeline OCR progress completed=4825 total=5500 succeeded=4825 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:04:58,356 INFO cardrag_worker.pipeline OCR progress completed=4850 total=5500 succeeded=4850 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:03,474 INFO cardrag_worker.pipeline OCR progress completed=4875 total=5500 succeeded=4875 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:08,151 INFO cardrag_worker.pipeline OCR progress completed=4900 total=5500 succeeded=4900 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:14,113 INFO cardrag_worker.pipeline OCR progress completed=4925 total=5500 succeeded=4925 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:17,635 INFO cardrag_worker.pipeline OCR progress completed=4950 total=5500 succeeded=4950 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:22,124 INFO cardrag_worker.pipeline OCR progress completed=4975 total=5500 succeeded=4975 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:28,589 INFO cardrag_worker.pipeline OCR progress completed=5000 total=5500 succeeded=5000 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:34,935 INFO cardrag_worker.pipeline OCR progress completed=5025 total=5500 succeeded=5025 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:41,805 INFO cardrag_worker.pipeline OCR progress completed=5050 total=5500 succeeded=5050 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:48,242 INFO cardrag_worker.pipeline OCR progress completed=5075 total=5500 succeeded=5075 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:05:55,186 INFO cardrag_worker.pipeline OCR progress completed=5100 total=5500 succeeded=5100 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:01,894 INFO cardrag_worker.pipeline OCR progress completed=5125 total=5500 succeeded=5125 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:07,790 INFO cardrag_worker.pipeline OCR progress completed=5150 total=5500 succeeded=5150 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:13,507 INFO cardrag_worker.pipeline OCR progress completed=5175 total=5500 succeeded=5175 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:18,768 INFO cardrag_worker.pipeline OCR progress completed=5200 total=5500 succeeded=5200 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:24,604 INFO cardrag_worker.pipeline OCR progress completed=5225 total=5500 succeeded=5225 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:30,428 INFO cardrag_worker.pipeline OCR progress completed=5250 total=5500 succeeded=5250 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:36,332 INFO cardrag_worker.pipeline OCR progress completed=5275 total=5500 succeeded=5275 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:40,827 INFO cardrag_worker.pipeline OCR progress completed=5300 total=5500 succeeded=5300 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:06:45,533 INFO cardrag_worker.pipeline OCR progress completed=5325 total=5500 succeeded=5325 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:18:40,906 INFO cardrag_worker.pipeline OCR progress completed=5350 total=5500 succeeded=5350 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:32:17,627 INFO cardrag_worker.pipeline OCR progress completed=5375 total=5500 succeeded=5375 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:32:27,011 INFO cardrag_worker.pipeline OCR progress completed=5400 total=5500 succeeded=5400 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:32:32,843 INFO cardrag_worker.pipeline OCR progress completed=5425 total=5500 succeeded=5425 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:32:38,447 INFO cardrag_worker.pipeline OCR progress completed=5450 total=5500 succeeded=5450 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:32:43,574 INFO cardrag_worker.pipeline OCR progress completed=5475 total=5500 succeeded=5475 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:32:47,151 INFO cardrag_worker.pipeline OCR progress completed=5500 total=5500 succeeded=5500 failed=0 structure_failed=0 cache_publication_deferred=0
+2026-10-03 02:37:12,388 INFO cardrag_worker.pipeline V5 capacity preflight passed derived_views=613667 unique_cache_misses=11885 wal_baseline_bytes=4161232 sidecar_bytes=10054320128 database_bytes=15261659136 logical_growth_bytes=26107424464 peak_growth_bytes=71892401872 state_usage_bytes=50623693409 filesystem_free_bytes=116333228032
+2026-10-03 02:37:12,394 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:21,644 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:21,644 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:26,391 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:26,391 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:30,240 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:30,240 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:45,441 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:45,441 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:50,241 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:37:50,241 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:38:11,888 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:38:11,888 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:38:46,695 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:38:46,695 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:08,815 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:08,815 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:14,287 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:14,287 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:18,460 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:18,461 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:25,519 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:25,519 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:29,954 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:29,954 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:46,528 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:39:46,528 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:01,461 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:01,461 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:42,831 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:42,831 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:51,541 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:51,541 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:55,490 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:40:55,490 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:00,697 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:00,697 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:10,269 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:10,269 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:14,467 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:14,467 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:23,572 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:23,572 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:34,653 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:34,653 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:44,531 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:41:44,531 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:23,566 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:23,567 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:29,592 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:29,593 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:37,373 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:37,374 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:42,651 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:42,651 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:48,712 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:48,712 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:53,202 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:42:53,202 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:01,164 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:01,164 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:11,189 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:11,189 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:15,950 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:15,950 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:29,200 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:43:29,200 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:15,198 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:15,198 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:22,073 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:22,073 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:30,199 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:30,199 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:40,577 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:40,578 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:45,088 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:45,089 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:54,330 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:54,331 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:58,291 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:44:58,292 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:45:02,759 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:45:02,759 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:45:07,158 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:45:07,158 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:45:40,798 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:45:40,798 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:00,446 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:00,446 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:04,959 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:04,959 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:09,991 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:09,991 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:14,567 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:14,567 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:20,134 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:20,134 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4161232 wal_limit_bytes=401997520
+2026-10-03 02:46:27,070 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:27,071 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:31,206 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:31,206 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:36,461 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:36,461 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:42,038 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:46:42,038 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:13,587 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:13,587 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:21,027 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:21,027 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:25,746 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:25,746 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:29,849 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:29,849 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:39,809 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:39,809 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:49,475 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:49,475 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:54,502 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:47:54,502 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:00,762 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:00,762 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:04,878 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:04,878 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:09,105 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:09,105 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:18,006 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:18,006 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:22,511 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:22,511 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:39,177 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:39,177 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:49,270 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:49,270 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:54,474 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:48:54,474 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:01,076 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:01,076 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:06,769 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:06,769 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:19,698 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:19,698 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:24,715 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:24,715 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:31,160 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:31,160 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:36,141 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:36,141 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:40,181 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:40,181 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:44,314 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:44,314 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:48,828 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:48,828 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:49:49,241 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=1/12 retry_seconds=1.000
+2026-10-03 02:49:50,538 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=2/12 retry_seconds=2.000
+2026-10-03 02:49:53,039 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=3/12 retry_seconds=4.000
+2026-10-03 02:50:48,456 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:50:48,456 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:50:52,627 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:50:52,627 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:01,743 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:01,743 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:08,046 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:08,046 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:18,940 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:18,940 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:52,384 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:52,384 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:57,298 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:51:57,298 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:02,435 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:02,435 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:07,969 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:07,969 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:12,771 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:12,771 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:16,980 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:16,981 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:22,568 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:22,568 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:32,616 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:32,616 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:36,538 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:36,538 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:40,775 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:40,775 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:44,778 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:44,778 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:52:45,161 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=1/12 retry_seconds=1.000
+2026-10-03 02:53:03,643 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:03,643 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:15,905 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:15,905 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:20,224 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:20,224 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:25,123 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:25,123 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:28,816 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:28,816 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:38,772 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:38,772 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:42,517 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:42,517 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:46,454 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:46,454 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:50,575 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:50,575 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:55,305 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:55,305 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:59,488 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:53:59,488 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:03,852 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:03,852 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:09,611 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:09,611 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:25,873 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:25,873 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:36,919 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:36,919 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:41,522 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:41,522 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:45,616 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:45,616 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:49,494 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:49,495 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:55,906 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:54:55,906 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:04,342 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:04,342 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:07,990 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:07,990 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:12,585 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:12,585 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:16,883 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:16,883 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:22,473 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:22,473 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:26,679 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:26,679 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:30,697 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:55:30,698 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:02,138 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:02,138 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:06,740 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:06,740 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:10,629 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:10,629 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:14,579 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:14,579 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:18,643 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:18,644 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:22,345 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:22,345 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:28,920 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:28,920 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:33,207 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:33,207 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:37,399 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:37,399 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:41,985 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:41,985 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:45,626 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:45,626 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:50,705 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:50,705 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:54,936 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:54,936 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:56:55,266 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=1/12 retry_seconds=1.000
+2026-10-03 02:56:56,604 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=2/12 retry_seconds=2.000
+2026-10-03 02:57:16,512 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:16,512 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:27,669 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:27,669 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:39,396 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:39,396 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:42,974 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:42,974 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:46,974 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:46,975 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:50,773 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:50,773 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:57,304 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:57:57,304 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:00,944 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:00,944 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:04,869 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:04,869 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:09,731 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:09,731 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:14,634 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:14,634 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:18,594 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:18,594 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:35,930 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:35,930 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:48,456 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:48,456 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:56,107 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:58:56,107 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:00,713 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:00,713 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:04,284 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:04,284 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:08,783 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:08,783 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:12,990 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:12,990 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:17,087 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:17,087 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:21,255 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:21,255 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:30,178 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:30,179 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:34,446 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:34,446 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:38,670 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:38,670 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:39,112 WARNING cardrag_worker.embedding_v5 OpenRouter embedding request transient failure reason=rate_limit status=429 attempt=1/12 retry_seconds=1.000
+2026-10-03 02:59:55,733 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 02:59:55,733 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:06,820 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:06,820 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:11,549 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:11,549 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:15,339 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:15,339 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:20,588 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:20,588 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:25,540 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:25,540 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:29,822 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=after-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:00:29,822 INFO cardrag_worker.pipeline V5 embedding cache WAL capacity boundary=before-provider-batch baseline_bytes=4161232 wal_size_bytes=4169472 wal_limit_bytes=401997520
+2026-10-03 03:01:58,351 ERROR cardrag_worker.pipeline Worker pipeline failed unexpectedly during run d9de4b240e804ae5a0e28a1c97cb9a31: disk I/O error
+Traceback (most recent call last):
+  File "/opt/cardrag/lib/python3.13/site-packages/cardrag_worker/pipeline.py", line 2386, in _run_measured
+    result = await self._run_locked(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "/opt/cardrag/lib/python3.13/site-packages/cardrag_worker/pipeline.py", line 4658, in _run_locked
+    published_result = await self._build_v5_generation(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<15 lines>...
+    )
+    ^
+  File "/opt/cardrag/lib/python3.13/site-packages/cardrag_worker/pipeline.py", line 5496, in _build_v5_generation
+    await self._finite_stage(
+    ...<9 lines>...
+    )
+  File "/opt/cardrag/lib/python3.13/site-packages/cardrag_worker/pipeline.py", line 2178, in _finite_stage
+    result = await operation()
+             ^^^^^^^^^^^^^^^^^
+  File "/opt/cardrag/lib/python3.13/site-packages/cardrag_worker/pipeline.py", line 5347, in embed_views
+    cached = self.state.get_embedding_v5(
+        cache_key,
+    ...<5 lines>...
+        validate_norm=False,
+    )
+  File "/opt/cardrag/lib/python3.13/site-packages/cardrag_worker/state.py", line 1636, in get_embedding_v5
+    row = self.connection.execute(
+          ~~~~~~~~~~~~~~~~~~~~~~~^
+        """SELECT cache_key,profile_id,input_sha256,dimension,dtype,normalization,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        (cache_key,),
+        ^^^^^^^^^^^^^
+    ).fetchone()
+    ^
+sqlite3.OperationalError: disk I/O error
+2026-10-03 03:02:06,998 INFO cardrag_worker.cli Worker execution finished elapsed_seconds=43007.294
+{
+  "error_class_category": "database",
+  "reason": "Worker pipeline failed unexpectedly.",
+  "reason_code": "worker_unexpected_failure",
+  "report": "runs/d9de4b240e804ae5a0e28a1c97cb9a31/reports/worker-failure.json",
+  "run_id": "d9de4b240e804ae5a0e28a1c97cb9a31",
+  "status": "failed"
+}

@@ -1,0 +1,19 @@
+Oct 03 03:00:00.086740 4700u-ubuntu-desktop systemd[1]: Starting cardrag-worker.service - Run the one-shot CardRAG Worker...
+Oct 03 03:00:00.459717 4700u-ubuntu-desktop cardrag-worker[3560847]: time="2026-10-03T03:00:00+09:00" level=warning msg="volume \"cardrag-worker-v120-recovery-auth-20260910\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+Oct 03 03:00:00.459717 4700u-ubuntu-desktop cardrag-worker[3560847]: time="2026-10-03T03:00:00+09:00" level=warning msg="volume \"cardrag-worker-paddleocr-models\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+Oct 03 03:00:00.459717 4700u-ubuntu-desktop cardrag-worker[3560847]: time="2026-10-03T03:00:00+09:00" level=warning msg="volume \"cardrag-worker-v129-state\" already exists but was not created by Docker Compose. Use `external: true` to use an existing volume"
+Oct 03 03:00:00.539785 4700u-ubuntu-desktop cardrag-worker[3560847]:  Container cardrag-worker-worker-run-804ddf0ac863 Creating
+Oct 03 03:00:00.693340 4700u-ubuntu-desktop cardrag-worker[3560847]:  Container cardrag-worker-worker-run-804ddf0ac863 Created
+Oct 03 03:00:08.286417 4700u-ubuntu-desktop cardrag-worker[3560847]: 2026-10-03 03:00:08,285 INFO cardrag_worker.cli Worker startup capacity preflight passed filesystem_free_bytes=116176023552 minimum_free_bytes=2147483648
+Oct 03 03:00:12.248335 4700u-ubuntu-desktop cardrag-worker[3560847]: 2026-10-03 03:00:12,247 INFO cardrag_worker.cli OCR discovered 6 compatible contracts: gpt-5.6-sol, gpt-5.4, gpt-5.6-terra, anthropic/claude-sonnet-5, PaddleOCR-VL-1.6, PaddleOCR-VL-1.6
+Oct 03 03:00:12.248335 4700u-ubuntu-desktop cardrag-worker[3560847]: 2026-10-03 03:00:12,247 INFO cardrag_worker.cli Remote OCR cache access mode=read-write require_hit=False
+Oct 03 03:00:32.421644 4700u-ubuntu-desktop cardrag-worker[3560847]: 2026-10-03 03:00:32,421 INFO cardrag_worker.cli Qwen provider preflight passed provider=deepinfra samples=24 minimum_repeat_cosine=0.999898 minimum_cross_provider_cosine=0.999875 tokenizer_sha256=83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d
+Oct 03 03:00:32.421644 4700u-ubuntu-desktop cardrag-worker[3560847]: 2026-10-03 03:00:32,421 INFO cardrag_worker.cli Worker startup completed elapsed_seconds=30.602
+Oct 03 03:00:32.435521 4700u-ubuntu-desktop cardrag-worker[3560847]: 2026-10-03 03:00:32,434 INFO cardrag_worker.cli Worker execution finished elapsed_seconds=30.616
+Oct 03 03:00:32.437135 4700u-ubuntu-desktop cardrag-worker[3560847]: {
+Oct 03 03:00:32.437135 4700u-ubuntu-desktop cardrag-worker[3560847]:   "reason": "Worker did not start because the worker lock is held.",
+Oct 03 03:00:32.437135 4700u-ubuntu-desktop cardrag-worker[3560847]:   "reason_code": "worker_busy",
+Oct 03 03:00:32.437135 4700u-ubuntu-desktop cardrag-worker[3560847]:   "status": "already_running"
+Oct 03 03:00:32.437135 4700u-ubuntu-desktop cardrag-worker[3560847]: }
+Oct 03 03:00:32.815676 4700u-ubuntu-desktop systemd[1]: cardrag-worker.service: Deactivated successfully.
+Oct 03 03:00:32.815981 4700u-ubuntu-desktop systemd[1]: Finished cardrag-worker.service - Run the one-shot CardRAG Worker.
