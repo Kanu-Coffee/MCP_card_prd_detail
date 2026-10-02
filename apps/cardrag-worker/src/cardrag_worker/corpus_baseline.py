@@ -142,29 +142,29 @@ def baseline_payload(
 ) -> dict[str, Any]:
     ordered = sorted(documents, key=lambda d: d.document_id)
     return {
-    "contract_sha256": contract_sha256,
-    "corpus_sha256": corpus_sha256,
-    "counts": {
-        "current": sum(1 for d in ordered if d.temporal_status == "current"),
-        "historical": sum(1 for d in ordered if d.temporal_status == "historical"),
-        "total": len(ordered),
-    },
-    "documents": [
-        {
-            "document_id": d.document_id,
-            "document_type": d.document_type,
-            "issuer": d.issuer,
-            "pdf_sha256": d.pdf_sha256,
-            "product_code": d.product_code,
-            "source_id": d.source_id,
-            "temporal_status": d.temporal_status,
-        }
-        for d in ordered
-    ],
-    "generation_id": generation_id,
-    "issuer_counts": dict(sorted(issuer_counts.items())),
-    "run_id": run_id,
-    "schema_version": CORPUS_BASELINE_SCHEMA_VERSION,
+        "contract_sha256": contract_sha256,
+        "corpus_sha256": corpus_sha256,
+        "counts": {
+            "current": sum(1 for d in ordered if d.temporal_status == "current"),
+            "historical": sum(1 for d in ordered if d.temporal_status == "historical"),
+            "total": len(ordered),
+        },
+        "documents": [
+            {
+                "document_id": d.document_id,
+                "document_type": d.document_type,
+                "issuer": d.issuer,
+                "pdf_sha256": d.pdf_sha256,
+                "product_code": d.product_code,
+                "source_id": d.source_id,
+                "temporal_status": d.temporal_status,
+            }
+            for d in ordered
+        ],
+        "generation_id": generation_id,
+        "issuer_counts": dict(sorted(issuer_counts.items())),
+        "run_id": run_id,
+        "schema_version": CORPUS_BASELINE_SCHEMA_VERSION,
     }
 
 
@@ -207,7 +207,9 @@ def record_corpus_baseline(
     dir_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
     temp_fd = -1
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         temp_fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
         view = memoryview(payload_bytes)
         while view:
@@ -300,7 +302,9 @@ def load_corpus_baseline(state_dir: Path, state: WorkerState) -> CorpusBaseline 
     root = Path(os.path.abspath(state_dir))
     directory = root / _BASELINE_DIRECTORY
     try:
-        names = [name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])]
+        names = [
+            name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])
+        ]
     except FileNotFoundError:
         return None
     if not names:
@@ -352,7 +356,9 @@ def prune_corpus_baselines(state_dir: Path, *, keep: int) -> int:
         raise CorpusBaselineError("baseline_keep_invalid")
     directory = Path(os.path.abspath(state_dir)) / _BASELINE_DIRECTORY
     try:
-        names = [name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])]
+        names = [
+            name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])
+        ]
     except FileNotFoundError:
         return 0
     entries = []

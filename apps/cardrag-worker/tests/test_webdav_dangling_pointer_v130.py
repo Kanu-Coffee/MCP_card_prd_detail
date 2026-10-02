@@ -42,9 +42,7 @@ class _Policy:
 
 def _client(monkeypatch: pytest.MonkeyPatch, *, raise_status: int, manifest_exists: bool) -> WebDAVClient:
     generation_id = "g-0928dee8e6f04af9ae41fdb7-f916d1c475e0"
-    pointer = GenerationPointer(
-        generation_id=generation_id, manifest_sha256="a" * 64, ready_sha256="b" * 64
-    )
+    pointer = GenerationPointer(generation_id=generation_id, manifest_sha256="a" * 64, ready_sha256="b" * 64)
 
     class Core:
         def read_only(self) -> object:

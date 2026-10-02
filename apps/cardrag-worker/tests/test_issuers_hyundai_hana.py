@@ -449,9 +449,7 @@ async def test_hana_accepts_distinct_publications_of_same_stable_source_across_p
         ),
     ],
 )
-async def test_hana_rejects_partial_raw_row_replay(
-    pages: list[dict[str, Any]], message: str
-) -> None:
+async def test_hana_rejects_partial_raw_row_replay(pages: list[dict[str, Any]], message: str) -> None:
     with pytest.raises(IssuerMarkupChanged, match=message):
         await hana_discover(pages)
 

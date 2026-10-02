@@ -385,6 +385,16 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # remains immediately before SQLite opens the path, after any allowed
         # WebDAV construction/GET-only aggregation validation.
         startup_capacity = revalidate_worker_start_capacity(startup_capacity)
+        # A lock-rejected process must never open a live writer's SQLite database.
+        # The 2026-10-03 production state-loss incident happened because the daily
+        # timer's container ran this startup preflight (which opened the state DB),
+        # only *then* lost the lock inside the pipeline and closed that connection;
+        # the concurrent open/close clobbered page 1 of the WAL database.  Probe the
+        # worker lock here, immediately before SQLite touches the path, so a busy
+        # second process exits before opening anything.  The authoritative
+        # acquisition stays in WorkerPipeline._run_locked, so the winner is unchanged.
+        with worker_lock(settings.lock_file):
+            pass
         with WorkerState(
             settings.state_database,
             sqlite_cache_mib=settings.sqlite_cache_mib,

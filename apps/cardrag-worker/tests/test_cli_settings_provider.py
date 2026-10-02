@@ -618,6 +618,7 @@ def test_run_rejects_nested_state_database_symlink_before_any_runtime_client(
         document_aggregation_profile_artifact_sha256 = None
         state_dir = state_root
         state_database = state_root / "worker-state.sqlite3"
+        lock_file = state_root / "worker.lock"
         minimum_start_free_bytes = 0
 
     def must_not_run(*_args: object, **_kwargs: object) -> None:
@@ -783,6 +784,7 @@ def test_run_revalidates_a_new_m0_state_root_twice_before_state_open(
         document_aggregation_profile_artifact_sha256 = None
         state_dir = state_root
         state_database = state_root / "worker-state.sqlite3"
+        lock_file = state_root / "worker.lock"
         minimum_start_free_bytes = 0
 
     class Client:
@@ -1998,7 +2000,7 @@ async def test_codex_ocr_token_plan_provider_config_is_injected_and_key_forwarde
 
         async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
             captured["stdin"] = body
-            return ("## Page 1\n\ntoken-plan transcription body\n".encode()), b""
+            return b"## Page 1\n\ntoken-plan transcription body\n", b""
 
         def kill(self) -> None:
             return None
@@ -2011,7 +2013,8 @@ async def test_codex_ocr_token_plan_provider_config_is_injected_and_key_forwarde
         captured["env"] = kwargs["env"]
         return Process()
 
-    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-plan-secret")
+    plan_secret = _repeated_test_token("test-", "plan-secret", 1)
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", plan_secret)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
     provider = CodexOCRProvider(
         executable="codex",
@@ -2045,7 +2048,7 @@ async def test_codex_ocr_token_plan_provider_config_is_injected_and_key_forwarde
         'model_catalog_json="/var/lib/cardrag-codex-home/model-catalog.local.json"',
         *providers_module.CODEX_OCR_CONFIG_OVERRIDES,
     )
-    assert captured["env"]["ALIBABA_TOKEN_PLAN_API_KEY"] == "test-plan-secret"
+    assert captured["env"]["ALIBABA_TOKEN_PLAN_API_KEY"] == plan_secret
     assert captured["env"]["CODEX_HOME"] == str(tmp_path / "codex-auth")
     assert result.startswith("## Page 1")
 
@@ -2132,7 +2135,9 @@ def test_worker_settings_parses_token_plan_provider_knobs(
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
     )
     monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY")
-    monkeypatch.setenv("CARDRAG_CODEX_MODEL_CATALOG_JSON", "/var/lib/cardrag-codex-home/model-catalog.local.json")
+    monkeypatch.setenv(
+        "CARDRAG_CODEX_MODEL_CATALOG_JSON", "/var/lib/cardrag-codex-home/model-catalog.local.json"
+    )
 
     settings = WorkerSettings.from_env()
 
@@ -2154,3 +2159,73 @@ def test_worker_settings_rejects_unsafe_token_plan_values(
     monkeypatch.setenv("CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY")
     with pytest.raises(ValueError, match="BASE_URL"):
         WorkerSettings.from_env()
+
+
+def test_run_probes_worker_lock_before_opening_state_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock-rejected process must not open the live state database.
+
+    The 2026-10-03 production incident destroyed page 1 of the WAL database when
+    the daily timer container opened the state DB during startup preflight and
+    only afterwards lost the worker lock inside the pipeline.
+    """
+
+    state_root = tmp_path / "state"
+    events: list[str] = []
+
+    class Settings(_PerformanceSettings):
+        channel = "candidate-v1.0.11"
+        stable_publication_approved = False
+        document_aggregation_profile_path = None
+        document_aggregation_profile_artifact_sha256 = None
+        state_dir = state_root
+        minimum_start_free_bytes = 0
+
+        @property
+        def lock_file(self) -> Path:
+            return state_root / "worker.lock"
+
+        @property
+        def state_database(self) -> Path:
+            return state_root / "worker-state.sqlite3"
+
+    class FakeClient:
+        async def close(self) -> None:
+            events.append("webdav_close")
+
+    class FakeWebDAV:
+        @staticmethod
+        def from_env(**_kwargs: object) -> object:
+            events.append("webdav_client")
+            return FakeClient()
+
+    def must_not_open(*_args: object, **_kwargs: object) -> None:
+        events.append("state_database_open")
+        raise AssertionError("the state database must stay closed while the lock is held")
+
+    state_root.mkdir(parents=True)
+    descriptor = os.open(state_root / "worker.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+        monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+        monkeypatch.setattr(
+            cli_module,
+            "preflight_worker_start_capacity",
+            lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1, minimum_free_bytes=0),
+        )
+        monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", lambda snapshot: snapshot)
+        monkeypatch.setattr(cli_module, "WebDAVClient", FakeWebDAV)
+        monkeypatch.setattr(cli_module, "WorkerState", must_not_open)
+        monkeypatch.setattr(cli_module, "_qwen_embedding_provider", must_not_open)
+
+        with pytest.raises(cli_module.AlreadyRunning, match="another worker owns"):
+            asyncio.run(cli_module._run(None))
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    assert events == ["webdav_client", "webdav_close"]
+    assert not (state_root / "worker-state.sqlite3").exists()

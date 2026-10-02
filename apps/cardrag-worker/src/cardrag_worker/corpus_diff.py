@@ -230,9 +230,7 @@ def generate_corpus_diff_report(
     prior_all = prior_current | prior_historical
     prior_entries = prior.entries
     prior_source_ids = {pe.source_id for pe in prior_entries.values()}
-    prior_products = {
-        (pe.issuer, pe.product_code) for pe in prior_entries.values() if pe.product_code
-    }
+    prior_products = {(pe.issuer, pe.product_code) for pe in prior_entries.values() if pe.product_code}
 
     unchanged = prior_current & set(current_map.keys())
     replaced_predecessors: set[str] = set(historical_map.keys()) & prior_current
@@ -265,7 +263,11 @@ def generate_corpus_diff_report(
             )
         elif (
             superseded_id is not None
-            and (superseded_id in replaced_predecessors or superseded_id in prior_entries or superseded_id in prior_all)
+            and (
+                superseded_id in replaced_predecessors
+                or superseded_id in prior_entries
+                or superseded_id in prior_all
+            )
         ) or (source.issuer, source.product_code) in prior_products:
             if superseded_id is None:
                 for pe in prior_entries.values():

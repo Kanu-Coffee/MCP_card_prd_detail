@@ -236,7 +236,9 @@ def _atomic_write(
     dir_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
     temp_fd = -1
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         temp_fd = os.open(temp_name, flags, mode, dir_fd=dir_fd)
         view = memoryview(payload_bytes)
         while view:
@@ -319,7 +321,9 @@ def load_retirement_ledger(state_dir: Path) -> RetirementLedger | None:
     if directory.is_symlink() or not directory.is_dir():
         raise RetirementError("unsafe_retirement_path")
     pointer_path = directory / _POINTER_NAME
-    names = [name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])]
+    names = [
+        name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])
+    ]
     if pointer_path.exists():
         if pointer_path.is_symlink() or not pointer_path.is_file():
             raise RetirementError("retirement_ledger_invalid")
@@ -356,7 +360,9 @@ def prune_retirement_ledgers(state_dir: Path, *, keep: int) -> int:
         raise RetirementError("retirement_keep_invalid")
     directory = Path(os.path.abspath(state_dir)) / _RETIREMENT_DIRECTORY
     try:
-        names = [name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])]
+        names = [
+            name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])
+        ]
     except FileNotFoundError:
         return 0
     pointer_target: str | None = None

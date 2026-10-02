@@ -728,9 +728,7 @@ class CodexOCRProvider:
                 raise ProviderSystemicError("provider_systemic_failure")
             environment[self.provider_env_key] = secret
         security_arguments = [
-            token
-            for key, value in self.provider_config
-            for token in ("--config", f'{key}="{value}"')
+            token for key, value in self.provider_config for token in ("--config", f'{key}="{value}"')
         ]
         security_arguments.extend(
             value for override in CODEX_OCR_CONFIG_OVERRIDES for value in ("--config", override)

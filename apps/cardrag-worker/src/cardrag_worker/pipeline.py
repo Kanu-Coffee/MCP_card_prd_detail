@@ -2558,7 +2558,11 @@ class WorkerPipeline:
         remain justified through the sealed retirement ledger.
         """
 
-        if result.status != "succeeded" or result.generation_id is None or not self._corpus_baseline_documents:
+        if (
+            result.status != "succeeded"
+            or result.generation_id is None
+            or not self._corpus_baseline_documents
+        ):
             return
         try:
             record_corpus_baseline(
@@ -2658,7 +2662,9 @@ class WorkerPipeline:
             lineage_absent: dict[str, bool] = {}
             evidence_budget = policy.max_per_run + 10
             budget_used = 0
-            for document in sorted(absent.values(), key=lambda item: (item.issuer, item.product_code, item.document_id)):
+            for document in sorted(
+                absent.values(), key=lambda item: (item.issuer, item.product_code, item.document_id)
+            ):
                 lineage_absent[document.document_id] = document.lineage_key not in discovered_lineages
                 if budget_used < evidence_budget:
                     budget_used += 1
@@ -2680,7 +2686,9 @@ class WorkerPipeline:
                 "retired": len(outcome.retired),
                 "candidates": len(outcome.candidates),
             }
-            if outcome.ledger.entries and (ledger is None or ledger_bytes(ledger) != ledger_bytes(outcome.ledger)):
+            if outcome.ledger.entries and (
+                ledger is None or ledger_bytes(ledger) != ledger_bytes(outcome.ledger)
+            ):
                 self._pending_retirement_ledger = outcome.ledger
             return outcome
 
@@ -3380,7 +3388,9 @@ class WorkerPipeline:
         self._corpus_issuer_counts = {}
         for item in acquired:
             if not item.is_historical:
-                self._corpus_issuer_counts[item.source.issuer] = self._corpus_issuer_counts.get(item.source.issuer, 0) + 1
+                self._corpus_issuer_counts[item.source.issuer] = (
+                    self._corpus_issuer_counts.get(item.source.issuer, 0) + 1
+                )
         self._corpus_gate_counts = {}
         self._pending_retirement_ledger = None
         with self.performance.measure("corpus_diff_seconds"):
@@ -3390,7 +3400,9 @@ class WorkerPipeline:
                 seed_ledger=seed_ledger,
                 prior=retirement_prior,
                 retirement_resolver=(
-                    self._build_retirement_resolver(run_id=run_id, prior=retirement_prior, seed_ledger=seed_ledger)
+                    self._build_retirement_resolver(
+                        run_id=run_id, prior=retirement_prior, seed_ledger=seed_ledger
+                    )
                     if retirement_prior is not None
                     else None
                 ),
@@ -3784,6 +3796,7 @@ class WorkerPipeline:
                             (c_document.pdf.sha256, c_document.pdf.size_bytes, c_document.page_count),
                             c_document,
                         )
+
                 def _retained_identity_conflict(candidate_doc_id: str, partner_seal_sha: str) -> bool:
                     """True when the document's own retained bytes disagree with a
                     candidate bind source and its own identity is already retained."""
@@ -3875,9 +3888,16 @@ class WorkerPipeline:
                     prior_doc_id = c_doc.document_id
                     if prior_doc_id == doc_id:
                         continue
-                    prior_ocr_path = runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "ocr.md"
+                    prior_ocr_path = (
+                        runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "ocr.md"
+                    )
                     prior_manifest_path = (
-                        runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "native-manifest.json"
+                        runs_root
+                        / candidate_run_id
+                        / "documents"
+                        / prior_doc_id
+                        / "ocr"
+                        / "native-manifest.json"
                     )
                     if (
                         not prior_manifest_path.is_file()

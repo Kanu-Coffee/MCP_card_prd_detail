@@ -104,7 +104,9 @@ def test_lotte_regression_two_runs_candidate_then_retired() -> None:
         for e in first.ledger.entries
         if e.status == "candidate"
     )
-    second = _evaluate(sweep, run_id="run-2", started_at=datetime(2026, 10, 1, tzinfo=UTC), ledger=first.ledger)
+    second = _evaluate(
+        sweep, run_id="run-2", started_at=datetime(2026, 10, 1, tzinfo=UTC), ledger=first.ledger
+    )
     assert len(second.retired) == 8
     assert second.candidates == ()
     assert second.unjustified == {}
@@ -211,8 +213,13 @@ def test_absolute_and_ratio_caps_fail_closed_on_overflow() -> None:
 def test_reinstatement_closes_open_retirement_records() -> None:
     items = tuple(_absent(code) for code in LOTTE_CODES[:2])
     first = _evaluate(items, run_id="run-1", started_at=datetime(2026, 9, 30, tzinfo=UTC), ledger=None)
-    second = _evaluate((), run_id="run-2", started_at=datetime(2026, 10, 1, tzinfo=UTC), ledger=first.ledger,
-                       discovered={("lotte", "1151", "product-manual"), ("lotte", "1835", "product-manual")})
+    second = _evaluate(
+        (),
+        run_id="run-2",
+        started_at=datetime(2026, 10, 1, tzinfo=UTC),
+        ledger=first.ledger,
+        discovered={("lotte", "1151", "product-manual"), ("lotte", "1835", "product-manual")},
+    )
     assert set(second.reinstated) == {i.document_id for i in items}
     statuses = {e.document_id: e.status for e in second.ledger.entries}
     assert all(statuses[i.document_id] == "reinstated" for i in items)
@@ -271,6 +278,7 @@ def test_ledger_schema_guard(tmp_path: Path) -> None:
     directory.mkdir(parents=True)
     fake = b'{"schema_version": "bogus", "entries": []}'
     import hashlib as _hashlib
+
     name = _hashlib.sha256(fake).hexdigest() + ".json"
     (directory / name).write_bytes(fake)
     (directory / "latest").write_text(name[:-5] + "\n")
