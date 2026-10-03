@@ -1577,6 +1577,13 @@ class OCRResolver:
             # Refuse before downloading or materializing anything: the shared cache
             # holds a nondeterministic sibling of the bytes this generation already
             # sealed, and only the retained seal may back this generation.
+            warnings.warn(
+                "refusing remote OCR cache variant before download because it is outside "
+                f"the retained generation seal; document_id={source_document_id} "
+                f"reuse_key={reuse_key}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return None
         body = await self._get_cache_bytes(artifact.path, phase="cas", max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
@@ -1956,22 +1963,29 @@ class OCRResolver:
                         source=manifest.source,
                         source_document_id=source_document_id,
                         output_dir=output_dir,
+                        expected_ocr_identity=expected_ocr_identity,
                     )
                 except ProviderSystemicError:
                     raise
                 except Exception:
                     winner = None
+            # The shared OCR cache keeps one immutable entry per reuse key, but LLM
+            # OCR is not byte-deterministic, so the remote entry can legitimately
+            # already hold another variant of the same input.  That is never a reason
+            # to fail a document or abort a batch: keep the generation's own bytes,
+            # leave the remote entry untouched, and report the skip.
+            # Defer only when the remote pointer holds a *validated but different*
+            # variant, the expected consequence of nondeterministic LLM OCR sharing one
+            # immutable reuse key.  The generation keeps its own bytes and the remote
+            # entry is left untouched.  Everything else stays fail-closed: an
+            # unverifiable or corrupt remote control file (winner is None), network,
+            # timeout and HTTP failures including auth, and any CAS-phase failure.
             retained_conflict = (
-                expected_ocr_identity is not None
-                and exc.phase in {"manifest", "ready"}
+                exc.phase in {"manifest", "ready"}
+                and expected_ocr_identity is not None
                 and (winner is None or (winner.ocr_sha256, winner.size_bytes) != expected_ocr_identity)
             )
             if retained_conflict:
-                # LLM OCR is not byte-deterministic, so the shared cache can already
-                # hold an alternate variant under this reuse key.  The retained
-                # generation seal wins: the foreign variant is never adopted, the
-                # remote entry is never overwritten, and the batch is never aborted.
-                # The conflict stays observable as a deferred publication diagnostic.
                 winner = None
             if winner is not None:
                 self._cache_publication_diagnostic_path(output_dir).unlink(missing_ok=True)
@@ -1983,8 +1997,8 @@ class OCRResolver:
                     error=exc,
                 )
                 warnings.warn(
-                    "native OCR cache publication skipped for a retained generation seal "
-                    f"conflict (reason_code={exc.reason_code}, phase={exc.phase}); "
+                    "native OCR cache publication skipped because the remote entry already "
+                    f"holds a different variant (reason_code={exc.reason_code}, phase={exc.phase}); "
                     "publishing generation-only OCR",
                     RuntimeWarning,
                     stacklevel=2,
