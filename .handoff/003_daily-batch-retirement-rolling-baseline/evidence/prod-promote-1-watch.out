@@ -1,0 +1,240 @@
+prod-promote-1 exit code: 1 at 2026-10-03T08:18:03+09:00
+2026-10-03 07:34:57,066 INFO cardrag_worker.cli Worker startup capacity preflight passed filesystem_free_bytes=109078286336 minimum_free_bytes=2147483648
+2026-10-03 07:34:59,656 INFO cardrag_worker.cli OCR discovered 6 compatible contracts: gpt-5.6-sol, gpt-5.4, gpt-5.6-terra, anthropic/claude-sonnet-5, PaddleOCR-VL-1.6, PaddleOCR-VL-1.6
+2026-10-03 07:34:59,656 INFO cardrag_worker.cli Remote OCR cache access mode=read-write require_hit=False
+2026-10-03 07:35:14,027 INFO cardrag_worker.cli Qwen provider preflight passed provider=deepinfra samples=24 minimum_repeat_cosine=0.999900 minimum_cross_provider_cosine=0.999841 tokenizer_sha256=83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d
+2026-10-03 07:35:14,027 INFO cardrag_worker.cli Worker startup completed elapsed_seconds=17.954
+2026-10-03 07:39:04,682 INFO cardrag_worker.pipeline discovery completed issuer=woori records=915 warnings=0
+2026-10-03 07:39:24,791 INFO cardrag_worker.pipeline discovery completed issuer=kb records=751 warnings=0
+2026-10-03 07:39:47,225 INFO cardrag_worker.pipeline discovery completed issuer=shinhan records=883 warnings=0
+2026-10-03 07:40:01,456 INFO cardrag_worker.pipeline discovery completed issuer=samsung records=565 warnings=0
+2026-10-03 07:42:34,179 INFO cardrag_worker.pipeline discovery completed issuer=hyundai records=577 warnings=4
+2026-10-03 07:42:34,194 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 13843: source effective date unavailable (99999999)
+2026-10-03 07:42:34,194 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12662: source effective date unavailable (99999999)
+2026-10-03 07:42:34,194 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12518: source effective date unavailable (99999999)
+2026-10-03 07:42:34,194 WARNING cardrag_worker.pipeline discovery warning issuer=hyundai: Hyundai product 12942: no published PDF attachment
+2026-10-03 07:43:08,859 INFO cardrag_worker.pipeline discovery completed issuer=hana records=724 warnings=0
+2026-10-03 07:43:10,966 INFO cardrag_worker.pipeline discovery completed issuer=lotte records=529 warnings=2
+2026-10-03 07:43:10,980 WARNING cardrag_worker.pipeline discovery warning issuer=lotte: source_unavailable issuer=lotte product_code=1678 source_id=source_29e7ea5b8261cb950be7fbc614afbbb5089d3c9ad32d12a4b1119ac6c17c1d49 status=404 source_version=20210930 source_url=https://image.lottecard.co.kr/UploadFiles/cardProvisionPath/%EC%BA%90%EC%8B%9C%EB%85%B8%ED%8A%B8%20%EC%83%81%ED%92%88%EC%95%88%EB%82%B4%EC%9E%A5%20_230310OL.pdf
+2026-10-03 07:43:10,980 WARNING cardrag_worker.pipeline discovery warning issuer=lotte: source_unavailable issuer=lotte product_code=1603 source_id=source_3942b85e984b704350f7f60e93cf89cd820439a68bacdf5c7f2c9890065c9195 status=404 source_version=20190730 source_url=https://image.lottecard.co.kr/UploadFiles/cardProvisionPath/%EC%9D%B4%EC%97%A0%EC%9D%B4%EC%BD%94%EB%A6%AC%EC%95%84%20Wonderful_%EA%B0%80%EC%9D%B4%EB%93%9C%EB%B6%81_220120OL.pdf
+2026-10-03 07:43:11,232 INFO cardrag_worker.pipeline discovery completed issuer=bc records=122 warnings=1
+2026-10-03 07:43:11,241 WARNING cardrag_worker.pipeline discovery warning issuer=bc: BC disclosure parsed 113 product rows; selected 122 guides; excluded 1 application forms and 1 corporate guides
+2026-10-03 07:43:12,116 INFO cardrag_worker.pipeline PDF progress completed=25 total=5066 cache_hits=25 cache_misses=0 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:12,846 INFO cardrag_worker.pipeline PDF progress completed=50 total=5066 cache_hits=50 cache_misses=0 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:13,535 INFO cardrag_worker.pipeline PDF progress completed=75 total=5066 cache_hits=75 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:14,627 INFO cardrag_worker.pipeline PDF progress completed=100 total=5066 cache_hits=100 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:15,686 INFO cardrag_worker.pipeline PDF progress completed=125 total=5066 cache_hits=125 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:16,515 INFO cardrag_worker.pipeline PDF progress completed=150 total=5066 cache_hits=150 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:17,201 INFO cardrag_worker.pipeline PDF progress completed=175 total=5066 cache_hits=175 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:18,062 INFO cardrag_worker.pipeline PDF progress completed=200 total=5066 cache_hits=200 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:18,742 INFO cardrag_worker.pipeline PDF progress completed=225 total=5066 cache_hits=225 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:19,471 INFO cardrag_worker.pipeline PDF progress completed=250 total=5066 cache_hits=250 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:20,055 INFO cardrag_worker.pipeline PDF progress completed=275 total=5066 cache_hits=275 cache_misses=1 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:20,727 INFO cardrag_worker.pipeline PDF progress completed=300 total=5066 cache_hits=300 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:21,546 INFO cardrag_worker.pipeline PDF progress completed=325 total=5066 cache_hits=325 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:22,147 INFO cardrag_worker.pipeline PDF progress completed=350 total=5066 cache_hits=350 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:22,795 INFO cardrag_worker.pipeline PDF progress completed=375 total=5066 cache_hits=375 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:23,922 INFO cardrag_worker.pipeline PDF progress completed=400 total=5066 cache_hits=400 cache_misses=2 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:24,577 INFO cardrag_worker.pipeline PDF progress completed=425 total=5066 cache_hits=425 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:25,158 INFO cardrag_worker.pipeline PDF progress completed=450 total=5066 cache_hits=450 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:25,924 INFO cardrag_worker.pipeline PDF progress completed=475 total=5066 cache_hits=475 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:26,750 INFO cardrag_worker.pipeline PDF progress completed=500 total=5066 cache_hits=500 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:27,231 INFO cardrag_worker.pipeline PDF progress completed=525 total=5066 cache_hits=525 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:27,873 INFO cardrag_worker.pipeline PDF progress completed=550 total=5066 cache_hits=550 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:28,538 INFO cardrag_worker.pipeline PDF progress completed=575 total=5066 cache_hits=575 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:29,141 INFO cardrag_worker.pipeline PDF progress completed=600 total=5066 cache_hits=600 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:29,953 INFO cardrag_worker.pipeline PDF progress completed=625 total=5066 cache_hits=625 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:30,881 INFO cardrag_worker.pipeline PDF progress completed=650 total=5066 cache_hits=650 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:31,752 INFO cardrag_worker.pipeline PDF progress completed=675 total=5066 cache_hits=675 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:32,370 INFO cardrag_worker.pipeline PDF progress completed=700 total=5066 cache_hits=700 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:32,980 INFO cardrag_worker.pipeline PDF progress completed=725 total=5066 cache_hits=725 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:33,920 INFO cardrag_worker.pipeline PDF progress completed=750 total=5066 cache_hits=750 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:34,630 INFO cardrag_worker.pipeline PDF progress completed=775 total=5066 cache_hits=775 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:35,388 INFO cardrag_worker.pipeline PDF progress completed=800 total=5066 cache_hits=800 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:36,126 INFO cardrag_worker.pipeline PDF progress completed=825 total=5066 cache_hits=825 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:36,968 INFO cardrag_worker.pipeline PDF progress completed=850 total=5066 cache_hits=850 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:37,695 INFO cardrag_worker.pipeline PDF progress completed=875 total=5066 cache_hits=875 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:38,279 INFO cardrag_worker.pipeline PDF progress completed=900 total=5066 cache_hits=900 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:38,888 INFO cardrag_worker.pipeline PDF progress completed=925 total=5066 cache_hits=925 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:39,547 INFO cardrag_worker.pipeline PDF progress completed=950 total=5066 cache_hits=950 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:40,203 INFO cardrag_worker.pipeline PDF progress completed=975 total=5066 cache_hits=975 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:40,835 INFO cardrag_worker.pipeline PDF progress completed=1000 total=5066 cache_hits=1000 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:41,469 INFO cardrag_worker.pipeline PDF progress completed=1025 total=5066 cache_hits=1025 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:42,051 INFO cardrag_worker.pipeline PDF progress completed=1050 total=5066 cache_hits=1050 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:42,680 INFO cardrag_worker.pipeline PDF progress completed=1075 total=5066 cache_hits=1075 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:43,261 INFO cardrag_worker.pipeline PDF progress completed=1100 total=5066 cache_hits=1100 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:44,019 INFO cardrag_worker.pipeline PDF progress completed=1125 total=5066 cache_hits=1125 cache_misses=3 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:48,620 INFO cardrag_worker.pipeline PDF progress completed=1150 total=5066 cache_hits=1150 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:49,256 INFO cardrag_worker.pipeline PDF progress completed=1175 total=5066 cache_hits=1175 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:49,789 INFO cardrag_worker.pipeline PDF progress completed=1200 total=5066 cache_hits=1200 cache_misses=4 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:50,445 INFO cardrag_worker.pipeline PDF progress completed=1225 total=5066 cache_hits=1225 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:50,936 INFO cardrag_worker.pipeline PDF progress completed=1250 total=5066 cache_hits=1250 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:51,532 INFO cardrag_worker.pipeline PDF progress completed=1275 total=5066 cache_hits=1275 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:52,099 INFO cardrag_worker.pipeline PDF progress completed=1300 total=5066 cache_hits=1300 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:52,696 INFO cardrag_worker.pipeline PDF progress completed=1325 total=5066 cache_hits=1325 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:53,259 INFO cardrag_worker.pipeline PDF progress completed=1350 total=5066 cache_hits=1350 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:53,763 INFO cardrag_worker.pipeline PDF progress completed=1375 total=5066 cache_hits=1375 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:54,709 INFO cardrag_worker.pipeline PDF progress completed=1400 total=5066 cache_hits=1400 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:55,324 INFO cardrag_worker.pipeline PDF progress completed=1425 total=5066 cache_hits=1425 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:55,758 INFO cardrag_worker.pipeline PDF progress completed=1450 total=5066 cache_hits=1450 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:56,453 INFO cardrag_worker.pipeline PDF progress completed=1475 total=5066 cache_hits=1475 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:56,933 INFO cardrag_worker.pipeline PDF progress completed=1500 total=5066 cache_hits=1500 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:57,528 INFO cardrag_worker.pipeline PDF progress completed=1525 total=5066 cache_hits=1525 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:58,185 INFO cardrag_worker.pipeline PDF progress completed=1550 total=5066 cache_hits=1550 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:58,823 INFO cardrag_worker.pipeline PDF progress completed=1575 total=5066 cache_hits=1575 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:59,405 INFO cardrag_worker.pipeline PDF progress completed=1600 total=5066 cache_hits=1600 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:43:59,917 INFO cardrag_worker.pipeline PDF progress completed=1625 total=5066 cache_hits=1625 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:00,570 INFO cardrag_worker.pipeline PDF progress completed=1650 total=5066 cache_hits=1650 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:01,352 INFO cardrag_worker.pipeline PDF progress completed=1675 total=5066 cache_hits=1675 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:02,321 INFO cardrag_worker.pipeline PDF progress completed=1700 total=5066 cache_hits=1700 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:02,774 INFO cardrag_worker.pipeline PDF progress completed=1725 total=5066 cache_hits=1725 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:03,288 INFO cardrag_worker.pipeline PDF progress completed=1750 total=5066 cache_hits=1750 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:03,813 INFO cardrag_worker.pipeline PDF progress completed=1775 total=5066 cache_hits=1775 cache_misses=5 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:04,496 INFO cardrag_worker.pipeline PDF progress completed=1800 total=5066 cache_hits=1800 cache_misses=6 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:05,254 INFO cardrag_worker.pipeline PDF progress completed=1825 total=5066 cache_hits=1825 cache_misses=6 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:05,971 INFO cardrag_worker.pipeline PDF progress completed=1850 total=5066 cache_hits=1850 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:06,561 INFO cardrag_worker.pipeline PDF progress completed=1875 total=5066 cache_hits=1875 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:07,103 INFO cardrag_worker.pipeline PDF progress completed=1900 total=5066 cache_hits=1900 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:07,582 INFO cardrag_worker.pipeline PDF progress completed=1925 total=5066 cache_hits=1925 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:08,160 INFO cardrag_worker.pipeline PDF progress completed=1950 total=5066 cache_hits=1950 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:08,829 INFO cardrag_worker.pipeline PDF progress completed=1975 total=5066 cache_hits=1975 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:09,419 INFO cardrag_worker.pipeline PDF progress completed=2000 total=5066 cache_hits=2000 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:10,137 INFO cardrag_worker.pipeline PDF progress completed=2025 total=5066 cache_hits=2025 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:10,683 INFO cardrag_worker.pipeline PDF progress completed=2050 total=5066 cache_hits=2050 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:11,327 INFO cardrag_worker.pipeline PDF progress completed=2075 total=5066 cache_hits=2075 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:11,888 INFO cardrag_worker.pipeline PDF progress completed=2100 total=5066 cache_hits=2100 cache_misses=7 downloads=0 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:12,641 INFO cardrag_worker.pipeline PDF progress completed=2125 total=5066 cache_hits=2124 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:13,216 INFO cardrag_worker.pipeline PDF progress completed=2150 total=5066 cache_hits=2149 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:13,791 INFO cardrag_worker.pipeline PDF progress completed=2175 total=5066 cache_hits=2174 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:14,378 INFO cardrag_worker.pipeline PDF progress completed=2200 total=5066 cache_hits=2199 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:15,009 INFO cardrag_worker.pipeline PDF progress completed=2225 total=5066 cache_hits=2224 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:15,575 INFO cardrag_worker.pipeline PDF progress completed=2250 total=5066 cache_hits=2249 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:16,508 INFO cardrag_worker.pipeline PDF progress completed=2275 total=5066 cache_hits=2274 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:17,122 INFO cardrag_worker.pipeline PDF progress completed=2300 total=5066 cache_hits=2299 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:17,701 INFO cardrag_worker.pipeline PDF progress completed=2325 total=5066 cache_hits=2324 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:18,482 INFO cardrag_worker.pipeline PDF progress completed=2350 total=5066 cache_hits=2349 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:19,156 INFO cardrag_worker.pipeline PDF progress completed=2375 total=5066 cache_hits=2374 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:19,781 INFO cardrag_worker.pipeline PDF progress completed=2400 total=5066 cache_hits=2399 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:20,438 INFO cardrag_worker.pipeline PDF progress completed=2425 total=5066 cache_hits=2424 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:21,045 INFO cardrag_worker.pipeline PDF progress completed=2450 total=5066 cache_hits=2449 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:21,585 INFO cardrag_worker.pipeline PDF progress completed=2475 total=5066 cache_hits=2474 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:22,063 INFO cardrag_worker.pipeline PDF progress completed=2500 total=5066 cache_hits=2499 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:22,741 INFO cardrag_worker.pipeline PDF progress completed=2525 total=5066 cache_hits=2524 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:23,427 INFO cardrag_worker.pipeline PDF progress completed=2550 total=5066 cache_hits=2549 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:24,015 INFO cardrag_worker.pipeline PDF progress completed=2575 total=5066 cache_hits=2574 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:24,569 INFO cardrag_worker.pipeline PDF progress completed=2600 total=5066 cache_hits=2599 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:25,170 INFO cardrag_worker.pipeline PDF progress completed=2625 total=5066 cache_hits=2624 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:25,798 INFO cardrag_worker.pipeline PDF progress completed=2650 total=5066 cache_hits=2649 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:26,740 INFO cardrag_worker.pipeline PDF progress completed=2675 total=5066 cache_hits=2674 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:27,480 INFO cardrag_worker.pipeline PDF progress completed=2700 total=5066 cache_hits=2699 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:27,941 INFO cardrag_worker.pipeline PDF progress completed=2725 total=5066 cache_hits=2724 cache_misses=8 downloads=1 revisions=0 revalidations=0 not_modified=0 unsupported=0
+2026-10-03 07:44:28,695 INFO cardrag_worker.pipeline PDF progress completed=2750 total=5066 cache_hits=2747 cache_misses=10 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-03 07:44:29,497 INFO cardrag_worker.pipeline PDF progress completed=2775 total=5066 cache_hits=2772 cache_misses=10 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-03 07:44:30,304 INFO cardrag_worker.pipeline PDF progress completed=2800 total=5066 cache_hits=2797 cache_misses=10 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=1
+2026-10-03 07:44:30,942 INFO cardrag_worker.pipeline PDF progress completed=2825 total=5066 cache_hits=2821 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:31,573 INFO cardrag_worker.pipeline PDF progress completed=2850 total=5066 cache_hits=2846 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:32,207 INFO cardrag_worker.pipeline PDF progress completed=2875 total=5066 cache_hits=2871 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:32,788 INFO cardrag_worker.pipeline PDF progress completed=2900 total=5066 cache_hits=2896 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:33,378 INFO cardrag_worker.pipeline PDF progress completed=2925 total=5066 cache_hits=2921 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:34,105 INFO cardrag_worker.pipeline PDF progress completed=2950 total=5066 cache_hits=2946 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:34,794 INFO cardrag_worker.pipeline PDF progress completed=2975 total=5066 cache_hits=2971 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:35,613 INFO cardrag_worker.pipeline PDF progress completed=3000 total=5066 cache_hits=2996 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:36,518 INFO cardrag_worker.pipeline PDF progress completed=3025 total=5066 cache_hits=3021 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:37,213 INFO cardrag_worker.pipeline PDF progress completed=3050 total=5066 cache_hits=3046 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:37,826 INFO cardrag_worker.pipeline PDF progress completed=3075 total=5066 cache_hits=3071 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:38,412 INFO cardrag_worker.pipeline PDF progress completed=3100 total=5066 cache_hits=3096 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:39,002 INFO cardrag_worker.pipeline PDF progress completed=3125 total=5066 cache_hits=3121 cache_misses=11 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=2
+2026-10-03 07:44:39,669 INFO cardrag_worker.pipeline PDF progress completed=3150 total=5066 cache_hits=3145 cache_misses=12 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:40,195 INFO cardrag_worker.pipeline PDF progress completed=3175 total=5066 cache_hits=3170 cache_misses=12 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:40,748 INFO cardrag_worker.pipeline PDF progress completed=3200 total=5066 cache_hits=3195 cache_misses=12 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:41,328 INFO cardrag_worker.pipeline PDF progress completed=3225 total=5066 cache_hits=3220 cache_misses=12 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:41,900 INFO cardrag_worker.pipeline PDF progress completed=3250 total=5066 cache_hits=3245 cache_misses=12 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:42,588 INFO cardrag_worker.pipeline PDF progress completed=3275 total=5066 cache_hits=3270 cache_misses=12 downloads=2 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:43,504 INFO cardrag_worker.pipeline PDF progress completed=3300 total=5066 cache_hits=3294 cache_misses=13 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:44,146 INFO cardrag_worker.pipeline PDF progress completed=3325 total=5066 cache_hits=3319 cache_misses=13 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:44,934 INFO cardrag_worker.pipeline PDF progress completed=3350 total=5066 cache_hits=3344 cache_misses=13 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=3
+2026-10-03 07:44:45,523 INFO cardrag_worker.pipeline PDF progress completed=3375 total=5066 cache_hits=3368 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:46,404 INFO cardrag_worker.pipeline PDF progress completed=3400 total=5066 cache_hits=3393 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:46,892 INFO cardrag_worker.pipeline PDF progress completed=3425 total=5066 cache_hits=3418 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:47,531 INFO cardrag_worker.pipeline PDF progress completed=3450 total=5066 cache_hits=3443 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:48,047 INFO cardrag_worker.pipeline PDF progress completed=3475 total=5066 cache_hits=3468 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:48,485 INFO cardrag_worker.pipeline PDF progress completed=3500 total=5066 cache_hits=3493 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:49,170 INFO cardrag_worker.pipeline PDF progress completed=3525 total=5066 cache_hits=3518 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:49,654 INFO cardrag_worker.pipeline PDF progress completed=3550 total=5066 cache_hits=3543 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:51,289 INFO cardrag_worker.pipeline PDF progress completed=3575 total=5066 cache_hits=3568 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:52,366 INFO cardrag_worker.pipeline PDF progress completed=3600 total=5066 cache_hits=3593 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:53,098 INFO cardrag_worker.pipeline PDF progress completed=3625 total=5066 cache_hits=3618 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:54,110 INFO cardrag_worker.pipeline PDF progress completed=3650 total=5066 cache_hits=3643 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:54,753 INFO cardrag_worker.pipeline PDF progress completed=3675 total=5066 cache_hits=3668 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:55,413 INFO cardrag_worker.pipeline PDF progress completed=3700 total=5066 cache_hits=3693 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:55,952 INFO cardrag_worker.pipeline PDF progress completed=3725 total=5066 cache_hits=3718 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:56,582 INFO cardrag_worker.pipeline PDF progress completed=3750 total=5066 cache_hits=3743 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:57,393 INFO cardrag_worker.pipeline PDF progress completed=3775 total=5066 cache_hits=3768 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:58,007 INFO cardrag_worker.pipeline PDF progress completed=3800 total=5066 cache_hits=3793 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:58,761 INFO cardrag_worker.pipeline PDF progress completed=3825 total=5066 cache_hits=3818 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:44:59,471 INFO cardrag_worker.pipeline PDF progress completed=3850 total=5066 cache_hits=3843 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:00,136 INFO cardrag_worker.pipeline PDF progress completed=3875 total=5066 cache_hits=3868 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:00,906 INFO cardrag_worker.pipeline PDF progress completed=3900 total=5066 cache_hits=3893 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:01,477 INFO cardrag_worker.pipeline PDF progress completed=3925 total=5066 cache_hits=3918 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:01,955 INFO cardrag_worker.pipeline PDF progress completed=3950 total=5066 cache_hits=3943 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:02,947 INFO cardrag_worker.pipeline PDF progress completed=3975 total=5066 cache_hits=3968 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:03,789 INFO cardrag_worker.pipeline PDF progress completed=4000 total=5066 cache_hits=3993 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:04,271 INFO cardrag_worker.pipeline PDF progress completed=4025 total=5066 cache_hits=4018 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:04,956 INFO cardrag_worker.pipeline PDF progress completed=4050 total=5066 cache_hits=4043 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:05,606 INFO cardrag_worker.pipeline PDF progress completed=4075 total=5066 cache_hits=4068 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:06,732 INFO cardrag_worker.pipeline PDF progress completed=4100 total=5066 cache_hits=4093 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:07,262 INFO cardrag_worker.pipeline PDF progress completed=4125 total=5066 cache_hits=4118 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:07,961 INFO cardrag_worker.pipeline PDF progress completed=4150 total=5066 cache_hits=4143 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:08,549 INFO cardrag_worker.pipeline PDF progress completed=4175 total=5066 cache_hits=4168 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:09,153 INFO cardrag_worker.pipeline PDF progress completed=4200 total=5066 cache_hits=4193 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:09,894 INFO cardrag_worker.pipeline PDF progress completed=4225 total=5066 cache_hits=4218 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:10,430 INFO cardrag_worker.pipeline PDF progress completed=4250 total=5066 cache_hits=4243 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:11,034 INFO cardrag_worker.pipeline PDF progress completed=4275 total=5066 cache_hits=4268 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:11,632 INFO cardrag_worker.pipeline PDF progress completed=4300 total=5066 cache_hits=4293 cache_misses=14 downloads=3 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:12,355 INFO cardrag_worker.pipeline PDF progress completed=4325 total=5066 cache_hits=4317 cache_misses=15 downloads=4 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:13,389 INFO cardrag_worker.pipeline PDF progress completed=4350 total=5066 cache_hits=4340 cache_misses=17 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:14,339 INFO cardrag_worker.pipeline PDF progress completed=4375 total=5066 cache_hits=4365 cache_misses=17 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:14,985 INFO cardrag_worker.pipeline PDF progress completed=4400 total=5066 cache_hits=4390 cache_misses=17 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:15,785 INFO cardrag_worker.pipeline PDF progress completed=4425 total=5066 cache_hits=4415 cache_misses=17 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:16,728 INFO cardrag_worker.pipeline PDF progress completed=4450 total=5066 cache_hits=4440 cache_misses=17 downloads=6 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:18,060 INFO cardrag_worker.pipeline PDF progress completed=4475 total=5066 cache_hits=4463 cache_misses=19 downloads=8 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:18,940 INFO cardrag_worker.pipeline PDF progress completed=4500 total=5066 cache_hits=4488 cache_misses=19 downloads=8 revisions=0 revalidations=0 not_modified=0 unsupported=4
+2026-10-03 07:45:19,477 INFO cardrag_worker.pipeline PDF progress completed=4525 total=5066 cache_hits=4511 cache_misses=20 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-03 07:45:20,276 INFO cardrag_worker.pipeline PDF progress completed=4550 total=5066 cache_hits=4536 cache_misses=20 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-03 07:45:21,224 INFO cardrag_worker.pipeline PDF progress completed=4575 total=5066 cache_hits=4561 cache_misses=20 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-03 07:45:21,915 INFO cardrag_worker.pipeline PDF progress completed=4600 total=5066 cache_hits=4586 cache_misses=20 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-03 07:45:22,815 INFO cardrag_worker.pipeline PDF progress completed=4625 total=5066 cache_hits=4611 cache_misses=20 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-03 07:45:23,716 INFO cardrag_worker.pipeline PDF progress completed=4650 total=5066 cache_hits=4636 cache_misses=20 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=5
+2026-10-03 07:45:24,365 INFO cardrag_worker.pipeline PDF progress completed=4675 total=5066 cache_hits=4660 cache_misses=21 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:25,140 INFO cardrag_worker.pipeline PDF progress completed=4700 total=5066 cache_hits=4685 cache_misses=21 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:26,177 INFO cardrag_worker.pipeline PDF progress completed=4725 total=5066 cache_hits=4710 cache_misses=21 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:27,522 INFO cardrag_worker.pipeline PDF progress completed=4750 total=5066 cache_hits=4735 cache_misses=21 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:28,314 INFO cardrag_worker.pipeline PDF progress completed=4775 total=5066 cache_hits=4760 cache_misses=21 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:29,299 INFO cardrag_worker.pipeline PDF progress completed=4800 total=5066 cache_hits=4785 cache_misses=21 downloads=9 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:30,154 INFO cardrag_worker.pipeline PDF progress completed=4825 total=5066 cache_hits=4809 cache_misses=21 downloads=10 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:32,097 INFO cardrag_worker.pipeline PDF progress completed=4850 total=5066 cache_hits=4833 cache_misses=22 downloads=11 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:32,968 INFO cardrag_worker.pipeline PDF progress completed=4875 total=5066 cache_hits=4858 cache_misses=22 downloads=11 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:33,842 INFO cardrag_worker.pipeline PDF progress completed=4900 total=5066 cache_hits=4883 cache_misses=22 downloads=11 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:34,693 INFO cardrag_worker.pipeline PDF progress completed=4925 total=5066 cache_hits=4908 cache_misses=22 downloads=11 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:35,352 INFO cardrag_worker.pipeline PDF progress completed=4950 total=5066 cache_hits=4933 cache_misses=22 downloads=11 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:36,519 INFO cardrag_worker.pipeline PDF progress completed=4975 total=5066 cache_hits=4955 cache_misses=23 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:37,179 INFO cardrag_worker.pipeline PDF progress completed=5000 total=5066 cache_hits=4980 cache_misses=23 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:37,823 INFO cardrag_worker.pipeline PDF progress completed=5025 total=5066 cache_hits=5005 cache_misses=23 downloads=14 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:38,742 INFO cardrag_worker.pipeline PDF progress completed=5050 total=5066 cache_hits=5027 cache_misses=25 downloads=17 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 07:45:39,552 INFO cardrag_worker.pipeline PDF progress completed=5066 total=5066 cache_hits=5041 cache_misses=25 downloads=19 revisions=0 revalidations=0 not_modified=0 unsupported=6
+2026-10-03 08:13:50,257 INFO cardrag_worker.pipeline Discovered 3994 reusable local OCR artifacts from prior run c622d3c4b1fb4df5a74a4b139591028f (remaining unbound: 1515)
+2026-10-03 08:18:01,970 INFO cardrag_worker.cli Worker execution finished elapsed_seconds=2585.896
+{
+  "document_id": "doc_8356d2d2849beb11eba92bf3a6b95629aa5a69ba7e8bf6c86bd5074fb77364f0",
+  "error_class_category": "ocr_cache_integrity",
+  "error_kind": "integrity",
+  "issuer": "bc",
+  "phase": "healing",
+  "product_code": "p-2e276f343490eedf1e219a5d6516c955e00a6e944162c7c84f4e2090c0a07332--v-e3b0c44298fc1c14",
+  "reason": "OCR cache healing returned bytes outside the retained generation identity.",
+  "reason_code": "ocr_cache_healing_identity_mismatch",
+  "report": "runs/06d890904e00437b80910f8bce5142a6/reports/ocr-systemic-failure.json",
+  "retryable": false,
+  "run_id": "06d890904e00437b80910f8bce5142a6",
+  "status": "failed"
+}
