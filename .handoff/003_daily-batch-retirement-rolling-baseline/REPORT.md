@@ -102,3 +102,22 @@ journalctl -u cardrag-worker.service -f   # 수동 1회 진행 확인(로그가 
 - registry 이미지 patch3~patch7 다이제스트 전부 유지(로컬 patch7 이미지 건재 확인).
 - `/etc/cardrag/worker.env.bak.$TS`(블록 #3 적용 시 생성)로 원복 가능. 현재 원본 무변경.
 - stable 채널 pointer/운영 볼륨 미터치. 후보 generation `g-c622d3c4…e95cb9ce7d7f`는 candidate 채널에만 publish됨.
+
+---
+
+## Addendum (2026-10-03 12:00 KST, Executor) — 상태 변경 고지
+
+본 REPORT.md 작성 이후 다음이发生했고, §4/§5/§6의 결론이 부분적으로 갱신된다.
+상세·증거·재현 커맨드·새 plan 입력은 **`HANDOFF_20261003_EXECUTOR.md`** 를 정본으로 읽을 것.
+
+1. 블록 #3 적용(14:57→15:02 KST, 10/2) 및 prod 수동 런 `d9de4b24…` 수행: hana 724 통과(patch7 실운영 검증),
+   PDF 5,066, OCR 5,500/5,500 failed=0(신규 호출 96 = 95 중복 + 1 legit)까지 진행 후 **03:02 sqlite I/O 오류로 실패**.
+2. 그 결과 **prod 상태 DB(v129) 파기**. 원인은 "락 거부 프로세스가 SQLite를 먼저 여는" 코드 순결함(§4-1).
+   보존본 SHA-256 `199b9e1a…f051`(볼륨 `cardrag-v129-corrupt-state-20261003`), MCP 서빙·파일 자산 무영향.
+   → 수정 `b252aa2`(락 프로브, patch8).
+3. 검증된 후보 볼륨 `v130`의 prod 승격 시도 중 **qwen OCR 비대결정성**을 발견(114/3,988 상이 본,
+   `evidence/prod-vs-candidate-ocr-divergence.jsonl`). 사용자 지시 R2에 따라 힐링 가드 의미를
+   "retained generation seal 우선 + 충돌은 관찰 가능한 스킵"으로 재정의(커밋 `a58ca9d`→`a406ee9`→`dc76d49`, patch9→11).
+4. 진행: `cardrag-prod-promote-4`(patch11, 새 런, channel stable, 원격 GC 임시 off) 11:51 기동.
+5. §6의 "블록 #3/정리 제안"은 수행 또는 대체되었고, worker.env 승격 블록(§7)과 잔여 과제는
+   HANDOFF §7·§8로 이관. 001/002 산출물은 무수정.
