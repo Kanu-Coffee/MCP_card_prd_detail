@@ -2637,6 +2637,18 @@ class WorkerPipeline:
                         except OSError:
                             pass
 
+        # 3. Check WebDAV CAS if webdav client is available:
+        if isinstance(self.webdav, WebDAVClient) and candidate_doc.ocr_sha256:
+            with suppress(Exception):
+                cas_obj_path = object_path(candidate_doc.ocr_sha256)
+                resp = self.webdav.core.get(cas_obj_path, max_bytes=8 * 1024 * 1024)
+                if (
+                    resp.status_code == 200
+                    and hashlib.sha256(resp.content).hexdigest() == candidate_doc.ocr_sha256
+                    and len(resp.content) > 0
+                ):
+                    return True
+
         return False
 
     def _build_retirement_resolver(
@@ -2656,7 +2668,7 @@ class WorkerPipeline:
         def resolve(
             requests: Sequence[RetirementRequest], discovered_lineages: frozenset[LineageKey]
         ) -> RetirementOutcome | None:
-            ledger = load_retirement_ledger(self.state_dir)
+            ledger = load_retirement_ledger(self.state_dir, self.state)
             absent: dict[str, AbsentDocument] = {}
             for request in requests:
                 absent[request.document_id] = AbsentDocument(
@@ -2726,8 +2738,14 @@ class WorkerPipeline:
     def _commit_pending_retirement_ledger(self) -> None:
         pending = getattr(self, "_pending_retirement_ledger", None)
         if pending is not None:
-            write_retirement_ledger(self.state_dir, pending)
-            self._pending_retirement_ledger = None
+            try:
+                write_retirement_ledger(self.state_dir, pending)
+            except Exception:
+                LOGGER.exception(
+                    "reason_code=retirement_ledger_commit_failed; continuing after durable run completion"
+                )
+            finally:
+                self._pending_retirement_ledger = None
 
     async def _reconcile_cancelled_publication(self, run_id: str) -> bool:
         """Record an exact stable commit completed immediately before cancellation."""
@@ -2752,13 +2770,13 @@ class WorkerPipeline:
                 status="ready",
                 details={"manifest_sha256": manifest.manifest_sha256},
             )
-            self._commit_pending_retirement_ledger()
             self.state.finish_run_if_running(
                 run_id,
                 "succeeded",
                 corpus_sha256=manifest.corpus_sha256,
                 contract_sha256=manifest.contract_sha256,
             )
+            self._commit_pending_retirement_ledger()
             return True
         except Exception:
             # Cancellation reconciliation is a strict positive proof.  Any
@@ -3382,12 +3400,46 @@ class WorkerPipeline:
             prior_observed_at = self.state.run_finished_at(seed_ledger.run_id) or ""
         retirement_prior: CorpusPriorView | None = None
         if corpus_baseline is not None:
+            prior_manifest_ocr: dict[str, str] = {}
+            prior_seal_path = self.state_dir / "runs" / corpus_baseline.run_id / "sealed" / "publish.json"
+            if prior_seal_path.is_file() and not prior_seal_path.is_symlink():
+                try:
+                    prior_seal_data = json.loads(prior_seal_path.read_text(encoding="utf-8"))
+                    prior_manifest = (
+                        prior_seal_data.get("manifest") if isinstance(prior_seal_data, dict) else None
+                    )
+                    if isinstance(prior_manifest, dict):
+                        for doc in prior_manifest.get("documents", []):
+                            if isinstance(doc, dict) and doc.get("availability") == "available":
+                                ocr_info = doc.get("ocr")
+                                if isinstance(ocr_info, dict) and ocr_info.get("sha256"):
+                                    prior_manifest_ocr[str(doc["document_id"])] = str(ocr_info["sha256"])
+                except Exception:
+                    LOGGER.debug("reason_code=prior_seal_ocr_read_failed; will fallback to webdav if needed")
+            if not prior_manifest_ocr and isinstance(self.webdav, WebDAVClient):
+                try:
+                    gen_manifest_path = generation_manifest_path(corpus_baseline.generation_id)
+                    gen_manifest_data = await self.webdav.get_json(gen_manifest_path)
+                    if isinstance(gen_manifest_data, dict):
+                        for doc in gen_manifest_data.get("documents", []):
+                            if isinstance(doc, dict) and doc.get("availability") == "available":
+                                ocr_info = doc.get("ocr")
+                                if isinstance(ocr_info, dict) and ocr_info.get("sha256"):
+                                    prior_manifest_ocr[str(doc["document_id"])] = str(ocr_info["sha256"])
+                except Exception:
+                    LOGGER.debug("reason_code=webdav_prior_manifest_read_failed")
+
             baseline_entries: dict[str, PriorEntry] = {}
             for baseline_document in corpus_baseline.documents:
                 seed_entry = (
                     seed_ledger.entries_by_doc_id.get(baseline_document.document_id)
                     if seed_ledger is not None
                     else None
+                )
+                ocr_sha = (
+                    seed_entry.ocr_sha256
+                    if seed_entry is not None and seed_entry.ocr_sha256
+                    else prior_manifest_ocr.get(baseline_document.document_id)
                 )
                 baseline_entries[baseline_document.document_id] = PriorEntry(
                     document_id=baseline_document.document_id,
@@ -3396,7 +3448,7 @@ class WorkerPipeline:
                     product_code=baseline_document.product_code,
                     document_type=baseline_document.document_type,
                     pdf_sha256=baseline_document.pdf_sha256,
-                    ocr_sha256=seed_entry.ocr_sha256 if seed_entry is not None else None,
+                    ocr_sha256=ocr_sha,
                 )
             retirement_prior = CorpusPriorView(
                 kind="rolling-baseline",
@@ -3642,13 +3694,13 @@ class WorkerPipeline:
         ):
             if isinstance(self.webdav, WebDAVClient):
                 await self.webdav.verification_gate()
-            self._commit_pending_retirement_ledger()
             self.state.finish_run(
                 run_id,
                 "no_change",
                 corpus_sha256=corpus_sha256,
                 contract_sha256=contract_sha256,
             )
+            self._commit_pending_retirement_ledger()
             return await finalize_pdf_activity(
                 PipelineResult(
                     run_id,
@@ -3686,6 +3738,7 @@ class WorkerPipeline:
                 corpus_sha256=corpus_sha256,
                 contract_sha256=contract_sha256,
             )
+            self._commit_pending_retirement_ledger()
             return await finalize_pdf_activity(
                 PipelineResult(
                     run_id,
@@ -4706,6 +4759,7 @@ class WorkerPipeline:
                 corpus_sha256=corpus_sha256,
                 contract_sha256=contract_sha256,
             )
+            self._commit_pending_retirement_ledger()
             return await finalize_pdf_activity(
                 PipelineResult(
                     run_id=run_id,
@@ -6630,13 +6684,13 @@ class WorkerPipeline:
                     status="ready",
                     details={"manifest_sha256": sealed_manifest.manifest_sha256},
                 )
-                self._commit_pending_retirement_ledger()
                 self.state.finish_run(
                     run_id,
                     "succeeded",
                     corpus_sha256=sealed_manifest.corpus_sha256,
                     contract_sha256=sealed_manifest.contract_sha256,
                 )
+                self._commit_pending_retirement_ledger()
                 return PipelineResult(
                     run_id=run_id,
                     status="succeeded",
@@ -6651,13 +6705,13 @@ class WorkerPipeline:
             if current.ocr_failed_document_count == 0:
                 if isinstance(self.webdav, WebDAVClient):
                     await self.webdav.verification_gate()
-                self._commit_pending_retirement_ledger()
                 self.state.finish_run(
                     run_id,
                     "no_change",
                     corpus_sha256=sealed_manifest.corpus_sha256,
                     contract_sha256=sealed_manifest.contract_sha256,
                 )
+                self._commit_pending_retirement_ledger()
                 return PipelineResult(
                     run_id=run_id,
                     status="no_change",
@@ -6714,13 +6768,13 @@ class WorkerPipeline:
             status="ready",
             details={"manifest_sha256": published.manifest_sha256},
         )
-        self._commit_pending_retirement_ledger()
         self.state.finish_run(
             run_id,
             "succeeded",
             corpus_sha256=str(aligned["corpus_sha256"]),
             contract_sha256=str(aligned["contract_sha256"]),
         )
+        self._commit_pending_retirement_ledger()
         return PipelineResult(
             run_id=run_id,
             status="succeeded",

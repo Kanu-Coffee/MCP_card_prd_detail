@@ -336,3 +336,45 @@ def test_retirement_requires_two_distinct_qualifying_runs() -> None:
     assert run2.ledger.entries[0].consecutive_absences == 2
     assert run2.ledger.entries[0].status == "retired"
     assert run2.ledger.entries[0].retired_run_id == "run-2"
+
+
+def test_load_retirement_ledger_validates_completed_run_status(tmp_path: Path) -> None:
+    class DummyState:
+        def __init__(self, statuses: dict[str, str]) -> None:
+            self._statuses = statuses
+
+        def run_status(self, run_id: str) -> str | None:
+            return self._statuses.get(run_id)
+
+    items = (_absent("1151"),)
+    outcome1 = _evaluate(items, run_id="run-1", started_at=datetime(2026, 9, 30, tzinfo=UTC), ledger=None)
+    write_retirement_ledger(tmp_path, outcome1.ledger)
+
+    # When run-1 is succeeded, it loads successfully
+    state = DummyState({"run-1": "succeeded"})
+    loaded = load_retirement_ledger(tmp_path, state)  # type: ignore[arg-type]
+    assert loaded is not None
+    assert loaded.updated_run_id == "run-1"
+
+    # When run-1 is failed or interrupted, load_retirement_ledger returns None
+    state_failed = DummyState({"run-1": "failed"})
+    assert load_retirement_ledger(tmp_path, state_failed) is None  # type: ignore[arg-type]
+
+    # Now write run-2
+    outcome2 = _evaluate(
+        items, run_id="run-2", started_at=datetime(2026, 10, 1, tzinfo=UTC), ledger=outcome1.ledger
+    )
+    write_retirement_ledger(tmp_path, outcome2.ledger)
+
+    # run-2 is failed/interrupted, but run-1 was succeeded:
+    # load_retirement_ledger must skip unconfirmed run-2 and fall back to run-1
+    state_mix = DummyState({"run-1": "succeeded", "run-2": "failed"})
+    fallback = load_retirement_ledger(tmp_path, state_mix)  # type: ignore[arg-type]
+    assert fallback is not None
+    assert fallback.updated_run_id == "run-1"
+
+    # When run-2 finishes as no_change or succeeded, it is loaded
+    state_ok = DummyState({"run-1": "succeeded", "run-2": "no_change"})
+    loaded2 = load_retirement_ledger(tmp_path, state_ok)  # type: ignore[arg-type]
+    assert loaded2 is not None
+    assert loaded2.updated_run_id == "run-2"

@@ -32,7 +32,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from .state import WorkerState
 
 from cardrag_core.canonical import canonical_json_bytes
 
@@ -312,7 +315,10 @@ def _parse_ledger(content: bytes) -> RetirementLedger:
     )
 
 
-def load_retirement_ledger(state_dir: Path) -> RetirementLedger | None:
+def load_retirement_ledger(
+    state_dir: Path,
+    state: WorkerState | None = None,
+) -> RetirementLedger | None:
     """Load the pointed ledger version; a missing ledger family yields None."""
 
     directory = Path(os.path.abspath(state_dir)) / _RETIREMENT_DIRECTORY
@@ -324,6 +330,24 @@ def load_retirement_ledger(state_dir: Path) -> RetirementLedger | None:
     names = [
         name for name in os.listdir(directory) if name.endswith(".json") and _SHA256.fullmatch(name[:-5])
     ]
+    if not names:
+        return None
+
+    def _try_load_version(v_path: Path) -> RetirementLedger | None:
+        content = v_path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != v_path.name[:-5]:
+            raise RetirementError("retirement_ledger_invalid")
+        ledger = _parse_ledger(content)
+        if state is not None and ledger.updated_run_id:
+            status = state.run_status(ledger.updated_run_id)
+            if status not in ("succeeded", "no_change"):
+                return None
+        return RetirementLedger(
+            updated_run_id=ledger.updated_run_id,
+            entries=ledger.entries,
+            ledger_sha256=v_path.name[:-5],
+        )
+
     if pointer_path.exists():
         if pointer_path.is_symlink() or not pointer_path.is_file():
             raise RetirementError("retirement_ledger_invalid")
@@ -332,25 +356,23 @@ def load_retirement_ledger(state_dir: Path) -> RetirementLedger | None:
             raise RetirementError("retirement_ledger_invalid")
         if pointer not in [name[:-5] for name in names]:
             raise RetirementError("retirement_ledger_invalid")
-        version = directory / f"{pointer}.json"
-    elif names:
-        # Crash window: version sealed but pointer not yet moved; newest wins.
-        newest = max(
-            names,
-            key=lambda name: (directory / name).lstat().st_mtime_ns,
-        )
-        version = directory / newest
-    else:
-        return None
-    content = version.read_bytes()
-    if hashlib.sha256(content).hexdigest() != version.name[:-5]:
-        raise RetirementError("retirement_ledger_invalid")
-    ledger = _parse_ledger(content)
-    return RetirementLedger(
-        updated_run_id=ledger.updated_run_id,
-        entries=ledger.entries,
-        ledger_sha256=version.name[:-5],
+        pointed_version = directory / f"{pointer}.json"
+        loaded = _try_load_version(pointed_version)
+        if loaded is not None:
+            return loaded
+
+    # Crash window or unconfirmed pointer: fallback to newest version verified by state.
+    sorted_names = sorted(
+        names,
+        key=lambda name: (directory / name).lstat().st_mtime_ns,
+        reverse=True,
     )
+    for name in sorted_names:
+        loaded = _try_load_version(directory / name)
+        if loaded is not None:
+            return loaded
+
+    return None
 
 
 def prune_retirement_ledgers(state_dir: Path, *, keep: int) -> int:
