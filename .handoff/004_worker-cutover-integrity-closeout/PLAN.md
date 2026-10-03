@@ -6,7 +6,7 @@
 
 건전한 v130 상태와 이미 발행된 stable 세대를 기반으로 운영 Worker를 복구하고, 10월 3일 사고와 은퇴 판정의 재발 경로를 고친 뒤 실제 03:00 예약 배치 **연속 2회**를 관찰한다. MCP 서비스와 WebDAV의 기존 OCR 바이트를 보존한다. 불필요한 이전 운영 볼륨을 치우고 검증된 롤백 근거는 최대 1개만 남긴다. 검증 후 코드의 `main` 반영과 릴리스를 마친다.
 
-운영 복구와 데이터 무결성에 필요한 수정은 첫 예약 실행 전에 처리한다. 관측성·문서 정리는 정상 운영을 지연시키지 않는 범위에서 이어서 완료한다. 특정 발급사의 은퇴 건수나 OCR 변형 건수를 합격을 위한 고정 숫자로 사용하지 않는다. 실제 upstream 및 실행 결과에 따라 계산한다.
+락과 은퇴 판정의 무결성 수정은 첫 예약 실행 전에 처리한다. 원격 OCR cache 발행 분기 수정이 늦어지면 native cache를 일시 `read-only`로 두고 **세대 OCR CAS 발행·복원은 별도로 검증**해 예약 실행을 재개한다. 손상 오분류 수정 전에는 `read-write`를 재활성화하지 않는다. 관측성·기존 CI 이력 정리는 정상 운영을 지연시키지 않는 범위에서 이어서 완료한다. 특정 발급사의 은퇴 건수나 OCR 변형 건수를 합격을 위한 고정 숫자로 사용하지 않는다. 실제 upstream 및 실행 결과에 따라 계산한다.
 
 ## 003 전수검토 결과 — 004의 출발 상태
 
@@ -55,17 +55,16 @@
 - 기존 v130 ledger를 읽기 전용 감사해 실패 run Lotte 8건과 단일 run AAP1543의 판정 근거를 재구성한다. 새 corrective ledger는 이전 artifact의 해시·오류 근거와 유효한 성공 관찰을 연결한다. AAP의 c622/785c 두 성공에서 실제 연속 결석·OCR 증거가 확인되면 정당한 은퇴로 재판정할 수 있다. 입증되지 않으면 candidate/부당 누락으로 명시하고 조용히 통과시키지 않는다. Lotte 8건은 현재 재게시 상태를 유지한다.
 - 은퇴 판단 대상에 한해 원격 또는 로컬 retained OCR seal의 실제 바이트/해시·문서 결속을 확인한다. 이전 baseline에 이름이 있다는 이유만으로 통과시키지 않는다. 5천여 전체 문서를 매일 중복 다운로드하는 검증은 요구하지 않는다.
 - OCR 발행 충돌은 **검증 완료된 다른 출력**과 손상·검증 실패를 분리한다. READY→manifest→CAS를 해시/크기로 확인하되 다른 본을 run 디렉터리에 물질화하지 않는다. 확인된 변형이면 기존 seal 보존+명시적 defer, 손상 control/CAS·권한·네트워크 오류는 기존 fail-closed. deferred 사유·key 수를 구조화해 집계한다.
-- 003의 Git 이력에 들어간 해시 식별자 209건 때문에 현 CI 비밀 검사가 실패한다. 각 finding의 파일/필드/값을 다시 확인한 뒤 **확인된 증거에만 한정**한 fingerprint 또는 값 단위 예외를 마련하고 `gitleaks detect --source .`를 통과시킨다. 전체 handoff 경로나 `generic-api-key` 규칙을 통째로 제외하지 않는다. 새 토큰 모양 fixture가 여전히 검출되는지도 검증한다. 새 증거는 004의 가린 사본처럼 게시 전 검사한다.
 
 ### 3. 좁은 회귀와 패키지 검증
 
 - 실제 결함을 재현하는 테스트: 두 Worker 동시 시작/패자 DB 무접촉; 동일 run resume·실패 후 성공·정상 완료 run 2회(`succeeded` 및 `no_change`)·3일만 경과·rolling baseline 이후 `missing=0`·재게시·후보→은퇴 판정만 바뀐 동일 corpus; 기존 잘못된 ledger 교정; OCR seal 바이트 결손; verified divergent와 corrupt READY/manifest/CAS 및 401/403/timeout 별 결과. 기존 `test_retirement_v130.py`, `test_corpus_gate_v130_integration.py`, `test_corpus_baseline_v130.py`, OCR/CLI 테스트를 확장한다. 현재 기존 타깃 23건은 통과하나 위 경계를 검증하지 않는다.
-- 전체 프로젝트 테스트, ruff, format, mypy, `git diff --check`, **gitleaks/Trivy**, worker Compose 렌더를 실행한다. 테스트 숫자는 실행 결과로 기록한다. 실패 원인 노출 개선은 비밀을 로그에 싣지 않는 구조화 사유로 하고, 관련 테스트를 추가한다. compatible-models의 현재 모델 생략은 문서 또는 작은 설정 테스트로 설명한다.
+- 전체 프로젝트 테스트, ruff, format, mypy, `git diff --check`, 변경 파일에 대한 gitleaks/Trivy, worker Compose 렌더를 실행한다. 기존 003 Git 이력의 209건 때문에 전체 `gitleaks detect`는 별도 CI 정리 과제로 추적하며 timer 재개의 단독 차단 사유로 삼지 않는다. 테스트 숫자는 실행 결과로 기록한다. 실패 원인 노출 개선은 비밀을 로그에 싣지 않는 구조화 사유로 하고, 관련 테스트를 추가한다. compatible-models의 현재 모델 생략은 문서 또는 작은 설정 테스트로 설명한다.
 - 새 이미지를 GHCR에 올린 뒤 **원격 OCI digest, pull 결과, revision label과 소스 커밋**을 대조한다. patch11의 성공을 새 코드의 검증으로 오인하지 않는다. 용량을 소모하는 v131 전체 복제 대신 작은 격리 fixture와 실제 v130의 감독 하 1회로 검증하며, 추가 전체 복제가 필요하면 먼저 디스크 예산을 확보한다.
 
 ### 4. 운영 cutover, OCR 보존, 용량 회수
 
-- 자동 timer는 계속 정지한 상태로, 최신 코드 이미지 digest와 **v130**을 가리키게 `worker.env`를 원자적으로 전환하고 Compose `config --quiet`·실효 환경을 점검한다. 현재 GC는 promote-4와 같이 명시적으로 off로 두고 별도 검증 후 복구한다. 낡은 patch7/v129로 돌아가는 설정은 사용하지 않는다.
+- 자동 timer는 계속 정지한 상태로, 최신 코드 이미지 digest와 **v130**을 가리키게 `worker.env`를 원자적으로 전환하고 Compose `config --quiet`·실효 환경을 점검한다. 현재 GC는 promote-4와 같이 명시적으로 off로 두고 별도 검증 후 복구한다. OCR 원격 손상 오분류 수정이 완료되지 않았다면 native cache만 `read-only`로 설정하고 실제 세대 OCR CAS 발행·복원을 검증한 뒤 예약 실행을 재개한다. 낡은 patch7/v129로 돌아가는 설정은 사용하지 않는다.
 - 현재 stable의 OCR 객체와, 직전 1개 세대가 남아 있다면 그 세대의 OCR 객체를 인증된 읽기 전용 GET으로 전수 스트리밍·SHA/크기 확인하고, `restore-ocr-seed`를 격리된 작은 복원 대상으로 시험한다. 002에서 요구된 **Paddle 작업 15건의 원래 OCR 바이트**도 WebDAV에서 15/15 해시·크기 검증하고 독립 복원 가능성을 확인한다. 최신 qwen 세대가 그 바이트를 사용해야 한다고 가정하지 않는다. 현재 stable의 WebDAV 보존이 입증되기 전에는 v129 자료를 지우지 않는다.
 - v129 원본과 `cardrag-v129-corrupt-state-20261003`는 장애 증거(원인·SHA `199b9e1ad1616d5cb578ec64ada859a19b9762c1c4c965b7be7022b988ccf051`, 크기, 필요 최소 진단본)로 요약한 뒤, 더 이상 실행 설정·컨테이너 참조·복구 근거가 아님을 확인하고 **정확한 이름으로 하나씩** 삭제한다. 빈 `cardrag-v131-probe-state`, 종료된 promote 컨테이너와 불필요한 과거 이미지도 참조를 확인한 뒤 선별 정리한다. 현재 v130·MCP·실제 인증/모델 볼륨은 유지한다. 각 삭제 전후 `df`, `docker system df`, MCP health를 기록한다.
 - 새 코드로 timer 시간창 밖에서 감독 하 1회 stable 배치를 실행한다. 상태 `succeeded`면 새 publish ready, `no_change`면 기존 ready 세대의 무변경 결속을 확인한다. DB `quick_check`/baseline/retirement ledger, OCR 100%와 실패 0, 실제 provider·deferred 수, source coverage, MCP 최신 세대/12 tools, 여유 공간을 확인한다. 실행 전 이번 discovery·새 PDF 수에 근거해 신규 OCR 호출 예산을 선언하고 예상 밖의 대량 재OCR가 시작되면 중단·진단한다. 오류 시 마지막 정상 세대는 계속 서빙하고 timer를 켜지 않는다.
@@ -73,7 +72,8 @@
 
 ### 5. 무인 검증, GC, 릴리스
 
-- 감독 run과 로컬 게이트가 통과하면 운영 중인 소스를 리뷰해 `main`에 병합하고 `main` CI를 확인한다. CI 소요 때문에 예약 실행 복구를 불필요하게 멈추지는 않되, 배포 digest의 revision label과 `main` 커밋 일치를 확인한다.
+- 003의 Git 이력에 들어간 해시 식별자 209건을 파일/필드/값으로 다시 확인한 뒤 **확인된 증거에만 한정**한 fingerprint 또는 값 단위 예외를 마련하고 `gitleaks detect --source .`를 통과시킨다. 전체 handoff 경로나 `generic-api-key` 규칙을 통째로 제외하지 않으며, 새 토큰 모양 fixture가 계속 검출되는지 검사한다. 새 증거는 004의 가린 사본처럼 게시 전 검사한다. 이 CI 이력 정리는 timer 재개와 병행할 수 있다.
+- 감독 run과 로컬 게이트가 통과하고 CI 비밀 검사 이력이 정리되면 운영 중인 소스를 리뷰해 `main`에 병합하고 `main` CI를 확인한다. CI 소요 때문에 예약 실행 복구를 불필요하게 멈추지는 않되, 배포 digest의 revision label과 `main` 커밋 일치를 확인한다.
 - 03:00 KST의 실제 timer 기동 2회를 **연속** 관찰한다. 이 계획 작성 시 다음 예정은 10/4와 10/5이지만 활성화 시각에 따라 실제 날짜를 기록한다. 각 회차마다 systemd trigger/run ID/exit, DB `succeeded` **또는 검증된 `no_change`**, 해당 새 publish `ready` **또는 기존 READY·pointer 불변**, MCP 세대/health, corpus diff, OCR 보존/새 호출, deferred 집계, 디스크를 대조한다. 정상 `no_change`는 무인 성공으로 센다. 감독 수동 run이나 `worker_busy` exit 0은 세지 않는다. 한 번 실패하면 연속 횟수는 다시 센다.
 - 원격 GC는 우선 dry-run으로 현재/직전 세대 및 OCR CAS 보호 목록을 검증한다. 최근 120건의 다른 OCR 본을 직접 삭제/덮어쓰지 않는다. dry-run과 실제 적용의 참조·바이트 결속이 안전하고 정당한 제거 대상만 있을 때 감독 하 apply 및 다음 배치의 `gc_status`를 확인해 GC를 복구한다. 불확실하면 GC만 off로 유지하고 사유·추적 과제를 보고하되 03:00 배치 성공 자체를 숨기지 않는다.
 - 정기 2회 관찰 결과를 004 REPORT에 기록하고, 전체 수용 증거가 모이면 새 버전을 발행한다. 기존 v1.0.29와 공개 GitHub Release 태그 이력은 보존한다. 병합된 003/004 작업 브랜치만 참조 확인 후 정리한다.
