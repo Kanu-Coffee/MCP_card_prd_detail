@@ -1498,6 +1498,7 @@ class OCRResolver:
         source_document_id: str,
         output_dir: Path,
         adoption_policy_version: str | None = None,
+        expected_ocr_identity: tuple[str, int] | None = None,
     ) -> OCRResult | None:
         if self.webdav is None:
             return None
@@ -1515,6 +1516,7 @@ class OCRResolver:
                 reuse_key=reuse_key,
                 source=source,
                 output_dir=output_dir,
+                expected_ocr_identity=expected_ocr_identity,
             )
         if ready_body is None or manifest_body is None:
             raise OCRValidationError(f"incomplete {kind} OCR cache entry")
@@ -1568,6 +1570,14 @@ class OCRResolver:
             char_count = adopted.ocr_chars
             provider = "legacy-adoption"
             model = adopted.receipt.source_database_id
+        if (
+            expected_ocr_identity is not None
+            and (artifact.sha256, artifact.size_bytes) != expected_ocr_identity
+        ):
+            # Refuse before downloading or materializing anything: the shared cache
+            # holds a nondeterministic sibling of the bytes this generation already
+            # sealed, and only the retained seal may back this generation.
+            return None
         body = await self._get_cache_bytes(artifact.path, phase="cas", max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
             raise OCRValidationError("OCR cache artifact is missing or corrupt")
@@ -1615,7 +1625,8 @@ class OCRResolver:
         reuse_key: str,
         source: OCRInput,
         output_dir: Path,
-    ) -> OCRResult:
+        expected_ocr_identity: tuple[str, int] | None = None,
+    ) -> OCRResult | None:
         """Repair the sole safe partial state: verified manifest+CAS, absent READY."""
 
         self._require_remote_cache_writable()
@@ -1629,6 +1640,11 @@ class OCRResolver:
         if manifest.reuse_key != reuse_key or manifest.source != source or manifest.contract != self.contract:
             raise OCRValidationError("partial native OCR manifest contract mismatch")
         artifact = manifest.output
+        if (
+            expected_ocr_identity is not None
+            and (artifact.sha256, artifact.size_bytes) != expected_ocr_identity
+        ):
+            return None
         body = await self._get_cache_bytes(artifact.path, phase="cas", max_bytes=artifact.size_bytes)
         if body is None or hashlib.sha256(body).hexdigest() != artifact.sha256:
             raise OCRValidationError("partial native OCR artifact is missing or corrupt")
@@ -2087,11 +2103,23 @@ class OCRResolver:
         # 1. State Seed Ledger Lookup (Fast immutable local cache)
         if self._seed_ledger is not None and document_id in self._seed_ledger.entries_by_doc_id:
             seed_entry = self._seed_ledger.entries_by_doc_id[document_id]
-            seed_result = self._lookup_seed_entry(
-                entry=seed_entry,
-                source=source,
-                output_dir=output_dir,
-            )
+            if (
+                expected_ocr_identity is not None
+                and (seed_entry.ocr_sha256, seed_entry.ocr_size_bytes) != expected_ocr_identity
+            ):
+                warnings.warn(
+                    "refusing OCR seed variant outside the retained generation seal; "
+                    f"document_id={document_id}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                seed_result = None
+            else:
+                seed_result = self._lookup_seed_entry(
+                    entry=seed_entry,
+                    source=source,
+                    output_dir=output_dir,
+                )
             if seed_result is not None and not _outside_retained_seal(seed_result):
                 return seed_result
             if seed_result is not None:
@@ -2134,6 +2162,7 @@ class OCRResolver:
                     source_document_id=document_id,
                     output_dir=output_dir,
                     adoption_policy_version=candidate_policy,
+                    expected_ocr_identity=expected_ocr_identity,
                 )
             except OCRValidationError:
                 warnings.warn(
