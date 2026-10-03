@@ -4005,7 +4005,9 @@ class WorkerPipeline:
                     # still carry bytes different from the already published
                     # generation OCR (for example after an inconsistent remote
                     # overwrite). Healing must never silently rebind that
-                    # generation to the alternate bytes.
+                    # generation to the alternate bytes. OCRResolver now refuses
+                    # such variants upstream and keeps the retained seal, so this
+                    # check remains only as a last-resort integrity tripwire.
                     raise OCRCacheHealingIdentityError() from None
                 return result
 

@@ -1917,6 +1917,7 @@ class OCRResolver:
         body: bytes,
         output_dir: Path,
         source_document_id: str,
+        expected_ocr_identity: tuple[str, int] | None = None,
     ) -> OCRResult:
         if body != result.ocr_bytes:
             raise OCRValidationError("local native OCR body does not match its verified result")
@@ -1944,9 +1945,39 @@ class OCRResolver:
                     raise
                 except Exception:
                     winner = None
+            retained_conflict = (
+                expected_ocr_identity is not None
+                and exc.phase in {"manifest", "ready"}
+                and (winner is None or (winner.ocr_sha256, winner.size_bytes) != expected_ocr_identity)
+            )
+            if retained_conflict:
+                # LLM OCR is not byte-deterministic, so the shared cache can already
+                # hold an alternate variant under this reuse key.  The retained
+                # generation seal wins: the foreign variant is never adopted, the
+                # remote entry is never overwritten, and the batch is never aborted.
+                # The conflict stays observable as a deferred publication diagnostic.
+                winner = None
             if winner is not None:
                 self._cache_publication_diagnostic_path(output_dir).unlink(missing_ok=True)
                 return replace(winner, provider_called=result.provider_called)
+            if retained_conflict:
+                self._write_cache_publication_diagnostic(
+                    output_dir=output_dir,
+                    manifest=manifest,
+                    error=exc,
+                )
+                warnings.warn(
+                    "native OCR cache publication skipped for a retained generation seal "
+                    f"conflict (reason_code={exc.reason_code}, phase={exc.phase}); "
+                    "publishing generation-only OCR",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return replace(
+                    result,
+                    cache_publication_deferred=True,
+                    cache_publication_reason_code=exc.reason_code,
+                )
             if not exc.retryable:
                 raise
             self._write_cache_publication_diagnostic(
@@ -2033,6 +2064,26 @@ class OCRResolver:
         )
         native_key = native_ocr_reuse_key(self.contract, source)
 
+        # LLM OCR is not byte-deterministic, so the shared cache can legitimately hold
+        # an alternate variant under a reuse key that a retained generation already
+        # sealed.  The retained generation seal is authoritative: a cache entry whose
+        # bytes differ from it is refused (treated as a miss) instead of being
+        # materialized into this generation, so a generation is never silently
+        # rebound to other bytes.  The conflict stays observable as a warning, and
+        # WorkerPipeline keeps its own identity guard as defence in depth.
+        expected_ocr_identity = (
+            (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
+            if prior_local_native is not None
+            else None
+        )
+
+        def _outside_retained_seal(result: OCRResult | None) -> bool:
+            return bool(
+                result is not None
+                and expected_ocr_identity is not None
+                and (result.ocr_sha256, result.size_bytes) != expected_ocr_identity
+            )
+
         # 1. State Seed Ledger Lookup (Fast immutable local cache)
         if self._seed_ledger is not None and document_id in self._seed_ledger.entries_by_doc_id:
             seed_entry = self._seed_ledger.entries_by_doc_id[document_id]
@@ -2041,8 +2092,15 @@ class OCRResolver:
                 source=source,
                 output_dir=output_dir,
             )
-            if seed_result is not None:
+            if seed_result is not None and not _outside_retained_seal(seed_result):
                 return seed_result
+            if seed_result is not None:
+                warnings.warn(
+                    "refusing OCR seed variant outside the retained generation seal; "
+                    f"document_id={document_id}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
@@ -2084,6 +2142,14 @@ class OCRResolver:
                     stacklevel=2,
                 )
                 found = None
+            if found is not None and _outside_retained_seal(found):
+                warnings.warn(
+                    "refusing remote OCR cache variant outside the retained generation seal; "
+                    f"document_id={document_id} reuse_key={lookup_key}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                found = None
             if found is not None:
                 if kind == "native":
                     local_remote = self._load_local_native(
@@ -2099,11 +2165,6 @@ class OCRResolver:
                             output_dir=output_dir,
                         )
                 return found
-        expected_ocr_identity = (
-            (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
-            if prior_local_native is not None
-            else None
-        )
         local = self._load_local_native(
             output_dir=output_dir,
             source=source,
@@ -2167,6 +2228,7 @@ class OCRResolver:
                 body=local_body,
                 output_dir=output_dir,
                 source_document_id=document_id,
+                expected_ocr_identity=expected_ocr_identity,
             )
             final_local = self._load_local_native(
                 output_dir=output_dir,
@@ -2252,6 +2314,7 @@ class OCRResolver:
                 body=body,
                 output_dir=output_dir,
                 source_document_id=document_id,
+                expected_ocr_identity=expected_ocr_identity,
             )
             final_local = self._load_local_native(
                 output_dir=output_dir,
@@ -2430,6 +2493,7 @@ class OCRResolver:
             body=body,
             output_dir=output_dir,
             source_document_id=document_id,
+            expected_ocr_identity=expected_ocr_identity,
         )
         final_local = self._load_local_native(
             output_dir=output_dir,

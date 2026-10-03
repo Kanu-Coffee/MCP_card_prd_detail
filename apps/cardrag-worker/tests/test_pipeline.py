@@ -914,17 +914,29 @@ async def test_exact_generation_with_deferred_seal_repairs_native_cache_without_
                 ocr_sha256=conflicting_verified.sha256,
             ).canonical_bytes()
 
-            with pytest.raises(OCRSystemicFailureError) as mismatch:
-                await pipeline.run()
-            assert mismatch.value.failure.reason_code == "ocr_cache_healing_identity_mismatch"
+            # A non-deterministic LLM variant under the same reuse key must not abort
+            # the batch and must not rebind the generation: the retained generation
+            # seal wins, the remote entry is left untouched, and the conflict is only
+            # reported (refusal warning plus a deferred publication diagnostic).
+            retained_body = (native_root / "ocr.md").read_bytes()
+            with pytest.warns(RuntimeWarning, match="retained generation seal"):
+                conflicted = await pipeline.run()
+            assert conflicted.status in {"succeeded", "no_change"}
             assert (
                 primary_provider.calls,
                 fallback_provider.calls if fallback_provider is not None else None,
             ) == provider_calls_after_first
+            healed_bodies = [
+                path.read_bytes() for path in (tmp_path / "runs" / conflicted.run_id).rglob("*.md")
+            ]
+            assert conflicting_body not in healed_bodies
+            assert retained_body in healed_bodies
             unchanged_seal = json.loads(
                 (tmp_path / "runs" / first.run_id / "sealed" / "publish.json").read_bytes()
             )
             assert unchanged_seal["ocr_cache_publication_deferred"] == 1
+            remote_ready = json.loads(webdav.objects[f"{cache_root}/READY.json"].decode())
+            assert remote_ready["ocr_sha256"] == conflicting_verified.sha256
             return
 
         second = await pipeline.run()
