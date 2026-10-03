@@ -1499,6 +1499,7 @@ class OCRResolver:
         output_dir: Path,
         adoption_policy_version: str | None = None,
         expected_ocr_identity: tuple[str, int] | None = None,
+        materialize: bool = True,
     ) -> OCRResult | None:
         if self.webdav is None:
             return None
@@ -1517,6 +1518,7 @@ class OCRResolver:
                 source=source,
                 output_dir=output_dir,
                 expected_ocr_identity=expected_ocr_identity,
+                materialize=materialize,
             )
         if ready_body is None or manifest_body is None:
             raise OCRValidationError(f"incomplete {kind} OCR cache entry")
@@ -1600,7 +1602,7 @@ class OCRResolver:
             )
         except Exception as exc:
             raise OCRValidationError("OCR cache bytes failed strict verification") from exc
-        if kind == "native":
+        if kind == "native" and materialize:
             # Keep a local, canonical copy of the exact remote winner.  Besides
             # making ordinary cache hits restartable, this is the commit point
             # used when two isolated workers race to populate one immutable
@@ -1633,6 +1635,7 @@ class OCRResolver:
         source: OCRInput,
         output_dir: Path,
         expected_ocr_identity: tuple[str, int] | None = None,
+        materialize: bool = True,
     ) -> OCRResult | None:
         """Repair the sole safe partial state: verified manifest+CAS, absent READY."""
 
@@ -1667,11 +1670,12 @@ class OCRResolver:
             )
         except Exception as exc:
             raise OCRValidationError("partial native OCR bytes failed strict verification") from exc
-        self._materialize_native_seal(
-            output_dir=output_dir,
-            manifest=manifest,
-            body=body,
-        )
+        if materialize:
+            self._materialize_native_seal(
+                output_dir=output_dir,
+                manifest=manifest,
+                body=body,
+            )
         result = OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -1950,12 +1954,17 @@ class OCRResolver:
             await self._publish_native_cache(manifest=manifest, body=body)
         except OCRCachePublicationError as exc:
             winner: OCRResult | None = None
-            if exc.phase in {"manifest", "ready"} and exc.error_kind in {"contract", "integrity"}:
+            if (
+                exc.phase in {"manifest", "ready"}
+                and exc.error_kind in {"contract", "integrity", "unexpected"}
+                and exc.status_code not in {401, 403}
+            ):
                 # A create-once collision can be a legitimate concurrent
-                # first-writer win.  Adopt it only after the normal native
-                # READY -> manifest -> CAS -> page-hash validation succeeds.
-                # Any incomplete, corrupt, or differently contracted entry
-                # preserves the original fail-closed publication error.
+                # first-writer win. Verify the existing remote entry without
+                # materializing it into output_dir first.
+                # Only a strictly verified, valid remote entry can be adopted or deferred.
+                # Any incomplete, corrupt (corrupt READY/manifest/CAS), or differently contracted
+                # entry, or transport/auth/timeout failure preserves the fail-closed error.
                 try:
                     winner = await self._lookup_cache(
                         kind="native",
@@ -1963,33 +1972,43 @@ class OCRResolver:
                         source=manifest.source,
                         source_document_id=source_document_id,
                         output_dir=output_dir,
-                        expected_ocr_identity=expected_ocr_identity,
+                        expected_ocr_identity=None,
+                        materialize=False,
                     )
                 except ProviderSystemicError:
                     raise
                 except Exception:
-                    winner = None
-            # The shared OCR cache keeps one immutable entry per reuse key, but LLM
-            # OCR is not byte-deterministic, so the remote entry can legitimately
-            # already hold another variant of the same input.  That is never a reason
-            # to fail a document or abort a batch: keep the generation's own bytes,
-            # leave the remote entry untouched, and report the skip.
-            # Defer only when the remote pointer holds a *validated but different*
-            # variant, the expected consequence of nondeterministic LLM OCR sharing one
-            # immutable reuse key.  The generation keeps its own bytes and the remote
-            # entry is left untouched.  Everything else stays fail-closed: an
-            # unverifiable or corrupt remote control file (winner is None), network,
-            # timeout and HTTP failures including auth, and any CAS-phase failure.
+                    # Remote entry is corrupt, unverifiable, or transport/auth/timeout failed.
+                    # Fail-closed: re-raise the original publication error.
+                    raise exc from None
+
+                if winner is None:
+                    raise exc
+
             retained_conflict = (
                 exc.phase in {"manifest", "ready"}
                 and expected_ocr_identity is not None
-                and (winner is None or (winner.ocr_sha256, winner.size_bytes) != expected_ocr_identity)
+                and winner is not None
+                and (winner.ocr_sha256, winner.size_bytes) != expected_ocr_identity
             )
             if retained_conflict:
                 winner = None
+
             if winner is not None:
+                # Concurrent first-writer win. Materialize the verified winner into output_dir.
+                winner = await self._lookup_cache(
+                    kind="native",
+                    reuse_key=manifest.reuse_key,
+                    source=manifest.source,
+                    source_document_id=source_document_id,
+                    output_dir=output_dir,
+                    expected_ocr_identity=None,
+                    materialize=True,
+                )
+                assert winner is not None
                 self._cache_publication_diagnostic_path(output_dir).unlink(missing_ok=True)
                 return replace(winner, provider_called=result.provider_called)
+
             if retained_conflict:
                 self._write_cache_publication_diagnostic(
                     output_dir=output_dir,
@@ -2008,6 +2027,7 @@ class OCRResolver:
                     cache_publication_deferred=True,
                     cache_publication_reason_code=exc.reason_code,
                 )
+
             if not exc.retryable:
                 raise
             self._write_cache_publication_diagnostic(

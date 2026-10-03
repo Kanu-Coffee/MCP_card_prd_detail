@@ -2668,8 +2668,218 @@ async def test_concurrent_native_first_writer_is_strictly_adopted_without_provid
 
         resumed = await resolver.resolve(**arguments)
         assert provider.calls == [1]
+        resumed = await resolver.resolve(**arguments)
+        assert provider.calls == [1]
         assert resumed.ocr_bytes == OCR_BODY
         assert resumed.provider_called is False
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_collision_with_verified_divergent_variant_against_retained_seal_defers_without_overwriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    runs_root = tmp_path / "runs"
+    prior_dir = runs_root / "run-0" / "documents" / "doc_divergent" / "ocr"
+    prior_dir.mkdir(parents=True)
+    pdf = tmp_path / "pdf-pages.txt"
+    pdf.write_text("1", encoding="utf-8")
+    state = WorkerState(tmp_path / "state.sqlite3")
+
+    class RacingDivergentWebDAV(FakeWebDAV):
+        collision_enabled = False
+
+        async def put_json(
+            self,
+            path: str | PurePosixPath,
+            payload: dict[str, Any],
+            *,
+            immutable: bool,
+        ) -> bytes:
+            if self.collision_enabled and str(path).endswith("/manifest.json"):
+                # Remote already has a verified, valid DIFFERENT variant (OCR_BODY)
+                local = OCRArtifactManifest.model_validate_json(canonical_json_bytes(payload))
+                verified = verify_ocr_bytes(OCR_BODY, expected_page_count=1)
+                output = ArtifactRef.for_cas(
+                    sha256=verified.sha256,
+                    size_bytes=verified.size_bytes,
+                    media_type="text/markdown; charset=utf-8",
+                )
+                winner = OCRArtifactManifest(
+                    reuse_key=local.reuse_key,
+                    source=local.source,
+                    contract=local.contract,
+                    output=output,
+                    ocr_chars=verified.char_count,
+                    page_output_sha256=tuple(verified.page_sha256),
+                    created_at=datetime.now(UTC),
+                )
+                ready = OCRReady(
+                    reuse_key=winner.reuse_key,
+                    manifest_sha256=sha256_bytes(winner.canonical_bytes()),
+                    ocr_sha256=winner.output.sha256,
+                )
+                root = f"v1/ocr-cache/native/{winner.reuse_key[:2]}/{winner.reuse_key}"
+                self.objects[str(output.path)] = OCR_BODY
+                self.objects[f"{root}/manifest.json"] = winner.canonical_bytes()
+                self.objects[f"{root}/READY.json"] = ready.canonical_bytes()
+                raise OCRCachePublicationError(phase="manifest", error_kind="integrity")
+            return await super().put_json(path, payload, immutable=immutable)
+
+    provider = FakeProvider()
+    webdav = RacingDivergentWebDAV()
+    webdav.collision_enabled = True
+    resolver = OCRResolver(
+        provider=provider,
+        state=state,
+        webdav=webdav,
+        chunk_pages=1,
+    )  # type: ignore[arg-type]
+
+    try:
+        # Create a prior retained local seal with webdav=None (only in local run storage)
+        state.start_run(run_id="run-0")
+        prior_resolver = OCRResolver(
+            provider=provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        prior_res = await prior_resolver.resolve(
+            run_id="run-0",
+            document_id="doc_divergent",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=prior_dir,
+        )
+        local_bytes = prior_res.ocr_bytes
+        assert local_bytes != OCR_BODY
+
+        state.start_run(run_id="run-1")
+        output_dir = runs_root / "run-1" / "documents" / "doc_divergent" / "ocr"
+        prior = PriorLocalNativeSource(
+            runs_root=runs_root,
+            run_id="run-0",
+            generation_id="g-prior",
+            corpus_sha256="c" * 64,
+            contract_sha256="d" * 64,
+            document_id="doc_divergent",
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            ocr_sha256=prior_res.ocr_sha256,
+            ocr_size_bytes=prior_res.size_bytes,
+        )
+
+        with pytest.warns(RuntimeWarning, match="remote entry already holds a different variant"):
+            result = await resolver.resolve(
+                run_id="run-1",
+                document_id="doc_divergent",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=output_dir,
+                prior_local_native=prior,
+            )
+
+        assert result.cache_publication_deferred is True
+        # Must retain local bytes, NOT overwrite with remote OCR_BODY
+        assert result.ocr_bytes == local_bytes
+        assert (output_dir / "ocr.md").read_bytes() == local_bytes
+        assert (output_dir / OCR_CACHE_PUBLICATION_DIAGNOSTIC).exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_collision_with_corrupt_ready_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+
+    runs_root = tmp_path / "runs"
+    prior_dir = runs_root / "run-0" / "documents" / "doc_corrupt_ready" / "ocr"
+    prior_dir.mkdir(parents=True)
+    pdf = tmp_path / "pdf-pages.txt"
+    pdf.write_text("1", encoding="utf-8")
+    state = WorkerState(tmp_path / "state.sqlite3")
+
+    class CorruptReadyWebDAV(FakeWebDAV):
+        async def put_json(
+            self,
+            path: str | PurePosixPath,
+            payload: dict[str, Any],
+            *,
+            immutable: bool,
+        ) -> bytes:
+            if str(path).endswith("/manifest.json"):
+                # Manifest is written, but READY is corrupt JSON
+                root = f"v1/ocr-cache/native/{payload['reuse_key'][:2]}/{payload['reuse_key']}"
+                self.objects[f"{root}/manifest.json"] = canonical_json_bytes(payload)
+                self.objects[f"{root}/READY.json"] = b"INVALID_CORRUPT_JSON"
+                raise OCRCachePublicationError(phase="manifest", error_kind="integrity")
+            return await super().put_json(path, payload, immutable=immutable)
+
+    provider = FakeProvider()
+    webdav = CorruptReadyWebDAV()
+    resolver = OCRResolver(
+        provider=provider,
+        state=state,
+        webdav=webdav,
+        chunk_pages=1,
+    )  # type: ignore[arg-type]
+
+    try:
+        state.start_run(run_id="run-0")
+        prior_resolver = OCRResolver(
+            provider=provider,
+            state=state,
+            webdav=None,
+            chunk_pages=1,
+        )  # type: ignore[arg-type]
+        prior_res = await prior_resolver.resolve(
+            run_id="run-0",
+            document_id="doc_corrupt_ready",
+            pdf_path=pdf,
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=prior_dir,
+        )
+        prior = PriorLocalNativeSource(
+            runs_root=runs_root,
+            run_id="run-0",
+            generation_id="g-prior",
+            corpus_sha256="c" * 64,
+            contract_sha256="d" * 64,
+            document_id="doc_corrupt_ready",
+            pdf_sha256=PDF_SHA,
+            pdf_size_bytes=3,
+            page_count=1,
+            ocr_sha256=prior_res.ocr_sha256,
+            ocr_size_bytes=prior_res.size_bytes,
+        )
+        state.start_run(run_id="run-1")
+        output_dir = runs_root / "run-1" / "documents" / "doc_corrupt_ready" / "ocr"
+
+        # Must fail-closed (raise OCRCachePublicationError), NEVER defer
+        with pytest.raises(OCRCachePublicationError):
+            await resolver.resolve(
+                run_id="run-1",
+                document_id="doc_corrupt_ready",
+                pdf_path=pdf,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=output_dir,
+                prior_local_native=prior,
+            )
     finally:
         state.close()
 

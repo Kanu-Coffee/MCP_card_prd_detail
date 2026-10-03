@@ -284,3 +284,55 @@ def test_ledger_schema_guard(tmp_path: Path) -> None:
     (directory / "latest").write_text(name[:-5] + "\n")
     with pytest.raises(RetirementError):
         load_retirement_ledger(tmp_path)
+
+
+def test_grace_days_alone_without_two_runs_never_retires() -> None:
+    items = (_absent("1151"),)
+    first = _evaluate(items, run_id="run-1", started_at=datetime(2026, 9, 25, tzinfo=UTC), ledger=None)
+    assert first.retired == ()
+    assert len(first.candidates) == 1
+    assert first.ledger.entries[0].consecutive_absences == 1
+    # 5 days have elapsed, but only 1 run has evaluated it. Must NOT retire.
+    resumed_same_run = _evaluate(
+        items,
+        run_id="run-1",
+        started_at=datetime(2026, 9, 30, tzinfo=UTC),
+        ledger=first.ledger,
+    )
+    assert resumed_same_run.retired == ()
+    assert len(resumed_same_run.candidates) == 1
+    assert resumed_same_run.ledger.entries[0].consecutive_absences == 1
+    assert resumed_same_run.ledger.entries[0].status == "candidate"
+
+
+def test_same_run_resume_is_idempotent() -> None:
+    items = (_absent("1151"),)
+    first = _evaluate(items, run_id="run-1", started_at=datetime(2026, 9, 30, 3, 0, tzinfo=UTC), ledger=None)
+    assert first.ledger.entries[0].consecutive_absences == 1
+    # Resuming the exact same run_id must not increment absences
+    resumed = _evaluate(
+        items,
+        run_id="run-1",
+        started_at=datetime(2026, 9, 30, 3, 15, tzinfo=UTC),
+        ledger=first.ledger,
+    )
+    assert resumed.ledger.entries[0].consecutive_absences == 1
+    assert resumed.ledger.entries[0].status == "candidate"
+    assert resumed.retired == ()
+
+
+def test_retirement_requires_two_distinct_qualifying_runs() -> None:
+    items = (_absent("1151"),)
+    # Run 1: candidate (absences = 1)
+    run1 = _evaluate(items, run_id="run-1", started_at=datetime(2026, 9, 30, tzinfo=UTC), ledger=None)
+    assert run1.retired == ()
+    assert run1.ledger.entries[0].consecutive_absences == 1
+    assert run1.ledger.entries[0].status == "candidate"
+
+    # Distinct Run 2: reaches 2 absences -> retired
+    run2 = _evaluate(items, run_id="run-2", started_at=datetime(2026, 10, 1, tzinfo=UTC), ledger=run1.ledger)
+    assert len(run2.retired) == 1
+    assert run2.candidates == ()
+    assert run2.ledger.entries[0].consecutive_absences == 2
+    assert run2.ledger.entries[0].status == "retired"
+    assert run2.ledger.entries[0].retired_run_id == "run-2"

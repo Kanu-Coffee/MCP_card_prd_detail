@@ -393,13 +393,14 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # worker lock here, immediately before SQLite touches the path, so a busy
         # second process exits before opening anything.  The authoritative
         # acquisition stays in WorkerPipeline._run_locked, so the winner is unchanged.
-        with worker_lock(settings.lock_file):
-            pass
-        with WorkerState(
-            settings.state_database,
-            sqlite_cache_mib=settings.sqlite_cache_mib,
-            sqlite_mmap_mib=settings.sqlite_mmap_mib,
-        ) as state:
+        with (
+            worker_lock(settings.lock_file),
+            WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state,
+        ):
             if isinstance(webdav, WebDAVClient):
                 webdav.configure_verification(state, settings.webdav_verification)
             primary = OCRResolver(
@@ -500,6 +501,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
                     maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
                 ),
+                lock_held=True,
             ).run(resume_run_id=resume)
             return _pipeline_result_payload(result)
     finally:

@@ -15,7 +15,7 @@ import stat
 import struct
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, nullcontext, suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1903,6 +1903,7 @@ class WorkerPipeline:
         pdf_concurrency: int = 8,
         pdf_concurrency_per_issuer: int = 2,
         local_processing_workers: int = 4,
+        lock_held: bool = False,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
@@ -1913,6 +1914,7 @@ class WorkerPipeline:
         ):
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be an integer between 1 and {maximum}")
+        self.lock_held = lock_held
         self.pdf_concurrency = pdf_concurrency
         self.pdf_concurrency_per_issuer = pdf_concurrency_per_issuer
         self.local_processing_workers = local_processing_workers
@@ -2366,7 +2368,8 @@ class WorkerPipeline:
                 LOGGER.warning("Worker performance report could not be written")
 
     async def _run_measured(self, *, resume_run_id: str | None = None) -> PipelineResult:
-        with worker_lock(self.state_dir / "worker.lock"):
+        lock_cm = nullcontext() if self.lock_held else worker_lock(self.state_dir / "worker.lock")
+        with lock_cm:
             if self.document_aggregation is not None:
                 # Rebind the complete live-provider Worker contract before a
                 # run row or retention cleanup can mutate candidate state.
@@ -2604,11 +2607,37 @@ class WorkerPipeline:
             return False
         if digest.hexdigest() != candidate_doc.pdf_sha256:
             return False
-        if candidate_doc.ocr_sha256 is not None:
-            return True
-        # A document present in the verified prior corpus completed OCR in the
-        # run that sealed that baseline; its retained artifacts are resolvable.
-        return candidate_doc.document_id in prior.entries
+        if not candidate_doc.ocr_sha256 or not _CORPUS_SHA256.fullmatch(candidate_doc.ocr_sha256):
+            return False
+
+        # Verify actual OCR bytes exist and match candidate_doc.ocr_sha256.
+        # 1. Check local ocr-seed directory:
+        seed_ocr = self.state_dir / "ocr-seed" / candidate_doc.document_id / "ocr.md"
+        if seed_ocr.is_file():
+            try:
+                ocr_bytes = seed_ocr.read_bytes()
+                if hashlib.sha256(ocr_bytes).hexdigest() == candidate_doc.ocr_sha256 and len(ocr_bytes) > 0:
+                    return True
+            except OSError:
+                pass
+
+        # 2. Check local runs documents directory:
+        runs_dir = self.state_dir / "runs"
+        if runs_dir.is_dir():
+            for doc_dir in runs_dir.glob(f"*/documents/{candidate_doc.document_id}/ocr"):
+                for ocr_file in doc_dir.glob("**/ocr.md"):
+                    if ocr_file.is_file():
+                        try:
+                            ocr_bytes = ocr_file.read_bytes()
+                            if (
+                                hashlib.sha256(ocr_bytes).hexdigest() == candidate_doc.ocr_sha256
+                                and len(ocr_bytes) > 0
+                            ):
+                                return True
+                        except OSError:
+                            pass
+
+        return False
 
     def _build_retirement_resolver(
         self,
@@ -2694,6 +2723,12 @@ class WorkerPipeline:
 
         return resolve
 
+    def _commit_pending_retirement_ledger(self) -> None:
+        pending = getattr(self, "_pending_retirement_ledger", None)
+        if pending is not None:
+            write_retirement_ledger(self.state_dir, pending)
+            self._pending_retirement_ledger = None
+
     async def _reconcile_cancelled_publication(self, run_id: str) -> bool:
         """Record an exact stable commit completed immediately before cancellation."""
 
@@ -2717,6 +2752,7 @@ class WorkerPipeline:
                 status="ready",
                 details={"manifest_sha256": manifest.manifest_sha256},
             )
+            self._commit_pending_retirement_ledger()
             self.state.finish_run_if_running(
                 run_id,
                 "succeeded",
@@ -3409,9 +3445,8 @@ class WorkerPipeline:
                 output_path=run_dir / "reports" / "corpus-diff.json",
                 fail_on_missing=True,
             )
-        if self._pending_retirement_ledger is not None:
-            write_retirement_ledger(self.state_dir, self._pending_retirement_ledger)
-            self._pending_retirement_ledger = None
+        # The pending retirement ledger is kept in memory and committed to disk
+        # only upon verified successful run completion (succeeded or no_change).
         if self._corpus_gate_counts:
             self.performance.set("retired_lineage_count", self._corpus_gate_counts.get("retired", 0))
             self.performance.set("retirement_candidate_count", self._corpus_gate_counts.get("candidates", 0))
@@ -3596,9 +3631,18 @@ class WorkerPipeline:
                     cache_healing_seal = dict(candidate_seal)
                     cache_healing_seal_path = prior_seal_path
                     cache_healing_validated_seal = validated_prior_seal
-        if current_remote is not None and current_is_exact_complete and cache_healing_generation_id is None:
+        has_new_retirements = bool(
+            self._corpus_gate_counts and self._corpus_gate_counts.get("retired", 0) > 0
+        )
+        if (
+            current_remote is not None
+            and current_is_exact_complete
+            and cache_healing_generation_id is None
+            and not has_new_retirements
+        ):
             if isinstance(self.webdav, WebDAVClient):
                 await self.webdav.verification_gate()
+            self._commit_pending_retirement_ledger()
             self.state.finish_run(
                 run_id,
                 "no_change",
@@ -6586,6 +6630,7 @@ class WorkerPipeline:
                     status="ready",
                     details={"manifest_sha256": sealed_manifest.manifest_sha256},
                 )
+                self._commit_pending_retirement_ledger()
                 self.state.finish_run(
                     run_id,
                     "succeeded",
@@ -6606,6 +6651,7 @@ class WorkerPipeline:
             if current.ocr_failed_document_count == 0:
                 if isinstance(self.webdav, WebDAVClient):
                     await self.webdav.verification_gate()
+                self._commit_pending_retirement_ledger()
                 self.state.finish_run(
                     run_id,
                     "no_change",
@@ -6668,6 +6714,7 @@ class WorkerPipeline:
             status="ready",
             details={"manifest_sha256": published.manifest_sha256},
         )
+        self._commit_pending_retirement_ledger()
         self.state.finish_run(
             run_id,
             "succeeded",

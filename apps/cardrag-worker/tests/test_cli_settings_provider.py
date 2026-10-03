@@ -355,6 +355,51 @@ def test_cli_already_running_is_success_and_resume_passes_exact_id(
     assert raw_sentinel not in result.stdout + resumed.stdout
 
 
+def test_worker_lock_held_loser_never_opens_database_and_returns_worker_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cardrag_worker.pipeline import worker_lock
+
+    state_dir = tmp_path / "worker-state"
+    state_dir.mkdir(parents=True)
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("CARDRAG_CHANNEL", "candidate-v1.0.11")
+    monkeypatch.setenv("CARDRAG_WEBDAV_BASE_URL", "https://webdav.example.test")
+    monkeypatch.setenv("CARDRAG_WEBDAV_USERNAME", "user")
+    monkeypatch.setenv("CARDRAG_WEBDAV_PASSWORD", "pass")
+    monkeypatch.setenv("CARDRAG_OPENROUTER_API_KEY", "fake-key")
+
+    db_path = state_dir / "worker-state.sqlite3"
+    assert not db_path.exists()
+
+    logger = logging.getLogger("cardrag_worker")
+    prior_handlers = list(logger.handlers)
+    prior_level = logger.level
+    prior_propagate = logger.propagate
+    try:
+        # Pre-acquire worker.lock as another process/worker
+        lock_file = state_dir / "worker.lock"
+        with worker_lock(lock_file):
+            # A competing worker tries to run
+            result = CliRunner().invoke(cli_module.app, ["run"])
+
+            assert result.exit_code == 0
+            json_start = result.stdout.index("{")
+            parsed = json.loads(result.stdout[json_start:])
+            assert parsed["reason_code"] == "worker_busy"
+            assert parsed["status"] == "already_running"
+
+            # The loser must NEVER open, create, or touch the database or its WAL/SHM files
+            assert not db_path.exists()
+            assert not (state_dir / "worker-state.sqlite3-wal").exists()
+            assert not (state_dir / "worker-state.sqlite3-shm").exists()
+    finally:
+        logger.handlers[:] = prior_handlers
+        logger.setLevel(prior_level)
+        logger.propagate = prior_propagate
+
+
 @pytest.mark.parametrize(
     ("failure", "expected"),
     [

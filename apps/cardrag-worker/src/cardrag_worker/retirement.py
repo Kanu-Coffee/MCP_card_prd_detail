@@ -437,11 +437,17 @@ def evaluate_retirements(
         if prior is not None and prior.status == "retired":
             retired.append(_retired_record(prior, already=True))
             continue
-        absences = (prior.consecutive_absences + 1) if prior is not None else 1
+        if prior is not None and prior.last_checked_run_id == run_id:
+            # Resuming the same run must be idempotent; do not increment absences.
+            absences = prior.consecutive_absences
+        else:
+            absences = (prior.consecutive_absences + 1) if prior is not None else 1
         first_run = prior.first_absent_run_id if prior is not None else run_id
         first_at = prior.first_absent_at if prior is not None else run_stamp
         days = _elapsed_days(first_at, run_stamp)
-        meets_grace = absences >= policy.grace_runs or days >= policy.grace_days
+        # Retirement requires at least 2 distinct completed qualifying runs (consecutive_absences >= 2).
+        # Elapsed days alone cannot substitute for the minimum 2 runs requirement.
+        meets_grace = absences >= policy.grace_runs and absences >= 2
         if new_judgements >= effective_cap:
             unjustified[item.document_id] = "retirement_cap_exceeded"
             continue

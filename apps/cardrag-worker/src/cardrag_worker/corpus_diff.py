@@ -301,7 +301,7 @@ def generate_corpus_diff_report(
     retired_records: tuple[dict[str, Any], ...] = ()
     candidate_records: tuple[dict[str, Any], ...] = ()
     unjustified: tuple[str, ...] = tuple(missing)
-    if missing and retirement_resolver is not None:
+    if retirement_resolver is not None:
         discovered_lineages = frozenset(
             (d.source.issuer, d.source.product_code, d.source.document_type) for d in current_docs
         )
@@ -319,7 +319,8 @@ def generate_corpus_diff_report(
         )
         outcome = retirement_resolver(requests, discovered_lineages)
         if outcome is not None:
-            unjustified = tuple(sorted(outcome.unjustified))
+            missing_set = set(missing)
+            unjustified = tuple(sorted(doc_id for doc_id in outcome.unjustified if doc_id in missing_set))
             retired_records = outcome.retired
             candidate_records = outcome.candidates
 
