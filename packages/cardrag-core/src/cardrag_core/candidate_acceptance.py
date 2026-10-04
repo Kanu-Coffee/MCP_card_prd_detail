@@ -190,7 +190,17 @@ class CandidateImageIdentity(_CanonicalModel):
     attestation_subject_digest: ImageDigest
     revision: SourceCommit
     version: Literal[
-        "1.0.22", "1.0.23", "1.0.24", "1.0.25", "1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31"
+        "1.0.22",
+        "1.0.23",
+        "1.0.24",
+        "1.0.25",
+        "1.0.26",
+        "1.0.27",
+        "1.0.28",
+        "1.0.29",
+        "1.0.30",
+        "1.0.31",
+        "1.0.32",
     ]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
@@ -225,7 +235,17 @@ class EffectiveConfigEvidence(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-effective-config.v4"]
     source_commit: SourceCommit
     release_version: Literal[
-        "1.0.22", "1.0.23", "1.0.24", "1.0.25", "1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31"
+        "1.0.22",
+        "1.0.23",
+        "1.0.24",
+        "1.0.25",
+        "1.0.26",
+        "1.0.27",
+        "1.0.28",
+        "1.0.29",
+        "1.0.30",
+        "1.0.31",
+        "1.0.32",
     ]
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
@@ -910,7 +930,17 @@ class CandidateEvidenceBindings(_CanonicalModel):
 class CandidateAcceptanceReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.candidate-acceptance-receipt.v2"]
     release_version: Literal[
-        "1.0.22", "1.0.23", "1.0.24", "1.0.25", "1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31"
+        "1.0.22",
+        "1.0.23",
+        "1.0.24",
+        "1.0.25",
+        "1.0.26",
+        "1.0.27",
+        "1.0.28",
+        "1.0.29",
+        "1.0.30",
+        "1.0.31",
+        "1.0.32",
     ]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v122-candidate"]
@@ -1221,7 +1251,7 @@ def verify_candidate_acceptance(
         raise CandidateAcceptanceError("evidence_source_commit_mismatch")
     expected_generation_schema, expected_serving_schema = (
         ("cardrag.generation.v6", "cardrag.serving-db.v6")
-        if receipt.release_version in ("1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31")
+        if receipt.release_version in ("1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31", "1.0.32")
         else ("cardrag.generation.v5", "cardrag.serving-db.v5")
     )
     if (
