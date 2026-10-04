@@ -2274,3 +2274,62 @@ def test_run_probes_worker_lock_before_opening_state_database(
 
     assert events == ["webdav_client", "webdav_close"]
     assert not (state_root / "worker-state.sqlite3").exists()
+
+
+def test_first_revalidation_failure_exits_already_running_when_worker_lock_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a concurrent worker is mutating the state directory during the first
+    revalidation, V5CapacityError must probe worker_lock and exit cleanly with AlreadyRunning."""
+    state_root = tmp_path / "state"
+    events: list[str] = []
+
+    class Settings(_PerformanceSettings):
+        channel = "candidate-v1.0.11"
+        stable_publication_approved = False
+        document_aggregation_profile_path = None
+        document_aggregation_profile_artifact_sha256 = None
+        state_dir = state_root
+        minimum_start_free_bytes = 0
+
+        @property
+        def lock_file(self) -> Path:
+            return state_root / "worker.lock"
+
+        @property
+        def state_database(self) -> Path:
+            return state_root / "worker-state.sqlite3"
+
+    def fail_revalidation(*_args: object, **_kwargs: object) -> None:
+        events.append("revalidation_failed_due_to_concurrent_mutation")
+        raise V5CapacityError("Worker state capacity tree changed during traversal")
+
+    def must_not_run(*_args: object, **_kwargs: object) -> None:
+        events.append("forbidden_runtime_call")
+        raise AssertionError("must not run when lock is held")
+
+    state_root.mkdir(parents=True)
+    descriptor = os.open(state_root / "worker.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: Settings())
+        monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+        monkeypatch.setattr(
+            cli_module,
+            "preflight_worker_start_capacity",
+            lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1, minimum_free_bytes=0),
+        )
+        monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", fail_revalidation)
+        monkeypatch.setattr(cli_module, "WebDAVClient", must_not_run)
+        monkeypatch.setattr(cli_module, "WorkerState", must_not_run)
+        monkeypatch.setattr(cli_module, "_qwen_embedding_provider", must_not_run)
+
+        with pytest.raises(cli_module.AlreadyRunning, match="another worker owns"):
+            asyncio.run(cli_module._run(None))
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    assert events == ["revalidation_failed_due_to_concurrent_mutation"]
+    assert not (state_root / "worker-state.sqlite3").exists()

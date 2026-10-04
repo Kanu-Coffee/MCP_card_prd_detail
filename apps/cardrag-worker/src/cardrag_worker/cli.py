@@ -43,6 +43,7 @@ from .cache_seed_v109 import (
     paths_overlap as v109_paths_overlap,
 )
 from .capacity_v5 import (
+    V5CapacityError,
     V5CapacityPolicy,
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
@@ -370,7 +371,17 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # Preserve the unsealed M0 startup order byte-for-byte and behaviorally:
         # candidate state precedes construction of its WebDAV client.
         settings.state_dir.mkdir(parents=True, exist_ok=True)
-        startup_capacity = revalidate_worker_start_capacity(startup_capacity)
+        try:
+            startup_capacity = revalidate_worker_start_capacity(startup_capacity)
+        except V5CapacityError:
+            # If a concurrent worker holds the lock and is mutating the state
+            # directory, probe the worker lock immediately so that we exit cleanly
+            # with AlreadyRunning (worker_busy) rather than an unexpected failure.
+            lock_file = getattr(settings, "lock_file", None)
+            if lock_file is not None:
+                with worker_lock(lock_file):
+                    raise
+            raise
     webdav = WebDAVClient.from_env(
         stable_publication_approved=settings.stable_publication_approved,
         upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
