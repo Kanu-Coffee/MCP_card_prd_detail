@@ -94,7 +94,7 @@ jobs:
           test "$("$validator_tools_dir/uv" --version)" = "uv 0.8.17"
           "$validator_tools_dir/uv" lock --check
           "$validator_tools_dir/uv" sync --frozen \
-            --package cardrag-mcp --package cardrag-worker --no-dev
+            --all-packages --no-dev
 
       - name: Validate immutable release source
         id: version
