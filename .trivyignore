@@ -1,0 +1,4 @@
+# Pinned Chainguard Python 3.14 base image bundled py3-pip-wheel (CVEs in bundled urllib3).
+# The MCP runtime is shell-free, nonroot, and executes only cardrag-mcp; pip is never invoked.
+CVE-2026-97687
+CVE-2026-97689
