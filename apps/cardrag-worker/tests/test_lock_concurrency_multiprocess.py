@@ -30,11 +30,13 @@ def _worker_process_target(
     os.environ["CARDRAG_WEBDAV_PASSWORD"] = "pass"  # noqa: S105
     os.environ["CARDRAG_OPENROUTER_API_KEY"] = "fake-key"
     os.environ["CARDRAG_DOCUMENT_AGGREGATION"] = ""
+    os.environ["CARDRAG_WORKER_MINIMUM_START_FREE_BYTES"] = "0"
 
     # Wait at the barrier for simultaneous start
     barrier.wait()
 
     import sqlite3
+    import traceback
 
     orig_connect = sqlite3.connect
     db_opened = False
@@ -47,6 +49,16 @@ def _worker_process_target(
     sqlite3.connect = guarded_connect  # type: ignore[assignment]
 
     from cardrag_worker import cli as cli_module
+
+    orig_unexpected = cli_module._echo_worker_unexpected_failure
+    last_traceback = None
+
+    def captured_unexpected(exc: object = None) -> None:
+        nonlocal last_traceback
+        last_traceback = traceback.format_exc()
+        orig_unexpected(exc)  # type: ignore[arg-type]
+
+    cli_module._echo_worker_unexpected_failure = captured_unexpected  # type: ignore[assignment]
 
     runner = CliRunner()
     start_time = time.monotonic()
@@ -73,6 +85,7 @@ def _worker_process_target(
             "stdout": stdout,
             "elapsed": elapsed,
             "exception": repr(result.exception),
+            "traceback": last_traceback,
         }
     )
 

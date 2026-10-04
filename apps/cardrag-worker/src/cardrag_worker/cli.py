@@ -381,10 +381,6 @@ async def _run(resume: str | None) -> dict[str, Any]:
             # until GET-only proof identifies the evaluated M0 or its sealed M1.
             await validate_document_aggregation_head(webdav, document_aggregation)
             settings.state_dir.mkdir(parents=True, exist_ok=True)
-        # Narrow the descriptor-walk-to-use window for both M0 and M1.  This
-        # remains immediately before SQLite opens the path, after any allowed
-        # WebDAV construction/GET-only aggregation validation.
-        startup_capacity = revalidate_worker_start_capacity(startup_capacity)
         # A lock-rejected process must never open a live writer's SQLite database.
         # The 2026-10-03 production state-loss incident happened because the daily
         # timer's container ran this startup preflight (which opened the state DB),
@@ -393,60 +389,18 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # worker lock here, immediately before SQLite touches the path, so a busy
         # second process exits before opening anything.  The authoritative
         # acquisition stays in WorkerPipeline._run_locked, so the winner is unchanged.
-        with (
-            worker_lock(settings.lock_file),
-            WorkerState(
+        with worker_lock(settings.lock_file):
+            # Narrow the descriptor-walk-to-use window for both M0 and M1 under lock.
+            startup_capacity = revalidate_worker_start_capacity(startup_capacity)
+            with WorkerState(
                 settings.state_database,
                 sqlite_cache_mib=settings.sqlite_cache_mib,
                 sqlite_mmap_mib=settings.sqlite_mmap_mib,
-            ) as state,
-        ):
-            if isinstance(webdav, WebDAVClient):
-                webdav.configure_verification(state, settings.webdav_verification)
-            primary = OCRResolver(
-                provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
-                state=state,
-                webdav=webdav,
-                chunk_pages=settings.ocr_chunk_pages,
-                whole_document_max_pages=settings.ocr_whole_document_max_pages,
-                context_pages_before=settings.ocr_context_pages_before,
-                context_pages_after=settings.ocr_context_pages_after,
-                render_scale_milli=settings.ocr_render_scale_milli,
-                cache_epoch=settings.ocr_cache_epoch,
-                prompt_version=settings.ocr_prompt_version,
-                cache_mode=settings.ocr_cache_mode,
-                require_cache_hit=settings.ocr_cache_require_hit,
-            )
-            compatible_contracts = discover_compatible_contracts(
-                state_dir=settings.state_dir,
-                current_contract=primary.contract,
-                compatible_models=settings.compatible_ocr_models,
-            )
-            if compatible_contracts:
-                primary.set_compatible_contracts(compatible_contracts)
-                logging.getLogger("cardrag_worker.cli").info(
-                    "OCR discovered %d compatible contracts: %s",
-                    len(compatible_contracts),
-                    ", ".join(c.model for c in compatible_contracts),
-                )
-            resolver: OCRResolver | FailoverOCRResolver = primary
-            if settings.ocr_fallback_provider:
-                fallback_model = settings.ocr_fallback_model
-                if not fallback_model:
-                    if settings.ocr_fallback_provider.strip().casefold() == "openrouter":
-                        fallback_model = settings.openrouter_ocr_model
-                    elif settings.ocr_fallback_provider.strip().casefold() in {"codex", "codex-exec"}:
-                        fallback_model = "gpt-5.6-terra"
-                    elif settings.ocr_fallback_provider.strip().casefold() in {
-                        "local-paddleocr",
-                        "paddleocr",
-                        "paddleocr-vl",
-                    }:
-                        fallback_model = "PaddleOCR-VL-1.6"
-                    else:
-                        raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
-                fallback = OCRResolver(
-                    provider=_provider(settings, settings.ocr_fallback_provider, fallback_model),
+            ) as state:
+                if isinstance(webdav, WebDAVClient):
+                    webdav.configure_verification(state, settings.webdav_verification)
+                primary = OCRResolver(
+                    provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
                     state=state,
                     webdav=webdav,
                     chunk_pages=settings.ocr_chunk_pages,
@@ -458,52 +412,94 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     prompt_version=settings.ocr_prompt_version,
                     cache_mode=settings.ocr_cache_mode,
                     require_cache_hit=settings.ocr_cache_require_hit,
-                    compatible_contracts=compatible_contracts,
                 )
-                resolver = FailoverOCRResolver(primary, fallback)
-            logging.getLogger("cardrag_worker.cli").info(
-                "Remote OCR cache access mode=%s require_hit=%s",
-                settings.ocr_cache_mode,
-                settings.ocr_cache_require_hit,
-            )
-            embeddings = await _qwen_embedding_provider(settings)
-            logging.getLogger("cardrag_worker.cli").info(
-                "Worker startup completed elapsed_seconds=%.3f", time.monotonic() - started
-            )
-            result = await WorkerPipeline(
-                state=state,
-                state_dir=settings.state_dir,
-                adapters=enabled_adapters(),
-                ocr=resolver,  # type: ignore[arg-type]
-                embeddings=embeddings,
-                webdav=webdav,
-                pdf_concurrency=settings.pdf_concurrency,
-                pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
-                local_processing_workers=settings.local_processing_workers,
-                maximum_attempts=settings.stage_max_attempts,
-                retry_cap_seconds=settings.retry_cap_seconds,
-                collect_remote_garbage=settings.collect_remote_garbage,
-                stable_publication_approved=settings.stable_publication_approved,
-                ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
-                remote_gc_approved=settings.remote_gc_approved,
-                retained_generations=settings.retain_generations,
-                retained_incomplete_runs=settings.retained_incomplete_runs,
-                retirement_grace_runs=settings.retirement_grace_runs,
-                retirement_grace_days=settings.retirement_grace_days,
-                retirement_max_per_run=settings.retirement_max_per_run,
-                garbage_grace_days=settings.garbage_grace_days,
-                pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
-                pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
-                document_aggregation=document_aggregation,
-                capacity_policy_v5=V5CapacityPolicy(
-                    maximum_state_bytes=settings.maximum_state_bytes,
-                    reserved_free_space_bytes=settings.reserved_free_space_bytes,
-                    maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
-                    maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
-                ),
-                lock_held=True,
-            ).run(resume_run_id=resume)
-            return _pipeline_result_payload(result)
+                compatible_contracts = discover_compatible_contracts(
+                    state_dir=settings.state_dir,
+                    current_contract=primary.contract,
+                    compatible_models=settings.compatible_ocr_models,
+                )
+                if compatible_contracts:
+                    primary.set_compatible_contracts(compatible_contracts)
+                    logging.getLogger("cardrag_worker.cli").info(
+                        "OCR discovered %d compatible contracts: %s",
+                        len(compatible_contracts),
+                        ", ".join(c.model for c in compatible_contracts),
+                    )
+                resolver: OCRResolver | FailoverOCRResolver = primary
+                if settings.ocr_fallback_provider:
+                    fallback_model = settings.ocr_fallback_model
+                    if not fallback_model:
+                        if settings.ocr_fallback_provider.strip().casefold() == "openrouter":
+                            fallback_model = settings.openrouter_ocr_model
+                        elif settings.ocr_fallback_provider.strip().casefold() in {"codex", "codex-exec"}:
+                            fallback_model = "gpt-5.6-terra"
+                        elif settings.ocr_fallback_provider.strip().casefold() in {
+                            "local-paddleocr",
+                            "paddleocr",
+                            "paddleocr-vl",
+                        }:
+                            fallback_model = "PaddleOCR-VL-1.6"
+                        else:
+                            raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
+                    fallback = OCRResolver(
+                        provider=_provider(settings, settings.ocr_fallback_provider, fallback_model),
+                        state=state,
+                        webdav=webdav,
+                        chunk_pages=settings.ocr_chunk_pages,
+                        whole_document_max_pages=settings.ocr_whole_document_max_pages,
+                        context_pages_before=settings.ocr_context_pages_before,
+                        context_pages_after=settings.ocr_context_pages_after,
+                        render_scale_milli=settings.ocr_render_scale_milli,
+                        cache_epoch=settings.ocr_cache_epoch,
+                        prompt_version=settings.ocr_prompt_version,
+                        cache_mode=settings.ocr_cache_mode,
+                        require_cache_hit=settings.ocr_cache_require_hit,
+                        compatible_contracts=compatible_contracts,
+                    )
+                    resolver = FailoverOCRResolver(primary, fallback)
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Remote OCR cache access mode=%s require_hit=%s",
+                    settings.ocr_cache_mode,
+                    settings.ocr_cache_require_hit,
+                )
+                embeddings = await _qwen_embedding_provider(settings)
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Worker startup completed elapsed_seconds=%.3f", time.monotonic() - started
+                )
+                result = await WorkerPipeline(
+                    state=state,
+                    state_dir=settings.state_dir,
+                    adapters=enabled_adapters(),
+                    ocr=resolver,  # type: ignore[arg-type]
+                    embeddings=embeddings,
+                    webdav=webdav,
+                    pdf_concurrency=settings.pdf_concurrency,
+                    pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
+                    local_processing_workers=settings.local_processing_workers,
+                    maximum_attempts=settings.stage_max_attempts,
+                    retry_cap_seconds=settings.retry_cap_seconds,
+                    collect_remote_garbage=settings.collect_remote_garbage,
+                    stable_publication_approved=settings.stable_publication_approved,
+                    ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
+                    remote_gc_approved=settings.remote_gc_approved,
+                    retained_generations=settings.retain_generations,
+                    retained_incomplete_runs=settings.retained_incomplete_runs,
+                    retirement_grace_runs=settings.retirement_grace_runs,
+                    retirement_grace_days=settings.retirement_grace_days,
+                    retirement_max_per_run=settings.retirement_max_per_run,
+                    garbage_grace_days=settings.garbage_grace_days,
+                    pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
+                    pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
+                    document_aggregation=document_aggregation,
+                    capacity_policy_v5=V5CapacityPolicy(
+                        maximum_state_bytes=settings.maximum_state_bytes,
+                        reserved_free_space_bytes=settings.reserved_free_space_bytes,
+                        maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
+                        maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
+                    ),
+                    lock_held=True,
+                ).run(resume_run_id=resume)
+                return _pipeline_result_payload(result)
     finally:
         await webdav.close()
         logging.getLogger("cardrag_worker.cli").info(
