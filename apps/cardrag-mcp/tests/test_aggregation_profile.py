@@ -844,18 +844,3 @@ def test_json_evidence_path_replacement_is_detected_at_context_exit(
         with open_score_artifact(paths.scores, paths.inventory, paths.matrix, paths.vectors):
             target.replace(displaced)
             target.write_bytes(original)
-
-
-def test_release_workflow_names_all_compact_profile_inputs() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    for contract in (
-        "aggregation_profile_sha256:",
-        'aggregation_profile="$evidence_dir/document-aggregation-profile.json"',
-        'aggregation_scores="$evidence_dir/document-aggregation-scores.jsonl"',
-        ".venv/bin/python -m cardrag_mcp.aggregation_profile",
-        '--scores "$aggregation_scores"',
-        '--validate-profile "$aggregation_profile"',
-        "--bootstrap-samples 2000",
-        "--bootstrap-seed 1010",
-    ):
-        assert contract in workflow

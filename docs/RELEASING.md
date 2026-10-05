@@ -86,10 +86,11 @@ provenance 계약을 충족했다고 간주하지 않습니다.
 
 ## 필요한 증빙
 
-[평가 안내](EVALUATION.md)의 전체 gold·capture·집계·답변 검증을 수행합니다. 품질 비교
-schema의 `v109_baseline` 같은 이름은 frozen 평가 입력의 식별자입니다. 이전 운영자만
-보유한 자료나 과거 실사 보고서를 현재 검증 대신 사용하지 않습니다. 해당 비교 입력이
-없으면 검증 미완료로 남으며 release gate를 우회하지 않습니다.
+공식 릴리스 게이트는 **현재 후보의 운영 기능 release-readiness 증빙**만 요구합니다.
+[평가 안내](EVALUATION.md)의 승인 gold·`v109_baseline`·5-lane 품질 비교, 통계적 우위와
+답변 품질 검증은 이번 릴리스의 필수 게이트가 아니며 수행했다고 주장하지 않습니다.
+연구 평가 기능과 검증기는 선택적 후속 품질 평가로 그대로 유지됩니다. 이전 운영자만
+보유한 자료나 과거 실사 보고서를 현재 검증 대신 사용하지 않습니다.
 
 후보 receipt는 다음 자료를 실제 source commit·generation·이미지와 결속합니다.
 
@@ -98,7 +99,7 @@ schema의 `v109_baseline` 같은 이름은 frozen 평가 입력의 식별자입�
 - 기본 MCP 도구 12개의 discovery와 실제 호출 요청·응답, exact 검색 coverage
 - 현재 baseline 보존, 후보의 게시·재시작·baseline 복귀와 재활성화 검증
 - 공유 OCR cache와 stable 포인터의 불변성, 허용되지 않은 쓰기·삭제 0건
-- generation manifest, 집계 프로파일, gold와 원문 근거를 묶는 전체 평가 파일
+- 후보 generation의 manifest·READY·candidate pointer와 serving DB·vector sidecar 산출물
 
 공개 릴리스는 `cardrag_mcp.candidate_smoke`를 진입점으로 사용합니다. 이 검증기는
 `cardrag_core.candidate_acceptance`의 canonical JSON·파일 크기·SHA-256·
@@ -109,7 +110,9 @@ canonical hash를 함께 기록합니다. 오류 응답·스키마 불일치·�
 호출 원문에 인증 헤더, 사설 URL, 조사자의 입력, 비공개 데이터나 공개 권한 없는 PDF/OCR
 본문이 포함되지 않았는지 **봉인 전에** 확인합니다. 공개하면 안 되는 입력은 공개 가능한
 평가 corpus로 교체하고 검증을 다시 수행합니다. 봉인 후 내용을 지우고 기존 해시를 재사용하지
-않습니다. Workflow는 봉인된 portable evidence도 release asset으로 공개합니다.
+않습니다. Workflow는 봉인된 release-readiness evidence(allowlist: receipt와 그 12개
+결속 증빙 파일만)도 release asset으로 공개합니다. 원본 운영 로그, 자격 증명, 사설 URL,
+개인 질의와 품질 연구 산출물은 공개 번들에 포함하지 않습니다.
 
 사용할 MCP 클라이언트에서도 실제 `tools/list`와 호출을 검증합니다. 카드사 별칭·잘못된
 카드사명, 최근 출시·날짜 미확인, 기간·복수 카드사, 일괄 요약, generation 변경 오류와
@@ -138,11 +141,10 @@ Fork의 유지관리자는 다음을 자신의 저장소에 설정합니다. 후
 provenance와 repository 설정은 실제 빌드 원본과 일치해야 합니다.
 
 Dispatch의 필수 입력은 `version=1.0.32`, `candidate_source_commit`,
-`acceptance_report_sha256`, `aggregation_profile_sha256`, `capture_set_receipt_sha256`,
 `candidate_acceptance_sha256`, `candidate_worker_image_digest`,
-`candidate_mcp_image_digest`입니다. 모두 검증한 실제 파일·이미지에서 얻습니다.
+`candidate_mcp_image_digest`입니다. 모두 검증한 실제 receipt·이미지에서 얻습니다.
 
-Workflow는 source·annotated tag·CI·receipt·portable evidence, 공개 후보 package,
+Workflow는 source·annotated tag·CI·receipt·release-readiness evidence, 공개 후보 package,
 OCI/SBOM/provenance와 strict 보안 검사를 확인한 뒤 **동일 digest**를 공개 저장소로 복사합니다.
 서명·attestation·release asset checksum과 원격 자산을 다시 검증합니다. 누락된 증빙,
 다른 source·image·version 또는 충돌하는 immutable tag는 실패로 처리합니다.
