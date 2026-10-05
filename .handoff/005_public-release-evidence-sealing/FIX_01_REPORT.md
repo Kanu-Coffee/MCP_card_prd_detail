@@ -47,7 +47,7 @@ source_16452578404de2315a5cf908418f954f4b98cbff241cc5e930432e65b0155fd2
 
 금지된 우회(불실행): 수동 SQLite 복사·임의 스냅샷 행 작성으로 시드 검사 무력화(RELEASING 55~57·FIX_01 §1·§2), 시드 검사 완화 코드 변경을 승인 없이단행(커밋된 검증 도구의 신뢰 모델 변경 — Reviewer 판단 사항).
 
-따라서 §실행순서 2 후반(실Run·12도구 실측 receipt)→3(봉인)→4(tag·dispatch)는 정当한 입력 결여로 도달 불가. **v1.0.32 tag 생성 0건, release.yml dispatch 0건, Docker Hub 게시 0건, GitHub Release 변경 0건.**
+따라서 §실행순서 2 후반(실Run·12도구 실측 receipt)→3(봉인)→4(tag·dispatch)는 정당한 입력 결여로 도달 불가. **v1.0.32 tag 생성 0건, release.yml dispatch 0건, Docker Hub 게시 0건, GitHub Release 변경 0건.**
 
 ## 운영 불변 재확인 (2026-10-06 08:1x KST)
 
