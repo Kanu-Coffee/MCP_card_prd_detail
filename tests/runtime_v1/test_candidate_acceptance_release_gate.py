@@ -152,11 +152,11 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
 
     required = (
         "candidate_source_commit:",
-        "candidate_acceptance_sha256:",
+        "release_readiness_sha256:",
         "candidate_worker_image_digest:",
         "candidate_mcp_image_digest:",
         '[[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]',
-        '[[ "$CANDIDATE_ACCEPTANCE_SHA256" =~ ^[0-9a-f]{64}$ ]]',
+        '[[ "$RELEASE_READINESS_SHA256" =~ ^[0-9a-f]{64}$ ]]',
         '[[ "$CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
         '[[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
         'test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"',
@@ -169,11 +169,11 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
         "if: ${{ inputs.version == '1.0.32' }}",
         "':(exclude)release-evidence/v1.0.32/**'",
         "release-evidence/v1.0.32/*) ;;",
-        'candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"',
-        'test "$(sha256sum "$candidate_acceptance" | awk \'{print $1}\')" =',
-        "candidate_validation=$(",
-        ".venv/bin/python -m cardrag_mcp.candidate_smoke",
-        '--expected-receipt-sha256 "$CANDIDATE_ACCEPTANCE_SHA256"',
+        'readiness_receipt="$evidence_dir/release-readiness-receipt.json"',
+        'test "$(sha256sum "$readiness_receipt" | awk \'{print $1}\')" =',
+        "readiness_validation=$(",
+        ".venv/bin/python -m cardrag_mcp.release_readiness",
+        '--expected-receipt-sha256 "$RELEASE_READINESS_SHA256"',
         '--expected-image-repository "$CANDIDATE_IMAGE_REPOSITORY"',
         "worker_image.platform_manifest_digest",
         "worker_image.platform_config_digest",
@@ -181,8 +181,8 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
         "mcp_image.platform_manifest_digest",
         "mcp_image.platform_config_digest",
         "mcp_image.attestation_manifest_digest",
-        'test "$(jq -r \'.worker_image.digest\' <<<"$candidate_validation")" =',
-        'test "$(jq -r \'.mcp_image.digest\' <<<"$candidate_validation")" =',
+        'test "$(jq -r \'.worker_image.digest\' <<<"$readiness_validation")" =',
+        'test "$(jq -r \'.mcp_image.digest\' <<<"$readiness_validation")" =',
     )
     for contract in required:
         assert contract in workflow
@@ -215,13 +215,13 @@ def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_comm
         assert research_reference not in publish_job
 
 
-def test_release_seals_and_publishes_every_candidate_acceptance_evidence_file() -> None:
+def test_release_seals_and_publishes_every_readiness_evidence_file() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     path_block = workflow.split("            readiness_evidence_relative_paths=(\n", 1)[1].split(
         "\n            )", 1
     )[0]
     readiness_paths = tuple(line.strip() for line in path_block.splitlines() if line.strip())
-    assert readiness_paths == ("candidate-acceptance-receipt.json",)
+    assert readiness_paths == ("release-readiness-receipt.json",)
     assert all("*" not in path and "?" not in path for path in readiness_paths)
 
     for contract in (
@@ -260,11 +260,11 @@ def test_release_validators_read_the_manifest_bound_preserved_path_snapshot() ->
     snapshot_binding = 'evidence_dir=$(realpath --canonicalize-existing "$readiness_validation_dir")'
     assert snapshot_binding in validate_job
     binding_index = validate_job.index(snapshot_binding)
-    for invocation in ("candidate_validation=$(",):
+    for invocation in ("readiness_validation=$(",):
         assert binding_index < validate_job.index(invocation)
     for contract in (
         '--evidence-root "$evidence_dir"',
-        'candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"',
+        'readiness_receipt="$evidence_dir/release-readiness-receipt.json"',
         "src_dir_fd=files_directory",
         "dst_dir_fd=snapshot_parent",
         "snapshot_listed.st_nlink == 2",
@@ -273,7 +273,7 @@ def test_release_validators_read_the_manifest_bound_preserved_path_snapshot() ->
         assert contract in validate_job
 
 
-def test_readiness_preparse_includes_all_candidate_acceptance_evidence() -> None:
+def test_readiness_preparse_includes_all_bound_evidence() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
     expected_keys = {

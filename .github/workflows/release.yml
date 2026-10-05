@@ -12,8 +12,8 @@ on:
         description: "Exact lowercase 40-hex candidate commit before the evidence-only sealing commit"
         required: true
         type: string
-      candidate_acceptance_sha256:
-        description: "SHA-256 of the canonical candidate acceptance receipt"
+      release_readiness_sha256:
+        description: "SHA-256 of the canonical release-readiness receipt"
         required: true
         type: string
       candidate_worker_image_digest:
@@ -89,7 +89,7 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           CANDIDATE_SOURCE_COMMIT: ${{ inputs.candidate_source_commit }}
-          CANDIDATE_ACCEPTANCE_SHA256: ${{ inputs.candidate_acceptance_sha256 }}
+          RELEASE_READINESS_SHA256: ${{ inputs.release_readiness_sha256 }}
           CANDIDATE_WORKER_IMAGE_DIGEST: ${{ inputs.candidate_worker_image_digest }}
           CANDIDATE_MCP_IMAGE_DIGEST: ${{ inputs.candidate_mcp_image_digest }}
         run: |
@@ -110,12 +110,12 @@ jobs:
           if [[ "$version" == "1.0.32" ]]; then
             evidence_dir="release-evidence/v${version}"
             evidence_dir=$(realpath --canonicalize-existing "$evidence_dir")
-            candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
+            readiness_receipt="$evidence_dir/release-readiness-receipt.json"
             readiness_evidence_relative_paths=(
-              candidate-acceptance-receipt.json
+              release-readiness-receipt.json
             )
             [[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$CANDIDATE_ACCEPTANCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$RELEASE_READINESS_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"
@@ -464,7 +464,7 @@ jobs:
               try:
                   _receipt_sha256, _receipt_size, receipt_line = inspect_source(
                       source_root,
-                      "candidate-acceptance-receipt.json",
+                      "release-readiness-receipt.json",
                       first_line=True,
                   )
                   assert receipt_line is not None
@@ -482,7 +482,7 @@ jobs:
                       "source_commit",
                   }
                   assert candidate_receipt["schema_version"] == (
-                      "cardrag.candidate-acceptance-receipt.v2"
+                      "cardrag.release-readiness-receipt.v1"
                   )
                   assert candidate_receipt["source_commit"] == source_commit
                   evidence_bindings = candidate_receipt["evidence"]
@@ -531,6 +531,22 @@ jobs:
                       if dynamic_path not in relative_paths:
                           relative_paths.append(dynamic_path)
                   assert len(relative_paths) == len(set(relative_paths))
+
+                  def collect_evidence_files(dir_fd: int, prefix: tuple[str, ...]) -> set[str]:
+                      found: set[str] = set()
+                      for entry in os.scandir(dir_fd):
+                          if entry.is_dir(follow_symlinks=False):
+                              child = os.open(entry.name, DIRECTORY_FLAGS, dir_fd=dir_fd)
+                              try:
+                                  found.update(collect_evidence_files(child, prefix + (entry.name,)))
+                              finally:
+                                  os.close(child)
+                          else:
+                              assert entry.is_file(follow_symlinks=False)
+                              found.add(PurePosixPath(*prefix, entry.name).as_posix())
+                      return found
+
+                  assert collect_evidence_files(source_root, ()) == set(relative_paths)
                   entries = []
                   asset_names = set()
                   for raw_relative in relative_paths:
@@ -669,7 +685,7 @@ jobs:
             )
             [[ "$readiness_evidence_manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
             evidence_dir=$(realpath --canonicalize-existing "$readiness_validation_dir")
-            candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"
+            readiness_receipt="$evidence_dir/release-readiness-receipt.json"
             mapfile -d '' candidate_evidence_paths < <(
               git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
             )
@@ -685,39 +701,39 @@ jobs:
                   ;;
               esac
             done
-            test "$(sha256sum "$candidate_acceptance" | awk '{print $1}')" = \
-              "$CANDIDATE_ACCEPTANCE_SHA256"
-            candidate_validation=$(.venv/bin/python -m cardrag_mcp.candidate_smoke \
-              --receipt "$candidate_acceptance" \
+            test "$(sha256sum "$readiness_receipt" | awk '{print $1}')" = \
+              "$RELEASE_READINESS_SHA256"
+            readiness_validation=$(.venv/bin/python -m cardrag_mcp.release_readiness \
+              --receipt "$readiness_receipt" \
               --evidence-root "$evidence_dir" \
-              --expected-receipt-sha256 "$CANDIDATE_ACCEPTANCE_SHA256" \
+              --expected-receipt-sha256 "$RELEASE_READINESS_SHA256" \
               --expected-source-commit "$CANDIDATE_SOURCE_COMMIT" \
               --expected-image-repository "$CANDIDATE_IMAGE_REPOSITORY")
-            test "$(jq -r '.schema_version' <<<"$candidate_validation")" = \
-              "cardrag.candidate-acceptance-validation.v1"
-            test "$(jq -r '.status' <<<"$candidate_validation")" = validated
-            test "$(jq -r '.source_commit' <<<"$candidate_validation")" = \
+            test "$(jq -r '.schema_version' <<<"$readiness_validation")" = \
+              "cardrag.release-readiness-validation.v1"
+            test "$(jq -r '.status' <<<"$readiness_validation")" = validated
+            test "$(jq -r '.source_commit' <<<"$readiness_validation")" = \
               "$CANDIDATE_SOURCE_COMMIT"
-            test "$(jq -r '.worker_image.repository' <<<"$candidate_validation")" = \
+            test "$(jq -r '.worker_image.repository' <<<"$readiness_validation")" = \
               "$CANDIDATE_IMAGE_REPOSITORY"
-            test "$(jq -r '.mcp_image.repository' <<<"$candidate_validation")" = \
+            test "$(jq -r '.mcp_image.repository' <<<"$readiness_validation")" = \
               "$CANDIDATE_IMAGE_REPOSITORY"
-            test "$(jq -r '.worker_image.digest' <<<"$candidate_validation")" = \
+            test "$(jq -r '.worker_image.digest' <<<"$readiness_validation")" = \
               "$CANDIDATE_WORKER_IMAGE_DIGEST"
-            test "$(jq -r '.mcp_image.digest' <<<"$candidate_validation")" = \
+            test "$(jq -r '.mcp_image.digest' <<<"$readiness_validation")" = \
               "$CANDIDATE_MCP_IMAGE_DIGEST"
             worker_platform_digest=$(jq -r '.worker_image.platform_manifest_digest' \
-              <<<"$candidate_validation")
+              <<<"$readiness_validation")
             worker_config_digest=$(jq -r '.worker_image.platform_config_digest' \
-              <<<"$candidate_validation")
+              <<<"$readiness_validation")
             worker_attestation_digest=$(jq -r '.worker_image.attestation_manifest_digest' \
-              <<<"$candidate_validation")
+              <<<"$readiness_validation")
             mcp_platform_digest=$(jq -r '.mcp_image.platform_manifest_digest' \
-              <<<"$candidate_validation")
+              <<<"$readiness_validation")
             mcp_config_digest=$(jq -r '.mcp_image.platform_config_digest' \
-              <<<"$candidate_validation")
+              <<<"$readiness_validation")
             mcp_attestation_digest=$(jq -r '.mcp_image.attestation_manifest_digest' \
-              <<<"$candidate_validation")
+              <<<"$readiness_validation")
             [[ "$worker_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$worker_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$worker_attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]

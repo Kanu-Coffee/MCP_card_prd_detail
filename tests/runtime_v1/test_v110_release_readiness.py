@@ -9,17 +9,18 @@ def test_release_seals_operational_readiness_instead_of_research_gold() -> None:
 
     required_contracts = (
         'evidence_dir="release-evidence/v${version}"',
-        'candidate_acceptance="$evidence_dir/candidate-acceptance-receipt.json"',
+        'readiness_receipt="$evidence_dir/release-readiness-receipt.json"',
         '"schema": "cardrag.release-readiness-evidence.v1"',
         '"maximum_file_bytes": MAX_FILE_BYTES',
         "name: readiness-evidence-${{ steps.version.outputs.version }}",
-        ".venv/bin/python -m cardrag_mcp.candidate_smoke \\\n",
+        ".venv/bin/python -m cardrag_mcp.release_readiness \\\n",
         'test "$version" = "1.0.32"',
         'test "$(git cat-file -t "refs/tags/v$version")" = tag',
         'test "$(git cat-file -t "refs/tags/v$VERSION")" = tag',
         'git ls-remote origin "refs/tags/v${version}^{}"',
         'git ls-remote origin "refs/tags/v${VERSION}^{}"',
         "release-readiness-manifest.json",
+        "assert collect_evidence_files(source_root, ()) == set(relative_paths)",
     )
     for contract in required_contracts:
         assert contract in workflow
