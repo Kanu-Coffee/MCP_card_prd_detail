@@ -59,7 +59,7 @@ source_16452578404de2315a5cf908418f954f4b98cbff241cc5e930432e65b0155fd2
 
 ## Secret/권한 점검 한계
 
-- `dockerhub-public` 환경 존재 확인(`can_admins_bypass=false`). 다만 현재 `gh` OAuth 토큰으로는 환경 secret 목록 API가 404를 반환해 `DOCKERHUB_USERNAME`·`DOCKERHUB_TOKEN` 이름 등록을 **API로 재확인하지 못했다**(FIX_01 §7 "현재 API 재확인 가능" 전제와 불일치 — 토큰 scope 한계로 추정). 실제 게시 권한의 최종 실증 수단은 공식 publish job이며,本轮では 미도달.
+- `dockerhub-public` 환경 존재 확인(`can_admins_bypass=false`). 다만 현재 `gh` OAuth 토큰으로는 환경 secret 목록 API가 404를 반환해 `DOCKERHUB_USERNAME`·`DOCKERHUB_TOKEN` 이름 등록을 **API로 재확인하지 못했다**(FIX_01 §7 "현재 API 재확인 가능" 전제와 불일치 — 토큰 scope 한계로 추정). 실제 게시 권한의 최종 실증 수단은 공식 publish job이며,이번 라운드は 미도달.
 
 ## 미실행 항목
 
