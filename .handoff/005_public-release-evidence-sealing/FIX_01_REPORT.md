@@ -10,7 +10,7 @@ FIX_01의 **릴리스 계약 재설계(§1~§3, §5)와 후보 OCI 발행 전 �
 
 | commit | 내용 | CI run |
 |---|---|---|
-| `e6ccc82` | gold dispatch 입력 3종·56 portable 경로·`cardrag_mcp.evaluation`/`gold_capture`/`aggregation_profile` 필수 호출을 발행 경로에서 제거. readiness 번들 스키마(`cardrag.release-readiness-evidence.v1`, `release-readiness-manifest.json`, `readiness-evidence--` 자산 접두)로 일관改名(validate→publish 재검증→release 자산 조립/SHA256SUMS 전체). Release notes에 수행 검증/미수행(300~500 gold, `v109_baseline`, 5-lane, 통계 우위, 답변 품질) 구분 명시. | 37273732727 success |
+| `e6ccc82` | gold dispatch 입력 3종·56 portable 경로·`cardrag_mcp.evaluation`/`gold_capture`/`aggregation_profile` 필수 호출을 발행 경로에서 제거. readiness 번들 스키마(`cardrag.release-readiness-evidence.v1`, `release-readiness-manifest.json`, `readiness-evidence--` 자산 접두)로 일관 개칭(validate→publish 재검증→release 자산 조립/SHA256SUMS 전체). Release notes에 수행 검증/미수행(300~500 gold, `v109_baseline`, 5-lane, 통계 우위, 답변 품질) 구분 명시. | 37273732727 success |
 | `435a99f` | **협은 release-readiness receipt 스키마** 신설: `cardrag.release-readiness-receipt.v1` + `cardrag.release-readiness-effective-config.v1`(v4의 70개 운영 필드 그대로, 연구 산출물 3필드 `document_aggregation_profile_sha256`·`document_aggregation_policy`·`retrieval_policy_sha256`만 제외) + `verify_release_readiness`(기타 12결속 불변식 전부 유지) + `cardrag_mcp.release_readiness` CLI(candidate_smoke 응답 모델 리플레이 재사용) + core 동작 테스트 6종. evidence root allowlist 강제(수락 목록 외 추가 regular file·symlink tree 거부). dispatch 입력 `release_readiness_sha256`. | 37378742323 success |
 
 - narrow schema 착수 근거(FIX_01 §2 후문 절): 실측 운영 runtime은 profileless다. `/etc/cardrag/worker.env`에 `CARDRAG_DOCUMENT_AGGREGATION_PROFILE_*` 주입 없음, host 전체에 프로파일 산출물 없음(find), `compose.yaml`은 optional(all-or-nothing). 반면 `verify_candidate_acceptance`는 `manifest.sealed_profile_sha256` 비NULL을 강제(`generation_profile_unsealed`)하여 **실측 실행을 receipt로 봉인 불가**. gold 없이 profile을 만드는 것은 허위 작성이고, 허위 봉인 금지 조항이 이를 거부 → FIX_01 §2의 "별도 좁은 release-readiness schema/validator" 분기 발동. (과정에서 한 차례 재사용 설계로 되돌렸다가 위 실측 근거로 narrow 설계를 복원했다 — 이 경위는 본 문서에 남긴다.)
@@ -28,7 +28,7 @@ source commit `435a99f78fb48f1936bcedf7c7fd315920a64ccd`, 빌더 `cardrag-releas
 
 - 저장소 jq 검증기 5종(`validate-candidate-oci-index`/`platform-manifest`/`attestation-manifest`/`provenance`/`sbom`)을 고정 crane v0.22.0(checksum 일치) + `validate-strict-json.py`으로 익명 재현: **worker/mcp 전부 PASS**. provenance subject·빌드인자 9종·materials 불변성·git secret 선언/무마운트 검증 통과.
 - 라벨 실측: `org.opencontainers.image.revision=435a99f…`, `version=1.0.32`, entrypoint `cardrag-worker`/`cardrag-mcp`, user `10001:10001`, `linux/amd64` 확인.
-- 이미지는 공개 후보 GHCR 저장소 `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate`의 `candidate-v1.0.32-<role>-<40hex>` tag로 존재(후보 전용 namespace; Docker Hub·Release 미触及).
+- 이미지는 공개 후보 GHCR 저장소 `ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate`의 `candidate-v1.0.32-<role>-<40hex>` tag로 존재(후보 전용 namespace; Docker Hub·Release 미도달).
 
 ### 3. 격리 자원 준비와 되돌림
 
