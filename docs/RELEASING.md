@@ -57,6 +57,20 @@ v1.0.29 계열 후보는 라인업/OCR 시드(`seed-state-v122`)와 임베딩 �
 항상 빈 볼륨에서 두 명령을 순서대로 적용해 구성하며, 임베딩 캐시가 이미 있다고
 가정하지 않습니다. v1.0.29 r3 후보 볼륨의 임베딩 캐시 복사본은 FIX_02에서 전체 행
 무결성 검증으로 1회성 예외로 비준(ratify)된 것이며 재생산 경로가 아닙니다.
+
+v1.0.32 격리 후보 초기화만 예외적으로 **검증된 오프라인 상태 복제** 경로를 허용합니다
+(handoff/005 FIX_02 승인). 003 rolling baseline compaction 이후 운영 `snapshot`
+테이블은 문서별 discovery binding을 보존하지 않아 위 시드 명령이 최신 generation에서
+구조적으로 실패합니다(`source_record_missing`; 검사 완화나 snapshot 날조는 금지).
+대체 절차: 운영 writer가 종료하고 WAL/SHM/journal이 없음을 확인한 정비 구간에서만
+원본 상태 볼륨을 read-only로 연결해 **빈** 후보 상태 볼륨으로 전체 복제하고,
+`tools/cardrag_offline_volume_verify.py state`의 전수 파일 hash·SQLite integrity와
+`codex` 인증 복제 검증, 그리고 `docs/RECOVERY.md`의 전체 상태 복제 규정을 모두
+통과해야 합니다. 목적지에 기존 내용이 있으면 덮어쓰지 않고 실패로 다루고, 검증
+중 원본이 변경되면 목적지를 폐기합니다. 복제 상태로 만든 후보는 run·generation
+이력을 상속하므로 복제된 과거 run을 신규 후보 실사로 계상하지 않습니다. 이 예외는
+1.0.32 초기화에 한정되며 임베딩 캐시 수동 이식이나 가짜 seed ledger 작성 허용을
+뜻하지 않습니다.
 v1.0.29의 출시일 parser v3는 OCR 계약과 재사용 키를 변경하지 않습니다. v1.0.28의
 PaddleOCR 계약 SHA-256 `873a628ea7a4a91d217cebf2fb94489c4bc93fb7055607099a9e7933991c83ed`를
 유지하고, 기존 PDF identity에서 provider가 다시 호출되거나 OCR SHA가 달라지면 후보를
@@ -101,9 +115,12 @@ provenance 계약을 충족했다고 간주하지 않습니다.
 - 공유 OCR cache와 stable 포인터의 불변성, 허용되지 않은 쓰기·삭제 0건
 - 후보 generation의 manifest·READY·candidate pointer와 serving DB·vector sidecar 산출물
 
-공개 릴리스는 `cardrag_mcp.candidate_smoke`를 진입점으로 사용합니다. 이 검증기는
-`cardrag_core.candidate_acceptance`의 canonical JSON·파일 크기·SHA-256·
-source·image·generation 결속 검증과 실제 MCP 응답 모델 검증을 함께 수행합니다. 실행 환경에 맞는 값을 직접 측정해야 하며
+공개 릴리스는 `cardrag_mcp.release_readiness`를 진입점으로 사용합니다. 이 검증기는
+`cardrag_core.release_readiness`의 canonical JSON·파일 크기·SHA-256·
+source·image·generation 결속 검증과 실제 MCP 응답 모델 검증을 함께 수행합니다. 봉인
+대상은 `release-readiness-receipt.json`과 그 12개 bound evidence 파일만입니다.
+`cardrag_mcp.candidate_smoke`/`cardrag_core.candidate_acceptance`(gold 연구 결속
+포함)는 삭제되지 않고 연구 경로 검증기로 남습니다. 실행 환경에 맞는 값을 직접 측정해야 하며
 `passed=true`를 작성하거나 다른 버전의 증빙을 이름만 바꿔 넣어 대체할 수 없습니다.
 각 도구 응답은 MCP/JSON-RPC 봉투를 제거한 정규화 payload로 보존하며 request와 response의
 canonical hash를 함께 기록합니다. 오류 응답·스키마 불일치·다른 generation은 거부합니다.
@@ -141,7 +158,7 @@ Fork의 유지관리자는 다음을 자신의 저장소에 설정합니다. 후
 provenance와 repository 설정은 실제 빌드 원본과 일치해야 합니다.
 
 Dispatch의 필수 입력은 `version=1.0.32`, `candidate_source_commit`,
-`candidate_acceptance_sha256`, `candidate_worker_image_digest`,
+`release_readiness_sha256`, `candidate_worker_image_digest`,
 `candidate_mcp_image_digest`입니다. 모두 검증한 실제 receipt·이미지에서 얻습니다.
 
 Workflow는 source·annotated tag·CI·receipt·release-readiness evidence, 공개 후보 package,
