@@ -236,6 +236,24 @@ def add_incoming_temp_leaves(webdav: FakeWebDAV) -> tuple[PurePosixPath, PurePos
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("root", ["v1/ocr-cache/content", "v1/ocr-cache/content-index"])
+async def test_gc_blocks_when_content_cache_exists_before_any_delete(tmp_path: Path, root: str) -> None:
+    webdav, _, _, _ = build_remote()
+    webdav.children[root] = (PurePosixPath(root) / "entry",)
+    with (
+        WorkerState(tmp_path / "state.sqlite3") as state,
+        pytest.raises(GCMarkVerificationError, match="cannot mark content OCR variants"),
+    ):
+        await collect_garbage(
+            webdav=webdav,
+            state=state,
+            apply=True,
+            now=NOW + timedelta(days=31),
+        )
+    assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_gc_marks_exact_cache_key_and_sweeps_generation_cache_then_cas(tmp_path: Path) -> None:
     webdav, active_key, inactive_key, unused_sha = build_remote()
     with WorkerState(tmp_path / "state.sqlite3") as state:

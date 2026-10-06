@@ -2011,7 +2011,7 @@ class WorkerPipeline:
             "key_schema": "cardrag.ocr-content-reuse-key.v2",
             "output_profile": "cardrag.ocr-markdown.v1",
             "validation_profile": "cardrag.ocr-markdown.v1",
-            "cache_epoch": getattr(self.ocr.contract, "cache_epoch", 0),
+            "cache_epoch": getattr(self.ocr, "cache_epoch", getattr(self.ocr.contract, "cache_epoch", 0)),
         }
         if self.v5_profile is not None:
             parser_profiles = [
@@ -2394,6 +2394,9 @@ class WorkerPipeline:
             if isinstance(self.webdav, WebDAVClient):
                 self.webdav.begin_verification_run(run_id)
             self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="before_run")
+            freeze_content = getattr(self.ocr, "freeze_content_snapshot", None)
+            if callable(freeze_content):
+                await freeze_content(run_id)
             cancellation_requested = False
             unexpected_failure: WorkerUnexpectedFailureError | None = None
             try:

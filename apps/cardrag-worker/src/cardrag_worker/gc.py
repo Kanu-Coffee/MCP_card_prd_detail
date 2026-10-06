@@ -213,6 +213,19 @@ async def _optional_children(
         raise
 
 
+async def _reject_unhandled_content_cache(webdav: WebDAVClient) -> None:
+    """Keep all content variants and their CAS objects until mark support exists."""
+
+    for root in (
+        PurePosixPath("v1/ocr-cache/content"),
+        PurePosixPath("v1/ocr-cache/content-index"),
+    ):
+        if await _optional_children(webdav, root):
+            raise GCMarkVerificationError(
+                "remote GC cannot mark content OCR variants; leave GC disabled until content marking is implemented"
+            )
+
+
 def _is_incoming_temp_leaf(path: PurePosixPath | str) -> bool:
     candidate = PurePosixPath(path)
     return bool(
@@ -416,6 +429,7 @@ async def collect_garbage(
     observed_at = (now or datetime.now(UTC)).astimezone(UTC)
 
     # Complete every parse/list/hash decision before considering DELETE.
+    await _reject_unhandled_content_cache(webdav)
     pointer_body, manifests = await _generation_chain(
         webdav,
         retain=retain_generations,

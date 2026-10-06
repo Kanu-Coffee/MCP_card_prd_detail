@@ -25,3 +25,12 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 **현재 브랜치는 배포하면 안 된다.** Resolver는 아직 레거시 `native`/`adopted`만 조회·게시한다. 새 계약으로 generation 식별이 달라지는 동안 content cache 적중은 발생하지 않으므로 PLAN의 핵심 수용 기준이 미달이다.
 
 다음 구현 순서는 (1) WebDAV content variant 검증·일괄 인덱스·최신 선택 및 run snapshot, (2) 로컬 content 인덱스·레거시 역조회/승격·새 variant 게시, (3) 재작업/restore 명령과 GC/seed/seal 경로, (4) M0 실데이터 읽기 전용 inventory와 격리 리허설, (5) 전체 검증·운영 불변 재확인이다. 운영 마이그레이션 적용과 이미지 전환은 PLAN 단계 6·7의 별도 승인 범위다. 전체 corpus OCR·Paddle 재처리·운영 WebDAV 쓰기는 이번 작업에서 하지 않았다.
+
+## 2026-10-07 후속 구현 — 원격 content 경로 연결, 계속 진행 중
+
+- 불변 content variant를 CAS → manifest → READY → 평면 discovery index 순서로 게시한다. `v1/ocr-cache/content-index/`를 한 번 열거해 run 로컬 snapshot으로 저장하며, 조회 시 index만 믿지 않고 manifest·READY·CAS·OCR 바이트를 검증해 최신 유효 variant를 고른다. 평면 index는 WebDAV의 문서별 PROPFIND를 피하기 위한 구현 세부 조정이다.
+- Resolver가 content hit를 레거시 캐시보다 먼저 조회하고, 새 OCR 결과의 content variant를 게시한다. provider A가 게시한 결과를 provider B가 다음 run에서 OCR 호출 없이 재사용하는 테스트를 추가했다. 정확한 `variant_id`는 generation document까지 전달된다.
+- 기존 원격 GC는 content variant와 CAS 참조를 모른다. 완전한 mark 지원 전 사고를 막기 위해 content 경로 또는 index에 항목이 있으면 **삭제 전에 fail-closed**하도록 했다. 운영 원격 GC 승인은 계속 꺼둬야 한다.
+- 검증: `test_gc.py`와 `test_content_cache.py` 24 passed. GC guard까지 포함한 전체 테스트 **2,224 passed**, 기존 warning 9건. Ruff check/format, mypy(99 source files), `git diff --check` 통과.
+
+**아직 인수·배포 불가:** run의 index 목록은 고정되지만 문서별 선택 variant ID는 별도 영속화되지 않았다. 로컬 content 인덱스, 모든 레거시 variant 이전/M0, 서비스 중 OCR 텍스트 보존, 재처리·restore, 재처리 시 내용 동일성 판단, content aware GC mark, 운영 read-only inventory와 리허설이 남았다. 이번 후속 작업은 운영 WebDAV나 운영 state에 쓰지 않았다.
