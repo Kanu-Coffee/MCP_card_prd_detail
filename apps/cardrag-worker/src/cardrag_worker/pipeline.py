@@ -154,6 +154,11 @@ from .ocr import (
     PriorLocalNativeSource,
     page_records,
 )
+from .ocr_requests import (
+    OCRReprocessRequest,
+    complete_reprocess_request,
+    select_run_reprocess_request,
+)
 from .pdf_cache import PDFCache, PDFCachePruneError, PDFSourceIdentity
 from .performance import ExactTokenMemo, WorkerPerformance
 from .providers import (
@@ -1993,6 +1998,7 @@ class WorkerPipeline:
         self._corpus_gate_counts: dict[str, int] = {}
         self._corpus_baseline_documents: tuple[CorpusBaselineDocument, ...] = ()
         self._corpus_issuer_counts: dict[str, int] = {}
+        self._active_ocr_request: OCRReprocessRequest | None = None
         self.exporter = ServingDatabaseExporter()
         self.exporter_v5 = ServingDatabaseExporterV5()
         self.capacity_policy_v5 = None if v5_profile is None else capacity_policy_v5 or V5CapacityPolicy()
@@ -2394,12 +2400,13 @@ class WorkerPipeline:
             if isinstance(self.webdav, WebDAVClient):
                 self.webdav.begin_verification_run(run_id)
             self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="before_run")
-            freeze_content = getattr(self.ocr, "freeze_content_snapshot", None)
-            if callable(freeze_content):
-                await freeze_content(run_id)
             cancellation_requested = False
             unexpected_failure: WorkerUnexpectedFailureError | None = None
             try:
+                self._active_ocr_request = select_run_reprocess_request(self.state_dir, run_id)
+                freeze_content = getattr(self.ocr, "freeze_content_snapshot", None)
+                if callable(freeze_content):
+                    await freeze_content(run_id)
                 result = await self._run_locked(
                     run_id,
                     refresh_sources=resume_run_id is not None,
@@ -2525,7 +2532,20 @@ class WorkerPipeline:
                 retirement_candidate_count=self._corpus_gate_counts.get("candidates", 0),
             )
             self._record_corpus_baseline(result)
+            if self._active_ocr_request is not None and result.status == "succeeded":
+                try:
+                    if result.generation_id is None:
+                        raise ValueError("reprocess succeeded without generation ID")
+                    complete_reprocess_request(
+                        self.state_dir,
+                        self._active_ocr_request,
+                        run_id=run_id,
+                        generation_id=result.generation_id,
+                    )
+                except Exception:
+                    LOGGER.error("OCR reprocess completion receipt could not be written")
             self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="after_run")
+            self._active_ocr_request = None
             return result
 
     def _cleanup_local_runs_safely(self, *, exclude_run_id: str, phase: str) -> None:
@@ -3588,6 +3608,22 @@ class WorkerPipeline:
                 }
             ),
         )
+        if self._active_ocr_request is not None:
+            acquired_identity = {
+                item.source.document_id(item.pdf.sha256): (
+                    item.pdf.sha256,
+                    item.pdf.size_bytes,
+                    item.pdf.page_count,
+                )
+                for item in acquired
+            }
+            for target in self._active_ocr_request.targets:
+                if acquired_identity.get(target.document_id) != (
+                    target.pdf_sha256,
+                    target.pdf_size_bytes,
+                    target.page_count,
+                ):
+                    raise RuntimeError("OCR reprocess target no longer matches an acquired PDF")
         current_remote = await self.webdav.validated_current_generation()
         transition_served_ocr: dict[str, tuple[str, int, int, str, int]] = {}
         if isinstance(self.webdav, WebDAVClient) and current_remote is not None:
@@ -3648,7 +3684,7 @@ class WorkerPipeline:
                     and current_remote.generation_id == validated_resume_seal.manifest.generation_id
                     and validated_resume_seal.ocr_cache_publication_deferred > 0
                 )
-                if not resume_seal_is_current_deferred:
+                if not resume_seal_is_current_deferred or self._active_ocr_request is not None:
                     return await finalize_pdf_activity(
                         await self._publish_sealed(
                             run_id,
@@ -3684,6 +3720,7 @@ class WorkerPipeline:
             current_remote.corpus_sha256 == corpus_sha256
             and current_remote.contract_sha256 == contract_sha256
             and current_remote.ocr_failed_document_count == 0
+            and self._active_ocr_request is None
         )
         if (
             current_remote is not None
@@ -3761,7 +3798,7 @@ class WorkerPipeline:
             )
         if current_remote is None and stable_body is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing publication")
-        if existing is not None and current_remote is None:
+        if existing is not None and current_remote is None and self._active_ocr_request is None:
             # Missing stable.json can be reconstructed from an exact seal.
             generation_id = str(existing["generation_id"])
             prior_seal_path = self.state_dir / "runs" / str(existing["run_id"]) / "sealed" / "publish.json"
@@ -4094,6 +4131,11 @@ class WorkerPipeline:
         ocr_stopped = False
         completed_document_ids: set[str] = set()
         ocr_order = {item.source.document_id(item.pdf.sha256): index for index, item in enumerate(acquired)}
+        reprocess_document_ids = (
+            {target.document_id for target in self._active_ocr_request.targets}
+            if self._active_ocr_request is not None
+            else set()
+        )
         if len(ocr_order) != len(acquired):
             raise RuntimeError("OCR input contains duplicate document identities")
         self.performance.set("ocr_expected", len(acquired))
@@ -4111,7 +4153,11 @@ class WorkerPipeline:
             ocr_output_dir = run_dir / "documents" / document_id / "ocr"
 
             prefetch = getattr(self.ocr, "prefetch_local_native", None)
-            if self.v5_profile is not None and callable(prefetch):
+            if (
+                self.v5_profile is not None
+                and callable(prefetch)
+                and document_id not in reprocess_document_ids
+            ):
                 with self.performance.measure("ocr_local_prefetch"):
                     await to_thread_fenced(
                         prefetch,
@@ -4132,6 +4178,7 @@ class WorkerPipeline:
                 retained_identity = (
                     (served[3], served[4])
                     if served is not None
+                    and current_document_id not in reprocess_document_ids
                     and served[:3] == (current_pdf.sha256, current_pdf.size_bytes, current_pdf.page_count)
                     else None
                 )
@@ -4145,13 +4192,27 @@ class WorkerPipeline:
                     output_dir=current_output_dir,
                     prior_local_native=prior_local_native_sources.get(current_document_id),
                     retained_ocr_identity=retained_identity,
+                    reprocess_request_id=(
+                        self._active_ocr_request.request_id
+                        if self._active_ocr_request is not None
+                        and current_document_id in reprocess_document_ids
+                        else None
+                    ),
                 )
+                if current_document_id in reprocess_document_ids and (
+                    result.cache_kind != "content" or result.cache_variant_id is None
+                ):
+                    raise RuntimeError("OCR reprocess result was not durably published as a content variant")
                 prior_local_native = prior_local_native_sources.get(current_document_id)
-                if prior_local_native is not None and (
-                    result.ocr_sha256 != prior_local_native.ocr_sha256
-                    or result.size_bytes != prior_local_native.ocr_size_bytes
-                    or len(result.ocr_bytes) != prior_local_native.ocr_size_bytes
-                    or hashlib.sha256(result.ocr_bytes).hexdigest() != prior_local_native.ocr_sha256
+                if (
+                    current_document_id not in reprocess_document_ids
+                    and prior_local_native is not None
+                    and (
+                        result.ocr_sha256 != prior_local_native.ocr_sha256
+                        or result.size_bytes != prior_local_native.ocr_size_bytes
+                        or len(result.ocr_bytes) != prior_local_native.ocr_size_bytes
+                        or hashlib.sha256(result.ocr_bytes).hexdigest() != prior_local_native.ocr_sha256
+                    )
                 ):
                     # A valid cache entry for the same OCR source/contract may
                     # still carry bytes different from the already published

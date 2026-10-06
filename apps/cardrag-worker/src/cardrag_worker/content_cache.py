@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from cardrag_core import (
@@ -287,6 +288,82 @@ class ContentOCRVariantStore:
                 ),
             )
         return selected
+
+    async def lookup_request(
+        self, *, source: OCRInput, cache_epoch: int, request_id: str
+    ) -> ContentOCRVariantHit | None:
+        """Find a previous attempt's committed variant, including after same-run resume."""
+
+        validate_identifier(request_id, label="reprocess_request_id")
+        key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
+        try:
+            entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
+        except WebDAVHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            return None
+        hits: list[ContentOCRVariantHit] = []
+        for entry in entries:
+            indexed_key, _root = _indexed_variant_path(entry)
+            if indexed_key != key:
+                continue
+            try:
+                hit = await self._read_variant(entry, source=source, reuse_key=key)
+            except ContentCacheValidationError:
+                continue
+            if hit.manifest.reprocess_request_id == request_id:
+                hits.append(hit)
+        return (
+            max(hits, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256))
+            if hits
+            else None
+        )
+
+    async def verified_variants(
+        self, *, source: OCRInput, cache_epoch: int
+    ) -> tuple[ContentOCRVariantHit, ...]:
+        """List only fully verified variants for an explicit PDF."""
+
+        key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
+        try:
+            entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
+        except WebDAVHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            return ()
+        if len(entries) > _MAX_INDEX_ENTRIES:
+            raise ContentCacheValidationError("content index exceeds the lookup limit")
+        hits: list[ContentOCRVariantHit] = []
+        for entry in entries:
+            indexed_key, _ = _indexed_variant_path(entry)
+            if indexed_key == key:
+                hits.append(await self._read_variant(entry, source=source, reuse_key=key))
+        return tuple(sorted(hits, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256)))
+
+    async def restore_variant(
+        self, *, source: OCRInput, cache_epoch: int, variant_id: str
+    ) -> ContentOCRArtifactManifest:
+        """Promote verified historical bytes as a new immutable latest variant."""
+
+        validate_identifier(variant_id, label="variant_id")
+        hits = await self.verified_variants(source=source, cache_epoch=cache_epoch)
+        original = next((hit for hit in hits if hit.manifest.variant_id == variant_id), None)
+        if original is None:
+            raise ContentCacheValidationError("requested historical variant is not verified")
+        latest = hits[-1].manifest.created_at
+        created_at = max(datetime.now(UTC), latest + timedelta(microseconds=1))
+        manifest = ContentOCRArtifactManifest.create(
+            source=source,
+            cache_epoch=cache_epoch,
+            output=original.manifest.output,
+            ocr_chars=original.manifest.ocr_chars,
+            page_output_sha256=original.manifest.page_output_sha256,
+            created_at=created_at,
+            provenance=original.manifest.provenance,
+            restored_from=original.manifest.variant_id,
+        )
+        await self.publish_existing(manifest)
+        return manifest
 
     async def publish(self, manifest: ContentOCRArtifactManifest, body: bytes) -> None:
         """Commit CAS, manifest, READY, then the discoverable index marker."""

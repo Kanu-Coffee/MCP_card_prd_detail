@@ -87,3 +87,12 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 - 전체 테스트 **2,235 passed**, 기존 warning 9건. Ruff check/format, mypy 101 source files, `git diff --check` 통과.
 
 **남은 필수 개발:** 문서/issuer/전체 재작업 요청과 복원, 재작업 시 no-change 우회·pin 해제, 로컬 content 인덱스·레거시 역조회 안전망, 실제 격리 리허설과 운영 apply 절차. 적용 전 사용자 승인 단계는 PLAN §6에 따른다.
+
+## 2026-10-07 후속 구현 — 명시적 재처리와 variant 복원
+
+- `ocr-cache reprocess`를 추가했다. stable generation을 기준으로 문서 ID·PDF SHA·issuer·전체 대상을 선택하고, 기본은 문서/페이지/예상 호출 수만 보여준다. `--all`에는 `--confirm-all`이 필요하며 요청당 `--max-documents` 상한은 100개다. `--apply`는 운영 WebDAV가 아닌 **로컬 스풀**에 불변 요청을 원자적으로 등록한다.
+- Worker는 run 시작 시 요청 1개를 선택해 해당 run에 고정한다. 재개 중 큐가 바뀌어도 원래 대상을 유지한다. 해당 문서만 기존 OCR 캐시와 서비스 중 텍스트 pin을 우회해 현재 run의 provider로 재처리한다. 같은 요청·PDF의 content variant가 이미 게시됐으면 재호출하지 않는다. 모든 대상 PDF identity를 새 acquisition과 대조하고 content variant 게시가 되지 않으면 실패한다. 성공한 generation 게시 뒤 완료 영수증을 기록하며 손상된 영수증은 무시하지 않고 실패한다.
+- `ocr-cache restore --document-id ... --variant ...`는 기본적으로 검증된 과거 variant와 서비스 중 OCR SHA만 보여준다. `--apply` 시 과거 CAS 출력에 새 immutable variant를 붙여 최신으로 승격한다. `ocr-cache show --document-id ...`는 검증된 variant의 ID·생성시각·provider·복원/재처리 출처를 표시하며 OCR 본문은 출력하지 않는다.
+- 가짜 WebDAV에서 재처리 1회 호출·동일 요청 재개 0회 호출, 과거 OCR 복원 뒤 다음 run의 최신 선택, 원본 variant 불변, 큐 변경 중 재개 고정, 손상된 완료 영수증 차단을 확인했다. 전체 suite는 이번 코드의 영수증 검증 추가 직전 **2,323 passed, 기존 warning 9건**이었고, 추가 후 관련 145개 테스트가 통과했다. Ruff(Worker/core 범위), mypy(Worker 52 source files), `git diff --check`도 통과했다. 저장소 전체 Ruff는 이전 handoff 증거 스크립트에서 기존 오류 16건을 보고하므로 프로젝트 코드 범위로 검사했다.
+
+**아직 007 인수·배포 전:** 로컬 SQLite content 인덱스와 레거시 역조회 안전망, 실제 격리 WebDAV 후보 리허설, 운영 마이그레이션 apply/첫 generation 검증이 남았다. 특히 서비스 중 OCR을 문서별로 보존하는 규칙과 외부에서 새 variant가 게시된 다음 run의 최신 선택을 함께 검증해야 한다. 006 OpenCode 공급자는 코드에 통합됐지만 운영 활성화하지 않았다. 운영 WebDAV·state·timer·이미지·설정에는 쓰지 않았다. PLAN §6의 단계 6·7은 별도 승인 대상이다.

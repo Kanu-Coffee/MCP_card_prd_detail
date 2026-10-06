@@ -450,3 +450,92 @@ async def test_provider_change_hits_content_after_first_resolve(
     assert second.cache_reused is True
     assert second.cache_variant_id == first.cache_variant_id
     assert second.ocr_sha256 == first.ocr_sha256
+
+
+@pytest.mark.asyncio
+async def test_reprocess_bypasses_cache_once_and_resume_reuses_request_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class CountingProvider:
+        provider = "opencode"
+        model = "alibaba-token-plan/qwen3.8-flash"
+        reasoning_effort = "medium"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def recognize(self, *_args: object, **_kwargs: object) -> str:
+            self.calls += 1
+            return "## Page 1\nA newly requested OCR result with different text."
+
+    def render(_pdf_path: Path, output_dir: Path, *, scale: float) -> tuple[Path, ...]:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = output_dir / "page-0001.png"
+        image.write_bytes(b"fake-png")
+        return (image,)
+
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", render)
+    webdav = FakeWebDAV()
+    old, old_body = _variant(
+        created_at=datetime(2026, 10, 6, tzinfo=UTC),
+        provider="codex-exec",
+        text="Previously served OCR text with enough characters for strict verification.",
+    )
+    await ContentOCRVariantStore(webdav=webdav, state_root=tmp_path).publish(  # type: ignore[arg-type]
+        old, old_body
+    )
+    pdf_path = tmp_path / "source.pdf"
+    pdf_path.write_bytes(b"pdf")
+    provider = CountingProvider()
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        resolver = OCRResolver(provider=provider, state=state, webdav=webdav)  # type: ignore[arg-type]
+        state.start_run(run_id="reprocess1")
+        first = await resolver.resolve(
+            run_id="reprocess1",
+            document_id="doc_test",
+            pdf_path=pdf_path,
+            pdf_sha256=old.source.pdf_sha256,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "runs" / "reprocess1" / "documents" / "doc_test" / "ocr",
+            reprocess_request_id="ocr-request-test",
+        )
+        state.finish_run("reprocess1", "succeeded")
+        state.start_run(run_id="reprocess2")
+        resumed = await resolver.resolve(
+            run_id="reprocess2",
+            document_id="doc_test",
+            pdf_path=pdf_path,
+            pdf_sha256=old.source.pdf_sha256,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "runs" / "reprocess2" / "documents" / "doc_test" / "ocr",
+            reprocess_request_id="ocr-request-test",
+        )
+    assert provider.calls == 1
+    assert first.provider_called is True
+    assert first.cache_variant_id != old.variant_id
+    assert resumed.cache_variant_id == first.cache_variant_id
+    assert resumed.provider_called is False
+
+
+@pytest.mark.asyncio
+async def test_restore_promotes_historical_text_without_changing_original(tmp_path: Path) -> None:
+    webdav = FakeWebDAV()
+    store = ContentOCRVariantStore(webdav=webdav, state_root=tmp_path)  # type: ignore[arg-type]
+    old, old_body = _variant(
+        created_at=datetime(2026, 10, 6, tzinfo=UTC), provider="codex-exec", text="old OCR text"
+    )
+    recent, recent_body = _variant(
+        created_at=datetime(2026, 10, 7, tzinfo=UTC), provider="opencode", text="new OCR text"
+    )
+    await store.publish(old, old_body)
+    await store.publish(recent, recent_body)
+    restored = await store.restore_variant(source=old.source, cache_epoch=0, variant_id=old.variant_id)
+    assert restored.restored_from == old.variant_id
+    assert restored.output == old.output
+    assert restored.created_at > recent.created_at
+    assert webdav.objects[str(old.variant_root / "manifest.json")] == old.canonical_bytes()
+    latest = await store.lookup(run_id="after-restore", source=old.source, cache_epoch=0)
+    assert latest is not None and latest.manifest.variant_id == restored.variant_id
+    assert latest.body == old_body
