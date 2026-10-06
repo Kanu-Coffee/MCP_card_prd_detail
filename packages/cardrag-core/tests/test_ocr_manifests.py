@@ -12,6 +12,7 @@ from cardrag_core import (
     AdoptedOCRArtifactManifest,
     ArtifactRef,
     ContentOCRArtifactManifest,
+    ContentOCRImportedProvenance,
     ContentOCRMigrationSource,
     ContentOCRReady,
     EmbeddingContract,
@@ -701,3 +702,40 @@ def test_content_ocr_variant_binds_pdf_epoch_provenance_and_ready() -> None:
         ContentOCRArtifactManifest.model_validate_json(json.dumps(tampered))
     with pytest.raises(ValueError, match="OCR variant"):
         content_ocr_variant_root_path(first.reuse_key, "../unsafe")
+
+
+def test_content_imported_provenance_is_truthful_and_round_trips() -> None:
+    source = _source()
+    verified = verify_ocr_bytes(_ocr_payload(), expected_page_count=source.page_count)
+    output = ArtifactRef.for_cas(
+        sha256=verified.sha256,
+        size_bytes=verified.size_bytes,
+        media_type="text/markdown; charset=utf-8",
+    )
+    adopted = ContentOCRImportedProvenance(
+        source_kind="adopted",
+        provider="legacy-adoption",
+        source_manifest_sha256=sha256_bytes(b"adopted manifest"),
+    )
+    manifest = ContentOCRArtifactManifest.create(
+        source=source,
+        cache_epoch=0,
+        output=output,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+        provenance=adopted,
+        migrated_from=ContentOCRMigrationSource(kind="adopted", reuse_key=sha256_bytes(b"key")),
+    )
+    assert ContentOCRArtifactManifest.model_validate_json(manifest.canonical_bytes()) == manifest
+    assert manifest.provenance.provider == "legacy-adoption"
+
+    generation = ContentOCRImportedProvenance(
+        source_kind="generation-only",
+        provider="generation-only",
+        generation_id="g-stable",
+        document_id="doc_example",
+    )
+    assert generation.source_kind == "generation-only"
+    with pytest.raises(ValidationError, match="source manifest hash"):
+        ContentOCRImportedProvenance(source_kind="adopted", provider="legacy-adoption")

@@ -11,6 +11,7 @@ from cardrag_core import (
     AdoptedOCRArtifactManifest,
     ArtifactRef,
     ContentOCRArtifactManifest,
+    ContentOCRMigrationSource,
     ContentOCRReady,
     EmbeddingContract,
     GenerationCounts,
@@ -87,6 +88,12 @@ class FakeWebDAV:
         if failure is not None:
             raise failure
         self.deleted.append(key)
+
+    async def put_bytes(self, path: str | PurePosixPath, body: bytes, *, content_type: str) -> None:
+        key = str(path)
+        if key in self.objects and self.objects[key] != body:
+            raise ValueError("immutable collision")
+        self.objects[key] = body
 
 
 def cache_control(*, cache_epoch: int, body: bytes) -> tuple[str, OCRArtifactManifest, OCRReady, ArtifactRef]:
@@ -240,11 +247,19 @@ def add_incoming_temp_leaves(webdav: FakeWebDAV) -> tuple[PurePosixPath, PurePos
     return channel_leaf, publish_leaf
 
 
-def add_content_variant(webdav: FakeWebDAV) -> ContentOCRArtifactManifest:
-    body = b"## Page 1\n\nA verified, preserved content OCR variant.\n"
+def add_content_variant(
+    webdav: FakeWebDAV, *, migrated_from_key: str | None = None
+) -> ContentOCRArtifactManifest:
+    body = (
+        "## Page 1\n\n카드 혜택 조건과 제외 사항을 충분히 설명하는 본문입니다.\n".encode()
+        if migrated_from_key is not None
+        else b"## Page 1\n\nA verified, preserved content OCR variant.\n"
+    )
     source = OCRInput(pdf_sha256=sha256_bytes(b"pdf"), pdf_size_bytes=3, page_count=1)
     verified = verify_ocr_bytes(body, expected_page_count=1)
-    _key, native, _ready, _output = cache_control(cache_epoch=0, body=body)
+    _key, native, _ready, _output = cache_control(
+        cache_epoch=1 if migrated_from_key is not None else 0, body=body
+    )
     manifest = ContentOCRArtifactManifest.create(
         source=source,
         cache_epoch=0,
@@ -253,6 +268,11 @@ def add_content_variant(webdav: FakeWebDAV) -> ContentOCRArtifactManifest:
         page_output_sha256=verified.page_sha256,
         created_at=NOW,
         provenance=native.contract,
+        migrated_from=(
+            ContentOCRMigrationSource(kind="native", reuse_key=migrated_from_key)
+            if migrated_from_key is not None
+            else None
+        ),
     )
     content_root = PurePosixPath("v1/ocr-cache/content")
     prefix = content_root / manifest.reuse_key[:2]
@@ -296,6 +316,28 @@ async def test_gc_marks_all_content_variants_and_their_cas(tmp_path: Path) -> No
         result = await collect_garbage(webdav=webdav, state=state, now=NOW)
     assert manifest.output.path not in result.candidates
     assert content_index_path(manifest).as_posix() not in result.candidates
+
+
+@pytest.mark.asyncio
+async def test_gc_preserves_migrated_legacy_provenance(tmp_path: Path) -> None:
+    webdav, _active, inactive_key, _unused = build_remote()
+    add_content_variant(webdav, migrated_from_key=inactive_key)
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        result = await collect_garbage(webdav=webdav, state=state, now=NOW)
+    assert f"v1/ocr-cache/native/{inactive_key[:2]}/{inactive_key}" not in result.candidates
+
+
+@pytest.mark.asyncio
+async def test_gc_blocks_when_migrated_legacy_provenance_is_missing(tmp_path: Path) -> None:
+    webdav, _active, inactive_key, _unused = build_remote()
+    add_content_variant(webdav, migrated_from_key=inactive_key)
+    webdav.objects.pop(ocr_ready_path(inactive_key).as_posix())
+    with (
+        WorkerState(tmp_path / "state.sqlite3") as state,
+        pytest.raises(GCMarkVerificationError, match="migrated legacy OCR provenance is missing"),
+    ):
+        await collect_garbage(webdav=webdav, state=state, apply=True, now=NOW + timedelta(days=31))
+    assert webdav.deleted == []
 
 
 @pytest.mark.asyncio

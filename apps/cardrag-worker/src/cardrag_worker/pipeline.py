@@ -3590,14 +3590,10 @@ class WorkerPipeline:
         )
         current_remote = await self.webdav.validated_current_generation()
         transition_served_ocr: dict[str, tuple[str, int, int, str, int]] = {}
-        if (
-            isinstance(self.webdav, WebDAVClient)
-            and current_remote is not None
-            and current_remote.contract_sha256 != contract_sha256
-        ):
-            # The first content-cache contract transition must preserve each
-            # document's served text, including PDFs shared by documents with
-            # different historical OCR outputs.
+        if isinstance(self.webdav, WebDAVClient) and current_remote is not None:
+            # Preserve each existing document's served OCR across the first
+            # transition and later corpus revisions. A manual reprocess path
+            # must explicitly remove this per-document retention condition.
             previous_body = await self.webdav.get_bytes(
                 generation_manifest_path(current_remote.generation_id),
                 max_bytes=MAX_GENERATION_MANIFEST_BYTES,

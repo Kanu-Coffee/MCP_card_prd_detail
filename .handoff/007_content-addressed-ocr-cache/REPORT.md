@@ -76,3 +76,14 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 현재 remote generation의 contract가 새 Worker contract와 다를 때, canonical generation manifest를 읽어 기존 문서의 PDF identity와 OCR SHA/크기를 묶는다. 새 run에서 PDF가 동일한 문서는 이 OCR identity와 일치하는 content variant만 선택하고, 없으면 provider를 호출하지 않고 실패시킨다. 같은 PDF의 다른 문서는 각자의 기존 OCR로 고정된다. 일반 run은 최신 유효 variant를 선택한다. Resolver 단위 테스트에서 같은 PDF의 과거 variant 고정·새 run 최신 선택·일치 variant 부재 시 차단을 검증했다. 이 경로가 실제 5,512개 문서에 적용되려면 모든 필요한 content variant의 마이그레이션이 먼저 완료돼야 한다.
 
 - 문서별 전환 고정 적용 후 전체 테스트 **2,229 passed**, 기존 warning 9건. Ruff check/format, mypy 100 source files, `git diff --check` 통과.
+
+## 2026-10-07 이전 계획과 격리 적용 경로
+
+- `ContentOCRImportedProvenance`를 추가해 native 계약이 없는 **adopted**와 **generation-only** OCR을 실제 출처대로 기록한다. adopted는 원본 manifest SHA와 `migrated_from`을, generation-only는 stable generation/document ID를 보존한다. 기존 native provenance의 직렬화와 키는 변경하지 않았다.
+- `ocr-cache migrate --dry-run`은 검증된 레거시 후보와 stable generation 전용 CAS에서 불변 variant 계획을 만든다. 동일 PDF·다른 OCR은 서로 다른 variant로 보존하고, stable 문서마다 기존 텍스트의 variant ID를 지정한다. 운영 전체 dry-run은 **레거시 1,818 + generation-only 고유 3,354 = 총 5,172 variant**, stable 문서 **5,512개 모두 선택 가능**, 충돌 PDF 키 87개였다. credential 유사 패턴 검사를 추가한 뒤 재실행해 같은 수치로 완료했다. PDF/OCR 본문은 출력하지 않았다.
+- 내부 `apply_content_migration`은 기존 CAS를 재업로드하지 않고 검증한 다음 manifest → READY → index를 불변 게시한다. stable pointer가 계획과 다르거나 진행 중 바뀌면 중단하며, 같은 계획을 재실행할 수 있다. **운영 apply CLI는 열지 않았고 운영 WebDAV 쓰기도 하지 않았다.** 가짜 WebDAV에서 2회 적용 멱등성과 이후 opencode 설정 Resolver의 provider 호출 0건을 확인했다. 실제 격리 WebDAV prefix/후보 이미지 리허설은 남았다.
+- GC는 content variant뿐 아니라 `migrated_from` 원본 레거시 manifest·READY·CAS도 보존하도록 했다. 원본이 사라지거나 binding이 다르면 DELETE 전에 실패한다.
+- 서비스 텍스트 고정은 첫 계약 전환뿐 아니라 이후 corpus 변경 run의 기존 동일 PDF 문서에도 적용되도록 확장했다. 명시적 재작업에서 이 고정을 해제하는 경로는 아직 미구현이다.
+- 전체 테스트 **2,235 passed**, 기존 warning 9건. Ruff check/format, mypy 101 source files, `git diff --check` 통과.
+
+**남은 필수 개발:** 문서/issuer/전체 재작업 요청과 복원, 재작업 시 no-change 우회·pin 해제, 로컬 content 인덱스·레거시 역조회 안전망, 실제 격리 리허설과 운영 apply 절차. 적용 전 사용자 승인 단계는 PLAN §6에 따른다.

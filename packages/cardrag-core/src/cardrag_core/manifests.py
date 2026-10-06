@@ -1029,6 +1029,41 @@ class ContentOCRMigrationSource(StrictFrozenModel):
     reuse_key: Sha256Hex
 
 
+class ContentOCRImportedProvenance(StrictFrozenModel):
+    """Truthful origin when no native provider contract was ever recorded."""
+
+    schema_version: Literal["cardrag.ocr-imported-provenance.v1"] = "cardrag.ocr-imported-provenance.v1"
+    source_kind: Literal["adopted", "generation-only"]
+    provider: Literal["legacy-adoption", "generation-only"]
+    model: Literal["unrecorded"] = "unrecorded"
+    source_manifest_sha256: Sha256Hex | None = Field(default=None, exclude_if=lambda value: value is None)
+    generation_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    document_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def origin_fields_match_kind(self) -> Self:
+        if self.source_kind == "adopted":
+            if (
+                self.provider != "legacy-adoption"
+                or self.source_manifest_sha256 is None
+                or self.generation_id is not None
+                or self.document_id is not None
+            ):
+                raise ValueError("adopted OCR provenance requires only its source manifest hash")
+        elif (
+            self.provider != "generation-only"
+            or self.source_manifest_sha256 is not None
+            or self.generation_id is None
+            or self.document_id is None
+        ):
+            raise ValueError("generation-only OCR provenance requires generation and document IDs")
+        if self.generation_id is not None:
+            validate_identifier(self.generation_id, label="generation_id")
+        if self.document_id is not None:
+            validate_identifier(self.document_id, label="document_id")
+        return self
+
+
 class ContentOCRArtifactManifest(StrictFrozenModel):
     """One immutable OCR variant for a PDF and reset epoch.
 
@@ -1044,7 +1079,7 @@ class ContentOCRArtifactManifest(StrictFrozenModel):
     ocr_chars: PositiveInt
     page_output_sha256: tuple[Sha256Hex, ...] = Field(min_length=1)
     created_at: AwareDatetime
-    provenance: NativeOCRContract
+    provenance: NativeOCRContract | ContentOCRImportedProvenance
     variant_id: Sha256Hex
     migrated_from: ContentOCRMigrationSource | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -1062,7 +1097,7 @@ class ContentOCRArtifactManifest(StrictFrozenModel):
         ocr_chars: int,
         page_output_sha256: tuple[str, ...],
         created_at: datetime,
-        provenance: NativeOCRContract,
+        provenance: NativeOCRContract | ContentOCRImportedProvenance,
         migrated_from: ContentOCRMigrationSource | None = None,
         reprocess_request_id: str | None = None,
         restored_from: str | None = None,

@@ -222,7 +222,7 @@ async def _mark_content_variants(
     webdav: WebDAVClient,
     *,
     retained_variants: Mapping[tuple[str, str], tuple[str, int, str]],
-) -> set[str]:
+) -> tuple[set[str], dict[tuple[str, str], set[tuple[str, int, str]]]]:
     """Verify and retain every immutable content variant, including old siblings."""
 
     root = PurePosixPath("v1/ocr-cache/content")
@@ -236,6 +236,7 @@ async def _mark_content_variants(
     marked: set[str] = set()
     found_indexes: set[PurePosixPath] = set()
     found_variants: set[tuple[str, str]] = set()
+    legacy_references: dict[tuple[str, str], set[tuple[str, int, str]]] = {}
     prefixes = await _optional_children(webdav, root)
     if len(prefixes) != len(set(prefixes)):
         raise GCMarkVerificationError("duplicate content OCR prefix")
@@ -310,9 +311,17 @@ async def _mark_content_variants(
                         manifest.output.path,
                     }
                 )
+                if manifest.migrated_from is not None:
+                    legacy_key = (manifest.migrated_from.kind, manifest.migrated_from.reuse_key)
+                    legacy_binding = (
+                        manifest.output.sha256,
+                        manifest.output.size_bytes,
+                        manifest.output.path,
+                    )
+                    legacy_references.setdefault(legacy_key, set()).add(legacy_binding)
     if found_indexes != index_set or not set(retained_variants).issubset(found_variants):
         raise GCMarkVerificationError("content OCR index or retained generation variant is missing")
-    return marked
+    return marked, legacy_references
 
 
 def _is_incoming_temp_leaf(path: PurePosixPath | str) -> bool:
@@ -383,6 +392,7 @@ async def _mark_ocr_caches(
     webdav: WebDAVClient,
     *,
     retained_references: Mapping[tuple[str, str], set[tuple[str, int, str]]],
+    required_references: Mapping[tuple[str, str], set[tuple[str, int, str]]] | None = None,
 ) -> tuple[set[str], set[str]]:
     marked: set[str] = set()
     inactive: set[str] = set()
@@ -472,6 +482,11 @@ async def _mark_ocr_caches(
                             f"retained generation/cache binding differs for {kind}/{reuse_key}: "
                             f"cache points to {manifest_binding}, retained expects one of {sorted(retained_bindings)}"
                         )
+                    required_bindings = (
+                        required_references.get(reference_key) if required_references is not None else None
+                    )
+                    if required_bindings is not None and manifest_binding not in required_bindings:
+                        raise GCMarkVerificationError("migrated legacy OCR binding differs")
                     found_references.add(reference_key)
                     marked.update(
                         {
@@ -491,6 +506,8 @@ async def _mark_ocr_caches(
                 else:
                     inactive.add(reuse_root.as_posix())
     missing = set(retained_references).difference(found_references)
+    if required_references and set(required_references).intersection(missing):
+        raise GCMarkVerificationError("migrated legacy OCR provenance is missing")
     if missing:
         LOGGER.info(
             "Retained generations reference %d OCR caches not present on WebDAV (cache publication disabled or unseeded): %d native, %d adopted",
@@ -572,12 +589,18 @@ async def collect_garbage(
                 reuse_key,
                 sorted(bindings),
             )
+    content_marks, migrated_legacy = await _mark_content_variants(
+        webdav, retained_variants=retained_content_variants
+    )
+    marked.update(content_marks)
+    for identity, bindings in migrated_legacy.items():
+        retained_cache_references.setdefault(identity, set()).update(bindings)
     cache_marks, inactive_caches = await _mark_ocr_caches(
         webdav,
         retained_references=retained_cache_references,
+        required_references=migrated_legacy,
     )
     marked.update(cache_marks)
-    marked.update(await _mark_content_variants(webdav, retained_variants=retained_content_variants))
     all_generations = await _list_generation_ids(webdav)
     all_objects = await _list_cas_objects(webdav)
     incoming_temp_leaves = await _list_incoming_temp_leaves(webdav)

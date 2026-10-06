@@ -49,6 +49,7 @@ from .capacity_v5 import (
     revalidate_worker_start_capacity,
 )
 from .content_inventory import inventory_content_migration
+from .content_migration import plan_content_migration
 from .corpus_baseline import CorpusBaselineError
 from .corpus_diff import CorpusDiffError
 from .embedding_seed_v122 import (
@@ -131,6 +132,23 @@ def ocr_cache_inventory() -> None:
             await client.close()
 
     _echo(asyncio.run(inspect()))
+
+
+@ocr_cache_app.command("migrate")
+def ocr_cache_migrate(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    """Plan every immutable variant and stable document pin, without remote writes."""
+
+    if not dry_run:
+        raise typer.BadParameter("only --dry-run is implemented before migration rehearsal")
+
+    async def plan() -> dict[str, object]:
+        client = WebDAVClient.from_env()
+        try:
+            return (await plan_content_migration(client)).summary()
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(plan()))
 
 
 def _echo_ocr_failures(exc: OCRDocumentFailuresError) -> None:

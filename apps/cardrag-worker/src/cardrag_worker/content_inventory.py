@@ -24,6 +24,7 @@ from cardrag_core import (
 )
 
 from .gc import _generation_chain
+from .providers import ProviderSystemicError, reject_credential_bearing_ocr
 from .webdav import CONTROL_OBJECT_MAX_BYTES, WebDAVClient
 
 _HEX_PREFIX = re.compile(r"^[0-9a-f]{2}$")
@@ -43,6 +44,7 @@ class LegacyOCRCandidate:
     created_at: datetime
     manifest_sha256: str
     provider: str
+    manifest: OCRArtifactManifest | AdoptedOCRArtifactManifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +169,9 @@ async def _inspect_legacy(
             expected_char_count=manifest.ocr_chars,
             expected_page_sha256=manifest.page_output_sha256,
         )
+        reject_credential_bearing_ocr(body)
+    except ProviderSystemicError:
+        return InventoryExclusion(kind, key, "ocr_credential_pattern")
     except ValueError:
         return InventoryExclusion(kind, key, "ocr_object_invalid")
     return LegacyOCRCandidate(
@@ -179,12 +184,13 @@ async def _inspect_legacy(
         provider=manifest.contract.provider
         if isinstance(manifest, OCRArtifactManifest)
         else "legacy-adoption",
+        manifest=manifest,
     )
 
 
-async def inventory_content_migration(webdav: WebDAVClient) -> ContentInventory:
-    """Inspect controls and OCR bytes without writing local or remote state."""
-
+async def inspect_all_legacy(
+    webdav: WebDAVClient,
+) -> tuple[tuple[LegacyOCRCandidate, ...], tuple[InventoryExclusion, ...], int]:
     roots = await _legacy_roots(webdav)
     semaphore = asyncio.Semaphore(16)
 
@@ -195,6 +201,13 @@ async def inventory_content_migration(webdav: WebDAVClient) -> ContentInventory:
     inspected = await asyncio.gather(*(inspect(kind, key) for kind, key in roots))
     valid = tuple(row for row in inspected if isinstance(row, LegacyOCRCandidate))
     exclusions = tuple(row for row in inspected if isinstance(row, InventoryExclusion))
+    return valid, exclusions, len(roots)
+
+
+async def inventory_content_migration(webdav: WebDAVClient) -> ContentInventory:
+    """Inspect controls and OCR bytes without writing local or remote state."""
+
+    valid, exclusions, found_count = await inspect_all_legacy(webdav)
     _pointer, (stable,) = await _generation_chain(webdav, retain=1, pointer_path=STABLE_POINTER_PATH)
     by_source: dict[str, list[LegacyOCRCandidate]] = defaultdict(list)
     for row in valid:
@@ -217,6 +230,9 @@ async def inventory_content_migration(webdav: WebDAVClient) -> ContentInventory:
                 expected_sha256=sha256,
                 expected_size_bytes=size,
             )
+            reject_credential_bearing_ocr(body)
+        except ProviderSystemicError:
+            return False
         except ValueError:
             return False
         return True
@@ -256,7 +272,7 @@ async def inventory_content_migration(webdav: WebDAVClient) -> ContentInventory:
     stable_unverified = sum(not valid for valid in await asyncio.gather(*stable_verifications))
     return ContentInventory(
         stable_generation_id=stable.generation_id,
-        legacy_found=len(roots),
+        legacy_found=found_count,
         legacy_valid=len(valid),
         by_kind=dict(sorted(Counter(row.kind for row in valid).items())),
         by_provider=dict(sorted(Counter(row.provider for row in valid).items())),

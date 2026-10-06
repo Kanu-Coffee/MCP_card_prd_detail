@@ -303,6 +303,26 @@ class ContentOCRVariantStore:
         sha, path = await self.webdav.put_cas(body, media_type="text/markdown; charset=utf-8")
         if sha != manifest.output.sha256 or path != manifest.output.path:
             raise ContentCacheValidationError("content variant CAS publication identity differs")
+        await self._publish_controls(manifest)
+
+    async def publish_existing(self, manifest: ContentOCRArtifactManifest) -> None:
+        """Migrate a verified existing CAS without uploading its OCR bytes again."""
+
+        body = await self.webdav.get_bytes(manifest.output.path, max_bytes=manifest.output.size_bytes)
+        if body is None:
+            raise ContentCacheValidationError("migration OCR CAS object is missing")
+        reject_credential_bearing_ocr(body)
+        verify_ocr_bytes(
+            body,
+            expected_page_count=manifest.source.page_count,
+            expected_sha256=manifest.output.sha256,
+            expected_size_bytes=manifest.output.size_bytes,
+            expected_char_count=manifest.ocr_chars,
+            expected_page_sha256=manifest.page_output_sha256,
+        )
+        await self._publish_controls(manifest)
+
+    async def _publish_controls(self, manifest: ContentOCRArtifactManifest) -> None:
         root = manifest.variant_root
         await self.webdav.put_bytes(
             root / "manifest.json", manifest.canonical_bytes(), content_type="application/json"
