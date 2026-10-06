@@ -48,3 +48,21 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 - 전체 테스트 **2,226 passed**, 기존 warning 9건. Ruff check/format, mypy 99 source files, `git diff --check`, GC 관련 20건 통과.
 
 **계속 미완료:** 007 레거시 원격·로컬 역조회와 전체 산출물 이전, 운영 실데이터 M0 인벤토리, 재처리·복원, no-change/seed 경로 보완, 격리 리허설 및 운영 전환 검증. 006 운영 provider 활성화도 하지 않았다. 운영 timer·state·WebDAV·이미지·설정은 이번 단계에서 변경하지 않았다.
+
+## 2026-10-07 M0 읽기 전용 인벤토리
+
+`cardrag-worker ocr-cache inventory`를 추가했다. 레거시 native/adopted의 manifest·READY·OCR 바이트를 검증하고 현재 stable generation의 OCR CAS를 대조한다. 읽기 전용 구현이며 운영 WebDAV/state에 PUT·DELETE를 하지 않는다. 최초 실사에서는 stable OCR 5,512개를 순차 확인하는 부분이 180초 제한에 걸렸다. 검증된 레거시 바이트는 다시 받지 않고 남은 stable CAS를 최대 16개 병렬로 읽도록 개선한 후 전체 명령이 약 55초에 완료됐다.
+
+| M0 항목 | 관측값 |
+|---|---:|
+| 레거시 경로 / 유효 / 검증 제외 | 1,818 / 1,818 / 0 |
+| native / adopted | 308 / 1,510 |
+| 다중 레거시 variant PDF | 81 |
+| stable OCR 문서 | 5,512 |
+| 같은 OCR을 가리키는 레거시 캐시가 없는 stable 문서 | **3,625** |
+| 레거시 최신을 그대로 채택하면 서비스 중 텍스트가 달라질 문서 | **334** |
+| stable OCR CAS 검증 실패 | 0 |
+
+이 숫자는 **문서 수 기준**이며 PDF 고유 개수·마이그레이션 신규 variant 수와 같지 않다. 3,625개에 대한 generation 참조 승격과 334개의 서비스 중 텍스트 보존 승격이 필수다. 이 M0는 레거시 캐시와 현재 stable만 조사했다. 모든 과거 generation과 CAS 전체를 대조하는 고아 CAS 집계는 아직 하지 않았다. OCR 본문과 자격값은 보고서에 포함하지 않았다. 마이그레이션 적용은 하지 않았다.
+
+- M0 추가 후 전체 테스트 **2,228 passed**, 기존 warning 9건. Ruff check/format, mypy 100 source files, `git diff --check` 통과. 운영 timer는 `active`.

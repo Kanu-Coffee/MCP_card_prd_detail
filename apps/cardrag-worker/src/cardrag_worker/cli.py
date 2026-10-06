@@ -48,6 +48,7 @@ from .capacity_v5 import (
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
 )
+from .content_inventory import inventory_content_migration
 from .corpus_baseline import CorpusBaselineError
 from .corpus_diff import CorpusDiffError
 from .embedding_seed_v122 import (
@@ -86,6 +87,8 @@ from .tokenizer_v5 import ensure_qwen_tokenizer
 from .webdav import WebDAVClient
 
 app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/embedding worker")
+ocr_cache_app = typer.Typer(no_args_is_help=True, help="Read-only OCR cache inspection")
+app.add_typer(ocr_cache_app, name="ocr-cache")
 
 _WORKER_SHUTDOWN_SIGNALS: tuple[int, int] = (int(signal.SIGTERM), int(signal.SIGINT))
 
@@ -114,6 +117,20 @@ def _configure_worker_logging() -> None:
 
 def _echo(payload: Any) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str))
+
+
+@ocr_cache_app.command("inventory")
+def ocr_cache_inventory() -> None:
+    """Verify legacy OCR and current stable text without writing state or WebDAV."""
+
+    async def inspect() -> dict[str, object]:
+        client = WebDAVClient.from_env()
+        try:
+            return (await inventory_content_migration(client)).summary()
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(inspect()))
 
 
 def _echo_ocr_failures(exc: OCRDocumentFailuresError) -> None:
