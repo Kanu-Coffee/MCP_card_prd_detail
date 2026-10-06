@@ -2230,6 +2230,7 @@ class OCRResolver:
         if self._content_store is not None:
             content_hit = await self._content_store.lookup(
                 run_id=run_id,
+                document_id=document_id,
                 source=source,
                 cache_epoch=self.cache_epoch,
                 expected_ocr_identity=expected_ocr_identity,

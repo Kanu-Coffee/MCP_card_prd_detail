@@ -34,3 +34,9 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 - 검증: `test_gc.py`와 `test_content_cache.py` 24 passed. GC guard까지 포함한 전체 테스트 **2,224 passed**, 기존 warning 9건. Ruff check/format, mypy(99 source files), `git diff --check` 통과.
 
 **아직 인수·배포 불가:** run의 index 목록은 고정되지만 문서별 선택 variant ID는 별도 영속화되지 않았다. 로컬 content 인덱스, 모든 레거시 variant 이전/M0, 서비스 중 OCR 텍스트 보존, 재처리·restore, 재처리 시 내용 동일성 판단, content aware GC mark, 운영 read-only inventory와 리허설이 남았다. 이번 후속 작업은 운영 WebDAV나 운영 state에 쓰지 않았다.
+
+### 이어서 적용한 선택 고정
+
+문서별 content hit 선택을 `runs/<run_id>/content-ocr-selections/<document_id>.json`에 원자적으로 기록한다. 재개 시 같은 index·variant ID·OCR 바이트를 재검증하고, 선택된 variant가 훼손되면 다른 변형으로 조용히 바꾸지 않고 중단한다. 이 경로의 재개·훼손 테스트 1건을 추가했다. 위의 “문서별 선택 variant ID는 별도 영속화되지 않았다”는 최초 후속 구현 시점의 상태이며, 이 변경으로 해결했다. 나머지 미완료 항목과 배포 금지는 유지된다.
+
+- 선택 고정 적용 후 전체 테스트: **2,225 passed**, 기존 warning 9건. Ruff check/format, mypy 99 source files, `git diff --check` 통과.

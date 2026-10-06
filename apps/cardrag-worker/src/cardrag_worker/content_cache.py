@@ -69,6 +69,25 @@ class ContentOCRVariantStore:
         self.state_root = state_root
         self._snapshots: dict[str, dict[str, tuple[PurePosixPath, ...]]] = {}
 
+    def _selection_path(self, run_id: str, document_id: str) -> Path:
+        safe_run = validate_identifier(run_id, label="run_id")
+        safe_document = validate_identifier(document_id, label="document_id")
+        return self.state_root / "runs" / safe_run / "content-ocr-selections" / f"{safe_document}.json"
+
+    @staticmethod
+    def _atomic_write(path: Path, body: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            with temporary.open("xb") as handle:
+                os.chmod(temporary, 0o600)
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     async def freeze(self, run_id: str) -> None:
         """Reuse a durable snapshot on resume; otherwise enumerate once."""
 
@@ -118,17 +137,7 @@ class ContentOCRVariantStore:
             )
             if len(body) > _MAX_SNAPSHOT_BYTES:
                 raise ContentCacheValidationError("content index snapshot is too large")
-            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = snapshot_path.with_name(f".{snapshot_path.name}.{secrets.token_hex(8)}.tmp")
-            try:
-                with temporary.open("xb") as handle:
-                    os.chmod(temporary, 0o600)
-                    handle.write(body)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, snapshot_path)
-            finally:
-                temporary.unlink(missing_ok=True)
+            self._atomic_write(snapshot_path, body)
 
         by_key: dict[str, list[PurePosixPath]] = {}
         for entry in entries:
@@ -200,10 +209,52 @@ class ContentOCRVariantStore:
         source: OCRInput,
         cache_epoch: int,
         expected_ocr_identity: tuple[str, int] | None = None,
+        document_id: str | None = None,
     ) -> ContentOCRVariantHit | None:
         await self.freeze(run_id)
         key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
+        selection_path = self._selection_path(run_id, document_id) if document_id is not None else None
+        if selection_path is not None and selection_path.exists():
+            if selection_path.is_symlink() or not selection_path.is_file():
+                raise ContentCacheValidationError("content selection is not a regular file")
+            if selection_path.stat().st_size > CONTROL_OBJECT_MAX_BYTES:
+                raise ContentCacheValidationError("content selection is too large")
+            selection_body = selection_path.read_bytes()
+            try:
+                selection = json.loads(selection_body)
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise ContentCacheValidationError("content selection JSON is invalid") from exc
+            if (
+                not isinstance(selection, dict)
+                or set(selection) != {"schema_version", "reuse_key", "entry", "variant_id"}
+                or selection["schema_version"] != "cardrag.ocr-content-selection.v1"
+                or selection["reuse_key"] != key
+                or not isinstance(selection["entry"], str)
+                or not isinstance(selection["variant_id"], str)
+                or canonical_json_bytes(selection) != selection_body
+            ):
+                raise ContentCacheValidationError("content selection contract is invalid")
+            entry = PurePosixPath(selection["entry"])
+            if entry not in self._snapshots[run_id].get(key, ()):
+                raise ContentCacheValidationError("content selection is outside the run snapshot")
+            try:
+                hit = await self._read_variant(entry, source=source, reuse_key=key)
+            except ContentCacheValidationError as exc:
+                raise ContentCacheValidationError("frozen content selection is no longer valid") from exc
+            if hit.manifest.variant_id != selection["variant_id"]:
+                raise ContentCacheValidationError("frozen content selection variant changed")
+            if (
+                expected_ocr_identity is not None
+                and (
+                    hit.manifest.output.sha256,
+                    hit.manifest.output.size_bytes,
+                )
+                != expected_ocr_identity
+            ):
+                raise ContentCacheValidationError("frozen content selection conflicts with retained OCR")
+            return hit
         verified: list[ContentOCRVariantHit] = []
+        entries: dict[str, PurePosixPath] = {}
         for entry in self._snapshots[run_id].get(key, ()):
             try:
                 hit = await self._read_variant(entry, source=source, reuse_key=key)
@@ -219,9 +270,23 @@ class ContentOCRVariantStore:
             ):
                 continue
             verified.append(hit)
+            entries[hit.manifest.variant_id] = entry
         if not verified:
             return None
-        return max(verified, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256))
+        selected = max(verified, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256))
+        if selection_path is not None:
+            self._atomic_write(
+                selection_path,
+                canonical_json_bytes(
+                    {
+                        "schema_version": "cardrag.ocr-content-selection.v1",
+                        "reuse_key": key,
+                        "entry": entries[selected.manifest.variant_id].as_posix(),
+                        "variant_id": selected.manifest.variant_id,
+                    }
+                ),
+            )
+        return selected
 
     async def publish(self, manifest: ContentOCRArtifactManifest, body: bytes) -> None:
         """Commit CAS, manifest, READY, then the discoverable index marker."""

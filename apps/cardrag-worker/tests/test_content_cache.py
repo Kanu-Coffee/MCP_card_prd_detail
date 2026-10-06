@@ -18,7 +18,11 @@ from cardrag_core import (
     verify_ocr_bytes,
 )
 
-from cardrag_worker.content_cache import ContentOCRVariantStore, content_index_path
+from cardrag_worker.content_cache import (
+    ContentCacheValidationError,
+    ContentOCRVariantStore,
+    content_index_path,
+)
 from cardrag_worker.ocr import OCRResolver, OCRResult
 from cardrag_worker.state import WorkerState
 
@@ -152,6 +156,40 @@ async def test_content_variant_rejects_corrupt_latest_and_epoch_miss(tmp_path: P
     webdav.objects[str(index)] = canonical_json_bytes({"tampered": True})
     new_run = await store.lookup(run_id="run4", source=earlier.source, cache_epoch=0)
     assert new_run is None
+
+
+@pytest.mark.asyncio
+async def test_document_selection_survives_resume_and_fails_closed_if_variant_changes(tmp_path: Path) -> None:
+    webdav = FakeWebDAV()
+    store = ContentOCRVariantStore(webdav=webdav, state_root=tmp_path)  # type: ignore[arg-type]
+    earlier, earlier_body = _variant(
+        created_at=datetime(2026, 10, 6, tzinfo=UTC), provider="codex-exec", text="first text"
+    )
+    later, later_body = _variant(
+        created_at=datetime(2026, 10, 6, tzinfo=UTC) + timedelta(hours=1),
+        provider="opencode",
+        text="latest text",
+    )
+    await store.publish(earlier, earlier_body)
+    await store.publish(later, later_body)
+    first = await store.lookup(
+        run_id="run-select", document_id="doc_test", source=earlier.source, cache_epoch=0
+    )
+    assert first is not None and first.manifest.variant_id == later.variant_id
+    selection = tmp_path / "runs" / "run-select" / "content-ocr-selections" / "doc_test.json"
+    assert selection.is_file()
+
+    resumed = ContentOCRVariantStore(webdav=webdav, state_root=tmp_path)  # type: ignore[arg-type]
+    again = await resumed.lookup(
+        run_id="run-select", document_id="doc_test", source=earlier.source, cache_epoch=0
+    )
+    assert again is not None and again.manifest.variant_id == later.variant_id
+
+    webdav.objects[str(later.variant_root / "READY.json")] = b"{}"
+    with pytest.raises(ContentCacheValidationError, match="frozen content selection"):
+        await resumed.lookup(
+            run_id="run-select", document_id="doc_test", source=earlier.source, cache_epoch=0
+        )
 
 
 @pytest.mark.asyncio
