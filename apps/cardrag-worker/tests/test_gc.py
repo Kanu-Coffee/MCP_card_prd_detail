@@ -10,6 +10,8 @@ from cardrag_core import (
     STABLE_POINTER_PATH,
     AdoptedOCRArtifactManifest,
     ArtifactRef,
+    ContentOCRArtifactManifest,
+    ContentOCRReady,
     EmbeddingContract,
     GenerationCounts,
     GenerationDocument,
@@ -24,6 +26,7 @@ from cardrag_core import (
     OCRReady,
     WebDAVHTTPError,
     adopted_ocr_reuse_key,
+    canonical_json_bytes,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -35,11 +38,13 @@ from cardrag_core import (
     verify_ocr_bytes,
 )
 
+from cardrag_worker.content_cache import content_index_path
 from cardrag_worker.gc import (
     GCDeletionError,
     GCError,
     GCMarkVerificationError,
     GCPartialFailure,
+    _mark_content_variants,
     collect_garbage,
 )
 from cardrag_worker.state import WorkerState
@@ -235,22 +240,88 @@ def add_incoming_temp_leaves(webdav: FakeWebDAV) -> tuple[PurePosixPath, PurePos
     return channel_leaf, publish_leaf
 
 
+def add_content_variant(webdav: FakeWebDAV) -> ContentOCRArtifactManifest:
+    body = b"## Page 1\n\nA verified, preserved content OCR variant.\n"
+    source = OCRInput(pdf_sha256=sha256_bytes(b"pdf"), pdf_size_bytes=3, page_count=1)
+    verified = verify_ocr_bytes(body, expected_page_count=1)
+    _key, native, _ready, _output = cache_control(cache_epoch=0, body=body)
+    manifest = ContentOCRArtifactManifest.create(
+        source=source,
+        cache_epoch=0,
+        output=native.output,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+        provenance=native.contract,
+    )
+    content_root = PurePosixPath("v1/ocr-cache/content")
+    prefix = content_root / manifest.reuse_key[:2]
+    reuse_root = prefix / manifest.reuse_key
+    variants_root = reuse_root / "variants"
+    root = manifest.variant_root
+    manifest_path = root / "manifest.json"
+    ready_path = root / "READY.json"
+    index = content_index_path(manifest)
+    webdav.children[content_root.as_posix()] = (prefix,)
+    webdav.children[prefix.as_posix()] = (reuse_root,)
+    webdav.children[reuse_root.as_posix()] = (variants_root,)
+    webdav.children[variants_root.as_posix()] = (root,)
+    webdav.children[root.as_posix()] = (manifest_path, ready_path)
+    webdav.children[index.parent.as_posix()] = (index,)
+    webdav.objects[manifest_path.as_posix()] = manifest.canonical_bytes()
+    webdav.objects[ready_path.as_posix()] = ContentOCRReady.for_manifest(manifest).canonical_bytes()
+    webdav.objects[index.as_posix()] = canonical_json_bytes(
+        {
+            "schema_version": "cardrag.ocr-content-index.v1",
+            "reuse_key": manifest.reuse_key,
+            "variant_id": manifest.variant_id,
+            "manifest_sha256": manifest.manifest_sha256,
+            "variant_label": manifest.variant_label,
+        }
+    )
+    webdav.objects[manifest.output.path] = body
+    cas_prefix = PurePosixPath("v1/objects/sha256") / manifest.output.sha256[:2]
+    existing = webdav.children.get(cas_prefix.as_posix(), ())
+    webdav.children[cas_prefix.as_posix()] = tuple(sorted({*existing, PurePosixPath(manifest.output.path)}))
+    cas_root = PurePosixPath("v1/objects/sha256")
+    webdav.children[cas_root.as_posix()] = tuple(sorted({*webdav.children[cas_root.as_posix()], cas_prefix}))
+    return manifest
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("root", ["v1/ocr-cache/content", "v1/ocr-cache/content-index"])
-async def test_gc_blocks_when_content_cache_exists_before_any_delete(tmp_path: Path, root: str) -> None:
+async def test_gc_marks_all_content_variants_and_their_cas(tmp_path: Path) -> None:
     webdav, _, _, _ = build_remote()
-    webdav.children[root] = (PurePosixPath(root) / "entry",)
+    manifest = add_content_variant(webdav)
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        result = await collect_garbage(webdav=webdav, state=state, now=NOW)
+    assert manifest.output.path not in result.candidates
+    assert content_index_path(manifest).as_posix() not in result.candidates
+
+
+@pytest.mark.asyncio
+async def test_gc_blocks_incomplete_content_variant_before_any_delete(tmp_path: Path) -> None:
+    webdav, _, _, _ = build_remote()
+    manifest = add_content_variant(webdav)
+    webdav.objects.pop((manifest.variant_root / "READY.json").as_posix())
     with (
         WorkerState(tmp_path / "state.sqlite3") as state,
-        pytest.raises(GCMarkVerificationError, match="cannot mark content OCR variants"),
+        pytest.raises(GCMarkVerificationError, match="content OCR variant failed mark verification"),
     ):
-        await collect_garbage(
-            webdav=webdav,
-            state=state,
-            apply=True,
-            now=NOW + timedelta(days=31),
-        )
+        await collect_garbage(webdav=webdav, state=state, apply=True, now=NOW + timedelta(days=31))
     assert webdav.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_gc_rejects_retained_content_binding_mismatch() -> None:
+    webdav, _, _, _ = build_remote()
+    manifest = add_content_variant(webdav)
+    with pytest.raises(GCMarkVerificationError, match="content OCR variant failed mark verification"):
+        await _mark_content_variants(
+            webdav,  # type: ignore[arg-type]
+            retained_variants={
+                (manifest.reuse_key, manifest.variant_id): ("f" * 64, 1, manifest.output.path)
+            },
+        )
 
 
 @pytest.mark.asyncio

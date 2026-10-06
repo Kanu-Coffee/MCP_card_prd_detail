@@ -40,3 +40,11 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 문서별 content hit 선택을 `runs/<run_id>/content-ocr-selections/<document_id>.json`에 원자적으로 기록한다. 재개 시 같은 index·variant ID·OCR 바이트를 재검증하고, 선택된 variant가 훼손되면 다른 변형으로 조용히 바꾸지 않고 중단한다. 이 경로의 재개·훼손 테스트 1건을 추가했다. 위의 “문서별 선택 variant ID는 별도 영속화되지 않았다”는 최초 후속 구현 시점의 상태이며, 이 변경으로 해결했다. 나머지 미완료 항목과 배포 금지는 유지된다.
 
 - 선택 고정 적용 후 전체 테스트: **2,225 passed**, 기존 warning 9건. Ruff check/format, mypy 99 source files, `git diff --check` 통과.
+
+## 2026-10-07 후속 구현 — 006 통합 및 content GC mark
+
+- 006 OpenCode OCR 후보 구현과 PLAN/REPORT/FIX 이력을 007 브랜치에 별도 커밋 `1ac3cca`로 반영했다. 기존 기본 provider는 유지되며 opt-in `compose.opencode.yaml`만 추가된다. Compose `config --quiet`와 hadolint는 통과했다. gitleaks 전체 작업 트리 스캔은 551건을 보고했으나 **006 변경 파일에서는 0건**이었다. 전체 작업 트리 검출의 내용은 이번 과제에서 수정하지 않았다.
+- 이전 단계의 content 존재 시 원격 GC 전체 중단 장치를, **모든 content variant의 manifest·READY·index·OCR CAS를 검증하고 전부 mark**하는 경로로 교체했다. 레거시 GC 규칙은 유지한다. 미완성 variant·index 불일치·retained generation의 variant ID 또는 OCR binding 불일치면 DELETE 전에 중단한다. variant 삭제 정책은 도입하지 않았다.
+- 전체 테스트 **2,226 passed**, 기존 warning 9건. Ruff check/format, mypy 99 source files, `git diff --check`, GC 관련 20건 통과.
+
+**계속 미완료:** 007 레거시 원격·로컬 역조회와 전체 산출물 이전, 운영 실데이터 M0 인벤토리, 재처리·복원, no-change/seed 경로 보완, 격리 리허설 및 운영 전환 검증. 006 운영 provider 활성화도 하지 않았다. 운영 timer·state·WebDAV·이미지·설정은 이번 단계에서 변경하지 않았다.
