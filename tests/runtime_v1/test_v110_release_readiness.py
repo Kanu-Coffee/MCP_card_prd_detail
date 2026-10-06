@@ -3,41 +3,41 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_release_seals_operational_readiness_instead_of_research_gold() -> None:
+def test_release_seals_release_qualification_instead_of_runtime_receipts() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
-
-    required_contracts = (
-        'evidence_dir="release-evidence/v${version}"',
-        'readiness_receipt="$evidence_dir/release-readiness-receipt.json"',
-        '"schema": "cardrag.release-readiness-evidence.v1"',
-        '"maximum_file_bytes": MAX_FILE_BYTES',
-        "name: readiness-evidence-${{ steps.version.outputs.version }}",
-        ".venv/bin/python -m cardrag_mcp.release_readiness \\\n",
+    for contract in (
+        'qualification_dir="release-evidence/v${version}"',
+        'qualification="$qualification_dir/release-qualification.json"',
+        'test "$(find "$qualification_dir" -mindepth 1 | wc -l)" -eq 1',
+        '"cardrag.release-qualification-validation.v1"',
+        "name: release-qualification-${{ steps.version.outputs.version }}",
         'test "$version" = "1.0.32"',
         'test "$(git cat-file -t "refs/tags/v$version")" = tag',
-        'test "$(git cat-file -t "refs/tags/v$VERSION")" = tag',
         'git ls-remote origin "refs/tags/v${version}^{}"',
-        'git ls-remote origin "refs/tags/v${VERSION}^{}"',
-        "release-readiness-manifest.json",
-        "assert collect_evidence_files(source_root, ()) == set(relative_paths)",
-    )
-    for contract in required_contracts:
-        assert contract in workflow
-    for research_reference in (
-        "gold.jsonl",
-        "blind-evaluation",
-        "v109_baseline",
-        "cardrag_mcp.evaluation",
-        "cardrag_mcp.gold_capture",
-        "acceptance_report_sha256",
     ):
-        assert research_reference not in validate_job
+        assert contract in validate_job
+    for contract in (
+        'test "$(git cat-file -t "refs/tags/v$VERSION")" = tag',
+        'git ls-remote origin "refs/tags/v${VERSION}^{}"',
+    ):
+        assert contract in workflow
+    for runtime_receipt_reference in (
+        "release-readiness-receipt.json",
+        "candidate-acceptance-receipt.json",
+        "cardrag_mcp.candidate_smoke",
+        "cardrag_core.release_readiness",
+        "serving-generation-manifest.json",
+        "rollback-ledger.json",
+        "native-cache-audit.json",
+        "mcp-smoke.json",
+    ):
+        assert runtime_receipt_reference not in validate_job
 
     notes_region = workflow[workflow.index("notes = [") :]
     assert "수행 검증" in notes_region
-    assert "미수행" in notes_region
-    assert "선택적 후속 검증" in notes_region
+    assert "명시적 미수행" in notes_region
+    assert "참고(출처가 다른 운영 증거)" in notes_region
 
 
 def test_release_preflight_rejects_conflicting_existing_dockerhub_tags() -> None:

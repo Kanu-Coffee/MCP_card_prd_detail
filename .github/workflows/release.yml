@@ -12,8 +12,8 @@ on:
         description: "Exact lowercase 40-hex candidate commit before the evidence-only sealing commit"
         required: true
         type: string
-      release_readiness_sha256:
-        description: "SHA-256 of the canonical release-readiness receipt"
+      release_qualification_sha256:
+        description: "SHA-256 of the canonical release-qualification evidence file"
         required: true
         type: string
       candidate_worker_image_digest:
@@ -48,14 +48,14 @@ jobs:
       short_sha: ${{ steps.version.outputs.short_sha }}
       candidate_source_commit: ${{ steps.version.outputs.candidate_source_commit }}
       worker_digest: ${{ steps.version.outputs.worker_digest }}
-      worker_platform_digest: ${{ steps.version.outputs.worker_platform_digest }}
-      worker_config_digest: ${{ steps.version.outputs.worker_config_digest }}
-      worker_attestation_digest: ${{ steps.version.outputs.worker_attestation_digest }}
       mcp_digest: ${{ steps.version.outputs.mcp_digest }}
-      mcp_platform_digest: ${{ steps.version.outputs.mcp_platform_digest }}
-      mcp_config_digest: ${{ steps.version.outputs.mcp_config_digest }}
-      mcp_attestation_digest: ${{ steps.version.outputs.mcp_attestation_digest }}
-      readiness_evidence_manifest_sha256: ${{ steps.version.outputs.readiness_evidence_manifest_sha256 }}
+      release_qualification_sha256: ${{ steps.oci-identity.outputs.release_qualification_sha256 }}
+      worker_platform_digest: ${{ steps.oci-identity.outputs.worker_platform_digest }}
+      worker_config_digest: ${{ steps.oci-identity.outputs.worker_config_digest }}
+      worker_attestation_digest: ${{ steps.oci-identity.outputs.worker_attestation_digest }}
+      mcp_platform_digest: ${{ steps.oci-identity.outputs.mcp_platform_digest }}
+      mcp_config_digest: ${{ steps.oci-identity.outputs.mcp_config_digest }}
+      mcp_attestation_digest: ${{ steps.oci-identity.outputs.mcp_attestation_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,7 +89,7 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           CANDIDATE_SOURCE_COMMIT: ${{ inputs.candidate_source_commit }}
-          RELEASE_READINESS_SHA256: ${{ inputs.release_readiness_sha256 }}
+          RELEASE_QUALIFICATION_SHA256: ${{ inputs.release_qualification_sha256 }}
           CANDIDATE_WORKER_IMAGE_DIGEST: ${{ inputs.candidate_worker_image_digest }}
           CANDIDATE_MCP_IMAGE_DIGEST: ${{ inputs.candidate_mcp_image_digest }}
         run: |
@@ -98,594 +98,29 @@ jobs:
           [[ "$IMAGE_NAME" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]
           [[ "$CANDIDATE_IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          # This workflow's candidate receipt, OCI provenance, and release
-          # readiness evidence validators are version-specific. Refuse every
-          # other version before the conditional evidence block so a future
-          # version can never bypass the strong gate by falling through it.
+          # This workflow's release-qualification and OCI provenance
+          # validators are version-specific. Refuse every other version before
+          # the conditional evidence block so a future version can never
+          # bypass the strong gate by falling through it.
           test "$version" = "1.0.32"
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
           test "$GITHUB_REF" = "refs/tags/v$version"
           test "$(git cat-file -t "refs/tags/v$version")" = tag
           if [[ "$version" == "1.0.32" ]]; then
-            evidence_dir="release-evidence/v${version}"
-            evidence_dir=$(realpath --canonicalize-existing "$evidence_dir")
-            readiness_receipt="$evidence_dir/release-readiness-receipt.json"
-            readiness_evidence_relative_paths=(
-              release-readiness-receipt.json
-            )
+            qualification_dir="release-evidence/v${version}"
+            test -d "$qualification_dir"
+            test ! -L "$qualification_dir"
+            qualification="$qualification_dir/release-qualification.json"
+            test -f "$qualification"
+            test ! -L "$qualification"
+            test "$(find "$qualification_dir" -mindepth 1 | wc -l)" -eq 1
             [[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$RELEASE_READINESS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$RELEASE_QUALIFICATION_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"
             git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
-            readiness_artifact_dir="$RUNNER_TEMP/cardrag-readiness-evidence"
-            readiness_validation_dir="$RUNNER_TEMP/cardrag-readiness-validation-evidence"
-            readiness_evidence_manifest_sha256=$(
-              python - \
-                "$evidence_dir" \
-                "$readiness_artifact_dir" \
-                "$readiness_validation_dir" \
-                "$CANDIDATE_SOURCE_COMMIT" \
-                "$GITHUB_SHA" \
-                "${readiness_evidence_relative_paths[@]}" <<'PY'
-          import hashlib
-          import json
-          import os
-          import stat
-          import sys
-          from pathlib import Path, PurePosixPath
-
-          MAX_FILE_BYTES = 95_000_000
-          MAX_MANIFEST_BYTES = 2 * 1024 * 1024
-          DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-          READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-          CREATE_FLAGS = (
-              os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-          )
-
-
-          def identity(value: os.stat_result) -> tuple[int, ...]:
-              return (
-                  value.st_dev,
-                  value.st_ino,
-                  value.st_mode,
-                  value.st_nlink,
-                  value.st_size,
-                  value.st_mtime_ns,
-                  value.st_ctime_ns,
-              )
-
-
-          def require_directory(value: os.stat_result) -> None:
-              assert stat.S_ISDIR(value.st_mode)
-
-
-          def require_regular(value: os.stat_result, *, maximum_bytes: int) -> None:
-              assert stat.S_ISREG(value.st_mode)
-              assert value.st_nlink == 1
-              assert 0 < value.st_size <= maximum_bytes
-
-
-          def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-              result = {}
-              for key, value in pairs:
-                  assert key not in result
-                  result[key] = value
-              return result
-
-
-          def strict_json(payload: bytes) -> object:
-              return json.loads(
-                  payload,
-                  object_pairs_hook=reject_duplicate_keys,
-                  parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
-              )
-
-
-          def open_root(path: Path) -> tuple[int, tuple[int, ...]]:
-              listed = path.lstat()
-              require_directory(listed)
-              descriptor = os.open(path, DIRECTORY_FLAGS)
-              assert identity(os.fstat(descriptor)) == identity(listed)
-              return descriptor, identity(listed)
-
-
-          def open_parent(
-              root_descriptor: int, relative: PurePosixPath
-          ) -> tuple[int, str, list[int], list[tuple[int, str, int, tuple[int, ...]]]]:
-              assert not relative.is_absolute() and relative.parts
-              assert ".." not in relative.parts and "." not in relative.parts
-              descriptors = [os.dup(root_descriptor)]
-              checkpoints = []
-              for component in relative.parts[:-1]:
-                  parent = descriptors[-1]
-                  listed = os.stat(component, dir_fd=parent, follow_symlinks=False)
-                  require_directory(listed)
-                  child = os.open(component, DIRECTORY_FLAGS, dir_fd=parent)
-                  expected = identity(listed)
-                  assert identity(os.fstat(child)) == expected
-                  checkpoints.append((parent, component, child, expected))
-                  descriptors.append(child)
-              return descriptors[-1], relative.parts[-1], descriptors, checkpoints
-
-
-          def verify_directories(
-              checkpoints: list[tuple[int, str, int, tuple[int, ...]]]
-          ) -> None:
-              for parent, component, child, expected in reversed(checkpoints):
-                  assert identity(os.fstat(child)) == expected
-                  assert identity(
-                      os.stat(component, dir_fd=parent, follow_symlinks=False)
-                  ) == expected
-
-
-          def write_all(descriptor: int, payload: bytes) -> None:
-              view = memoryview(payload)
-              while view:
-                  written = os.write(descriptor, view)
-                  assert written > 0
-                  view = view[written:]
-
-
-          def hash_pinned_descriptor(
-              descriptor: int, *, maximum_bytes: int
-          ) -> tuple[str, int]:
-              os.lseek(descriptor, 0, os.SEEK_SET)
-              digest = hashlib.sha256()
-              size = 0
-              while chunk := os.read(descriptor, 1024 * 1024):
-                  size += len(chunk)
-                  assert size <= maximum_bytes
-                  digest.update(chunk)
-              return digest.hexdigest(), size
-
-
-          def inspect_source(
-              root_descriptor: int,
-              raw_relative: str,
-              *,
-              first_line: bool = False,
-          ) -> tuple[str, int, bytes | None]:
-              relative = PurePosixPath(raw_relative)
-              parent, leaf, descriptors, checkpoints = open_parent(
-                  root_descriptor, relative
-              )
-              try:
-                  listed = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                  require_regular(listed, maximum_bytes=MAX_FILE_BYTES)
-                  expected = identity(listed)
-                  source = os.open(leaf, READ_FLAGS, dir_fd=parent)
-                  try:
-                      assert identity(os.fstat(source)) == expected
-                      digest = hashlib.sha256()
-                      size = 0
-                      line = bytearray()
-                      found_newline = not first_line
-                      while chunk := os.read(source, 1024 * 1024):
-                          size += len(chunk)
-                          assert size <= MAX_FILE_BYTES
-                          digest.update(chunk)
-                          if not found_newline:
-                              newline = chunk.find(b"\n")
-                              if newline < 0:
-                                  line.extend(chunk)
-                                  assert len(line) <= MAX_MANIFEST_BYTES
-                              else:
-                                  line.extend(chunk[:newline])
-                                  found_newline = True
-                      assert size == listed.st_size and (found_newline or not first_line)
-                      assert identity(os.fstat(source)) == expected
-                      assert identity(
-                          os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                      ) == expected
-                      verify_directories(checkpoints)
-                      return digest.hexdigest(), size, bytes(line) if first_line else None
-                  finally:
-                      os.close(source)
-              finally:
-                  for descriptor in reversed(descriptors):
-                      os.close(descriptor)
-
-
-          def copy_source(
-              source_root: int,
-              raw_relative: str,
-              destination_directory: int,
-              destination_name: str,
-          ) -> tuple[str, int]:
-              relative = PurePosixPath(raw_relative)
-              parent, leaf, descriptors, checkpoints = open_parent(
-                  source_root, relative
-              )
-              try:
-                  listed = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                  require_regular(listed, maximum_bytes=MAX_FILE_BYTES)
-                  expected_source = identity(listed)
-                  source = os.open(leaf, READ_FLAGS, dir_fd=parent)
-                  destination = os.open(
-                      destination_name,
-                      CREATE_FLAGS,
-                      0o600,
-                      dir_fd=destination_directory,
-                  )
-                  try:
-                      assert identity(os.fstat(source)) == expected_source
-                      digest = hashlib.sha256()
-                      size = 0
-                      while chunk := os.read(source, 1024 * 1024):
-                          size += len(chunk)
-                          assert size <= MAX_FILE_BYTES
-                          digest.update(chunk)
-                          write_all(destination, chunk)
-                      os.fsync(destination)
-                      assert size == listed.st_size
-                      assert identity(os.fstat(source)) == expected_source
-                      assert identity(
-                          os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                      ) == expected_source
-                      verify_directories(checkpoints)
-                      sealed_destination = identity(os.fstat(destination))
-                      require_regular(
-                          os.fstat(destination), maximum_bytes=MAX_FILE_BYTES
-                      )
-                      copied_sha256, copied_size = hash_pinned_descriptor(
-                          destination, maximum_bytes=MAX_FILE_BYTES
-                      )
-                      assert (copied_sha256, copied_size) == (digest.hexdigest(), size)
-                      assert identity(os.fstat(destination)) == sealed_destination
-                      assert identity(
-                          os.stat(
-                              destination_name,
-                              dir_fd=destination_directory,
-                              follow_symlinks=False,
-                          )
-                      ) == sealed_destination
-                      return digest.hexdigest(), size
-                  finally:
-                      os.close(destination)
-                      os.close(source)
-              finally:
-                  for descriptor in reversed(descriptors):
-                      os.close(descriptor)
-
-
-          def write_new_file(
-              directory: int, name: str, payload: bytes, *, maximum_bytes: int
-          ) -> str:
-              assert 0 < len(payload) <= maximum_bytes
-              descriptor = os.open(name, CREATE_FLAGS, 0o600, dir_fd=directory)
-              try:
-                  write_all(descriptor, payload)
-                  os.fsync(descriptor)
-                  sealed = identity(os.fstat(descriptor))
-                  require_regular(os.fstat(descriptor), maximum_bytes=maximum_bytes)
-                  digest, size = hash_pinned_descriptor(
-                      descriptor, maximum_bytes=maximum_bytes
-                  )
-                  assert size == len(payload) and digest == hashlib.sha256(payload).hexdigest()
-                  assert identity(os.fstat(descriptor)) == sealed
-                  assert identity(
-                      os.stat(name, dir_fd=directory, follow_symlinks=False)
-                  ) == sealed
-                  return digest
-              finally:
-                  os.close(descriptor)
-
-
-          def create_parent(
-              root: int, relative: PurePosixPath
-          ) -> tuple[int, str, list[int]]:
-              assert not relative.is_absolute() and relative.parts
-              assert ".." not in relative.parts and "." not in relative.parts
-              descriptors = [os.dup(root)]
-              for component in relative.parts[:-1]:
-                  parent = descriptors[-1]
-                  try:
-                      listed = os.stat(
-                          component, dir_fd=parent, follow_symlinks=False
-                      )
-                  except FileNotFoundError:
-                      os.mkdir(component, 0o700, dir_fd=parent)
-                      listed = os.stat(
-                          component, dir_fd=parent, follow_symlinks=False
-                      )
-                  require_directory(listed)
-                  child = os.open(component, DIRECTORY_FLAGS, dir_fd=parent)
-                  assert identity(os.fstat(child)) == identity(listed)
-                  descriptors.append(child)
-              return descriptors[-1], relative.parts[-1], descriptors
-
-
-          evidence_root = Path(sys.argv[1])
-          artifact_root = Path(sys.argv[2])
-          validation_root = Path(sys.argv[3])
-          source_commit = sys.argv[4]
-          tag_commit = sys.argv[5]
-          relative_paths = list(sys.argv[6:])
-          assert relative_paths and len(relative_paths) == len(set(relative_paths))
-          source_root, source_root_identity = open_root(evidence_root)
-          artifact_parent, _artifact_parent_identity = open_root(artifact_root.parent)
-          try:
-              try:
-                  os.stat(
-                      artifact_root.name,
-                      dir_fd=artifact_parent,
-                      follow_symlinks=False,
-                  )
-              except FileNotFoundError:
-                  pass
-              else:
-                  raise AssertionError("readiness artifact root already exists")
-              os.mkdir(artifact_root.name, 0o700, dir_fd=artifact_parent)
-              artifact_listed = os.stat(
-                  artifact_root.name, dir_fd=artifact_parent, follow_symlinks=False
-              )
-              require_directory(artifact_listed)
-              artifact_directory = os.open(
-                  artifact_root.name, DIRECTORY_FLAGS, dir_fd=artifact_parent
-              )
-              assert identity(os.fstat(artifact_directory)) == identity(artifact_listed)
-              os.mkdir("files", 0o700, dir_fd=artifact_directory)
-              files_listed = os.stat(
-                  "files", dir_fd=artifact_directory, follow_symlinks=False
-              )
-              require_directory(files_listed)
-              files_directory = os.open(
-                  "files", DIRECTORY_FLAGS, dir_fd=artifact_directory
-              )
-              assert validation_root.parent == artifact_root.parent
-              try:
-                  os.stat(
-                      validation_root.name,
-                      dir_fd=artifact_parent,
-                      follow_symlinks=False,
-                  )
-              except FileNotFoundError:
-                  pass
-              else:
-                  raise AssertionError("readiness validation root already exists")
-              os.mkdir(validation_root.name, 0o700, dir_fd=artifact_parent)
-              validation_listed = os.stat(
-                  validation_root.name,
-                  dir_fd=artifact_parent,
-                  follow_symlinks=False,
-              )
-              require_directory(validation_listed)
-              validation_directory = os.open(
-                  validation_root.name,
-                  DIRECTORY_FLAGS,
-                  dir_fd=artifact_parent,
-              )
-              assert identity(os.fstat(validation_directory)) == identity(
-                  validation_listed
-              )
-              try:
-                  _receipt_sha256, _receipt_size, receipt_line = inspect_source(
-                      source_root,
-                      "release-readiness-receipt.json",
-                      first_line=True,
-                  )
-                  assert receipt_line is not None
-                  candidate_receipt = strict_json(receipt_line)
-                  assert isinstance(candidate_receipt, dict)
-                  assert set(candidate_receipt) == {
-                      "channel",
-                      "compose_project",
-                      "evidence",
-                      "generation_id",
-                      "issuers",
-                      "release_eligible",
-                      "release_version",
-                      "schema_version",
-                      "source_commit",
-                  }
-                  assert candidate_receipt["schema_version"] == (
-                      "cardrag.release-readiness-receipt.v1"
-                  )
-                  assert candidate_receipt["source_commit"] == source_commit
-                  evidence_bindings = candidate_receipt["evidence"]
-                  expected_evidence_keys = {
-                      "candidate_pointer",
-                      "effective_config",
-                      "generation_cas",
-                      "generation_manifest",
-                      "generation_ready",
-                      "mcp_smoke",
-                      "native_cache_after",
-                      "native_cache_audit",
-                      "native_cache_before",
-                      "rollback_ledger",
-                      "baseline_identity",
-                      "worker_metrics",
-                  }
-                  assert isinstance(evidence_bindings, dict)
-                  assert set(evidence_bindings) == expected_evidence_keys
-                  candidate_artifacts = {}
-                  for binding in evidence_bindings.values():
-                      assert isinstance(binding, dict) and set(binding) == {
-                          "path",
-                          "sha256",
-                          "size_bytes",
-                      }
-                      candidate_path = binding["path"]
-                      assert isinstance(candidate_path, str) and candidate_path
-                      candidate_relative = PurePosixPath(candidate_path)
-                      assert not candidate_relative.is_absolute()
-                      assert ".." not in candidate_relative.parts
-                      candidate_sha256 = binding["sha256"]
-                      candidate_size = binding["size_bytes"]
-                      assert isinstance(candidate_sha256, str)
-                      assert len(candidate_sha256) == 64
-                      assert set(candidate_sha256) <= set("0123456789abcdef")
-                      assert isinstance(candidate_size, int)
-                      assert 0 < candidate_size <= MAX_FILE_BYTES
-                      assert candidate_path not in candidate_artifacts
-                      candidate_artifacts[candidate_path] = (
-                          candidate_sha256,
-                          candidate_size,
-                      )
-                  dynamic_paths = sorted(candidate_artifacts)
-                  for dynamic_path in dynamic_paths:
-                      if dynamic_path not in relative_paths:
-                          relative_paths.append(dynamic_path)
-                  assert len(relative_paths) == len(set(relative_paths))
-
-                  def collect_evidence_files(dir_fd: int, prefix: tuple[str, ...]) -> set[str]:
-                      found: set[str] = set()
-                      for entry in os.scandir(dir_fd):
-                          if entry.is_dir(follow_symlinks=False):
-                              child = os.open(entry.name, DIRECTORY_FLAGS, dir_fd=dir_fd)
-                              try:
-                                  found.update(collect_evidence_files(child, prefix + (entry.name,)))
-                              finally:
-                                  os.close(child)
-                          else:
-                              assert entry.is_file(follow_symlinks=False)
-                              found.add(PurePosixPath(*prefix, entry.name).as_posix())
-                      return found
-
-                  assert collect_evidence_files(source_root, ()) == set(relative_paths)
-                  entries = []
-                  asset_names = set()
-                  for raw_relative in relative_paths:
-                      relative = PurePosixPath(raw_relative)
-                      assert not relative.is_absolute() and ".." not in relative.parts
-                      asset_name = (
-                          "readiness-evidence--" + raw_relative.replace("/", "--")
-                      )
-                      assert "/" not in asset_name and asset_name not in asset_names
-                      asset_names.add(asset_name)
-                      digest, size = copy_source(
-                          source_root,
-                          raw_relative,
-                          files_directory,
-                          asset_name,
-                      )
-                      candidate_binding = candidate_artifacts.get(raw_relative)
-                      if candidate_binding is not None:
-                          assert (digest, size) == candidate_binding
-                      snapshot_parent, snapshot_leaf, snapshot_descriptors = create_parent(
-                          validation_directory,
-                          relative,
-                      )
-                      try:
-                          os.link(
-                              asset_name,
-                              snapshot_leaf,
-                              src_dir_fd=files_directory,
-                              dst_dir_fd=snapshot_parent,
-                              follow_symlinks=False,
-                          )
-                          snapshot_listed = os.stat(
-                              snapshot_leaf,
-                              dir_fd=snapshot_parent,
-                              follow_symlinks=False,
-                          )
-                          assert stat.S_ISREG(snapshot_listed.st_mode)
-                          assert snapshot_listed.st_nlink == 2
-                          snapshot_descriptor = os.open(
-                              snapshot_leaf,
-                              READ_FLAGS,
-                              dir_fd=snapshot_parent,
-                          )
-                          try:
-                              os.fchmod(snapshot_descriptor, 0o400)
-                              sealed_snapshot = identity(os.fstat(snapshot_descriptor))
-                              assert sealed_snapshot[3] == 2
-                              assert identity(
-                                  os.stat(
-                                      asset_name,
-                                      dir_fd=files_directory,
-                                      follow_symlinks=False,
-                                  )
-                              ) == sealed_snapshot
-                              assert identity(
-                                  os.stat(
-                                      snapshot_leaf,
-                                      dir_fd=snapshot_parent,
-                                      follow_symlinks=False,
-                                  )
-                              ) == sealed_snapshot
-                          finally:
-                              os.close(snapshot_descriptor)
-                      finally:
-                          for descriptor in reversed(snapshot_descriptors):
-                              os.close(descriptor)
-                      entries.append(
-                          {
-                              "relative_path": raw_relative,
-                              "release_asset_name": asset_name,
-                              "sha256": digest,
-                              "size_bytes": size,
-                          }
-                      )
-                  assert set(os.listdir(files_directory)) == asset_names
-                  manifest = {
-                      "schema": "cardrag.release-readiness-evidence.v1",
-                      "source_commit": source_commit,
-                      "tag_commit": tag_commit,
-                      "maximum_file_bytes": MAX_FILE_BYTES,
-                      "file_count": len(entries),
-                      "files": entries,
-                  }
-                  manifest_payload = (
-                      json.dumps(
-                          manifest,
-                          ensure_ascii=False,
-                          sort_keys=True,
-                          separators=(",", ":"),
-                      ).encode("utf-8")
-                      + b"\n"
-                  )
-                  manifest_sha256 = write_new_file(
-                      artifact_directory,
-                      "release-readiness-manifest.json",
-                      manifest_payload,
-                      maximum_bytes=MAX_MANIFEST_BYTES,
-                  )
-                  assert set(os.listdir(artifact_directory)) == {
-                      "files",
-                      "release-readiness-manifest.json",
-                  }
-                  sealed_files = identity(os.fstat(files_directory))
-                  assert identity(
-                      os.stat("files", dir_fd=artifact_directory, follow_symlinks=False)
-                  ) == sealed_files
-                  sealed_artifact = identity(os.fstat(artifact_directory))
-                  assert identity(
-                      os.stat(
-                          artifact_root.name,
-                          dir_fd=artifact_parent,
-                          follow_symlinks=False,
-                      )
-                  ) == sealed_artifact
-                  sealed_validation = identity(os.fstat(validation_directory))
-                  assert identity(
-                      os.stat(
-                          validation_root.name,
-                          dir_fd=artifact_parent,
-                          follow_symlinks=False,
-                      )
-                  ) == sealed_validation
-                  assert identity(os.fstat(source_root)) == source_root_identity
-                  assert identity(evidence_root.lstat()) == source_root_identity
-                  sealed_artifact_parent = identity(os.fstat(artifact_parent))
-                  assert identity(artifact_root.parent.lstat()) == sealed_artifact_parent
-                  print(manifest_sha256)
-              finally:
-                  os.close(validation_directory)
-                  os.close(files_directory)
-                  os.close(artifact_directory)
-          finally:
-              os.close(artifact_parent)
-              os.close(source_root)
-          PY
-            )
-            [[ "$readiness_evidence_manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
-            evidence_dir=$(realpath --canonicalize-existing "$readiness_validation_dir")
-            readiness_receipt="$evidence_dir/release-readiness-receipt.json"
             mapfile -d '' candidate_evidence_paths < <(
               git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"
             )
@@ -701,57 +136,30 @@ jobs:
                   ;;
               esac
             done
-            test "$(sha256sum "$readiness_receipt" | awk '{print $1}')" = \
-              "$RELEASE_READINESS_SHA256"
-            readiness_validation=$(.venv/bin/python -m cardrag_mcp.release_readiness \
-              --receipt "$readiness_receipt" \
-              --evidence-root "$evidence_dir" \
-              --expected-receipt-sha256 "$RELEASE_READINESS_SHA256" \
+            test "$(sha256sum "$qualification" | awk '{print $1}')" = \
+              "$RELEASE_QUALIFICATION_SHA256"
+            qualification_validation=$(.venv/bin/python -m cardrag_core.release_qualification \
+              --qualification "$qualification" \
+              --expected-sha256 "$RELEASE_QUALIFICATION_SHA256" \
               --expected-source-commit "$CANDIDATE_SOURCE_COMMIT" \
-              --expected-image-repository "$CANDIDATE_IMAGE_REPOSITORY")
-            test "$(jq -r '.schema_version' <<<"$readiness_validation")" = \
-              "cardrag.release-readiness-validation.v1"
-            test "$(jq -r '.status' <<<"$readiness_validation")" = validated
-            test "$(jq -r '.source_commit' <<<"$readiness_validation")" = \
+              --expected-worker-image-digest "$CANDIDATE_WORKER_IMAGE_DIGEST" \
+              --expected-mcp-image-digest "$CANDIDATE_MCP_IMAGE_DIGEST" \
+              --expected-repository "$GITHUB_REPOSITORY")
+            test "$(jq -r '.schema_version' <<<"$qualification_validation")" = \
+              "cardrag.release-qualification-validation.v1"
+            test "$(jq -r '.status' <<<"$qualification_validation")" = qualified
+            test "$(jq -r '.source_commit' <<<"$qualification_validation")" = \
               "$CANDIDATE_SOURCE_COMMIT"
-            test "$(jq -r '.worker_image.repository' <<<"$readiness_validation")" = \
-              "$CANDIDATE_IMAGE_REPOSITORY"
-            test "$(jq -r '.mcp_image.repository' <<<"$readiness_validation")" = \
-              "$CANDIDATE_IMAGE_REPOSITORY"
-            test "$(jq -r '.worker_image.digest' <<<"$readiness_validation")" = \
+            test "$(jq -r '.worker_image_digest' <<<"$qualification_validation")" = \
               "$CANDIDATE_WORKER_IMAGE_DIGEST"
-            test "$(jq -r '.mcp_image.digest' <<<"$readiness_validation")" = \
+            test "$(jq -r '.mcp_image_digest' <<<"$qualification_validation")" = \
               "$CANDIDATE_MCP_IMAGE_DIGEST"
-            worker_platform_digest=$(jq -r '.worker_image.platform_manifest_digest' \
-              <<<"$readiness_validation")
-            worker_config_digest=$(jq -r '.worker_image.platform_config_digest' \
-              <<<"$readiness_validation")
-            worker_attestation_digest=$(jq -r '.worker_image.attestation_manifest_digest' \
-              <<<"$readiness_validation")
-            mcp_platform_digest=$(jq -r '.mcp_image.platform_manifest_digest' \
-              <<<"$readiness_validation")
-            mcp_config_digest=$(jq -r '.mcp_image.platform_config_digest' \
-              <<<"$readiness_validation")
-            mcp_attestation_digest=$(jq -r '.mcp_image.attestation_manifest_digest' \
-              <<<"$readiness_validation")
-            [[ "$worker_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$worker_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$worker_attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$mcp_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$mcp_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$mcp_attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             {
               echo "candidate_source_commit=$CANDIDATE_SOURCE_COMMIT"
               echo "short_sha=${CANDIDATE_SOURCE_COMMIT::12}"
               echo "worker_digest=$CANDIDATE_WORKER_IMAGE_DIGEST"
-              echo "worker_platform_digest=$worker_platform_digest"
-              echo "worker_config_digest=$worker_config_digest"
-              echo "worker_attestation_digest=$worker_attestation_digest"
               echo "mcp_digest=$CANDIDATE_MCP_IMAGE_DIGEST"
-              echo "mcp_platform_digest=$mcp_platform_digest"
-              echo "mcp_config_digest=$mcp_config_digest"
-              echo "mcp_attestation_digest=$mcp_attestation_digest"
-              echo "readiness_evidence_manifest_sha256=$readiness_evidence_manifest_sha256"
+              echo "release_qualification_sha256=$RELEASE_QUALIFICATION_SHA256"
             } >> "$GITHUB_OUTPUT"
           fi
           python - "$version" <<'PY'
@@ -780,12 +188,107 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Upload the exact release readiness evidence
+      - name: Install the checksum-pinned candidate OCI digest reader
+        if: ${{ inputs.version == '1.0.32' }}
+        run: |
+          set -euo pipefail
+          registry_tools_dir="$RUNNER_TEMP/cardrag-validate-registry-tools"
+          mkdir -p "$registry_tools_dir/unpack"
+          curl --fail --location --silent --show-error \
+            --output "$registry_tools_dir/go-containerregistry.tar.gz" \
+            https://github.com/google/go-containerregistry/releases/download/v0.22.0/go-containerregistry_Linux_x86_64.tar.gz
+          echo "edb74d53fad9a596860f59d1c5d04a43dfb5f441dc71f57060dd0bf39483c833  $registry_tools_dir/go-containerregistry.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$registry_tools_dir/go-containerregistry.tar.gz" \
+            -C "$registry_tools_dir/unpack" crane
+          install -m 0755 "$registry_tools_dir/unpack/crane" "$registry_tools_dir/crane"
+          "$registry_tools_dir/crane" version
+
+      - name: Resolve and revalidate the exact candidate OCI identities anonymously
+        id: oci-identity
+        if: ${{ inputs.version == '1.0.32' }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_QUALIFICATION_SHA256: ${{ steps.version.outputs.release_qualification_sha256 }}
+          CANDIDATE_SOURCE_COMMIT: ${{ steps.version.outputs.candidate_source_commit }}
+          WORKER_DIGEST: ${{ steps.version.outputs.worker_digest }}
+          MCP_DIGEST: ${{ steps.version.outputs.mcp_digest }}
+        run: |
+          set -euo pipefail
+          anonymous_docker_config="$RUNNER_TEMP/cardrag-anonymous-ghcr-docker-config"
+          test ! -e "$anonymous_docker_config/config.json"
+          install -d -m 0700 "$anonymous_docker_config"
+          printf '{"auths":{}}\n' > "$anonymous_docker_config/config.json"
+          chmod 0600 "$anonymous_docker_config/config.json"
+          export DOCKER_CONFIG="$anonymous_docker_config"
+          crane="$RUNNER_TEMP/cardrag-validate-registry-tools/crane"
+          for role in worker mcp; do
+            case "$role" in
+              worker) digest=$WORKER_DIGEST ;;
+              mcp) digest=$MCP_DIGEST ;;
+              *) exit 1 ;;
+            esac
+            image="${CANDIDATE_IMAGE_REPOSITORY}@${digest}"
+            tag="${CANDIDATE_IMAGE_REPOSITORY}:candidate-v${VERSION}-${role}-${CANDIDATE_SOURCE_COMMIT}"
+            test "$("$crane" digest "$tag")" = "$digest"
+            "$crane" manifest "$image" > /tmp/candidate-index-$role.json
+            python3 .github/scripts/validate-strict-json.py /tmp/candidate-index-$role.json
+            platform_digest=$(jq -er '[.manifests[] | select((.platform // {}).os == "linux" and (.platform // {}).architecture == "amd64")] | if length == 1 then .[0].digest else error("platform entry count") end' /tmp/candidate-index-$role.json)
+            attestation_digest=$(jq -er '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] == "attestation-manifest")] | if length == 1 then .[0].digest else error("attestation entry count") end' /tmp/candidate-index-$role.json)
+            jq -e --arg platform_digest "$platform_digest" \
+              --arg attestation_digest "$attestation_digest" \
+              -f .github/scripts/validate-candidate-oci-index.jq \
+              /tmp/candidate-index-$role.json >/dev/null
+            "$crane" manifest "${CANDIDATE_IMAGE_REPOSITORY}@${platform_digest}" \
+              > /tmp/candidate-platform-$role.json
+            python3 .github/scripts/validate-strict-json.py /tmp/candidate-platform-$role.json
+            config_digest=$(jq -er '.config.digest' /tmp/candidate-platform-$role.json)
+            jq -e --arg config_digest "$config_digest" \
+              -f .github/scripts/validate-candidate-platform-manifest.jq \
+              /tmp/candidate-platform-$role.json >/dev/null
+            "$crane" manifest "${CANDIDATE_IMAGE_REPOSITORY}@${attestation_digest}" \
+              > /tmp/candidate-attestation-$role.json
+            python3 .github/scripts/validate-strict-json.py /tmp/candidate-attestation-$role.json
+            jq -e --arg platform_digest "$platform_digest" \
+              -f .github/scripts/validate-candidate-attestation-manifest.jq \
+              /tmp/candidate-attestation-$role.json >/dev/null
+            provenance_layer=$(jq -er '[.layers[] | select(.mediaType == "application/vnd.in-toto+json" and .annotations["in-toto.io/predicate-type"] == "https://slsa.dev/provenance/v0.2")] | if length == 1 then .[0].digest else error("provenance layer count") end' /tmp/candidate-attestation-$role.json)
+            sbom_layer=$(jq -er '[.layers[] | select(.mediaType == "application/vnd.in-toto+json" and .annotations["in-toto.io/predicate-type"] == "https://spdx.dev/Document")] | if length == 1 then .[0].digest else error("SBOM layer count") end' /tmp/candidate-attestation-$role.json)
+            "$crane" blob "${CANDIDATE_IMAGE_REPOSITORY}@${provenance_layer}" > /tmp/provenance-$role.json
+            test "$(sha256sum /tmp/provenance-$role.json | cut -d' ' -f1)" = "${provenance_layer#sha256:}"
+            "$crane" blob "${CANDIDATE_IMAGE_REPOSITORY}@${sbom_layer}" > /tmp/sbom-$role.json
+            test "$(sha256sum /tmp/sbom-$role.json | cut -d' ' -f1)" = "${sbom_layer#sha256:}"
+            python3 .github/scripts/validate-strict-json.py /tmp/provenance-$role.json /tmp/sbom-$role.json
+            jq -e \
+              --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
+              --arg source_uri "https://github.com/${GITHUB_REPOSITORY}.git#${CANDIDATE_SOURCE_COMMIT}" \
+              --arg source_repository "$GITHUB_REPOSITORY" \
+              --arg image_repository "$CANDIDATE_IMAGE_REPOSITORY" \
+              --arg platform_digest_hex "${platform_digest#sha256:}" \
+              --arg role "$role" \
+              -f .github/scripts/validate-candidate-provenance.jq \
+              /tmp/provenance-$role.json >/dev/null
+            jq -e \
+              --arg source_commit "$CANDIDATE_SOURCE_COMMIT" \
+              --arg role "$role" \
+              --arg platform_digest_hex "${platform_digest#sha256:}" \
+              --arg image_repository "$CANDIDATE_IMAGE_REPOSITORY" \
+              -f .github/scripts/validate-candidate-sbom.jq \
+              /tmp/sbom-$role.json >/dev/null
+            {
+              echo "${role}_platform_digest=$platform_digest"
+              echo "${role}_config_digest=$config_digest"
+              echo "${role}_attestation_digest=$attestation_digest"
+            } >> "$GITHUB_OUTPUT"
+          done
+          echo "release_qualification_sha256=$RELEASE_QUALIFICATION_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the exact release qualification evidence
         if: ${{ inputs.version == '1.0.32' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: readiness-evidence-${{ steps.version.outputs.version }}
-          path: ${{ runner.temp }}/cardrag-readiness-evidence
+          name: release-qualification-${{ steps.version.outputs.version }}
+          path: release-evidence/v1.0.32/release-qualification.json
           if-no-files-found: error
           compression-level: 0
           overwrite: true
@@ -1486,208 +989,56 @@ jobs:
           name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
           path: strict-filesystem-scan
 
-      - name: Download the exact release readiness evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          name: readiness-evidence-${{ needs.validate.outputs.version }}
-          path: readiness-evidence
+          python-version: "3.12"
 
-      - name: Revalidate complete release readiness evidence before registry mutation
-        env:
-          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
-          READINESS_EVIDENCE_MANIFEST_SHA256: ${{ needs.validate.outputs.readiness_evidence_manifest_sha256 }}
+      - name: Install the checksum-pinned release qualification validator
         run: |
           set -euo pipefail
-          python - \
-            readiness-evidence \
-            "$READINESS_EVIDENCE_MANIFEST_SHA256" \
-            "$CANDIDATE_SOURCE_COMMIT" \
-            "$GITHUB_SHA" <<'PY'
-          import hashlib
-          import json
-          import os
-          import stat
-          import sys
-          from pathlib import Path, PurePosixPath
+          validator_tools_dir="$RUNNER_TEMP/cardrag-release-validator-tools"
+          mkdir -p "$validator_tools_dir/unpack"
+          curl --fail --location --silent --show-error \
+            --output "$validator_tools_dir/uv.tar.gz" \
+            https://github.com/astral-sh/uv/releases/download/0.8.17/uv-x86_64-unknown-linux-gnu.tar.gz
+          echo "920cbcaad514cc185634f6f0dcd71df5e8f4ee4456d440a22e0f8c0f142a8203  $validator_tools_dir/uv.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$validator_tools_dir/uv.tar.gz" -C "$validator_tools_dir/unpack"
+          install -m 0755 \
+            "$validator_tools_dir/unpack/uv-x86_64-unknown-linux-gnu/uv" \
+            "$validator_tools_dir/uv"
+          test "$("$validator_tools_dir/uv" --version)" = "uv 0.8.17"
+          "$validator_tools_dir/uv" lock --check
+          "$validator_tools_dir/uv" sync --frozen \
+            --all-packages --no-dev
 
-          MAX_FILE_BYTES = 95_000_000
-          MAX_MANIFEST_BYTES = 2 * 1024 * 1024
-          DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-          READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+      - name: Download the exact release qualification evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-qualification-${{ needs.validate.outputs.version }}
+          path: release-qualification
 
-
-          def identity(value: os.stat_result) -> tuple[int, ...]:
-              return (
-                  value.st_dev,
-                  value.st_ino,
-                  value.st_mode,
-                  value.st_nlink,
-                  value.st_size,
-                  value.st_mtime_ns,
-                  value.st_ctime_ns,
-              )
-
-
-          def open_directory_at(
-              parent: int, name: str
-          ) -> tuple[int, tuple[int, ...]]:
-              listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
-              assert stat.S_ISDIR(listed.st_mode)
-              descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
-              expected = identity(listed)
-              assert identity(os.fstat(descriptor)) == expected
-              return descriptor, expected
-
-
-          def read_regular_at(
-              parent: int, name: str, *, maximum_bytes: int, keep_bytes: bool
-          ) -> tuple[str, int, bytes | None]:
-              listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
-              assert stat.S_ISREG(listed.st_mode) and listed.st_nlink == 1
-              assert 0 < listed.st_size <= maximum_bytes
-              expected = identity(listed)
-              descriptor = os.open(name, READ_FLAGS, dir_fd=parent)
-              try:
-                  assert identity(os.fstat(descriptor)) == expected
-                  digest = hashlib.sha256()
-                  size = 0
-                  chunks = [] if keep_bytes else None
-                  while chunk := os.read(descriptor, 1024 * 1024):
-                      size += len(chunk)
-                      assert size <= maximum_bytes
-                      digest.update(chunk)
-                      if chunks is not None:
-                          chunks.append(chunk)
-                  assert size == listed.st_size
-                  assert identity(os.fstat(descriptor)) == expected
-                  assert identity(
-                      os.stat(name, dir_fd=parent, follow_symlinks=False)
-                  ) == expected
-                  return (
-                      digest.hexdigest(),
-                      size,
-                      b"".join(chunks) if chunks is not None else None,
-                  )
-              finally:
-                  os.close(descriptor)
-
-
-          def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-              result = {}
-              for key, value in pairs:
-                  assert key not in result
-                  result[key] = value
-              return result
-
-
-          bundle_path = Path(sys.argv[1])
-          expected_manifest_sha256 = sys.argv[2]
-          expected_source_commit = sys.argv[3]
-          expected_tag_commit = sys.argv[4]
-          assert len(expected_manifest_sha256) == 64
-          assert set(expected_manifest_sha256) <= set("0123456789abcdef")
-          bundle_listed = bundle_path.lstat()
-          assert stat.S_ISDIR(bundle_listed.st_mode)
-          bundle_identity = identity(bundle_listed)
-          bundle = os.open(bundle_path, DIRECTORY_FLAGS)
-          try:
-              assert identity(os.fstat(bundle)) == bundle_identity
-              assert set(os.listdir(bundle)) == {
-                  "files",
-                  "release-readiness-manifest.json",
-              }
-              files, files_identity = open_directory_at(bundle, "files")
-              try:
-                  manifest_sha256, _manifest_size, manifest_bytes = read_regular_at(
-                      bundle,
-                      "release-readiness-manifest.json",
-                      maximum_bytes=MAX_MANIFEST_BYTES,
-                      keep_bytes=True,
-                  )
-                  assert manifest_sha256 == expected_manifest_sha256
-                  assert manifest_bytes is not None
-                  manifest = json.loads(
-                      manifest_bytes,
-                      object_pairs_hook=reject_duplicate_keys,
-                      parse_constant=lambda value: (_ for _ in ()).throw(
-                          ValueError(value)
-                      ),
-                  )
-                  assert isinstance(manifest, dict)
-                  assert manifest_bytes == (
-                      json.dumps(
-                          manifest,
-                          ensure_ascii=False,
-                          sort_keys=True,
-                          separators=(",", ":"),
-                      ).encode("utf-8")
-                      + b"\n"
-                  )
-                  assert set(manifest) == {
-                      "file_count",
-                      "files",
-                      "maximum_file_bytes",
-                      "schema",
-                      "source_commit",
-                      "tag_commit",
-                  }
-                  assert manifest["schema"] == "cardrag.release-readiness-evidence.v1"
-                  assert manifest["source_commit"] == expected_source_commit
-                  assert manifest["tag_commit"] == expected_tag_commit
-                  assert manifest["maximum_file_bytes"] == MAX_FILE_BYTES
-                  entries = manifest["files"]
-                  assert isinstance(entries, list) and entries
-                  assert manifest["file_count"] == len(entries)
-                  relative_paths = set()
-                  asset_names = set()
-                  for entry in entries:
-                      assert isinstance(entry, dict) and set(entry) == {
-                          "relative_path",
-                          "release_asset_name",
-                          "sha256",
-                          "size_bytes",
-                      }
-                      relative_path = entry["relative_path"]
-                      asset_name = entry["release_asset_name"]
-                      sha256 = entry["sha256"]
-                      size_bytes = entry["size_bytes"]
-                      assert isinstance(relative_path, str) and relative_path
-                      relative = PurePosixPath(relative_path)
-                      assert not relative.is_absolute() and ".." not in relative.parts
-                      assert relative_path not in relative_paths
-                      relative_paths.add(relative_path)
-                      assert asset_name == (
-                          "readiness-evidence--" + relative_path.replace("/", "--")
-                      )
-                      assert "/" not in asset_name and asset_name not in asset_names
-                      asset_names.add(asset_name)
-                      assert isinstance(sha256, str) and len(sha256) == 64
-                      assert set(sha256) <= set("0123456789abcdef")
-                      assert isinstance(size_bytes, int)
-                      assert 0 < size_bytes <= MAX_FILE_BYTES
-                      observed_sha256, observed_size, _payload = read_regular_at(
-                          files,
-                          asset_name,
-                          maximum_bytes=MAX_FILE_BYTES,
-                          keep_bytes=False,
-                      )
-                      assert (observed_sha256, observed_size) == (sha256, size_bytes)
-                  assert set(os.listdir(files)) == asset_names
-                  assert identity(os.fstat(files)) == files_identity
-                  assert identity(
-                      os.stat("files", dir_fd=bundle, follow_symlinks=False)
-                  ) == files_identity
-                  assert set(os.listdir(bundle)) == {
-                      "files",
-                      "release-readiness-manifest.json",
-                  }
-                  assert identity(os.fstat(bundle)) == bundle_identity
-                  assert identity(bundle_path.lstat()) == bundle_identity
-              finally:
-                  os.close(files)
-          finally:
-              os.close(bundle)
-          PY
+      - name: Revalidate the release qualification evidence before registry mutation
+        env:
+          CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
+          RELEASE_QUALIFICATION_SHA256: ${{ needs.validate.outputs.release_qualification_sha256 }}
+          WORKER_DIGEST: ${{ needs.validate.outputs.worker_digest }}
+          MCP_DIGEST: ${{ needs.validate.outputs.mcp_digest }}
+        run: |
+          set -euo pipefail
+          test "$(sha256sum release-qualification/release-qualification.json | awk '{print $1}')" = \
+            "$RELEASE_QUALIFICATION_SHA256"
+          qualification_validation=$(.venv/bin/python -m cardrag_core.release_qualification \
+            --qualification release-qualification/release-qualification.json \
+            --expected-sha256 "$RELEASE_QUALIFICATION_SHA256" \
+            --expected-source-commit "$CANDIDATE_SOURCE_COMMIT" \
+            --expected-worker-image-digest "$WORKER_DIGEST" \
+            --expected-mcp-image-digest "$MCP_DIGEST" \
+            --expected-repository "$GITHUB_REPOSITORY")
+          test "$(jq -r '.status' <<<"$qualification_validation")" = qualified
+          test "$(jq -r '.source_commit' <<<"$qualification_validation")" = "$CANDIDATE_SOURCE_COMMIT"
+          test "$(jq -r '.worker_image_digest' <<<"$qualification_validation")" = "$WORKER_DIGEST"
+          test "$(jq -r '.mcp_image_digest' <<<"$qualification_validation")" = "$MCP_DIGEST"
 
       - name: Publish only the receipt-bound and successfully scanned digest
         id: resolved
@@ -2100,7 +1451,7 @@ jobs:
           SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
           CANDIDATE_SOURCE_COMMIT: ${{ needs.validate.outputs.candidate_source_commit }}
           SIGNATURE_SHA256: ${{ steps.signature.outputs.sha256 }}
-          READINESS_EVIDENCE_MANIFEST_SHA256: ${{ needs.validate.outputs.readiness_evidence_manifest_sha256 }}
+          RELEASE_QUALIFICATION_SHA256: ${{ needs.validate.outputs.release_qualification_sha256 }}
         run: |
           python - <<'PY'
           import hashlib
@@ -2119,17 +1470,22 @@ jobs:
           assert scan_receipt["attestation_manifest_digest"] == os.environ[
               "ATTESTATION_DIGEST"
           ]
-          readiness_manifest_path = Path("readiness-evidence/release-readiness-manifest.json")
-          readiness_manifest_bytes = readiness_manifest_path.read_bytes()
-          assert hashlib.sha256(readiness_manifest_bytes).hexdigest() == os.environ[
-              "READINESS_EVIDENCE_MANIFEST_SHA256"
+          qualification_path = Path("release-qualification/release-qualification.json")
+          qualification_bytes = qualification_path.read_bytes()
+          assert hashlib.sha256(qualification_bytes).hexdigest() == os.environ[
+              "RELEASE_QUALIFICATION_SHA256"
           ]
-          readiness_evidence = json.loads(readiness_manifest_bytes)
-          assert readiness_evidence["schema"] == "cardrag.release-readiness-evidence.v1"
-          assert readiness_evidence["source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
-          assert readiness_evidence["tag_commit"] == os.environ["GITHUB_SHA"]
-          assert readiness_evidence["maximum_file_bytes"] == 95_000_000
-          assert readiness_evidence["file_count"] == len(readiness_evidence["files"])
+          release_qualification = json.loads(qualification_bytes)
+          assert release_qualification["schema_version"] == "cardrag.release-qualification.v1"
+          assert release_qualification["release_version"] == os.environ["VERSION"]
+          assert release_qualification["source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
+          assert release_qualification[f"{role}_image_digest"] == digest
+          assert sorted(release_qualification["not_performed"]) == [
+              "candidate_mcp_12_tools",
+              "candidate_worker_full_run",
+              "gold_quality_evaluation",
+              "production_cutover",
+          ]
           manifest = {
               "schema": "cardrag.container-release-part.v6",
               "role": role,
@@ -2148,7 +1504,12 @@ jobs:
                   f'{os.environ["VERSION"]}-{role}-sha-{os.environ["SHORT_SHA"]}',
               ],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
-              "readiness_evidence": readiness_evidence,
+              "release_qualification": {
+                  "path": "release-qualification.json",
+                  "sha256": os.environ["RELEASE_QUALIFICATION_SHA256"],
+                  "size_bytes": len(qualification_bytes),
+                  "document": release_qualification,
+              },
               "strict_scan": {
                   "receipt_path": scan_receipt_path.as_posix(),
                   "receipt_sha256": os.environ["SCAN_RECEIPT_SHA256"],
@@ -2233,11 +1594,11 @@ jobs:
           name: strict-filesystem-scan-${{ needs.validate.outputs.version }}
           path: release-parts/filesystem
 
-      - name: Download exact release readiness evidence
+      - name: Download exact release qualification evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: readiness-evidence-${{ needs.validate.outputs.version }}
-          path: release-parts/readiness-evidence
+          name: release-qualification-${{ needs.validate.outputs.version }}
+          path: release-parts/qualification
 
       - name: Revalidate tag and assemble deterministic release metadata
         env:
@@ -2252,7 +1613,7 @@ jobs:
           MCP_PLATFORM_DIGEST: ${{ needs.validate.outputs.mcp_platform_digest }}
           MCP_CONFIG_DIGEST: ${{ needs.validate.outputs.mcp_config_digest }}
           MCP_ATTESTATION_DIGEST: ${{ needs.validate.outputs.mcp_attestation_digest }}
-          READINESS_EVIDENCE_MANIFEST_SHA256: ${{ needs.validate.outputs.readiness_evidence_manifest_sha256 }}
+          RELEASE_QUALIFICATION_SHA256: ${{ needs.validate.outputs.release_qualification_sha256 }}
         run: |
           set -euo pipefail
           test "$(git cat-file -t "refs/tags/v$VERSION")" = tag
@@ -2295,7 +1656,7 @@ jobs:
           assert all(part["workflow"] == os.environ["GITHUB_WORKFLOW_REF"] for part in parts)
           assert len({part["digest"] for part in parts}) == 2
 
-          MAX_READINESS_BYTES = 95_000_000
+          MAX_EVIDENCE_BYTES = 95_000_000
           DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
           READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
           CREATE_FLAGS = (
@@ -2383,7 +1744,7 @@ jobs:
                   digest, size, _payload = read_regular_at(
                       parent,
                       leaf,
-                      maximum_bytes=MAX_READINESS_BYTES,
+                      maximum_bytes=MAX_EVIDENCE_BYTES,
                       keep_bytes=False,
                   )
                   for ancestor, name, child, expected in reversed(checkpoints):
@@ -2413,7 +1774,7 @@ jobs:
                   source_name, dir_fd=source_directory, follow_symlinks=False
               )
               assert stat.S_ISREG(listed.st_mode) and listed.st_nlink == 1
-              assert 0 < listed.st_size <= MAX_READINESS_BYTES
+              assert 0 < listed.st_size <= MAX_EVIDENCE_BYTES
               expected_source = identity(listed)
               source_descriptor = os.open(
                   source_name, READ_FLAGS, dir_fd=source_directory
@@ -2430,7 +1791,7 @@ jobs:
                   size = 0
                   while chunk := os.read(source_descriptor, 1024 * 1024):
                       size += len(chunk)
-                      assert size <= MAX_READINESS_BYTES
+                      assert size <= MAX_EVIDENCE_BYTES
                       digest.update(chunk)
                       write_all(destination_descriptor, chunk)
                   os.fsync(destination_descriptor)
@@ -2449,7 +1810,7 @@ jobs:
                   copied_size = 0
                   while chunk := os.read(destination_descriptor, 1024 * 1024):
                       copied_size += len(chunk)
-                      assert copied_size <= MAX_READINESS_BYTES
+                      assert copied_size <= MAX_EVIDENCE_BYTES
                       copied_digest.update(chunk)
                   assert (copied_digest.hexdigest(), copied_size) == (
                       digest.hexdigest(),
@@ -2480,126 +1841,53 @@ jobs:
               workspace, "release-assets"
           )
           assets = Path("release-assets")
-          readiness_source = source / "readiness-evidence"
-          readiness_bundle, readiness_bundle_identity = open_root(readiness_source)
-          readiness_files_descriptor, readiness_files_identity = open_directory_at(
-              readiness_bundle, "files"
-          )
-          assert set(os.listdir(readiness_bundle)) == {
-              "files",
-              "release-readiness-manifest.json",
-          }
-          manifest_sha256, _manifest_size, readiness_manifest_bytes = read_regular_at(
-              readiness_bundle,
-              "release-readiness-manifest.json",
-              maximum_bytes=2 * 1024 * 1024,
-              keep_bytes=True,
-          )
-          assert manifest_sha256 == os.environ["READINESS_EVIDENCE_MANIFEST_SHA256"]
-          assert readiness_manifest_bytes is not None
-          readiness_evidence = json.loads(readiness_manifest_bytes)
-          assert set(readiness_evidence) == {
-              "file_count",
-              "files",
-              "maximum_file_bytes",
-              "schema",
+          qualification_source_path = source / "qualification" / "release-qualification.json"
+          listed_qualification = qualification_source_path.lstat()
+          assert stat.S_ISREG(listed_qualification.st_mode)
+          qualification_bytes = qualification_source_path.read_bytes()
+          manifest_sha256 = hashlib.sha256(qualification_bytes).hexdigest()
+          assert manifest_sha256 == os.environ["RELEASE_QUALIFICATION_SHA256"]
+          release_qualification = json.loads(qualification_bytes)
+          assert set(release_qualification) == {
+              "ci",
+              "mcp_image_digest",
+              "not_performed",
+              "operational_reference",
+              "release_version",
+              "schema_version",
               "source_commit",
-              "tag_commit",
+              "worker_image_digest",
           }
-          assert readiness_evidence["schema"] == "cardrag.release-readiness-evidence.v1"
-          assert readiness_evidence["source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
-          assert readiness_evidence["tag_commit"] == os.environ["GITHUB_SHA"]
-          assert readiness_evidence["maximum_file_bytes"] == 95_000_000
-          readiness_files = readiness_evidence["files"]
-          assert readiness_evidence["file_count"] == len(readiness_files)
-          assert readiness_files and all(
-              part["readiness_evidence"] == readiness_evidence for part in parts
+          assert release_qualification["schema_version"] == "cardrag.release-qualification.v1"
+          assert release_qualification["release_version"] == os.environ["VERSION"]
+          assert release_qualification["source_commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
+          assert release_qualification["worker_image_digest"] == os.environ["WORKER_DIGEST"]
+          assert release_qualification["mcp_image_digest"] == os.environ["MCP_DIGEST"]
+          assert set(release_qualification["ci"]) == {"commit", "conclusion", "run_url"}
+          assert release_qualification["ci"]["commit"] == os.environ["CANDIDATE_SOURCE_COMMIT"]
+          assert release_qualification["ci"]["conclusion"] == "success"
+          assert release_qualification["ci"]["run_url"].startswith(
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
           )
-          relative_paths = set()
-          release_asset_names = set()
-          checkout_root, checkout_root_identity = open_root(
-              Path("release-evidence") / f"v{os.environ['VERSION']}"
-          )
-
-          for entry in readiness_files:
-              assert set(entry) == {
-                  "relative_path",
-                  "release_asset_name",
-                  "sha256",
-                  "size_bytes",
-              }
-              relative_path = entry["relative_path"]
-              release_asset_name = entry["release_asset_name"]
-              assert isinstance(relative_path, str) and relative_path
-              relative = PurePosixPath(relative_path)
-              assert not relative.is_absolute() and ".." not in relative.parts
-              assert relative_path not in relative_paths
-              relative_paths.add(relative_path)
-              assert release_asset_name == (
-                  "readiness-evidence--" + relative_path.replace("/", "--")
-              )
-              assert "/" not in release_asset_name
-              assert release_asset_name not in release_asset_names
-              release_asset_names.add(release_asset_name)
-              assert isinstance(entry["size_bytes"], int)
-              assert 0 < entry["size_bytes"] <= 95_000_000
-              assert isinstance(entry["sha256"], str) and len(entry["sha256"]) == 64
-              assert set(entry["sha256"]) <= set("0123456789abcdef")
-              artifact_sha256, artifact_size = copy_regular_at(
-                  readiness_files_descriptor,
-                  release_asset_name,
-                  assets_descriptor,
-                  release_asset_name,
-              )
-              checkout_sha256, checkout_size = hash_relative(checkout_root, relative)
-              assert artifact_size == checkout_size == entry["size_bytes"]
-              assert artifact_sha256 == checkout_sha256 == entry["sha256"]
-          assert set(os.listdir(readiness_files_descriptor)) == release_asset_names
-          assert identity(os.fstat(readiness_files_descriptor)) == readiness_files_identity
-          assert identity(
-              os.stat("files", dir_fd=readiness_bundle, follow_symlinks=False)
-          ) == readiness_files_identity
-          assert set(os.listdir(readiness_bundle)) == {
-              "files",
-              "release-readiness-manifest.json",
+          assert set(release_qualification["operational_reference"]) == {
+              "generation_id",
+              "image_source_commit",
+              "interpretation",
+              "worker_run_id",
           }
-          assert identity(os.fstat(readiness_bundle)) == readiness_bundle_identity
-          assert identity(readiness_source.lstat()) == readiness_bundle_identity
-          assert identity(os.fstat(checkout_root)) == checkout_root_identity
-          assert identity(
-              (Path("release-evidence") / f"v{os.environ['VERSION']}").lstat()
-          ) == checkout_root_identity
-          manifest_destination = os.open(
-              "release-readiness-manifest.json",
-              CREATE_FLAGS,
-              0o600,
-              dir_fd=assets_descriptor,
+          assert release_qualification["operational_reference"]["interpretation"] == (
+              "reference_only_not_candidate_runtime"
           )
-          try:
-              write_all(manifest_destination, readiness_manifest_bytes)
-              os.fsync(manifest_destination)
-              sealed_manifest = identity(os.fstat(manifest_destination))
-              os.lseek(manifest_destination, 0, os.SEEK_SET)
-              copied_manifest = hashlib.sha256()
-              copied_manifest_size = 0
-              while chunk := os.read(manifest_destination, 1024 * 1024):
-                  copied_manifest_size += len(chunk)
-                  copied_manifest.update(chunk)
-              assert copied_manifest_size == len(readiness_manifest_bytes)
-              assert copied_manifest.hexdigest() == manifest_sha256
-              assert identity(os.fstat(manifest_destination)) == sealed_manifest
-              assert identity(
-                  os.stat(
-                      "release-readiness-manifest.json",
-                      dir_fd=assets_descriptor,
-                      follow_symlinks=False,
-                  )
-              ) == sealed_manifest
-          finally:
-              os.close(manifest_destination)
-              os.close(checkout_root)
-              os.close(readiness_files_descriptor)
-              os.close(readiness_bundle)
+          assert release_qualification["operational_reference"]["image_source_commit"] != (
+              os.environ["CANDIDATE_SOURCE_COMMIT"]
+          )
+          assert sorted(release_qualification["not_performed"]) == [
+              "candidate_mcp_12_tools",
+              "candidate_worker_full_run",
+              "gold_quality_evaluation",
+              "production_cutover",
+          ]
+          (assets / "release-qualification.json").write_bytes(qualification_bytes)
           filesystem_source = source / "filesystem"
           filesystem_receipt_path = filesystem_source / "strict-filesystem-scan.json"
           filesystem_report_path = filesystem_source / "trivy-filesystem.json"
@@ -2759,7 +2047,12 @@ jobs:
               "candidate_image_repository": os.environ["CANDIDATE_IMAGE_REPOSITORY"],
               "image": os.environ["IMAGE_NAME"],
               "workflow": os.environ["GITHUB_WORKFLOW_REF"],
-              "readiness_evidence": readiness_evidence,
+              "release_qualification": {
+                  "path": "release-qualification.json",
+                  "sha256": os.environ["RELEASE_QUALIFICATION_SHA256"],
+                  "size_bytes": len(qualification_bytes),
+                  "document": release_qualification,
+              },
               "strict_filesystem_scan": filesystem_scan,
               "roles": {role: roles[role] for role in ("worker", "mcp")},
           }
@@ -2783,19 +2076,29 @@ jobs:
                   "",
                   "첨부된 `release-manifest.json`, 역할별 manifest, strict image/filesystem "
                   "Trivy/Gitleaks JSON 및 DB metadata, Cosign 검증 결과, "
-                  "`release-readiness-manifest.json`과 `readiness-evidence--*` 봉인 증빙, "
+                  "`release-qualification.json` 봉인 증빙, "
                   "`SHA256SUMS`에서 게시 증거를 확인할 수 있습니다.",
                   "",
-                  "수행 검증: 격리 후보 1회 실행의 terminal Worker 결과와 게시 READY, OCI "
-                  "index·platform·config digest·provenance·SBOM, MCP 기본 12도구 discovery와 "
-                  "실제 호출·response schema/generation 결속, baseline 복귀, stable 포인터와 "
-                  "공유 OCR cache 불변, strict 보안·비밀 스캔, cosign 서명 및 원격 asset "
-                  "재검증.",
+                  "수행 검증: 봉인된 `release-qualification.json`의 canonical SHA-256과 "
+                  "source/tag/digest 결속, final source 및 봉인 commit의 GitHub Actions CI "
+                  "성공, BuildKit 원격 Git context 산출 OCI index·platform·config·"
+                  "attestation digest와 provenance·SBOM 검증기 5종, filesystem·image strict "
+                  "비밀/취약점 스캔, Docker Hub immutable tag 충돌 preflight, 동일 digest "
+                  "복사, cosign keyless 서명 검증, Release asset SHA256SUMS 원격 재검증.",
                   "",
-                  "미수행: 300~500개 승인 gold 질의와 `v109_baseline` frozen legacy를 포함한 "
-                  "5-lane 검색 품질 비교, 통계적 우위와 답변 품질 보증을 이번 릴리스에서는 "
-                  "수행하지 않았으며 주장하지 않습니다. `docs/EVALUATION.md`의 연구 평가는 "
-                  "선택적 후속 검증으로 유지됩니다.",
+                  "참고(출처가 다른 운영 증거): 2026-10-06 03:00 KST 운영 Worker run "
+                  "`03fbc4f18a3c450bb017e2fd6f6442c4`/generation "
+                  "`g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`(운영 이미지 source "
+                  "`1ba366db8029c6947c0509c2d480ed6182cf996b`)는 현재 운영 시스템의 기능 "
+                  "참고 증거이며 이 릴리스 후보 이미지의 실행 성공 증거가 아닙니다.",
+                  "",
+                  "명시적 미수행: `candidate_worker_full_run`(격리 후보 Worker 일괄 실행), "
+                  "`candidate_mcp_12_tools`(후보 환경 12도구 실호출), "
+                  "`gold_quality_evaluation`(승인 gold·`v109_baseline` 5-lane 품질 비교), "
+                  "`production_cutover`(운영 stable 이미지 전환)는 이번 발행에서 수행하지 "
+                  "않았으며 주장하지 않습니다. 공개 이미지·Release 발행은 운영 배포 승인이 "
+                  "아닙니다. 연구 평가는 `docs/EVALUATION.md`와 관련 검증기에서 선택적 "
+                  "후속 검증으로 유지됩니다.",
               ]
           )
           Path("release-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
@@ -2809,11 +2112,6 @@ jobs:
           os.close(workspace)
           PY
 
-          mapfile -t readiness_release_assets < <(
-            jq -er '.files[].release_asset_name' \
-              release-assets/release-readiness-manifest.json
-          )
-          ((${#readiness_release_assets[@]} > 0))
           (
             cd release-assets
             sha256sum \
@@ -2839,8 +2137,7 @@ jobs:
               trivy-version-mcp.json \
               trivy-version-worker.json \
               trivy-worker.json \
-              release-readiness-manifest.json \
-              "${readiness_release_assets[@]}" > SHA256SUMS
+              release-qualification.json > SHA256SUMS
           )
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -2881,17 +2178,9 @@ jobs:
             release-assets/trivy-mcp.json
             release-assets/trivy-version-worker.json
             release-assets/trivy-version-mcp.json
-            release-assets/release-readiness-manifest.json
+            release-assets/release-qualification.json
             release-assets/SHA256SUMS
           )
-          mapfile -t readiness_release_assets < <(
-            jq -er '.files[].release_asset_name' \
-              release-assets/release-readiness-manifest.json
-          )
-          ((${#readiness_release_assets[@]} > 0))
-          for readiness_asset in "${readiness_release_assets[@]}"; do
-            assets+=("release-assets/$readiness_asset")
-          done
           (cd release-assets && sha256sum --check SHA256SUMS)
           release_lookup="$RUNNER_TEMP/cardrag-release-lookup.json"
           release_json="$RUNNER_TEMP/cardrag-release.json"
@@ -3049,17 +2338,9 @@ jobs:
             release-assets/trivy-mcp.json
             release-assets/trivy-version-worker.json
             release-assets/trivy-version-mcp.json
-            release-assets/release-readiness-manifest.json
+            release-assets/release-qualification.json
             release-assets/SHA256SUMS
           )
-          mapfile -t readiness_release_assets < <(
-            jq -er '.files[].release_asset_name' \
-              release-assets/release-readiness-manifest.json
-          )
-          ((${#readiness_release_assets[@]} > 0))
-          for readiness_asset in "${readiness_release_assets[@]}"; do
-            assets+=("release-assets/$readiness_asset")
-          done
           (cd release-assets && sha256sum --check SHA256SUMS)
           release_view="$RUNNER_TEMP/cardrag-release-view.json"
           expected_assets=$(

@@ -35,7 +35,11 @@ Worker 종료 코드와 terminal 결과, 게시 완료 여부를 확인합니다
 봉인합니다. Workflow는 두 commit 사이에서 이 경로 밖의 변경을 거부합니다.
 문서 정리나 버전 변경도 이 이후에 섞지 않습니다.
 
-## 격리 후보의 계약
+## 격리 후보의 계약 (후속 전체 런타임 검증용)
+
+1.0.32 공개 발행 게이트는 아래 후보 전체 실행을 요구하지 않습니다(handoff/005 FIX_03).
+이 표와 시드·rollback 절차는 후보 full run·MCP 실호출·품질 후속 검증을 수행할 때의
+계약입니다.
 
 | 항목 | 후보 설정 |
 |---|---|
@@ -58,19 +62,6 @@ v1.0.29 계열 후보는 라인업/OCR 시드(`seed-state-v122`)와 임베딩 �
 가정하지 않습니다. v1.0.29 r3 후보 볼륨의 임베딩 캐시 복사본은 FIX_02에서 전체 행
 무결성 검증으로 1회성 예외로 비준(ratify)된 것이며 재생산 경로가 아닙니다.
 
-v1.0.32 격리 후보 초기화만 예외적으로 **검증된 오프라인 상태 복제** 경로를 허용합니다
-(handoff/005 FIX_02 승인). 003 rolling baseline compaction 이후 운영 `snapshot`
-테이블은 문서별 discovery binding을 보존하지 않아 위 시드 명령이 최신 generation에서
-구조적으로 실패합니다(`source_record_missing`; 검사 완화나 snapshot 날조는 금지).
-대체 절차: 운영 writer가 종료하고 WAL/SHM/journal이 없음을 확인한 정비 구간에서만
-원본 상태 볼륨을 read-only로 연결해 **빈** 후보 상태 볼륨으로 전체 복제하고,
-`tools/cardrag_offline_volume_verify.py state`의 전수 파일 hash·SQLite integrity와
-`codex` 인증 복제 검증, 그리고 `docs/RECOVERY.md`의 전체 상태 복제 규정을 모두
-통과해야 합니다. 목적지에 기존 내용이 있으면 덮어쓰지 않고 실패로 다루고, 검증
-중 원본이 변경되면 목적지를 폐기합니다. 복제 상태로 만든 후보는 run·generation
-이력을 상속하므로 복제된 과거 run을 신규 후보 실사로 계상하지 않습니다. 이 예외는
-1.0.32 초기화에 한정되며 임베딩 캐시 수동 이식이나 가짜 seed ledger 작성 허용을
-뜻하지 않습니다.
 v1.0.29의 출시일 parser v3는 OCR 계약과 재사용 키를 변경하지 않습니다. v1.0.28의
 PaddleOCR 계약 SHA-256 `873a628ea7a4a91d217cebf2fb94489c4bc93fb7055607099a9e7933991c83ed`를
 유지하고, 기존 PDF identity에서 provider가 다시 호출되거나 OCR SHA가 달라지면 후보를
@@ -100,36 +91,30 @@ provenance 계약을 충족했다고 간주하지 않습니다.
 
 ## 필요한 증빙
 
-공식 릴리스 게이트는 **현재 후보의 운영 기능 release-readiness 증빙**만 요구합니다.
-[평가 안내](EVALUATION.md)의 승인 gold·`v109_baseline`·5-lane 품질 비교, 통계적 우위와
-답변 품질 검증은 이번 릴리스의 필수 게이트가 아니며 수행했다고 주장하지 않습니다.
-연구 평가 기능과 검증기는 선택적 후속 품질 평가로 그대로 유지됩니다. 이전 운영자만
-보유한 자료나 과거 실사 보고서를 현재 검증 대신 사용하지 않습니다.
+1.0.32 공개 발행 게이트는 **단 하나의 경량 발행 자격 증거 파일**입니다.
+`release-evidence/v1.0.32/release-qualification.json`
+(`schema_version=cardrag.release-qualification.v1`)은 final source commit, Worker/MCP
+후보 OCI index digest, 해당 commit의 성공한 CI run URL, 참고용 운영 run 식별자
+(`03fbc4f18a3c450bb017e2fd6f6442c4`/`g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`, 운영
+이미지 source `1ba366db8029c6947c0509c2d480ed6182cf996b` — **final source와 다른 출처이며
+후보 런타임 성공 증거로 재사용하지 않는다**)과 명시적 미수행 4항목
+(`candidate_worker_full_run`, `candidate_mcp_12_tools`, `gold_quality_evaluation`,
+`production_cutover`)을 canonical JSON으로 결속합니다. Workflow는 이 파일 하나의
+SHA-256·중복 키·비정규 수치·symlink·추가 파일·source/tag/digest/CI/저장소 결속을
+validate→publish 재검증→release 자산·SHA256SUMS 전 단계에서 검사합니다.
 
-후보 receipt는 다음 자료를 실제 source commit·generation·이미지와 결속합니다.
+이번 발행는 full volume clone, PDF discovery, PaddleOCR, 외부 OCR/embedding 호출, 신규
+WebDAV generation 발행, 후보 채널 게시·rollback을 요구하지 않습니다. 공개 게이트는
+GitHub CI, OCI provenance/SBOM, strict 비밀·취약점 스캔, Docker Hub immutable tag
+preflight, cosign 서명과 asset checksum에 있습니다. 후보 full run과 gold/legacy 품질
+비교가 필요하면 위 "격리 후보의 계약"에 따라 별도 후속 과제로 수행합니다.
 
-- 유효 설정, 별도 상태·인증 경로, namespace와 변경 권한
-- terminal Worker 실행, 정확한 OCR·구조·임베딩·출판 지표와 원격 객체 검증
-- 기본 MCP 도구 12개의 discovery와 실제 호출 요청·응답, exact 검색 coverage
-- 현재 baseline 보존, 후보의 게시·재시작·baseline 복귀와 재활성화 검증
-- 공유 OCR cache와 stable 포인터의 불변성, 허용되지 않은 쓰기·삭제 0건
-- 후보 generation의 manifest·READY·candidate pointer와 serving DB·vector sidecar 산출물
-
-공개 릴리스는 `cardrag_mcp.release_readiness`를 진입점으로 사용합니다. 이 검증기는
-`cardrag_core.release_readiness`의 canonical JSON·파일 크기·SHA-256·
-source·image·generation 결속 검증과 실제 MCP 응답 모델 검증을 함께 수행합니다. 봉인
-대상은 `release-readiness-receipt.json`과 그 12개 bound evidence 파일만입니다.
-`cardrag_mcp.candidate_smoke`/`cardrag_core.candidate_acceptance`(gold 연구 결속
-포함)는 삭제되지 않고 연구 경로 검증기로 남습니다. 실행 환경에 맞는 값을 직접 측정해야 하며
-`passed=true`를 작성하거나 다른 버전의 증빙을 이름만 바꿔 넣어 대체할 수 없습니다.
-각 도구 응답은 MCP/JSON-RPC 봉투를 제거한 정규화 payload로 보존하며 request와 response의
-canonical hash를 함께 기록합니다. 오류 응답·스키마 불일치·다른 generation은 거부합니다.
-호출 원문에 인증 헤더, 사설 URL, 조사자의 입력, 비공개 데이터나 공개 권한 없는 PDF/OCR
-본문이 포함되지 않았는지 **봉인 전에** 확인합니다. 공개하면 안 되는 입력은 공개 가능한
-평가 corpus로 교체하고 검증을 다시 수행합니다. 봉인 후 내용을 지우고 기존 해시를 재사용하지
-않습니다. Workflow는 봉인된 release-readiness evidence(allowlist: receipt와 그 12개
-결속 증빙 파일만)도 release asset으로 공개합니다. 원본 운영 로그, 자격 증명, 사설 URL,
-개인 질의와 품질 연구 산출물은 공개 번들에 포함하지 않습니다.
+`cardrag_core.release_readiness`/`cardrag_mcp.candidate_smoke`·
+`cardrag_core.candidate_acceptance`와 연구 평가 검증기는 삭제·무력화하지 않고 선택적
+후속 검증 경로로 그대로 유지됩니다. 어느 경로에서도 실행하지 않은 검증을 `passed=true`로
+작성하거나 증빙을 이름만 바꿔 대체할 수 없습니다. 공개 증거에 자격 증명, 사설 URL, 원본
+운영 로그, 비공개 PDF/OCR 본문, 개인 질의를 싣지 않으며 봉인 후 내용을 지우고 기존
+해시를 재사용하지 않습니다.
 
 사용할 MCP 클라이언트에서도 실제 `tools/list`와 호출을 검증합니다. 카드사 별칭·잘못된
 카드사명, 최근 출시·날짜 미확인, 기간·복수 카드사, 일괄 요약, generation 변경 오류와
@@ -158,10 +143,11 @@ Fork의 유지관리자는 다음을 자신의 저장소에 설정합니다. 후
 provenance와 repository 설정은 실제 빌드 원본과 일치해야 합니다.
 
 Dispatch의 필수 입력은 `version=1.0.32`, `candidate_source_commit`,
-`release_readiness_sha256`, `candidate_worker_image_digest`,
-`candidate_mcp_image_digest`입니다. 모두 검증한 실제 receipt·이미지에서 얻습니다.
+`release_qualification_sha256`, `candidate_worker_image_digest`,
+`candidate_mcp_image_digest`입니다. 모두 검증한 실제 qualification 증거 파일과
+GHCR 후보 이미지에서 얻습니다. 공개 발행은 운영 배포 승인이 아닙니다.
 
-Workflow는 source·annotated tag·CI·receipt·release-readiness evidence, 공개 후보 package,
+Workflow는 source·annotated tag·CI·release qualification evidence, 공개 후보 package,
 OCI/SBOM/provenance와 strict 보안 검사를 확인한 뒤 **동일 digest**를 공개 저장소로 복사합니다.
 서명·attestation·release asset checksum과 원격 자산을 다시 검증합니다. 누락된 증빙,
 다른 source·image·version 또는 충돌하는 immutable tag는 실패로 처리합니다.

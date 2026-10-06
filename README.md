@@ -89,8 +89,7 @@ search_contracts(query="연회비와 적립 제외 조건", response_mode="compa
 - [MCP 도구와 응답 계약](docs/MCP_API.md)
 - [데이터 구조와 검색 원칙](docs/DATA_FORMATS.md)
 - [백업·복구와 상태 관리](docs/RECOVERY.md)
-- [평가와 실험 기능](docs/EVALUATION.md) (선택적 후속 품질 연구; 현재 공개 릴리스
-  게이트는 운영 기능 readiness 증빙만 요구하며 gold·5-lane 품질 비교는 미수행)
+- [평가와 실험 기능](docs/EVALUATION.md) (선택적 후속 품질 연구)
 - [릴리스와 stable 전환](docs/RELEASING.md)
 - [기여 안내](CONTRIBUTING.md) · [보안](SECURITY.md)
 

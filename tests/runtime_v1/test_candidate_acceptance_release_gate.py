@@ -1,6 +1,5 @@
 import asyncio
 import copy
-import hashlib
 import json
 import shutil
 import subprocess
@@ -145,248 +144,6 @@ def _raw_evidence_is_gitleaks_clean(tmp_path: Path, payloads: dict[str, object])
         text=True,
     )
     return result.returncode == 0
-
-
-def test_release_requires_exact_candidate_receipt_and_evidence_only_sealing_commit() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-
-    required = (
-        "candidate_source_commit:",
-        "release_readiness_sha256:",
-        "candidate_worker_image_digest:",
-        "candidate_mcp_image_digest:",
-        '[[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]',
-        '[[ "$RELEASE_READINESS_SHA256" =~ ^[0-9a-f]{64}$ ]]',
-        '[[ "$CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
-        '[[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
-        'test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"',
-        'git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
-        "mapfile -d '' candidate_evidence_paths",
-        'git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
-        "((${#candidate_evidence_paths[@]} > 0))",
-        'git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" --',
-        'test "$version" = "1.0.32"',
-        "if: ${{ inputs.version == '1.0.32' }}",
-        "':(exclude)release-evidence/v1.0.32/**'",
-        "release-evidence/v1.0.32/*) ;;",
-        'readiness_receipt="$evidence_dir/release-readiness-receipt.json"',
-        'test "$(sha256sum "$readiness_receipt" | awk \'{print $1}\')" =',
-        "readiness_validation=$(",
-        ".venv/bin/python -m cardrag_mcp.release_readiness",
-        '--expected-receipt-sha256 "$RELEASE_READINESS_SHA256"',
-        '--expected-image-repository "$CANDIDATE_IMAGE_REPOSITORY"',
-        "worker_image.platform_manifest_digest",
-        "worker_image.platform_config_digest",
-        "worker_image.attestation_manifest_digest",
-        "mcp_image.platform_manifest_digest",
-        "mcp_image.platform_config_digest",
-        "mcp_image.attestation_manifest_digest",
-        'test "$(jq -r \'.worker_image.digest\' <<<"$readiness_validation")" =',
-        'test "$(jq -r \'.mcp_image.digest\' <<<"$readiness_validation")" =',
-    )
-    for contract in required:
-        assert contract in workflow
-
-    assert workflow.count('--expected-source-commit "$CANDIDATE_SOURCE_COMMIT"') == 1
-    assert '--expected-source-commit "$GITHUB_SHA"' not in workflow
-    assert 'test "$version" = "1.0.11"' not in workflow
-    assert "release-evidence/v1.0.11" not in workflow
-    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
-    publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
-    for research_reference in (
-        "gold-evaluation-report",
-        "gold-capture-set-receipt",
-        "gold.jsonl",
-        "blind-evaluation",
-        "v109_baseline",
-        "qwen_page",
-        "qwen_structure_exact",
-        "lexical_shadow",
-        "reranker_shadow",
-        "document-aggregation-scores",
-        "cardrag_mcp.evaluation",
-        "cardrag_mcp.gold_capture",
-        "cardrag_mcp.aggregation_profile",
-        "acceptance_report_sha256",
-        "aggregation_profile_sha256",
-        "capture_set_receipt_sha256",
-    ):
-        assert research_reference not in validate_job
-        assert research_reference not in publish_job
-
-
-def test_release_seals_and_publishes_every_readiness_evidence_file() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    path_block = workflow.split("            readiness_evidence_relative_paths=(\n", 1)[1].split(
-        "\n            )", 1
-    )[0]
-    readiness_paths = tuple(line.strip() for line in path_block.splitlines() if line.strip())
-    assert readiness_paths == ("release-readiness-receipt.json",)
-    assert all("*" not in path and "?" not in path for path in readiness_paths)
-
-    for contract in (
-        'readiness_validation_dir="$RUNNER_TEMP/cardrag-readiness-validation-evidence"',
-        '"schema": "cardrag.release-readiness-evidence.v1"',
-        "MAX_FILE_BYTES = 95_000_000",
-        'getattr(os, "O_NOFOLLOW", 0)',
-        "os.O_DIRECTORY",
-        "value.st_dev",
-        "value.st_ino",
-        "value.st_mode",
-        "value.st_nlink",
-        "value.st_size",
-        "value.st_mtime_ns",
-        "value.st_ctime_ns",
-        "hash_pinned_descriptor",
-        "os.fsync(destination)",
-        "os.link(",
-        '"maximum_file_bytes": MAX_FILE_BYTES',
-        "name: readiness-evidence-${{ steps.version.outputs.version }}",
-        "name: readiness-evidence-${{ needs.validate.outputs.version }}",
-        '"readiness_evidence": readiness_evidence',
-        '"${readiness_release_assets[@]}" > SHA256SUMS',
-        'assets+=("release-assets/$readiness_asset")',
-    ):
-        assert contract in workflow
-    assert workflow.count('"readiness_evidence": readiness_evidence') == 2
-    assert workflow.count("Download the exact release readiness evidence") == 1
-    assert workflow.count("Download exact release readiness evidence") == 1
-    assert "release-readiness-manifest.json" in workflow
-
-
-def test_release_validators_read_the_manifest_bound_preserved_path_snapshot() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
-    snapshot_binding = 'evidence_dir=$(realpath --canonicalize-existing "$readiness_validation_dir")'
-    assert snapshot_binding in validate_job
-    binding_index = validate_job.index(snapshot_binding)
-    for invocation in ("readiness_validation=$(",):
-        assert binding_index < validate_job.index(invocation)
-    for contract in (
-        '--evidence-root "$evidence_dir"',
-        'readiness_receipt="$evidence_dir/release-readiness-receipt.json"',
-        "src_dir_fd=files_directory",
-        "dst_dir_fd=snapshot_parent",
-        "snapshot_listed.st_nlink == 2",
-        "os.fchmod(snapshot_descriptor, 0o400)",
-    ):
-        assert contract in validate_job
-
-
-def test_readiness_preparse_includes_all_bound_evidence() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    validate_job = workflow.split("  validate:\n", 1)[1].split("  strict-filesystem-scan:\n", 1)[0]
-    expected_keys = {
-        "candidate_pointer",
-        "effective_config",
-        "generation_cas",
-        "generation_manifest",
-        "generation_ready",
-        "mcp_smoke",
-        "native_cache_after",
-        "native_cache_audit",
-        "native_cache_before",
-        "rollback_ledger",
-        "baseline_identity",
-        "worker_metrics",
-    }
-    key_block = validate_job.split("                  expected_evidence_keys = {\n", 1)[1].split(
-        "\n                  }", 1
-    )[0]
-    observed_keys = {line.strip().strip('",') for line in key_block.splitlines() if line.strip()}
-    assert observed_keys == expected_keys
-    for contract in (
-        "assert set(evidence_bindings) == expected_evidence_keys",
-        "assert isinstance(binding, dict) and set(binding) == {",
-        "candidate_artifacts[candidate_path] = (",
-        "candidate_binding = candidate_artifacts.get(raw_relative)",
-        "assert (digest, size) == candidate_binding",
-    ):
-        assert contract in validate_job
-
-
-def test_publish_revalidates_the_entire_readiness_bundle_before_any_copy() -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
-    verifier_index = publish_job.index(
-        "Revalidate complete release readiness evidence before registry mutation"
-    )
-    assert verifier_index < publish_job.index('"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy')
-    verifier = _readiness_publish_verifier(workflow)
-    for contract in (
-        "assert set(os.listdir(bundle)) == {",
-        "assert set(os.listdir(files)) == asset_names",
-        'assert manifest["file_count"] == len(entries)',
-        'assert manifest["source_commit"] == expected_source_commit',
-        'assert manifest["tag_commit"] == expected_tag_commit',
-        "assert manifest_sha256 == expected_manifest_sha256",
-        "assert identity(os.fstat(descriptor)) == expected",
-        "follow_symlinks=False",
-        "assert 0 < listed.st_size <= maximum_bytes",
-    ):
-        assert contract in verifier
-
-
-def test_readiness_publish_verifier_rejects_extra_symlink_and_same_inode_tamper(
-    tmp_path: Path,
-) -> None:
-    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    source_commit = "a" * 40
-    tag_commit = "b" * 40
-    bundle = tmp_path / "readiness-evidence"
-    files = bundle / "files"
-    files.mkdir(parents=True)
-    relative_path = "mcp-smoke.json"
-    asset_name = "readiness-evidence--mcp-smoke.json"
-    payload = b'{"schema":"fixture"}\n'
-    artifact = files / asset_name
-    artifact.write_bytes(payload)
-    manifest = {
-        "file_count": 1,
-        "files": [
-            {
-                "relative_path": relative_path,
-                "release_asset_name": asset_name,
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "size_bytes": len(payload),
-            }
-        ],
-        "maximum_file_bytes": 95_000_000,
-        "schema": "cardrag.release-readiness-evidence.v1",
-        "source_commit": source_commit,
-        "tag_commit": tag_commit,
-    }
-    manifest_payload = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-    manifest_path = bundle / "release-readiness-manifest.json"
-    manifest_path.write_text(manifest_payload, encoding="utf-8")
-    manifest_sha256 = hashlib.sha256(manifest_payload.encode()).hexdigest()
-
-    assert (
-        _run_readiness_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode == 0
-    )
-
-    extra = files / "unexpected"
-    extra.write_bytes(b"extra")
-    assert (
-        _run_readiness_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode != 0
-    )
-    extra.unlink()
-
-    real_files = bundle / "real-files"
-    files.rename(real_files)
-    files.symlink_to(real_files.name, target_is_directory=True)
-    assert (
-        _run_readiness_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode != 0
-    )
-    files.unlink()
-    real_files.rename(files)
-
-    original_inode = artifact.stat().st_ino
-    artifact.write_bytes(b'{"schema":"tampered"}\n')
-    assert artifact.stat().st_ino == original_inode
-    assert (
-        _run_readiness_verifier(workflow, bundle, manifest_sha256, source_commit, tag_commit).returncode != 0
-    )
 
 
 def test_public_registry_jobs_use_environment_only_to_scope_secrets() -> None:
@@ -556,10 +313,10 @@ def test_release_scans_and_publishes_only_the_receipt_bound_oci_digests() -> Non
     assert '"schema": "cardrag.container-release-part.v6"' in publish_job
     assert '"candidate_source_commit": os.environ["CANDIDATE_SOURCE_COMMIT"]' in publish_job
     assert "needs: [validate, strict-filesystem-scan, strict-image-scan]" in workflow
-    assert workflow.count("-f .github/scripts/validate-candidate-oci-index.jq") == 2
-    assert workflow.count("-f .github/scripts/validate-candidate-attestation-manifest.jq") == 2
-    assert workflow.count("python3 .github/scripts/validate-strict-json.py") == 8
-    assert workflow.count("-f .github/scripts/validate-candidate-platform-manifest.jq") == 3
+    assert workflow.count("-f .github/scripts/validate-candidate-oci-index.jq") == 3
+    assert workflow.count("-f .github/scripts/validate-candidate-attestation-manifest.jq") == 3
+    assert workflow.count("python3 .github/scripts/validate-strict-json.py") == 12
+    assert workflow.count("-f .github/scripts/validate-candidate-platform-manifest.jq") == 4
     package_action = (ROOT / ".github/actions/verify-public-candidate-package/action.yml").read_text(
         encoding="utf-8"
     )
@@ -921,3 +678,89 @@ def test_public_candidate_package_supports_explicit_fork_ownership(tmp_path: Pat
     assert not _public_package_is_valid(tmp_path, candidate)
     candidate["visibility"] = "private"
     assert not _public_package_is_valid(tmp_path, candidate, **options)
+
+
+def test_release_requires_exact_qualification_and_evidence_only_sealing_commit() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    required = (
+        "release_qualification_sha256:",
+        "candidate_source_commit:",
+        "candidate_worker_image_digest:",
+        "candidate_mcp_image_digest:",
+        '[[ "$CANDIDATE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]',
+        '[[ "$RELEASE_QUALIFICATION_SHA256" =~ ^[0-9a-f]{64}$ ]]',
+        '[[ "$CANDIDATE_WORKER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+        '[[ "$CANDIDATE_MCP_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+        'test "$CANDIDATE_SOURCE_COMMIT" != "$GITHUB_SHA"',
+        'git merge-base --is-ancestor "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
+        "mapfile -d '' candidate_evidence_paths",
+        'git diff --name-only -z "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA"',
+        "((${#candidate_evidence_paths[@]} > 0))",
+        'git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" --',
+        'test "$version" = "1.0.32"',
+        "if: ${{ inputs.version == '1.0.32' }}",
+        "':(exclude)release-evidence/v1.0.32/**'",
+        "release-evidence/v1.0.32/*) ;;",
+        'qualification="$qualification_dir/release-qualification.json"',
+        'test ! -L "$qualification_dir"',
+        'test ! -L "$qualification"',
+        'test "$(find "$qualification_dir" -mindepth 1 | wc -l)" -eq 1',
+        'test "$(sha256sum "$qualification" | awk \'{print $1}\')" =',
+        ".venv/bin/python -m cardrag_core.release_qualification",
+        '--expected-sha256 "$RELEASE_QUALIFICATION_SHA256"',
+        '--expected-source-commit "$CANDIDATE_SOURCE_COMMIT"',
+        '--expected-repository "$GITHUB_REPOSITORY"',
+        '"cardrag.release-qualification-validation.v1"',
+        'test "$(jq -r \'.status\' <<<"$qualification_validation")" = qualified',
+        'tag="${CANDIDATE_IMAGE_REPOSITORY}:candidate-v${VERSION}-${role}-${CANDIDATE_SOURCE_COMMIT}"',
+        'test "$("$crane" digest "$tag")" = "$digest"',
+    )
+    for contract in required:
+        assert contract in workflow
+
+    assert workflow.count('--expected-source-commit "$CANDIDATE_SOURCE_COMMIT"') == 2
+    assert '--expected-source-commit "$GITHUB_SHA"' not in workflow
+    for stale in (
+        "candidate-acceptance-receipt.json",
+        "release-readiness-receipt",
+        "readiness_evidence_manifest_sha256",
+        "cardrag_mcp.candidate_smoke",
+        "cardrag_mcp.release_readiness",
+        "collect_evidence_files",
+        "gold-evaluation-report",
+        "gold-capture-set-receipt",
+        "acceptance_report_sha256",
+        "aggregation_profile_sha256",
+        "capture_set_receipt_sha256",
+    ):
+        assert stale not in workflow
+
+    notes_region = workflow[workflow.index("notes = [") :]
+    for claim in (
+        "candidate_worker_full_run",
+        "candidate_mcp_12_tools",
+        "gold_quality_evaluation",
+        "production_cutover",
+        "참고(출처가 다른 운영 증거)",
+        "운영 배포 승인이",
+    ):
+        assert claim in notes_region
+
+
+def test_publish_revalidates_qualification_before_any_registry_mutation() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    publish_job = workflow.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
+    revalidate = "Revalidate the release qualification evidence before registry mutation"
+    assert publish_job.index(revalidate) < publish_job.index(
+        '"$RUNNER_TEMP/cardrag-release-registry-tools/crane" copy'
+    )
+    for contract in (
+        "name: release-qualification-${{ needs.validate.outputs.version }}",
+        ".venv/bin/python -m cardrag_core.release_qualification",
+        '"cardrag.release-qualification.v1"',
+    ):
+        assert contract in publish_job
+    assert '"release_qualification": {' in publish_job
+    assert workflow.count("name: release-qualification-${{ needs.validate.outputs.version }}") == 2
+    assert workflow.count("name: release-qualification-${{ steps.version.outputs.version }}") == 1
