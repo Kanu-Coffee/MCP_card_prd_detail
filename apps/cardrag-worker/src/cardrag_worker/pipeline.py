@@ -3589,6 +3589,43 @@ class WorkerPipeline:
             ),
         )
         current_remote = await self.webdav.validated_current_generation()
+        transition_served_ocr: dict[str, tuple[str, int, int, str, int]] = {}
+        if (
+            isinstance(self.webdav, WebDAVClient)
+            and current_remote is not None
+            and current_remote.contract_sha256 != contract_sha256
+        ):
+            # The first content-cache contract transition must preserve each
+            # document's served text, including PDFs shared by documents with
+            # different historical OCR outputs.
+            previous_body = await self.webdav.get_bytes(
+                generation_manifest_path(current_remote.generation_id),
+                max_bytes=MAX_GENERATION_MANIFEST_BYTES,
+            )
+            if previous_body is None:
+                raise RuntimeError("current generation manifest is unavailable for OCR transition")
+            try:
+                previous_manifest = GenerationManifest.model_validate_json(previous_body)
+            except ValueError:
+                raise RuntimeError("current generation manifest is invalid for OCR transition") from None
+            if (
+                previous_manifest.canonical_bytes() != previous_body
+                or previous_manifest.generation_id != current_remote.generation_id
+                or previous_manifest.corpus_sha256 != current_remote.corpus_sha256
+                or previous_manifest.contract_sha256 != current_remote.contract_sha256
+            ):
+                raise RuntimeError("current generation manifest changed during OCR transition")
+            transition_served_ocr = {
+                document.document_id: (
+                    document.pdf.sha256,
+                    document.pdf.size_bytes,
+                    document.page_count,
+                    document.ocr.sha256,
+                    document.ocr.size_bytes,
+                )
+                for document in previous_manifest.documents
+                if document.ocr is not None
+            }
         stable_body = await _observed_pointer_bytes(self.webdav)
         cache_healing_generation_id: str | None = None
         cache_healing_seal: dict[str, Any] | None = None
@@ -4095,6 +4132,13 @@ class WorkerPipeline:
                 current_pdf: DownloadedPDF = pdf,
                 current_output_dir: Path = ocr_output_dir,
             ) -> OCRResult:
+                served = transition_served_ocr.get(current_document_id)
+                retained_identity = (
+                    (served[3], served[4])
+                    if served is not None
+                    and served[:3] == (current_pdf.sha256, current_pdf.size_bytes, current_pdf.page_count)
+                    else None
+                )
                 result = await self.ocr.resolve(
                     run_id=run_id,
                     document_id=current_document_id,
@@ -4104,6 +4148,7 @@ class WorkerPipeline:
                     page_count=current_pdf.page_count,
                     output_dir=current_output_dir,
                     prior_local_native=prior_local_native_sources.get(current_document_id),
+                    retained_ocr_identity=retained_identity,
                 )
                 prior_local_native = prior_local_native_sources.get(current_document_id)
                 if prior_local_native is not None and (

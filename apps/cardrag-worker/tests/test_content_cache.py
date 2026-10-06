@@ -23,7 +23,7 @@ from cardrag_worker.content_cache import (
     ContentOCRVariantStore,
     content_index_path,
 )
-from cardrag_worker.ocr import OCRResolver, OCRResult
+from cardrag_worker.ocr import OCRCacheMissError, OCRResolver, OCRResult
 from cardrag_worker.state import WorkerState
 
 
@@ -190,6 +190,72 @@ async def test_document_selection_survives_resume_and_fails_closed_if_variant_ch
         await resumed.lookup(
             run_id="run-select", document_id="doc_test", source=earlier.source, cache_epoch=0
         )
+
+
+@pytest.mark.asyncio
+async def test_transition_pin_preserves_each_documents_served_ocr(tmp_path: Path) -> None:
+    class NoCallProvider:
+        provider = "opencode"
+        model = "alibaba-token-plan/qwen3.8-flash"
+        reasoning_effort = "medium"
+
+        async def recognize(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("transition must use a verified content variant")
+
+    webdav = FakeWebDAV()
+    earlier, earlier_body = _variant(
+        created_at=datetime(2026, 10, 6, tzinfo=UTC), provider="codex-exec", text="served old text"
+    )
+    later, later_body = _variant(
+        created_at=datetime(2026, 10, 6, tzinfo=UTC) + timedelta(hours=1),
+        provider="opencode",
+        text="another document's text",
+    )
+    store = ContentOCRVariantStore(webdav=webdav, state_root=tmp_path)  # type: ignore[arg-type]
+    await store.publish(earlier, earlier_body)
+    await store.publish(later, later_body)
+    pdf_path = tmp_path / "source.pdf"
+    pdf_path.write_bytes(b"pdf")
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        resolver = OCRResolver(
+            provider=NoCallProvider(),  # type: ignore[arg-type]
+            state=state,
+            webdav=webdav,  # type: ignore[arg-type]
+            cache_mode="read-only",
+            require_cache_hit=True,
+        )
+        old = await resolver.resolve(
+            run_id="run-old",
+            document_id="doc_old",
+            pdf_path=pdf_path,
+            pdf_sha256=earlier.source.pdf_sha256,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "runs" / "run-old" / "documents" / "doc_old" / "ocr",
+            retained_ocr_identity=(earlier.output.sha256, earlier.output.size_bytes),
+        )
+        latest = await resolver.resolve(
+            run_id="run-latest",
+            document_id="doc_latest",
+            pdf_path=pdf_path,
+            pdf_sha256=earlier.source.pdf_sha256,
+            pdf_size_bytes=3,
+            page_count=1,
+            output_dir=tmp_path / "runs" / "run-latest" / "documents" / "doc_latest" / "ocr",
+        )
+        with pytest.raises(OCRCacheMissError, match="retained OCR"):
+            await resolver.resolve(
+                run_id="run-missing",
+                document_id="doc_missing",
+                pdf_path=pdf_path,
+                pdf_sha256=earlier.source.pdf_sha256,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=tmp_path / "runs" / "run-missing" / "documents" / "doc_missing" / "ocr",
+                retained_ocr_identity=("f" * 64, 1),
+            )
+    assert old.cache_variant_id == earlier.variant_id
+    assert latest.cache_variant_id == later.variant_id
 
 
 @pytest.mark.asyncio

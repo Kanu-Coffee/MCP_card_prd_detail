@@ -66,3 +66,13 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 이 숫자는 **문서 수 기준**이며 PDF 고유 개수·마이그레이션 신규 variant 수와 같지 않다. 3,625개에 대한 generation 참조 승격과 334개의 서비스 중 텍스트 보존 승격이 필수다. 이 M0는 레거시 캐시와 현재 stable만 조사했다. 모든 과거 generation과 CAS 전체를 대조하는 고아 CAS 집계는 아직 하지 않았다. OCR 본문과 자격값은 보고서에 포함하지 않았다. 마이그레이션 적용은 하지 않았다.
 
 - M0 추가 후 전체 테스트 **2,228 passed**, 기존 warning 9건. Ruff check/format, mypy 100 source files, `git diff --check` 통과. 운영 timer는 `active`.
+
+### M0 추가 조사: 동일 PDF의 서비스 중 OCR 충돌
+
+현재 stable generation의 5,512개 OCR 문서는 PDF 내용 키 기준 4,846개 그룹이다. **87개 PDF 키의 320개 문서가 같은 PDF에 서로 다른 OCR SHA를 서비스 중**이며, PDF당 단일 최신 variant만 고르면 적어도 214개 문서의 기존 텍스트가 바뀐다. 따라서 PLAN 부록 A.4의 “서비스 중 텍스트 보존”을 PDF당 최신 variant 하나를 추가하는 방법만으로는 달성할 수 없다. Executor는 첫 전환 run에서 문서별 stable OCR SHA로 variant 선택을 고정하는 추가 경로를 설계·검증한 후에만 마이그레이션 apply 및 배포를 제안한다. 신규 문서와 전환 이후의 명시적 재작업은 일반 최신 선택 규칙을 따라야 한다. 이번 추가 조사는 읽기 전용이며 문서 ID·OCR 본문을 보고서에 기록하지 않았다.
+
+### 첫 전환 run의 문서별 서비스 텍스트 고정 구현
+
+현재 remote generation의 contract가 새 Worker contract와 다를 때, canonical generation manifest를 읽어 기존 문서의 PDF identity와 OCR SHA/크기를 묶는다. 새 run에서 PDF가 동일한 문서는 이 OCR identity와 일치하는 content variant만 선택하고, 없으면 provider를 호출하지 않고 실패시킨다. 같은 PDF의 다른 문서는 각자의 기존 OCR로 고정된다. 일반 run은 최신 유효 variant를 선택한다. Resolver 단위 테스트에서 같은 PDF의 과거 variant 고정·새 run 최신 선택·일치 variant 부재 시 차단을 검증했다. 이 경로가 실제 5,512개 문서에 적용되려면 모든 필요한 content variant의 마이그레이션이 먼저 완료돼야 한다.
+
+- 문서별 전환 고정 적용 후 전체 테스트 **2,229 passed**, 기존 warning 9건. Ruff check/format, mypy 100 source files, `git diff --check` 통과.

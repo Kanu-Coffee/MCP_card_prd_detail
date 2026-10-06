@@ -2136,6 +2136,7 @@ class OCRResolver:
         page_count: int,
         output_dir: Path,
         prior_local_native: PriorLocalNativeSource | None = None,
+        retained_ocr_identity: tuple[str, int] | None = None,
     ) -> OCRResult:
         source = OCRInput(
             pdf_sha256=pdf_sha256,
@@ -2154,6 +2155,7 @@ class OCRResolver:
                 page_count=page_count,
                 output_dir=output_dir,
                 prior_local_native=prior_local_native,
+                retained_ocr_identity=retained_ocr_identity,
             )
 
     async def _resolve_serialized(
@@ -2167,6 +2169,7 @@ class OCRResolver:
         page_count: int,
         output_dir: Path,
         prior_local_native: PriorLocalNativeSource | None = None,
+        retained_ocr_identity: tuple[str, int] | None = None,
     ) -> OCRResult:
         source = OCRInput(
             pdf_sha256=pdf_sha256,
@@ -2185,8 +2188,14 @@ class OCRResolver:
         expected_ocr_identity = (
             (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
             if prior_local_native is not None
-            else None
+            else retained_ocr_identity
         )
+        if (
+            retained_ocr_identity is not None
+            and prior_local_native is not None
+            and expected_ocr_identity != retained_ocr_identity
+        ):
+            raise OCRValidationError("retained generation and local OCR seals disagree")
 
         def _outside_retained_seal(result: OCRResult | None) -> bool:
             return bool(
@@ -2196,7 +2205,11 @@ class OCRResolver:
             )
 
         # 1. State Seed Ledger Lookup (Fast immutable local cache)
-        if self._seed_ledger is not None and document_id in self._seed_ledger.entries_by_doc_id:
+        if (
+            retained_ocr_identity is None
+            and self._seed_ledger is not None
+            and document_id in self._seed_ledger.entries_by_doc_id
+        ):
             seed_entry = self._seed_ledger.entries_by_doc_id[document_id]
             if (
                 expected_ocr_identity is not None
@@ -2253,6 +2266,8 @@ class OCRResolver:
                     cache_variant_id=content_manifest.variant_id,
                     cache_reused=True,
                 )
+            if retained_ocr_identity is not None:
+                raise OCRCacheMissError("retained OCR has no matching content variant")
 
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
