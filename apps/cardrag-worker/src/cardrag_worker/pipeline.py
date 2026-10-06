@@ -704,6 +704,7 @@ class _ProcessedDocument:
     ocr_size_bytes: int
     ocr_cache_kind: OCRCacheKind | None
     ocr_reuse_key: str | None
+    ocr_variant_id: str | None
     chunks: tuple[dict[str, Any], ...]
     temporal_status: TemporalStatusV5 = "current"
     supersedes_document_id: str | None = None
@@ -2002,13 +2003,23 @@ class WorkerPipeline:
 
     @property
     def contract_sha256(self) -> str:
+        # OCR provider/model/prompt are provenance of a selected immutable
+        # variant. Only the content-cache interpretation changes generation
+        # identity; otherwise switching providers would republish the corpus.
+        ocr_cache_policy = {
+            "schema_version": "cardrag.ocr-content-cache.v1",
+            "key_schema": "cardrag.ocr-content-reuse-key.v2",
+            "output_profile": "cardrag.ocr-markdown.v1",
+            "validation_profile": "cardrag.ocr-markdown.v1",
+            "cache_epoch": getattr(self.ocr.contract, "cache_epoch", 0),
+        }
         if self.v5_profile is not None:
             parser_profiles = [
                 issuer_parser_profile(adapter.spec.code).payload
                 for adapter in sorted(self.adapters, key=lambda item: item.spec.code)
             ]
             contract_payload: dict[str, Any] = {
-                "schema_version": "cardrag.worker-contract.v4",
+                "schema_version": "cardrag.worker-contract.v5",
                 "serving_schema": SERVING_SCHEMA_ID_V5,
                 "issuer_adapters": [
                     {
@@ -2031,7 +2042,7 @@ class WorkerPipeline:
                     for adapter in self.adapters
                 ],
                 "download_contract": "cardrag.secure-pdf-download.v2",
-                "ocr_contract": self.ocr.contract,
+                "ocr_cache_policy": ocr_cache_policy,
                 "remote_ocr_cache": {
                     "mode": self.ocr.cache_mode,
                     "policy_version": "cardrag.remote-ocr-cache-access.v1",
@@ -2076,7 +2087,7 @@ class WorkerPipeline:
             return canonical_sha256(contract_payload)
         return canonical_sha256(
             {
-                "schema_version": "cardrag.worker-contract.v2",
+                "schema_version": "cardrag.worker-contract.v3",
                 "serving_schema": SERVING_SCHEMA_ID,
                 "issuer_adapters": [
                     {
@@ -2099,7 +2110,7 @@ class WorkerPipeline:
                     for adapter in self.adapters
                 ],
                 "download_contract": "cardrag.secure-pdf-download.v2",
-                "ocr_contract": self.ocr.contract,
+                "ocr_cache_policy": ocr_cache_policy,
                 "adoption_policy_version": self.ocr.adoption_policy_version,
                 "chunk_contract": {
                     "version": CHUNK_CONTRACT,
@@ -4595,6 +4606,7 @@ class WorkerPipeline:
                     ocr_size_bytes=ocr_result.size_bytes,
                     ocr_cache_kind=ocr_result.cache_kind,
                     ocr_reuse_key=ocr_result.cache_reuse_key,
+                    ocr_variant_id=ocr_result.cache_variant_id,
                     chunks=chunks,
                     temporal_status=acquired_document.temporal_status,
                     supersedes_document_id=acquired_document.supersedes_document_id,
@@ -4926,6 +4938,7 @@ class WorkerPipeline:
                         page_count=document.record.page_count,
                         ocr_cache_kind=document.ocr_cache_kind,
                         ocr_reuse_key=document.ocr_reuse_key,
+                        ocr_variant_id=document.ocr_variant_id,
                         availability="available",
                     )
                     for document in processed
@@ -5837,6 +5850,7 @@ class WorkerPipeline:
                         page_count=document.record.page_count,
                         ocr_cache_kind=document.ocr_cache_kind,
                         ocr_reuse_key=document.ocr_reuse_key,
+                        ocr_variant_id=document.ocr_variant_id,
                         availability="available",
                     )
                     for document in ordered_documents

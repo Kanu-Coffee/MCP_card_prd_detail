@@ -532,6 +532,7 @@ class OCRResult:
     reuse_key: str
     cache_kind: OCRCacheKind | None = None
     cache_reuse_key: str | None = None
+    cache_variant_id: str | None = None
     cache_publication_deferred: bool = False
     cache_publication_reason_code: str | None = None
     cache_reused: bool = False
@@ -543,6 +544,12 @@ class OCRResult:
             raise ValueError("OCR cache/provider metrics must be booleans")
         if (self.cache_kind is None) != (self.cache_reuse_key is None):
             raise ValueError("OCR cache kind and reuse key must be present together")
+        if self.cache_kind == "content" and (
+            self.cache_variant_id is None or not re.fullmatch(r"[0-9a-f]{64}", self.cache_variant_id)
+        ):
+            raise ValueError("content OCR result requires an exact variant ID")
+        if self.cache_kind != "content" and self.cache_variant_id is not None:
+            raise ValueError("OCR variant ID requires content cache kind")
         if self.cache_publication_deferred != (self.cache_publication_reason_code is not None):
             raise ValueError("deferred OCR cache publication and reason code must be present together")
         if self.cache_publication_reason_code is not None and not re.fullmatch(

@@ -56,8 +56,8 @@ def object_path(digest: str) -> PurePosixPath:
 
 def ocr_cache_root_path(reuse_key: str, *, kind: str = "native") -> PurePosixPath:
     value = validate_sha256(reuse_key)
-    if kind not in {"native", "adopted"}:
-        raise ValueError("OCR cache kind must be native or adopted")
+    if kind not in {"native", "adopted", "content"}:
+        raise ValueError("OCR cache kind must be native, adopted, or content")
     return PurePosixPath("v1", "ocr-cache", kind, value[:2], value)
 
 
@@ -67,6 +67,13 @@ def ocr_manifest_path(reuse_key: str, *, kind: str = "native") -> PurePosixPath:
 
 def ocr_ready_path(reuse_key: str, *, kind: str = "native") -> PurePosixPath:
     return ocr_cache_root_path(reuse_key, kind=kind) / "READY.json"
+
+
+def content_ocr_variant_root_path(reuse_key: str, variant_label: str) -> PurePosixPath:
+    """Return a traversal-safe directory for one immutable content OCR variant."""
+
+    label = validate_identifier(variant_label, label="OCR variant")
+    return ocr_cache_root_path(reuse_key, kind="content") / "variants" / label
 
 
 def generation_root_path(generation_id: str) -> PurePosixPath:

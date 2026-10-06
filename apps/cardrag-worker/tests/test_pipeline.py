@@ -3508,6 +3508,44 @@ def test_serving_affecting_issuer_catalog_fields_change_worker_contract(tmp_path
     assert first != second
 
 
+def test_ocr_provider_provenance_does_not_change_worker_contract(tmp_path: Path) -> None:
+    adapter = Adapter((source(),))
+    first_ocr = FakeOCR()
+    first_ocr.contract = {
+        "provider": "codex-exec",
+        "model": "gpt-5.6-sol",
+        "processor_version": "old",
+        "reasoning_effort": "high",
+    }
+    second_ocr = FakeOCR()
+    second_ocr.contract = {
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash",
+        "processor_version": "new",
+        "reasoning_effort": "medium",
+    }
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        first = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[adapter],
+            ocr=first_ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        ).contract_sha256
+        second = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[adapter],
+            ocr=second_ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        ).contract_sha256
+    assert first == second
+
+
 def install_concurrent_pdf_http(monkeypatch: pytest.MonkeyPatch, handler: Any) -> list[httpx.AsyncClient]:
     real_client = httpx.AsyncClient
     clients: list[httpx.AsyncClient] = []
