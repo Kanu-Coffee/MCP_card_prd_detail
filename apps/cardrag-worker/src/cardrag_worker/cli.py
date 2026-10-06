@@ -231,7 +231,11 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
         codex_provider_env_key=settings.codex_model_provider_env_key,
         codex_provider_wire_api=settings.codex_model_provider_wire_api,
         codex_model_catalog_json=settings.codex_model_catalog_json,
-        reasoning_effort=settings.ocr_reasoning_effort,
+        reasoning_effort=(
+            settings.opencode_ocr_reasoning_effort
+            if name.strip().casefold() == "opencode"
+            else settings.ocr_reasoning_effort
+        ),
         timeout_seconds=settings.ocr_provider_timeout_seconds,
         openrouter_fallback_model=settings.openrouter_ocr_fallback_model,
         paddleocr_pipeline_version=settings.paddleocr_pipeline_version,
@@ -239,6 +243,10 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
         paddleocr_pdf_dpi=settings.paddleocr_pdf_dpi,
         paddleocr_cpu_threads=settings.paddleocr_cpu_threads,
         paddleocr_timeout_seconds=settings.paddleocr_timeout_seconds,
+        opencode_executable=settings.opencode_executable,
+        opencode_config_path=settings.opencode_config,
+        opencode_agent=settings.opencode_agent,
+        opencode_api_key_env_var=settings.opencode_api_key_env_var,
     )
 
 
@@ -450,6 +458,8 @@ async def _run(resume: str | None) -> dict[str, Any]:
                             "paddleocr-vl",
                         }:
                             fallback_model = "PaddleOCR-VL-1.6"
+                        elif settings.ocr_fallback_provider.strip().casefold() == "opencode":
+                            fallback_model = "alibaba-token-plan/qwen3.8-flash"
                         else:
                             raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
                     fallback = OCRResolver(

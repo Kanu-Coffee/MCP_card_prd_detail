@@ -37,6 +37,7 @@ from cardrag_worker.pipeline import (
 )
 from cardrag_worker.providers import (
     CodexOCRProvider,
+    OpenCodeOCRProvider,
     OpenRouterOCRProvider,
     PaddleOCRVLProvider,
     ProviderError,
@@ -2333,3 +2334,454 @@ def test_first_revalidation_failure_exits_already_running_when_worker_lock_held(
 
     assert events == ["revalidation_failed_due_to_concurrent_mutation"]
     assert not (state_root / "worker-state.sqlite3").exists()
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_subprocess_invocation_and_json_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    images = tuple(tmp_path / f"page-{page}.png" for page in range(1, 3))
+    for image in images:
+        image.write_bytes(b"png")
+    captured: dict[str, Any] = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            captured["stdin"] = body
+            events = [
+                {"type": "step_start"},
+                {"type": "text", "part": {"type": "text", "text": "## Page 1\n한글 본문 1\n\n"}},
+                {"type": "text", "part": {"type": "text", "text": "## Page 2\n한글 본문 2"}},
+                {"type": "step_finish", "part": {"tokens": {"total": 100}}},
+            ]
+            json_stream = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+            return json_stream, b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def create(*args: str, **kwargs: Any) -> Process:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        captured["cwd"] = kwargs["cwd"]
+        return Process()
+
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-token-value")
+    monkeypatch.setenv("SHOULD_NOT_LEAK", "secret")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+
+    provider = OpenCodeOCRProvider(
+        executable="opencode",
+        model="alibaba-token-plan/qwen3.8-flash",
+        timeout_seconds=60,
+        reasoning_effort="medium",
+        api_key_env_var="ALIBABA_TOKEN_PLAN_API_KEY",
+    )
+    result = await provider.recognize(
+        images,
+        page_numbers=(1, 2),
+        target_page_numbers=(1, 2),
+        total_pages=2,
+        prompt="transcribe prompt",
+    )
+    assert result == "## Page 1\n한글 본문 1\n\n## Page 2\n한글 본문 2"
+
+    args = captured["args"]
+    assert args[0] == "opencode"
+    assert args[1] == "run"
+    assert args[args.index("-m") + 1] == "alibaba-token-plan/qwen3.8-flash"
+    assert args[args.index("--variant") + 1] == "medium"
+    assert "--format" in args and args[args.index("--format") + 1] == "json"
+    assert "--pure" in args
+    assert args.count("-f") == 2
+
+    env = captured["env"]
+    assert env["ALIBABA_TOKEN_PLAN_API_KEY"] == "test-token-value"  # noqa: S105
+    assert "SHOULD_NOT_LEAK" not in env
+    assert "HOME" in env
+    assert "OPENCODE_CONFIG" in env
+    # Verify auto-generated config has tools disabled
+    cfg = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())
+    assert cfg["tools"]["bash"] is False
+    assert cfg["autoupdate"] is False
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_rejects_credential_bearing_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            leaked_key = "sk-or-v1-" + "a" * 64
+            json_stream = (
+                f'{{"type":"text","part":{{"type":"text","text":"leaked: {leaked_key}"}}}}'
+            ).encode()
+            return json_stream, b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def create(*args: Any, **kwargs: Any) -> Process:
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-key")
+
+    provider = OpenCodeOCRProvider()
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="transcribe",
+        )
+    assert "provider_output_credential_detected" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_missing_api_key_fails_systemically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    monkeypatch.delenv("ALIBABA_TOKEN_PLAN_API_KEY", raising=False)
+
+    provider = OpenCodeOCRProvider(api_key_env_var="ALIBABA_TOKEN_PLAN_API_KEY")
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="transcribe",
+        )
+    assert "provider_systemic_failure" in str(exc_info.value)
+
+
+def test_settings_opencode_provider_defaults_and_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_env = {
+        "CARDRAG_STATE_DIR": str(tmp_path / "state"),
+        "CARDRAG_OCR_PROVIDER": "opencode",
+        "CARDRAG_EXTERNAL_OCR_ALLOWED": "true",
+    }
+    for k, v in base_env.items():
+        monkeypatch.setenv(k, v)
+
+    s = WorkerSettings.from_env()
+    assert s.ocr_provider == "opencode"
+    assert s.ocr_model == "alibaba-token-plan/qwen3.8-flash"
+    assert s.ocr_reasoning_effort == "medium"
+    assert s.opencode_executable == "opencode"
+    assert s.opencode_api_key_env_var == "ALIBABA_TOKEN_PLAN_API_KEY"
+
+    # Gate: CARDRAG_EXTERNAL_OCR_ALLOWED=false must raise ValueError
+    monkeypatch.setenv("CARDRAG_EXTERNAL_OCR_ALLOWED", "false")
+    with pytest.raises(ValueError, match="External OCR provider 'opencode'"):
+        WorkerSettings.from_env()
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_strict_json_parsing_and_error_handling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-key")
+
+    # 1. Non-JSON output must fail with provider_contract_invalid (no fallback to raw text)
+    class NonJsonProcess:
+        returncode = 0
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            return b"Raw plain text output from model without json events", b""
+        def kill(self) -> None: pass
+        async def wait(self) -> None: pass
+
+    async def mock_non_json(*a: Any, **k: Any) -> Any:
+        return NonJsonProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_non_json)
+    provider = OpenCodeOCRProvider()
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    assert "provider_contract_invalid" in str(exc_info.value)
+
+    # 2. Explicit error event in JSON stream must fail with provider_contract_invalid
+    class ErrorEventProcess:
+        returncode = 0
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            return json.dumps({"type": "error", "message": "quota exceeded"}).encode(), b""
+        def kill(self) -> None: pass
+        async def wait(self) -> None: pass
+
+    async def mock_error_event(*a: Any, **k: Any) -> Any:
+        return ErrorEventProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_error_event)
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    assert "provider_contract_invalid" in str(exc_info.value)
+
+    # 3. Valid JSON events but empty text must fail with provider_contract_invalid
+    class EmptyTextProcess:
+        returncode = 0
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            return json.dumps({"type": "step_finish", "part": {}}).encode(), b""
+        def kill(self) -> None: pass
+        async def wait(self) -> None: pass
+
+    async def mock_empty_text(*a: Any, **k: Any) -> Any:
+        return EmptyTextProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_empty_text)
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    assert "provider_contract_invalid" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_custom_config_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-key")
+
+    class MockProcess:
+        returncode = 0
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            return json.dumps({"type": "text", "part": {"type": "text", "text": "## Page 1\nOK"}}).encode(), b""
+        def kill(self) -> None: pass
+        async def wait(self) -> None: pass
+
+    async def mock_process(*a: Any, **k: Any) -> Any:
+        return MockProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_process)
+
+    # Insecure config (permission allow)
+    bad_cfg = tmp_path / "bad_config.json"
+    bad_cfg.write_text(json.dumps({"tools": {"*": False}, "permission": {"*": "allow"}}))
+    provider_bad = OpenCodeOCRProvider(config_path=bad_cfg)
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider_bad.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    assert "provider_systemic_failure" in str(exc_info.value)
+
+    # Insecure config (tools not disabled)
+    bad_tools = tmp_path / "bad_tools.json"
+    bad_tools.write_text(json.dumps({"tools": {"bash": True}, "permission": {"*": "deny"}}))
+    provider_bad_tools = OpenCodeOCRProvider(config_path=bad_tools)
+    with pytest.raises(ProviderSystemicError) as exc_info:
+        await provider_bad_tools.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    assert "provider_systemic_failure" in str(exc_info.value)
+
+
+    # Secure config succeeds
+    good_cfg = tmp_path / "good_config.json"
+    good_cfg.write_text(json.dumps({
+        "tools": {"*": False},
+        "permission": {"*": "deny"},
+        "agent": {"ocr": {"name": "ocr", "tools": {"*": False}, "permission": {"*": "deny"}}}
+    }))
+    provider_good = OpenCodeOCRProvider(config_path=good_cfg, agent="ocr")
+    result = await provider_good.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    assert result == "## Page 1\nOK"
+
+
+def test_settings_require_providers_opencode_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_env = {
+        "CARDRAG_STATE_DIR": str(tmp_path / "state"),
+        "CARDRAG_OCR_PROVIDER": "opencode",
+        "CARDRAG_EXTERNAL_OCR_ALLOWED": "true",
+        "CARDRAG_OPENROUTER_API_KEY": "sk-test",
+    }
+    for k, v in base_env.items():
+        monkeypatch.setenv(k, v)
+
+    # 1. Missing API key under require_providers=True raises ValueError
+    monkeypatch.delenv("ALIBABA_TOKEN_PLAN_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="OpenCode API key.*required"):
+        WorkerSettings.from_env(require_providers=True)
+
+    # Set API key
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-token")
+
+    # 2. Non-existent executable raises ValueError
+    monkeypatch.setenv("CARDRAG_OPENCODE_EXECUTABLE", "/nonexistent/binary/opencode")
+    with pytest.raises(ValueError, match="OpenCode executable.*not found"):
+        WorkerSettings.from_env(require_providers=True)
+
+    # Provide fake executable
+    fake_bin = tmp_path / "fake_opencode"
+    fake_bin.write_text("#!/bin/sh\nexit 0")
+    fake_bin.chmod(0o755)
+    monkeypatch.setenv("CARDRAG_OPENCODE_EXECUTABLE", str(fake_bin))
+
+    # 3. Insecure custom config raises ValueError
+    bad_cfg = tmp_path / "bad.json"
+    bad_cfg.write_text(json.dumps({"tools": {"bash": True}, "permission": {"*": "allow"}}))
+    monkeypatch.setenv("CARDRAG_OPENCODE_CONFIG", str(bad_cfg))
+    with pytest.raises(ValueError, match="OpenCode config must strictly set"):
+        WorkerSettings.from_env(require_providers=True)
+
+    # 4. Valid custom config passes
+    good_cfg = tmp_path / "good.json"
+    good_cfg.write_text(json.dumps({"tools": {"*": False}, "permission": {"*": "deny"}}))
+    monkeypatch.setenv("CARDRAG_OPENCODE_CONFIG", str(good_cfg))
+    s = WorkerSettings.from_env(require_providers=True)
+    assert s.ocr_provider == "opencode"
+    assert s.opencode_executable == str(fake_bin)
+
+
+def test_fallback_opencode_uses_medium_reasoning_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {
+        "CARDRAG_STATE_DIR": str(tmp_path / "state"),
+        "CARDRAG_OCR_PROVIDER": "codex-exec",
+        "CARDRAG_OCR_MODEL": "gpt-5.6-sol",
+        "CARDRAG_OCR_REASONING_EFFORT": "high",
+        "CARDRAG_OCR_FALLBACK_PROVIDER": "opencode",
+        "CARDRAG_EXTERNAL_OCR_ALLOWED": "true",
+    }
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    s = WorkerSettings.from_env()
+    assert s.ocr_provider == "codex-exec"
+    assert s.ocr_reasoning_effort == "high"
+    assert s.ocr_fallback_provider == "opencode"
+    # OpenCode specific reasoning effort remains "medium" even though primary is "high"
+    assert s.opencode_ocr_reasoning_effort == "medium"
+
+    from cardrag_worker.cli import _provider
+    fallback_p = _provider(s, "opencode", "alibaba-token-plan/qwen3.8-flash")
+    assert isinstance(fallback_p, OpenCodeOCRProvider)
+    assert fallback_p.reasoning_effort == "medium"
+
+
+def test_existing_provider_contracts_and_hashes_invariant() -> None:
+    from cardrag_core.canonical import canonical_sha256
+    from cardrag_core.ocr import NativeOCRContract
+
+    # Verify contract hashing consistency for existing providers
+    codex_contract = NativeOCRContract(
+        processor_version="v1.0.32",
+        prompt_version="cardrag-ocr.ko.v2",
+        prompt_sha256="0" * 64,
+        renderer_id="pdfium",
+        render_scale_milli=6000,
+        provider="codex-exec",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        segmentation_strategy_id="contiguous-target-chunk.v2",
+        whole_document_max_pages=4,
+        target_pages_per_call=2,
+        context_pages_before=1,
+        context_pages_after=1,
+        output_policy="target-pages-only",
+    )
+    codex_hash_1 = canonical_sha256(codex_contract)
+    codex_hash_2 = canonical_sha256(codex_contract)
+    assert codex_hash_1 == codex_hash_2
+
+    paddle_contract = NativeOCRContract(
+        processor_version="v1.0.32",
+        prompt_version="cardrag-ocr.ko.v2",
+        prompt_sha256="0" * 64,
+        renderer_id="pdfium",
+        render_scale_milli=6000,
+        provider="local-paddleocr",
+        model="PaddleOCR-VL-1.6",
+        reasoning_effort=None,
+        segmentation_strategy_id="contiguous-target-chunk.v2",
+        whole_document_max_pages=4,
+        target_pages_per_call=2,
+        context_pages_before=1,
+        context_pages_after=1,
+        output_policy="target-pages-only",
+    )
+    paddle_hash = canonical_sha256(paddle_contract)
+    assert paddle_hash != codex_hash_1
+
+    opencode_contract = NativeOCRContract(
+        processor_version="v1.0.32",
+        prompt_version="cardrag-ocr.ko.v2",
+        prompt_sha256="0" * 64,
+        renderer_id="pdfium",
+        render_scale_milli=6000,
+        provider="opencode",
+        model="alibaba-token-plan/qwen3.8-flash",
+        reasoning_effort="medium",
+        segmentation_strategy_id="contiguous-target-chunk.v2",
+        whole_document_max_pages=4,
+        target_pages_per_call=2,
+        context_pages_before=1,
+        context_pages_after=1,
+        output_policy="target-pages-only",
+    )
+    opencode_hash = canonical_sha256(opencode_contract)
+    assert opencode_hash != codex_hash_1
+    assert opencode_hash != paddle_hash
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_timeout_and_cancel_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "page-1.png"
+    image.write_bytes(b"png")
+    monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-key")
+
+    killed = False
+    waited = False
+
+    class HangingProcess:
+        returncode = None
+
+        async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)
+            return b"", b""
+
+        def kill(self) -> None:
+            nonlocal killed
+            killed = True
+
+        async def wait(self) -> None:
+            nonlocal waited
+            waited = True
+
+    async def mock_hanging(*a: Any, **k: Any) -> Any:
+        return HangingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_hanging)
+    provider = OpenCodeOCRProvider(timeout_seconds=0.01)
+
+    with pytest.raises(TimeoutError):
+        await provider.recognize(
+            (image,),
+            page_numbers=(1,),
+            target_page_numbers=(1,),
+            total_pages=1,
+            prompt="p",
+        )
+
+    assert killed is True
+    assert waited is True

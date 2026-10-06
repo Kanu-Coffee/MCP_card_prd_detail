@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import math
@@ -19,6 +20,8 @@ from cardrag_core import (
     DOCUMENT_EMBEDDING_PREFIX,
     EMBEDDING_DIMENSION,
 )
+
+MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class ProviderError(RuntimeError):
@@ -275,6 +278,23 @@ def _classify_codex_process_exit(stderr: bytes) -> ProviderSystemicReasonCode:
     return "provider_process_exit_unknown"
 
 
+def _classify_opencode_process_exit(stderr: bytes, stdout: bytes = b"") -> ProviderSystemicReasonCode:
+    """Classify OpenCode stderr and stdout using identical allowlisted reason codes."""
+
+    diagnostic = (stderr + b"\n" + stdout).decode("utf-8", errors="replace")
+    classifications: tuple[tuple[tuple[re.Pattern[str], ...], ProviderSystemicReasonCode], ...] = (
+        (_CODEX_AUTH_FAILURE_PATTERNS, "provider_process_authentication_failed"),
+        (_CODEX_CONFIG_FAILURE_PATTERNS, "provider_process_configuration_failed"),
+        (_CODEX_RATE_LIMIT_PATTERNS, "provider_process_rate_limited"),
+        (_CODEX_NETWORK_FAILURE_PATTERNS, "provider_process_network_error"),
+        (_CODEX_PROVIDER_FAILURE_PATTERNS, "provider_process_provider_unavailable"),
+    )
+    for patterns, reason_code in classifications:
+        if any(pattern.search(diagnostic) is not None for pattern in patterns):
+            return reason_code
+    return "provider_process_exit_unknown"
+
+
 # These patterns intentionally identify token *forms* without ever retaining
 # or rendering the matching value. They cover the credentials present in the
 # Worker threat boundary plus common prompt-injection exfiltration formats.
@@ -463,6 +483,14 @@ CODEX_OCR_CONFIG_OVERRIDES: tuple[str, ...] = (
 )
 
 CODEX_OCR_INHERITED_ENVIRONMENT_KEYS: tuple[str, ...] = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
+
+OPENCODE_OCR_INHERITED_ENVIRONMENT_KEYS: tuple[str, ...] = (
     "PATH",
     "LANG",
     "LC_ALL",
@@ -787,6 +815,275 @@ class CodexOCRProvider:
             raise ProviderSystemicError("provider_contract_invalid") from None
 
 
+async def _communicate_bounded(
+    process: asyncio.subprocess.Process,
+    input_data: bytes,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int = 16 * 1024 * 1024,
+) -> tuple[bytes, bytes]:
+    if getattr(process, "stdin", None) is None or getattr(process, "stdout", None) is None:
+        return await process.communicate(input_data)
+
+    assert process.stdin is not None
+    assert process.stdout is not None
+    stdin_writer = process.stdin
+    stdout_reader = process.stdout
+    stderr_reader = process.stderr
+
+
+    async def _write_stdin() -> None:
+        try:
+            stdin_writer.write(input_data)
+            await stdin_writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            try:
+                stdin_writer.close()
+                await stdin_writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+    async def _read_bounded(stream: asyncio.StreamReader, limit: int) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise ProviderSystemicError("provider_contract_invalid")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    stderr_task = (
+        _read_bounded(stderr_reader, max_stderr_bytes)
+        if stderr_reader is not None
+        else asyncio.sleep(0, result=b"")
+    )
+    _, stdout, stderr = await asyncio.gather(
+        _write_stdin(),
+        _read_bounded(stdout_reader, max_stdout_bytes),
+        stderr_task,
+    )
+    await process.wait()
+    return stdout, stderr
+
+
+
+
+class OpenCodeOCRProvider:
+    provider = "opencode"
+
+    def __init__(
+        self,
+        *,
+        executable: str = "opencode",
+        model: str = "alibaba-token-plan/qwen3.8-flash",
+        config_path: Path | None = None,
+        agent: str = "ocr",
+        timeout_seconds: float = 1800,
+        reasoning_effort: str = "medium",
+        api_key_env_var: str = "ALIBABA_TOKEN_PLAN_API_KEY",
+    ) -> None:
+        self.executable = executable
+        self.model = model
+        self.config_path = config_path
+        normalized_agent = agent.strip() if agent else "ocr"
+        if not normalized_agent or not re.fullmatch(r"[a-zA-Z0-9_-]+", normalized_agent):
+            raise ValueError(f"Invalid OpenCode agent name: {agent!r}")
+        self.agent = normalized_agent
+        if timeout_seconds <= 0:
+            raise ValueError("OCR provider timeout must be positive")
+        self.timeout_seconds = timeout_seconds
+        self.reasoning_effort: str | None = reasoning_effort
+        self.api_key_env_var = api_key_env_var
+
+    async def recognize(
+        self,
+        images: Sequence[Path],
+        *,
+        page_numbers: Sequence[int],
+        target_page_numbers: Sequence[int],
+        total_pages: int,
+        prompt: str,
+    ) -> str:
+        if not images:
+            raise ValueError("OCR requires one or more page images")
+        if len(images) != len(page_numbers):
+            raise ValueError("OCR image/page mapping length differs")
+        instructions = _ocr_call_instructions(
+            page_numbers=page_numbers,
+            target_page_numbers=target_page_numbers,
+            total_pages=total_pages,
+        )
+        file_arguments = [value for path in images for value in ("-f", str(path.resolve()))]
+        environment = {
+            name: os.environ[name] for name in OPENCODE_OCR_INHERITED_ENVIRONMENT_KEYS if name in os.environ
+        }
+        if self.api_key_env_var:
+            secret = os.environ.get(self.api_key_env_var, "").strip()
+            if not secret:
+                raise ProviderSystemicError("provider_systemic_failure")
+            environment[self.api_key_env_var] = secret
+
+        work_dir = images[0].parent.resolve()
+        environment["HOME"] = str(work_dir)
+        environment["XDG_CONFIG_HOME"] = str(work_dir)
+        environment["XDG_DATA_HOME"] = str(work_dir)
+        environment["OPENCODE_CONFIG_DIR"] = str(work_dir)
+
+        # Validate or generate isolated config with tool denial
+        if self.config_path is not None:
+            if not self.config_path.is_file():
+                raise ProviderSystemicError("provider_systemic_failure")
+            try:
+                cfg_data = json.loads(self.config_path.read_text(encoding="utf-8"))
+            except Exception:
+                raise ProviderSystemicError("provider_systemic_failure") from None
+            if not isinstance(cfg_data, dict):
+                raise ProviderSystemicError("provider_systemic_failure")
+            tools = cfg_data.get("tools")
+            if not isinstance(tools, dict) or tools.get("*") is not False:
+                raise ProviderSystemicError("provider_systemic_failure")
+            perms = cfg_data.get("permission")
+            if not isinstance(perms, dict) or perms.get("*") != "deny":
+                raise ProviderSystemicError("provider_systemic_failure")
+            agents = cfg_data.get("agent")
+            if isinstance(agents, dict) and self.agent in agents:
+                ag_cfg = agents[self.agent]
+                if isinstance(ag_cfg, dict):
+                    ag_tools = ag_cfg.get("tools")
+                    if not isinstance(ag_tools, dict) or ag_tools.get("*") is not False:
+                        raise ProviderSystemicError("provider_systemic_failure")
+                    ag_perms = ag_cfg.get("permission")
+                    if not isinstance(ag_perms, dict) or ag_perms.get("*") != "deny":
+                        raise ProviderSystemicError("provider_systemic_failure")
+            environment["OPENCODE_CONFIG"] = str(self.config_path.resolve())
+            environment["OPENCODE_CONFIG_DIR"] = str(self.config_path.parent.resolve())
+
+        else:
+            minimal_config = {
+                "$schema": "https://opencode.ai/config.json",
+                "autoupdate": False,
+                "mcp": {},
+                "tools": {
+                    "*": False,
+                    "bash": False,
+                    "write": False,
+                    "edit": False,
+                    "browse": False,
+                },
+                "permission": {"*": "deny"},
+                "agent": {
+                    self.agent: {
+                        "name": self.agent,
+                        "mode": "primary",
+                        "tools": {
+                            "*": False,
+                            "bash": False,
+                            "write": False,
+                            "edit": False,
+                            "browse": False,
+                        },
+                        "permission": {"*": "deny"},
+                    }
+                },
+                "provider": {
+                    "alibaba-token-plan": {
+                        "models": {
+                            "qwen3.8-flash": {"options": {"reasoningEffort": self.reasoning_effort or "medium"}},
+                            "qwen3.8-max": {"options": {"reasoningEffort": "high"}},
+                        }
+                    }
+                },
+            }
+
+            config_file = work_dir / ".opencode-ocr.json"
+            config_file.write_text(json.dumps(minimal_config), encoding="utf-8")
+            environment["OPENCODE_CONFIG"] = str(config_file)
+
+        command_args: list[str] = [
+            self.executable,
+            "run",
+            "-m",
+            self.model,
+        ]
+        if self.reasoning_effort:
+            command_args.extend(["--variant", self.reasoning_effort])
+        command_args.extend(["--format", "json", "--pure", "--agent", self.agent])
+        command_args.extend(file_arguments)
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command_args,
+                cwd=work_dir,
+                env=environment,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            raise ProviderSystemicError("provider_process_spawn_failed") from None
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                _communicate_bounded(
+                    process,
+                    (prompt + "\n\n" + instructions).encode("utf-8"),
+                    MAX_PROVIDER_RESPONSE_BYTES,
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            raise
+
+
+        if process.returncode:
+            raise ProviderSystemicError(
+                _classify_opencode_process_exit(stderr, stdout),
+                exit_code=process.returncode,
+                stderr_size_bytes=len(stderr),
+                stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+            ) from None
+
+        try:
+            raw_lines = stdout.decode("utf-8").splitlines()
+        except UnicodeDecodeError:
+            raise ProviderSystemicError("provider_contract_invalid") from None
+
+        text_parts: list[str] = []
+        non_empty_lines = [line.strip() for line in raw_lines if line.strip()]
+        if not non_empty_lines:
+            raise ProviderSystemicError("provider_contract_invalid")
+
+        for line in non_empty_lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                raise ProviderSystemicError("provider_contract_invalid") from None
+            if not isinstance(event, dict):
+                raise ProviderSystemicError("provider_contract_invalid")
+            if event.get("type") == "error":
+                raise ProviderSystemicError("provider_contract_invalid")
+            part = event.get("part")
+            if isinstance(part, dict) and part.get("type") == "text":
+                t = part.get("text")
+                if isinstance(t, str):
+                    text_parts.append(t)
+
+        text = "".join(text_parts).strip()
+        if not text:
+            raise ProviderSystemicError("provider_contract_invalid")
+
+        reject_credential_bearing_ocr(text)
+        return text
+
+
 class PaddleOCRVLProvider:
     """Local CPU PaddleOCR-VL full-document provider.
 
@@ -996,7 +1293,7 @@ def make_ocr_provider(
     codex_provider_env_key: str = "",
     codex_provider_wire_api: str = "responses",
     codex_model_catalog_json: str = "",
-    reasoning_effort: str = "high",
+    reasoning_effort: str | None = None,
     timeout_seconds: float = 1800,
     openrouter_fallback_model: str | None = None,
     paddleocr_pipeline_version: str = "v1.6",
@@ -1004,8 +1301,13 @@ def make_ocr_provider(
     paddleocr_pdf_dpi: int = 300,
     paddleocr_cpu_threads: int = 8,
     paddleocr_timeout_seconds: float = 14_400,
+    opencode_executable: str = "opencode",
+    opencode_config_path: Path | None = None,
+    opencode_agent: str = "ocr",
+    opencode_api_key_env_var: str = "ALIBABA_TOKEN_PLAN_API_KEY",
 ) -> OCRProvider:
     normalized = provider.casefold()
+    effective_effort = reasoning_effort if reasoning_effort is not None else ("medium" if normalized == "opencode" else "high")
     if normalized == "openrouter":
         return OpenRouterOCRProvider(
             api_key=api_key or "",
@@ -1020,12 +1322,22 @@ def make_ocr_provider(
             model=model,
             auth_root=codex_auth_root,
             timeout_seconds=timeout_seconds,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=effective_effort,
             provider_id=codex_provider_id,
             provider_base_url=codex_provider_base_url,
             provider_env_key=codex_provider_env_key,
             provider_wire_api=codex_provider_wire_api,
             model_catalog_json=codex_model_catalog_json,
+        )
+    if normalized == "opencode":
+        return OpenCodeOCRProvider(
+            executable=opencode_executable,
+            model=model,
+            config_path=opencode_config_path,
+            agent=opencode_agent,
+            timeout_seconds=timeout_seconds,
+            reasoning_effort=effective_effort,
+            api_key_env_var=opencode_api_key_env_var,
         )
     if normalized in {"local-paddleocr", "paddleocr", "paddleocr-vl"}:
         if paddleocr_cache_dir is None:
@@ -1039,5 +1351,5 @@ def make_ocr_provider(
             timeout_seconds=paddleocr_timeout_seconds,
         )
     raise ValueError(
-        f"unsupported OCR provider {provider!r}; supported: openrouter, codex-exec, local-paddleocr"
+        f"unsupported OCR provider {provider!r}; supported: openrouter, codex-exec, local-paddleocr, opencode"
     )

@@ -6,6 +6,9 @@ ARG WOLFI_BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f7651
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1
 ARG CODEX_VERSION=0.151.0
 ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6
+ARG OPENCODE_VERSION=1.18.34
+ARG OPENCODE_SHA256=b83e8ac66d752d05ead4b6a439d3a2cfa32bcd9817c708825a389b5d5cba4f19
+
 
 FROM ${UV_IMAGE} AS uv
 
@@ -104,6 +107,9 @@ USER 10001:10001
 FROM ${WOLFI_BASE_IMAGE} AS worker
 ARG CODEX_VERSION
 ARG CODEX_SHA256
+ARG OPENCODE_VERSION
+ARG OPENCODE_SHA256
+
 ARG APP_VERSION=dev
 ARG VCS_REF=unknown
 ARG SOURCE_URL=https://github.com/Kanu-Coffee/MCP_card_prd_detail
@@ -160,6 +166,16 @@ RUN printf '%s  %s\n' "${CODEX_SHA256}" /tmp/codex.tar.gz > /tmp/codex.sha256 &&
     ln -s codex /usr/local/bin/codex-linux-sandbox && \
     rm /tmp/codex.tar.gz /tmp/codex.sha256 && \
     codex --version
+ADD --chmod=0644 \
+  "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-${OPENCODE_VERSION}.tgz" \
+  /tmp/opencode.tgz
+RUN printf '%s  %s\n' "${OPENCODE_SHA256}" /tmp/opencode.tgz > /tmp/opencode.sha256 && \
+    sha256sum -c /tmp/opencode.sha256 && \
+    tar --extract --gzip --file /tmp/opencode.tgz --strip-components=2 --directory /usr/local/bin package/bin/opencode && \
+    chmod 0755 /usr/local/bin/opencode && \
+    rm /tmp/opencode.tgz /tmp/opencode.sha256 && \
+    HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp opencode --version
+
 COPY --from=worker-build /opt/cardrag /opt/cardrag
 WORKDIR /app
 USER 10001:10001

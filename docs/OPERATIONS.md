@@ -58,6 +58,12 @@ OCR 기본값은 `codex-exec`, `gpt-5.6-sol`, reasoning `high`입니다. Qwen �
 PaddleOCR 3.7.0의 PaddleOCR-VL 1.6 full document pipeline을 약 300 DPI로 실행하며 OCR용
 외부 API를 호출하지 않습니다. 후속 임베딩은 기존 OpenRouter 설정을 계속 사용합니다.
 
+OpenCode OCR은 `opencode` provider와 `deploy/worker/compose.opencode.yaml` overlay를 사용합니다.
+기본 모델은 `alibaba-token-plan/qwen3.8-flash`이며 reasoning effort는 `medium`입니다.
+CLI 실행 환경은 pinned binary(`1.18.34`)를 사용하며, 도구 비활성화(`tools: {"*": false}`) 및
+권한 거부(`permission: {"*": "deny"}`)가 강제된 전용 에이전트(`agent="ocr"`, `--pure --format json`)로
+동작합니다. API 키는 `ALIBABA_TOKEN_PLAN_API_KEY` 환경 변수 또는 비밀 마운트로 전달합니다.
+
 선택한 호스트와 경로로 env 예시를 수정한 후, 출력에 비밀이 포함되지 않는 설정 검사를
 수행합니다. `config --quiet`는 실제 자격증명이나 원격 저장소까지 검증하지 않습니다.
 
@@ -139,6 +145,16 @@ PaddleOCR를 선택한 경우 위 두 명령 모두 `compose.paddleocr.yaml`을 
 `ocr.md`/manifest/CAS 계약은 다른 OCR provider와 동일합니다. 300 DPI 실제 3페이지
 상품안내장 검증에서는 약 34분과 최대 약 8.4 GiB 메모리가 관찰됐으므로, 운영 호스트에는
 문서 복잡도에 따른 추가 여유를 확보합니다.
+
+OpenCode를 선택한 경우 `compose.opencode.yaml`을 overlay로 추가합니다.
+```bash
+docker compose --env-file /etc/cardrag/worker.env \
+  -f deploy/worker/compose.yaml -f deploy/worker/compose.opencode.yaml \
+  run --rm worker run
+```
+후보 검증 시 기존 stable 운영 환경의 systemd timer(`cardrag-worker.timer`)나 프로덕션 WebDAV/state는
+영향을 받지 않으며, 격리된 candidate overlay(`deploy/worker/compose.candidate.yaml`) 및
+독립된 state 볼륨을 사용하여 무중단 공존을 유지합니다.
 
 Worker의 종료 코드와 terminal 결과, 검증된 게시 결과를 확인한 뒤 MCP를 실행합니다.
 
