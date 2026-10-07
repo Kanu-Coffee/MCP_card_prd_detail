@@ -174,11 +174,20 @@ async def test_isolated_webdav_variant_publish_snapshot_and_restore(tmp_path: Pa
         core.close()
 
 
-def test_migration_apply_requires_explicit_stable_generation() -> None:
+def test_migration_apply_requires_explicit_stable_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = False
+
+    def unexpected_client() -> None:
+        nonlocal opened
+        opened = True
+
+    monkeypatch.setattr("cardrag_worker.cli.WebDAVClient.from_env", unexpected_client)
     runner = CliRunner()
     result = runner.invoke(app, ["ocr-cache", "migrate", "--apply"])
-    assert result.exit_code != 0
-    assert "--confirm-stable-generation" in result.output
+    assert result.exit_code == 2
+    assert opened is False
 
 
 @pytest.mark.asyncio
