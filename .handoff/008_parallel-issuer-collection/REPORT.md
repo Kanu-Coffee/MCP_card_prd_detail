@@ -63,3 +63,7 @@ docker inspect cardrag-prod-008-first --format '{{.State.Status}} exit={{.State.
 `exited exit=0 oom=false`가 정상 프로세스 종료 기준이다. `running exit=0`은 실행 중이다. 종료/오류를 알려주면 run의 `reports/issuer-collection.json`, exit, issuer별 수집 결과, 신한 기존 문서 carry/단종 freeze, 기존 OCR SHA·호출수 및 신규 OCR 구분, 전체 corpus/export와 MCP loaded generation을 검증한다. 신한이 여전히 reset이면 다른 issuer가 정상 처리되어도 신한 최신화는 미완료로 명시한다. 신한 접속 복구 자체는 인수 필수 조건으로 추가하지 않는다.
 
 006 OpenCode 코드는 통합했지만 운영 provider 전환은 별도 승인 게이트로 **미실행**이다. 준비된 `deploy/worker/compose.opencode.yaml`을 사용할 수 있으며 승인 후 provider/model/effort/secret/fallback/rollback을 확인한다. 현재는 기존 codex 설정을 유지한다.
+
+## 2026-10-07 — 운영 완료 후 최종 검증
+
+용량 확보 후 동일 run 재개가 21:40:32 KST에 exit 0으로 완료됐다. collection degraded(신한), 7 issuer 정상, 신한 931개 carry, 재개 OCR 호출 0 / 재사용 5,513개, 새 generation을 WebDAV stable 및 MCP에서 확인했다. 기존 공유 문서 5,511개의 PDF/OCR 바이트·신한 개정 행/검색 coverage 보존, 실제 상품·문서·페이지 HTTP 200을 검증했다. 롯데 1733 단종 후보 1개는 기존 정책에 따른 신규 목록 제외이며 원본 삭제는 없다. **008 핵심 기능 인수 가능**; 006 OpenCode 운영 활성화는 승인 전 미실행이다. 상세 결과·검증 한계는 [EXECUTOR_COMPLETION_20261007.md](EXECUTOR_COMPLETION_20261007.md), 오류 조치는 [EXECUTOR_RECOVERY_20261007.md](EXECUTOR_RECOVERY_20261007.md)를 참조한다. 추가 Worker 기동/장기 감시는 하지 않았다.
