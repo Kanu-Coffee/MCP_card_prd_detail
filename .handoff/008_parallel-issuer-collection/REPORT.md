@@ -71,3 +71,22 @@ docker inspect cardrag-prod-008-first --format '{{.State.Status}} exit={{.State.
 ## 2026-10-07 — OpenCode 운영 전환 승인 및 적용
 
 사용자의 별도 승인에 따라 OpenCode / alibaba-token-plan/qwen3.8-flash / medium으로 운영 overlay를 전환했다. 합성 1페이지 실호출 1회(8.57초), 실제 settings·WebDAV stable·cache/GC와 Compose 설정 검사 통과. 다음 2026-10-08 03시 timer부터 적용된다. 기존 키를 재사용하고 writable `/opt/cardrag`만 변경하여 sudo는 필요 없다. 추가 장기 Worker는 시작하지 않았다. 상세 수행·검증·rollback은 [EXECUTOR_OPENCODE_SWITCH_20261007.md](EXECUTOR_OPENCODE_SWITCH_20261007.md)에 기록했다. 앞선 보고서의 ‘OpenCode 미승인/미실행’ 상태는 이 시점의 승인 및 적용으로 해소됐다.
+
+## 2026-10-07 23:35 KST — v1.0.33 Git·정식 릴리스 마감 완료
+
+사용자의 v1.0.33 최종 발행 요청에 따라 아래 작업을 완료했다.
+
+- Worker/core/MCP 패키지·Worker runtime version·lockfile을 **1.0.33**으로 맞췄다. README, RELEASING, simple env 이미지 예시, [v1.0.33 변경 사항](../../docs/RELEASE_NOTES_v1.0.33.md)을 정리했다. 역사적인 handoff/이전 release evidence는 보존했다.
+- 006/007/008 변경을 포함한 [PR #41](https://github.com/Kanu-Coffee/MCP_card_prd_detail/pull/41)을 main에 merge commit `667cd26a07721d691c2a5fee4f7d534b8f60ad78`로 병합했다. 모든 007 커밋을 포함하므로 GitHub는 기존 Draft [PR #40](https://github.com/Kanu-Coffee/MCP_card_prd_detail/pull/40)도 MERGED로 처리했다. 열린 PR **0개**.
+- ancestry 확인 후 병합된 원격/로컬 작업 브랜치를 삭제했다. 로컬·원격 모두 **main만 유지**한다. 이전 공개 릴리스·Git 태그는 삭제하거나 재작성하지 않았다.
+- 최종 candidate source `9d530a1f2b699739d93bd2f90b42a94afbfba02b`, [source CI 37635572803](https://github.com/Kanu-Coffee/MCP_card_prd_detail/actions/runs/37635572803) success: **2,341 passed / 기존 warnings 9개**, Ruff·mypy·actionlint·secret/security 검사 및 두 이미지 빌드 통과.
+- 정확한 remote Git context, pinned BuildKit/scanner, SBOM/provenance로 Worker·MCP 후보 이미지를 새로 생성했다. 새 OpenCode URL/고정 SHA-256을 provenance 검증의 정확한 material 목록에 추가하고 누락/변조 거부 테스트를 추가했다. OCI index/platform/attestation/provenance/SBOM 5종 검증기는 실제 두 후보 산출물에서도 모두 통과했다.
+- `release-evidence/v1.0.33/release-qualification.json` 한 파일을 evidence-only commit `08c7113ccc15922d8632d23725603592ae077d67`에 봉인했다. canonical SHA-256 `f2e828dbc99a3500479b007efc489555210235a8c315c1391c04d95aeb208fa3`. [seal CI 37636249179](https://github.com/Kanu-Coffee/MCP_card_prd_detail/actions/runs/37636249179) success.
+- annotated tag **v1.0.33**을 봉인 commit에 생성·push했다. [발행 workflow 37637346075](https://github.com/Kanu-Coffee/MCP_card_prd_detail/actions/runs/37637346075) **전체 success**: qualification/source/CI/OCI 검증, strict filesystem·MCP·Worker 보안 검사(미수정 HIGH/CRITICAL도 거부), Docker Hub immutable preflight·동일 digest 게시, Cosign 서명 및 증거 자산·원격 checksum 검증.
+- [GitHub Release v1.0.33](https://github.com/Kanu-Coffee/MCP_card_prd_detail/releases/tag/v1.0.33)은 **정식 공개 / latest / draft=false / prerelease=false**, 2026-10-07 23:34:52 KST 발행이다. assets 24개(23개 증거와 SHA256SUMS)를 직접 다운로드하여 **23개 checksum 모두 OK**를 재확인했다.
+- 공개 Docker Hub role 태그를 직접 조회하여 candidate와 같은 immutable digest를 확인했다:
+  - `ymtop59/mcp-card-prd-detail:1.0.33-worker` → `sha256:4323f9e75647ea7abeb8e2a9c316a21c5194adfa1d02d85c0b95483c3b07018d`
+  - `ymtop59/mcp-card-prd-detail:1.0.33-mcp` → `sha256:d982bc1a33a56d3726589023d0dbf325f41fbf103f5c79e97e546ac85b8b4ef7`
+- 후보 게시 후 미사용 로컬 release build cache **23.68GB**를 정리했다. filesystem 여유 약 **100GiB**. 서비스/자료/볼륨/직전 운영 rollback은 삭제하지 않았다.
+
+공개 v1.0.33 이미지의 운영 cutover를 새로 수행하지 않았으며, 검증된 008 운영 이미지와 승인된 OpenCode 예약 설정을 유지한다. 후보 전체 batch/12도구/gold 품질 실사를 했다고 주장하지 않는다. 이번 요청의 **commit·main merge·v1.0.33 공개 릴리스·문서·PR/브랜치 정리는 모두 완료**다. 이 마감 기록의 후속 commit은 문서만 변경하며 공개 tag·digest·봉인 증거는 그대로 유지한다.
