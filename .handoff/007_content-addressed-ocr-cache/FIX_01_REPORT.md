@@ -57,3 +57,15 @@ controller의 문법 검사와 wrapper `shellcheck`는 통과했다. 백그라�
 `worker_started`이면 Docker 컨테이너 **`cardrag-prod-007-fix01`**이 첫 배치다. 사용자는 `docker logs -f cardrag-prod-007-fix01`로 관찰할 수 있다. 종료 뒤에는 `docker inspect cardrag-prod-007-fix01 --format '{{.State.Status}} {{.State.ExitCode}}'`로 결과를 확인한다. Executor는 사용자의 완료/오류 알림을 받은 다음 로그·종료 코드·최종 run 지표를 점검하고, 기존 동일 PDF 문서의 OCR 호출 0·baseline SHA/크기 불변·새 generation 게시·MCP 반영·timer 상태를 검증한다. 종료 결과를 확인하기 전까지 컨테이너를 삭제하지 않는다.
 
 최종 결과는 이 보고서에 **추가 기록**한다. 기존 내용을 덮어쓰거나 FIX_01 완료/인수로 미리 표시하지 않는다. 공개 릴리스, PR 병합, 006 OpenCode 활성화는 이 작업에 포함되지 않는다.
+
+## 2026-10-07 14:56 KST — 중단 원인 확인 및 전량 검증 재개
+
+사용자가 "worker 중지됨"을 알려와 실제 Docker·controller 상태를 확인했다. **정상 배치 Worker `cardrag-prod-007-fix01`은 아직 만들어진 적이 없다.** migration 컨테이너는 Docker `wait`에서 종료 코드 **0**을 반환했고 `operations/migration-exit-code.txt`에 보존됐다. 하지만 `migration-apply.json`이 0바이트여서 controller는 **14:51:20 `Migration success JSON was not written`**으로 중단했다. 원래 연결 실행 세션도 더 이상 존재하지 않았다. 결과가 실행 세션의 연결 stdout 파일에 의존했던 구조가 문제였으며, WebDAV 이전 실패나 OCR 작업 실패로 판정한 것이 아니다.
+
+- **마이그레이션 apply를 다시 실행하지 않았다.** 기존 종료 코드 0과 기록된 dry-run 계획을 사용하고, 실제 원격 전량 검증을 추가 완료해야 다음 단계로 진행하도록 controller를 수정했다. 비어 있는 apply JSON에 성공 결과를 만들어 넣지 않았다.
+- `/opt/cardrag/007-31edb1d/operations/finish-transition.py`의 최초 버전을 `finish-transition.initial.py`로 보존했다. 수정본은 검증을 `run -d --no-deps --name cardrag-007-content-verify-fix01 worker ocr-cache verify`로 실행한다. `--rm`을 쓰지 않고 **Docker가 종료 코드·로그를 보존**하도록 했다. controller는 `docker wait` 후 `docker logs`로 결과 JSON과 stderr를 수집한다. 기존 동일 이름의 검증 컨테이너가 있으면 이미지·명령을 확인하고 이어받아 중복 구동을 방지한다.
+- controller 문법 검사를 통과했고 독립 세션으로 재개했다. **14:56:13 KST**, controller PID **1706261**, 검증 컨테이너 **`cardrag-007-content-verify-fix01` running**을 확인했다. 사용 이미지 ID와 명령은 기존 승인된 새 Worker 이미지 / `["ocr-cache", "verify"]`다. 상태 파일은 **`verifying_content`**다. 이 검증은 OCR·LLM 추론을 호출하거나 WebDAV에 쓰지 않는다.
+- 검증 성공 시 여전히 같은 stable ID, 최소 5,172 verified variant, stable OCR 문서 5,512개 전량 대응을 요구한다. 그 근거는 별도 `migration-recovery-verified.json`에 기록한다. MCP·이미지·신한 source gate 이후의 Worker 구동 절차는 유지한다. 최초의 잘못된 migration stdout 의존 게이트만 제거했다.
+- 재확인 시 MCP ready는 HTTP **200**, root available 약 **67G**, `/opt/cardrag/current`는 아직 `/opt/cardrag/v1.0.29`다. 신한 discovery URL의 GET은 여전히 **connection reset / HTTP 000**으로 실패했다. source gate가 회복되지 않으면 검증 후 `source_blocked_no_worker`로 종료하는 것이 예상되며, issuer 제외나 실패 은폐는 하지 않는다.
+
+현재 **FIX_01 진행 중**이다. 사용자의 비용 절약 지시에 따라 검증/배치를 계속 폴링하지 않고 턴을 종료한다. 다음 완료·오류 알림 때 `transition-status.json`, 검증 컨테이너의 종료 코드/로그, 수집된 `migration-verify.json`을 먼저 확인한다. 기존 마이그레이션이나 검증을 무조건 재실행하지 않는다.
