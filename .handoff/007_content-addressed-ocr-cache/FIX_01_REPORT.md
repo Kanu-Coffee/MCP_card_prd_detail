@@ -69,3 +69,21 @@ controller의 문법 검사와 wrapper `shellcheck`는 통과했다. 백그라�
 - 재확인 시 MCP ready는 HTTP **200**, root available 약 **67G**, `/opt/cardrag/current`는 아직 `/opt/cardrag/v1.0.29`다. 신한 discovery URL의 GET은 여전히 **connection reset / HTTP 000**으로 실패했다. source gate가 회복되지 않으면 검증 후 `source_blocked_no_worker`로 종료하는 것이 예상되며, issuer 제외나 실패 은폐는 하지 않는다.
 
 현재 **FIX_01 진행 중**이다. 사용자의 비용 절약 지시에 따라 검증/배치를 계속 폴링하지 않고 턴을 종료한다. 다음 완료·오류 알림 때 `transition-status.json`, 검증 컨테이너의 종료 코드/로그, 수집된 `migration-verify.json`을 먼저 확인한다. 기존 마이그레이션이나 검증을 무조건 재실행하지 않는다.
+
+## 2026-10-07 15:12 KST — 전량 검증 성공 확인 및 실제 배치 구동
+
+사용자가 기존 컨테이너 `3c1e472d6754`도 Worker였음을 지적했다. **그 컨테이너는 Worker 이미지로 `ocr-cache migrate --apply`를 실행했고 `--rm`에 따라 종료 후 삭제됐다.** 이전의 "Worker는 기동된 적 없다"는 설명은 부정확했으며, 정확히는 **일반 배치 명령 `worker run`이 아직 시작되지 않았던 것**이다. migration의 Docker 종료 코드 0은 보존되어 있다.
+
+전량 검증 컨테이너 `cardrag-007-content-verify-fix01` / `d56551eadf39`는 **14:56:13~14:58:22 KST**, 종료 코드 **0**으로 완료됐고 `docker ps -a`에 남아 있다. 현재 실행 목록에 안 보이는 것은 종료됐기 때문이다. 결과: `verified_variants=5172`, `stable_ocr_documents_covered=5512`, stable ID `g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`, `read_only=true`. **이전 산출물 전량 검증은 통과**했으며 `migration-recovery-verified.json`에 기록됐다. controller는 이후 신한 source GET의 `ConnectionResetError` 때문에 14:58:26에 `source_blocked_no_worker`로 종료한 상태였다.
+
+사용자가 해당 상태 확인 후 **실제 배치를 구동하라고 지시**했으므로, 외부 source 사전검사 때문에 구동을 보류하던 규칙 대신 정상 배치에서 실제 결과를 확인하도록 진행했다. 신한 오류가 남아 있어 배치가 discovery에서 실패할 수 있다는 점을 사용자에게 설명했다. source 구현이나 issuer 목록은 변경하지 않았다.
+
+- 전량 검증 성공, 배포 이미지 ID, 새 MCP healthy, 다른 실행 중 Worker 없음, 기존 current 포인터를 확인했다.
+- `/opt/cardrag/current`를 `/opt/cardrag/007-31edb1d`로 원자적으로 전환했다. 기존 `/opt/cardrag/v1.0.29`는 롤백용으로 남아 있다.
+- `operations/worker-compose.sh run -d --no-deps --name cardrag-prod-007-fix01 worker run` 실행이 종료 코드 **0**으로 컨테이너를 구동했다.
+- **구동 시각 15:12:14 KST**, 실제 배치 컨테이너 **`cardrag-prod-007-fix01`**, ID **`c735cee66ba086ef45baa25d79bd80285d91bbc5edd166cc9846c5873c2fe724`**, 명령 **`["run"]`**, **`AutoRemove=false`**, running 상태를 한 번 확인했다. `worker-start.json`과 `transition-status.json`에 기록했다.
+- 시작 로그의 capacity preflight는 통과했다(`filesystem_free_bytes=71075037184`, 최소 하한 2 GiB). OCR 설정과 기존 state/auth 볼륨, GC false, timer active는 그대로다. 호환 계약 탐색 로그에 Paddle 이름이 나타나지만 운영 provider는 기존 `codex-exec / qwen3.8-flash`이며 강제 Paddle 재처리는 요청하지 않았다.
+
+**사용자 감시 기준:** `docker logs -f --tail 50 cardrag-prod-007-fix01`로 실행 로그를 보고, 종료하면 `docker inspect cardrag-prod-007-fix01 --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'`로 판정한다. **`exited`와 exit 0이 함께 나올 때 정상 종료**이고, nonzero/OOM이면 오류다. running 중의 ExitCode 0은 완료 근거가 아니다. 실행 목록에서 사라지면 `docker ps -a`에서 종료 컨테이너를 찾는다. `transition-status.json`은 구동 시점 기록이므로 Worker 완료 여부를 자동 갱신하지 않는다. 이번 수동 배치는 Docker 컨테이너 기준이며 systemd service의 과거 failed 기록과 구분한다.
+
+장시간 배치 모니터링은 수행하지 않는다. 사용자의 오류/완료 알림 뒤에 실제 exit·로그·run 지표·OCR SHA 보존·새 generation·MCP 반영을 확인해 이 보고서에 추가한다. **FIX_01 최종 완료 및 운영 인수는 아직 미판정**이다.
