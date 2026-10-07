@@ -102,12 +102,12 @@ jobs:
           # validators are version-specific. Refuse every other version before
           # the conditional evidence block so a future version can never
           # bypass the strong gate by falling through it.
-          test "$version" = "1.0.32"
+          test "$version" = "1.0.33"
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
           test "$GITHUB_REF" = "refs/tags/v$version"
           test "$(git cat-file -t "refs/tags/v$version")" = tag
-          if [[ "$version" == "1.0.32" ]]; then
+          if [[ "$version" == "1.0.33" ]]; then
             qualification_dir="release-evidence/v${version}"
             test -d "$qualification_dir"
             test ! -L "$qualification_dir"
@@ -126,10 +126,10 @@ jobs:
             )
             ((${#candidate_evidence_paths[@]} > 0))
             git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" -- \
-              . ':(exclude)release-evidence/v1.0.32/**'
+              . ':(exclude)release-evidence/v1.0.33/**'
             for evidence_path in "${candidate_evidence_paths[@]}"; do
               case "$evidence_path" in
-                release-evidence/v1.0.32/*) ;;
+                release-evidence/v1.0.33/*) ;;
                 *)
                   echo "non-evidence change after candidate source: $evidence_path" >&2
                   exit 1
@@ -189,7 +189,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install the checksum-pinned candidate OCI digest reader
-        if: ${{ inputs.version == '1.0.32' }}
+        if: ${{ inputs.version == '1.0.33' }}
         run: |
           set -euo pipefail
           registry_tools_dir="$RUNNER_TEMP/cardrag-validate-registry-tools"
@@ -206,7 +206,7 @@ jobs:
 
       - name: Resolve and revalidate the exact candidate OCI identities anonymously
         id: oci-identity
-        if: ${{ inputs.version == '1.0.32' }}
+        if: ${{ inputs.version == '1.0.33' }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
           RELEASE_QUALIFICATION_SHA256: ${{ steps.version.outputs.release_qualification_sha256 }}
@@ -284,11 +284,11 @@ jobs:
           echo "release_qualification_sha256=$RELEASE_QUALIFICATION_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Upload the exact release qualification evidence
-        if: ${{ inputs.version == '1.0.32' }}
+        if: ${{ inputs.version == '1.0.33' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ steps.version.outputs.version }}
-          path: release-evidence/v1.0.32/release-qualification.json
+          path: release-evidence/v1.0.33/release-qualification.json
           if-no-files-found: error
           compression-level: 0
           overwrite: true

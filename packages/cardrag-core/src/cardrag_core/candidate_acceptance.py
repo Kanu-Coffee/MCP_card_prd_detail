@@ -201,6 +201,7 @@ class CandidateImageIdentity(_CanonicalModel):
         "1.0.30",
         "1.0.31",
         "1.0.32",
+        "1.0.33",
     ]
     platform: Literal["linux/amd64"]
     entrypoint: Literal["cardrag-worker", "cardrag-mcp"]
@@ -246,6 +247,7 @@ class EffectiveConfigEvidence(_CanonicalModel):
         "1.0.30",
         "1.0.31",
         "1.0.32",
+        "1.0.33",
     ]
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
@@ -941,6 +943,7 @@ class CandidateAcceptanceReceipt(_CanonicalModel):
         "1.0.30",
         "1.0.31",
         "1.0.32",
+        "1.0.33",
     ]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v122-candidate"]
@@ -1251,7 +1254,8 @@ def verify_candidate_acceptance(
         raise CandidateAcceptanceError("evidence_source_commit_mismatch")
     expected_generation_schema, expected_serving_schema = (
         ("cardrag.generation.v6", "cardrag.serving-db.v6")
-        if receipt.release_version in ("1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31", "1.0.32")
+        if receipt.release_version
+        in ("1.0.26", "1.0.27", "1.0.28", "1.0.29", "1.0.30", "1.0.31", "1.0.32", "1.0.33")
         else ("cardrag.generation.v5", "cardrag.serving-db.v5")
     )
     if (

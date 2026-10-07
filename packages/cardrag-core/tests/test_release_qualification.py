@@ -68,8 +68,11 @@ def _verify(path: Path, **overrides: str) -> None:
     assert validation.status == "qualified"
 
 
-def test_qualification_round_trips_and_binds_public_artifacts(tmp_path: Path) -> None:
-    path = _write(tmp_path)
+@pytest.mark.parametrize("version", ["1.0.32", "1.0.33"])
+def test_qualification_round_trips_and_binds_public_artifacts(tmp_path: Path, version: str) -> None:
+    payload = _qualification().model_dump(mode="json")
+    payload["release_version"] = version
+    path = _write(tmp_path, canonical_json_bytes(payload) + b"\n")
     _verify(path)
 
 

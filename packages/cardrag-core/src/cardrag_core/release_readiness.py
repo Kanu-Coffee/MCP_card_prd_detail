@@ -1,4 +1,4 @@
-"""Fail-closed verifier for the v1.0.32 release-readiness receipt.
+"""Fail-closed verifier for the versioned release-readiness receipt.
 
 The release-readiness receipt is the operational sibling of the candidate
 acceptance receipt for releases whose publish gate is functional verification
@@ -76,6 +76,7 @@ class ReleaseReadinessEffectiveConfig(_CanonicalModel):
         "1.0.30",
         "1.0.31",
         "1.0.32",
+        "1.0.33",
     ]
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
@@ -172,7 +173,7 @@ class ReleaseReadinessEffectiveConfig(_CanonicalModel):
 
 class ReleaseReadinessReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.release-readiness-receipt.v1"]
-    release_version: Literal["1.0.32"]
+    release_version: Literal["1.0.32", "1.0.33"]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]

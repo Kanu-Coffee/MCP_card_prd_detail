@@ -12,7 +12,7 @@ def test_release_seals_release_qualification_instead_of_runtime_receipts() -> No
         'test "$(find "$qualification_dir" -mindepth 1 | wc -l)" -eq 1',
         '"cardrag.release-qualification-validation.v1"',
         "name: release-qualification-${{ steps.version.outputs.version }}",
-        'test "$version" = "1.0.32"',
+        'test "$version" = "1.0.33"',
         'test "$(git cat-file -t "refs/tags/v$version")" = tag',
         'git ls-remote origin "refs/tags/v${version}^{}"',
     ):

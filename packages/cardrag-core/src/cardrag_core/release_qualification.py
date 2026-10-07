@@ -1,4 +1,4 @@
-"""Lightweight, fail-closed release-qualification evidence for the public 1.0.32 release.
+"""Lightweight, fail-closed release-qualification evidence for the public 1.0.32/1.0.33 releases.
 
 Per handoff/005 FIX_03 the publish gate binds only verifiable public artifacts:
 the final source commit, the two candidate OCI index digests, the passing CI
@@ -75,7 +75,7 @@ class OperationalRunReference(_CanonicalModel):
 
 class ReleaseQualification(_CanonicalModel):
     schema_version: Literal["cardrag.release-qualification.v1"]
-    release_version: Literal["1.0.32"]
+    release_version: Literal["1.0.32", "1.0.33"]
     source_commit: SourceCommit
     worker_image_digest: ImageDigest
     mcp_image_digest: ImageDigest
