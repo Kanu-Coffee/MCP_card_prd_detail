@@ -36,3 +36,30 @@
 운영 MCP `cardrag-stable-v1026-mcp-1`은 기존 007 이미지로 healthy, Worker 실행 중 없음, timer active다. current는 `/opt/cardrag/007-31edb1d`, 가용 공간 약 69G다. 기존 migration verify(5,172 variant/5,512 OCR)와 baseline은 유지한다. 신한 공인 IP 차단은 확정하지 않았으며 URL/parser를 바꾸지 않았다.
 
 기존 provider codex/qwen, epoch 0, publication approvals, 동일 project/state/auth 볼륨, 원격 GC false를 유지한다. 새 Worker만 exact commit 이미지로 교체할 예정이며 MCP 재시작·migration apply 반복·강제 OCR/Paddle·전체 state clone은 수행하지 않는다. OpenCode 운영 활성화·PR merge·정식 공개 릴리스는 별도 게이트다. 장기 배치는 구동/실제 running 1회 확인 후 턴을 종료하고 사용자가 결과를 알려준 뒤 검증한다.
+
+## 2026-10-07 17:38 KST — 배포 및 첫 운영 배치 기동
+
+**구현·자동 검증·배포·기동까지 수행했다. 실제 장기 배치 결과 및 운영 인수 검증은 미완료이며 사용자 종료 알림 뒤 수행한다.** 실행 중 ExitCode 0을 완료로 해석하지 않는다.
+
+- 구현 커밋 `6b42a1a55899899be8fdab5d3b3555ef7b5390da`, remote `codex/008-parallel-issuer-collection`에 push 완료. 이후 REPORT 추가 커밋은 문서만 변경하므로 실행 이미지는 이 구현 커밋으로 고정한다. main 병합/공개 릴리스는 수행하지 않았다.
+- [GitHub CI run 37594483364](https://github.com/Kanu-Coffee/MCP_card_prd_detail/actions/runs/37594483364): 동일 구현 커밋, **completed / success**. 로컬 최종 전체 테스트 2,339 passed와 정적 검증도 통과했다.
+- 빌드: `docker build --target worker --build-arg APP_VERSION=1.0.32-008 --build-arg VCS_REF=6b42a1a55899899be8fdab5d3b3555ef7b5390da -t cardrag-worker:008-6b42a1a .` exit 0. OCI revision 일치. 이미지 ID `sha256:2eed6edbeb4f1d57d69481bd0d576dfbfcc957d29cb3bd89a5591619f5e9d121`. 빌드 로그 `/tmp/cardrag008-build-exact.log`.
+- exact archive `/opt/cardrag/008-6b42a1a` 생성, host-local secrets overlay에서 Worker image만 override했다. `current`를 007에서 새 디렉터리로 원자 교체했다. `/etc/cardrag` 비밀/env 변경 없음. MCP는 `cardrag-mcp:007-31edb1d`와 기존 healthy 컨테이너를 유지했다.
+- 실제 운영 설정을 사용하는 짧은 read-only preflight exit 0: stable `g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`, codex-exec / qwen3.8-flash, cache read-write / epoch 0, discovery concurrency 4 / deadline 300초, pending reprocess 없음, GC 승인 false. 동일 stable의 007 migration 검증/기존 OCR baseline을 재사용했다. migration apply/전수 검증/Paddle/강제 재OCR/전체 state clone은 수행하지 않았다.
+- Compose project `cardrag-worker`. 기존 `cardrag-worker-v130-candidate-state`, `cardrag-worker-v120-recovery-auth-20260910`, `cardrag-worker-paddleocr-models` 볼륨과 동일 mount 확인. Paddle 모델 볼륨의 보유는 Paddle 실행을 의미하지 않는다. Compose의 기존 외부생성 볼륨/종료된 orphan 안내는 경고이며 새 볼륨 생성·삭제나 기존 컨테이너 제거를 하지 않았다.
+- 기동 명령: `/opt/cardrag/008-6b42a1a/operations/worker-compose.sh run -d --no-deps --name cardrag-prod-008-first worker run`.
+- 컨테이너 `e3a34489ff0a68e7bd900c3b74ede237b145f5a9ed3ccdee516c3b3cc9c35446`, 시작 **17:37:44 KST**, 실제 state **running**, command `["run"]`, AutoRemove **false**, OOMKilled false. 1회 상태 확인 후 추가 장기 감시/폴링은 하지 않았다. 시작 로그의 capacity preflight 통과, free bytes `64071401472` (약 59.7 GiB). 실제 discovery 후 필요 공간 계산은 기존 동적 정책을 따른다.
+- timer active, 다음 **2026-10-08 03:00 KST**. systemd는 `/opt/cardrag/current`의 새 코드/overlay를 사용한다. 수동 run과 예약 run은 동일 state/worker.lock으로 중복을 방지한다. timer를 중지하거나 예약 실행을 추가하지 않았다.
+- 이번 배포 rollback 참조는 직전 007 코드/이미지/설정 **1세트**로 기록했다. 새 대형 백업·state 복제 없음. 이전부터 남은 배포 디렉터리/운영 증거의 추가 삭제는 이번 미인수 배치 중 수행하지 않았다.
+- 운영 근거: `/opt/cardrag/008-6b42a1a/operations/{rollback.json,prior-evidence.json,image-config.json,preflight-result.json,worker-start.json}`. 사용자 비밀값이나 전체 env는 저장하지 않았다.
+
+### 사용자의 감시 및 다음 검증
+
+```sh
+docker logs -f --tail 50 cardrag-prod-008-first
+docker inspect cardrag-prod-008-first --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'
+```
+
+`exited exit=0 oom=false`가 정상 프로세스 종료 기준이다. `running exit=0`은 실행 중이다. 종료/오류를 알려주면 run의 `reports/issuer-collection.json`, exit, issuer별 수집 결과, 신한 기존 문서 carry/단종 freeze, 기존 OCR SHA·호출수 및 신규 OCR 구분, 전체 corpus/export와 MCP loaded generation을 검증한다. 신한이 여전히 reset이면 다른 issuer가 정상 처리되어도 신한 최신화는 미완료로 명시한다. 신한 접속 복구 자체는 인수 필수 조건으로 추가하지 않는다.
+
+006 OpenCode 코드는 통합했지만 운영 provider 전환은 별도 승인 게이트로 **미실행**이다. 준비된 `deploy/worker/compose.opencode.yaml`을 사용할 수 있으며 승인 후 provider/model/effort/secret/fallback/rollback을 확인한다. 현재는 기존 codex 설정을 유지한다.
