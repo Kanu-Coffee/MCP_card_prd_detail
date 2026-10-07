@@ -87,3 +87,15 @@ controller의 문법 검사와 wrapper `shellcheck`는 통과했다. 백그라�
 **사용자 감시 기준:** `docker logs -f --tail 50 cardrag-prod-007-fix01`로 실행 로그를 보고, 종료하면 `docker inspect cardrag-prod-007-fix01 --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'`로 판정한다. **`exited`와 exit 0이 함께 나올 때 정상 종료**이고, nonzero/OOM이면 오류다. running 중의 ExitCode 0은 완료 근거가 아니다. 실행 목록에서 사라지면 `docker ps -a`에서 종료 컨테이너를 찾는다. `transition-status.json`은 구동 시점 기록이므로 Worker 완료 여부를 자동 갱신하지 않는다. 이번 수동 배치는 Docker 컨테이너 기준이며 systemd service의 과거 failed 기록과 구분한다.
 
 장시간 배치 모니터링은 수행하지 않는다. 사용자의 오류/완료 알림 뒤에 실제 exit·로그·run 지표·OCR SHA 보존·새 generation·MCP 반영을 확인해 이 보고서에 추가한다. **FIX_01 최종 완료 및 운영 인수는 아직 미판정**이다.
+
+## 2026-10-07 15:20 KST — 첫 실제 배치 실패 확인
+
+사용자가 제공한 로그와 보존된 Docker 컨테이너를 대조했다. 실제 배치 `cardrag-prod-007-fix01` / `c735cee66ba0` / run **`bb471003c6844c7394aae97fd9f85f26`**은 **15:17:16 KST에 종료 코드 1**, `OOMKilled=false`, `AutoRemove=false`로 종료됐다. 로그 전체를 `operations/worker-first-run.log`, 결과 요약을 `worker-result.json`에 보존하고 상태 파일을 **`worker_failed`**로 갱신했다.
+
+배치는 startup/capacity preflight를 통과하고 우리 discovery **915 records**, KB **751 records**를 수집했다. 다음 신한 `discover_current()`의 첫 공지 landing GET에서 응답 헤더를 읽기 전에 **`httpcore.ReadError` → `httpx.ReadError`**가 발생했다. CLI는 `error_class_category=network`, `reason_code=worker_unexpected_failure`, `status=failed`를 기록했다. 실패 보고서 경로는 `runs/bb471003c6844c7394aae97fd9f85f26/reports/worker-failure.json`이다. **OCR 처리·새 generation 게시 검증 단계에 도달하지 못했다.** 이번 로그를 content cache 무재호출·첫 generation 전환 성공 근거로 사용하지 않는다.
+
+호스트에서도 실제 신한 discovery URL을 IPv4/TLS 1.2로 요청했으나 원격 IP `210.112.177.1`에서 connection reset / HTTP 000이었다. HTTP/2 및 브라우저 User-Agent/Accept로 신한 홈페이지를 요청한 경우도 connection reset이었다. 기존 설정과 별도의 읽기 요청에서도 같은 증상이 재현되며, 서버 자체 장애와 이 호스트/네트워크에 대한 접근 차단 중 어느 것인지는 아직 구분되지 않았다. 연결 실패를 timeout·메모리·Paddle OCR 과부하로 판정할 근거는 없다.
+
+실패 후 운영 WebDAV stable 포인터를 읽기 전용으로 확인했고 **`g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd` 그대로**다. MCP **healthy / ready HTTP 200**이며 기존 서비스가 유지된다. 앞서 이전·전량 검증된 **5,172 variant / 5,512 stable OCR 문서**의 성공 근거는 유효하다. 현재 새 배포 디렉터리와 추가형 캐시는 유지하며 원격 GC는 켜지 않는다. 정상 배치의 자동 반복 재기동은 수행하지 않았다.
+
+남은 단계는 **신한 수집 연결 복구 후 새 Worker 정상 run 1회**, 기존 동일 PDF OCR SHA/크기·호출 0·새 generation·MCP 반영 검증이다. 현재는 외부 수집 연결에서 막혀 FIX_01 완료/인수로 판정할 수 없다. 재개 전에 가벼운 신한 연결 확인으로 반복 실패를 피하고, 종료 컨테이너와 로그는 최종 확인까지 보존한다.
