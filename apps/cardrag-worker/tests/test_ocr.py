@@ -4106,3 +4106,84 @@ async def test_openrouter_ocr_multi_model_fallback(tmp_path: Path, respx_mock: A
     assert len(respx_mock.calls) == 2
     req2_payload = json.loads(respx_mock.calls[1].request.content)
     assert req2_payload["model"] == "anthropic/claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_opencode_ocr_caching_and_contract_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    calls = 0
+
+    class FakeOpenCodeProvider:
+        provider = "opencode"
+        model = "alibaba-token-plan/qwen3.8-flash"
+        reasoning_effort = "medium"
+
+        async def recognize(
+            self,
+            images: tuple[Path, ...],
+            *,
+            page_numbers: tuple[int, ...],
+            target_page_numbers: tuple[int, ...],
+            total_pages: int,
+            prompt: str,
+        ) -> str:
+            nonlocal calls
+            calls += 1
+            return (
+                "## Page 1\n첫 번째 페이지의 카드 상품 상세 설명입니다.\n\n"
+                "## Page 2\n두 번째 페이지의 카드 상품 상세 설명입니다."
+            )
+
+    provider = FakeOpenCodeProvider()
+    state = WorkerState(tmp_path / "state.sqlite3")
+    resolver = OCRResolver(
+        provider=provider,  # type: ignore[arg-type]
+        state=state,
+        webdav=None,
+        cache_mode="read-write",
+    )
+
+    try:
+        run_id = state.start_run(run_id="run1")
+        pdf_path = tmp_path / "card.pdf"
+        pdf_path.write_text("2", encoding="utf-8")
+        pdf_sha = sha256_bytes(pdf_path.read_bytes())
+        output_dir1 = tmp_path / "ocr1"
+
+        # 1st execution: cache miss, calls provider
+        result1 = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_card",
+            pdf_path=pdf_path,
+            pdf_sha256=pdf_sha,
+            pdf_size_bytes=len(pdf_path.read_bytes()),
+            page_count=2,
+            output_dir=output_dir1,
+        )
+        assert calls == 1
+        assert result1.provider_called is True
+        assert result1.cache_reused is False
+        assert result1.provider == "opencode"
+        assert resolver.contract.provider == "opencode"
+        assert resolver.contract.model == "alibaba-token-plan/qwen3.8-flash"
+        assert resolver.contract.reasoning_effort == "medium"
+
+        # 2nd execution: identical settings -> cache hit, calls == 1 (0 new provider calls)
+        output_dir2 = tmp_path / "ocr2"
+        result2 = await resolver.resolve(
+            run_id=run_id,
+            document_id="doc_card",
+            pdf_path=pdf_path,
+            pdf_sha256=pdf_sha,
+            pdf_size_bytes=len(pdf_path.read_bytes()),
+            page_count=2,
+            output_dir=output_dir2,
+        )
+        assert calls == 1
+        assert result2.provider_called is False
+        assert result2.cache_reused is True
+        assert result2.ocr_bytes == result1.ocr_bytes
+    finally:
+        state.close()

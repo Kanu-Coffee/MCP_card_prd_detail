@@ -102,12 +102,12 @@ jobs:
           # validators are version-specific. Refuse every other version before
           # the conditional evidence block so a future version can never
           # bypass the strong gate by falling through it.
-          test "$version" = "1.0.32"
+          test "$version" = "1.0.33"
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "v$version"
           test "$GITHUB_REF" = "refs/tags/v$version"
           test "$(git cat-file -t "refs/tags/v$version")" = tag
-          if [[ "$version" == "1.0.32" ]]; then
+          if [[ "$version" == "1.0.33" ]]; then
             qualification_dir="release-evidence/v${version}"
             test -d "$qualification_dir"
             test ! -L "$qualification_dir"
@@ -126,10 +126,10 @@ jobs:
             )
             ((${#candidate_evidence_paths[@]} > 0))
             git diff --quiet "$CANDIDATE_SOURCE_COMMIT" "$GITHUB_SHA" -- \
-              . ':(exclude)release-evidence/v1.0.32/**'
+              . ':(exclude)release-evidence/v1.0.33/**'
             for evidence_path in "${candidate_evidence_paths[@]}"; do
               case "$evidence_path" in
-                release-evidence/v1.0.32/*) ;;
+                release-evidence/v1.0.33/*) ;;
                 *)
                   echo "non-evidence change after candidate source: $evidence_path" >&2
                   exit 1
@@ -189,7 +189,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install the checksum-pinned candidate OCI digest reader
-        if: ${{ inputs.version == '1.0.32' }}
+        if: ${{ inputs.version == '1.0.33' }}
         run: |
           set -euo pipefail
           registry_tools_dir="$RUNNER_TEMP/cardrag-validate-registry-tools"
@@ -206,7 +206,7 @@ jobs:
 
       - name: Resolve and revalidate the exact candidate OCI identities anonymously
         id: oci-identity
-        if: ${{ inputs.version == '1.0.32' }}
+        if: ${{ inputs.version == '1.0.33' }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
           RELEASE_QUALIFICATION_SHA256: ${{ steps.version.outputs.release_qualification_sha256 }}
@@ -284,11 +284,11 @@ jobs:
           echo "release_qualification_sha256=$RELEASE_QUALIFICATION_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Upload the exact release qualification evidence
-        if: ${{ inputs.version == '1.0.32' }}
+        if: ${{ inputs.version == '1.0.33' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ steps.version.outputs.version }}
-          path: release-evidence/v1.0.32/release-qualification.json
+          path: release-evidence/v1.0.33/release-qualification.json
           if-no-files-found: error
           compression-level: 0
           overwrite: true
@@ -2086,11 +2086,14 @@ jobs:
                   "비밀/취약점 스캔, Docker Hub immutable tag 충돌 preflight, 동일 digest "
                   "복사, cosign keyless 서명 검증, Release asset SHA256SUMS 원격 재검증.",
                   "",
-                  "참고(출처가 다른 운영 증거): 2026-10-06 03:00 KST 운영 Worker run "
-                  "`03fbc4f18a3c450bb017e2fd6f6442c4`/generation "
-                  "`g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`(운영 이미지 source "
-                  "`1ba366db8029c6947c0509c2d480ed6182cf996b`)는 현재 운영 시스템의 기능 "
-                  "참고 증거이며 이 릴리스 후보 이미지의 실행 성공 증거가 아닙니다.",
+                  "참고(출처가 다른 운영 증거): 운영 Worker run "
+                  f"`{release_qualification['operational_reference']['worker_run_id']}`/generation "
+                  f"`{release_qualification['operational_reference']['generation_id']}`(운영 이미지 source "
+                  f"`{release_qualification['operational_reference']['image_source_commit']}`)는 "
+                  "기능 참고 증거이며 이 릴리스 후보 이미지의 실행 성공 증거가 아닙니다.",
+                  "",
+                  f"변경 사항: https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/"
+                  f"v{os.environ['VERSION']}/docs/RELEASE_NOTES_v{os.environ['VERSION']}.md",
                   "",
                   "명시적 미수행: `candidate_worker_full_run`(격리 후보 Worker 일괄 실행), "
                   "`candidate_mcp_12_tools`(후보 환경 12도구 실호출), "

@@ -58,6 +58,12 @@ OCR 기본값은 `codex-exec`, `gpt-5.6-sol`, reasoning `high`입니다. Qwen �
 PaddleOCR 3.7.0의 PaddleOCR-VL 1.6 full document pipeline을 약 300 DPI로 실행하며 OCR용
 외부 API를 호출하지 않습니다. 후속 임베딩은 기존 OpenRouter 설정을 계속 사용합니다.
 
+OpenCode OCR은 `opencode` provider와 `deploy/worker/compose.opencode.yaml` overlay를 사용합니다.
+기본 모델은 `alibaba-token-plan/qwen3.8-flash`이며 reasoning effort는 `medium`입니다.
+CLI 실행 환경은 pinned binary(`1.18.34`)를 사용하며, 도구 비활성화(`tools: {"*": false}`) 및
+권한 거부(`permission: {"*": "deny"}`)가 강제된 전용 에이전트(`agent="ocr"`, `--pure --format json`)로
+동작합니다. API 키는 `ALIBABA_TOKEN_PLAN_API_KEY` 환경 변수 또는 비밀 마운트로 전달합니다.
+
 선택한 호스트와 경로로 env 예시를 수정한 후, 출력에 비밀이 포함되지 않는 설정 검사를
 수행합니다. `config --quiet`는 실제 자격증명이나 원격 저장소까지 검증하지 않습니다.
 
@@ -140,6 +146,16 @@ PaddleOCR를 선택한 경우 위 두 명령 모두 `compose.paddleocr.yaml`을 
 상품안내장 검증에서는 약 34분과 최대 약 8.4 GiB 메모리가 관찰됐으므로, 운영 호스트에는
 문서 복잡도에 따른 추가 여유를 확보합니다.
 
+OpenCode를 선택한 경우 `compose.opencode.yaml`을 overlay로 추가합니다.
+```bash
+docker compose --env-file /etc/cardrag/worker.env \
+  -f deploy/worker/compose.yaml -f deploy/worker/compose.opencode.yaml \
+  run --rm worker run
+```
+후보 검증 시 기존 stable 운영 환경의 systemd timer(`cardrag-worker.timer`)나 프로덕션 WebDAV/state는
+영향을 받지 않으며, 격리된 candidate overlay(`deploy/worker/compose.candidate.yaml`) 및
+독립된 state 볼륨을 사용하여 무중단 공존을 유지합니다.
+
 Worker의 종료 코드와 terminal 결과, 검증된 게시 결과를 확인한 뒤 MCP를 실행합니다.
 
 ```bash
@@ -217,3 +233,38 @@ stable 게시 권한이 모두 있어야 수행합니다. 설정 예시는 세 �
 인증된 `/metrics`에서 처리 결과·시간·응답 크기·캐시 사용량을 확인합니다. 질의문,
 상품명과 사용자는 metric label에 넣지 않습니다. 상세 실패 원문과 운영 증빙은 접근을
 제한한 별도 위치에 보관하십시오.
+
+## 카드사 병렬 수집과 일부 카드사 장애
+
+Worker는 카드사 목록을 최대 `CARDRAG_ISSUER_DISCOVERY_CONCURRENCY`개(기본 4, 범위 1~8)
+병렬 수집합니다. 카드사별 목록 수집은 재시도 시간을 포함해
+`CARDRAG_ISSUER_DISCOVERY_TIMEOUT_SECONDS`초(기본 300) 안에 종료됩니다.
+PDF 다운로드는 기존 전역 8개/카드사별 2개 제한과 요청 간격을 유지합니다.
+모든 카드사의 수집이 성공 또는 격리로 종료된 뒤 OCR을 시작합니다.
+
+목록·다운로드 단계에서 카드사 origin 연결 또는 파싱이 실패하면 해당 카드사의
+새 부분 결과를 이번 게시에서 제외합니다. 나머지 카드사의 수집은 계속하며,
+실패 카드사는 실제 서비스 중 generation의 PDF/OCR과 현재·과거 개정 관계를
+검증하여 유지합니다. 실패를 빈 정상 목록이나 상품 단종으로 기록하지 않고,
+마지막 origin 성공 시각도 갱신하지 않습니다. 다음 배치에서 다시 수집합니다.
+원격 PDF 복원이 필요한 경우 WebDAV CAS를 검증해 받으며 카드사 origin은 호출하지 않습니다.
+
+`runs/<run_id>/reports/issuer-collection.json`에서 issuer별 단계, 실패 reason,
+시도 수, 건수, carry 기준 generation을 확인합니다. 수집 중 보고서는
+`terminal=false`이며, 수집 종료 뒤 `terminal=true`입니다.
+일부 실패 + 나머지 정상 작업 완료는 `collection_status=degraded`와 경고를 남기고
+run은 `succeeded` 또는 `no_change`, 종료 코드 0을 반환합니다.
+이 결과는 실패 카드사의 최신화 성공을 의미하지 않습니다.
+모든 카드사가 실패하면 nonzero로 종료하고 OCR이나 게시를 수행하지 않습니다.
+공용 WebDAV/SQLite/디스크 및 산출물 무결성 실패도 계속 전체 실패로 처리합니다.
+
+기존 OCR content 캐시는 모델 변경 후에도 재사용합니다. 실패 카드사 대상
+수동 재OCR 요청은 대기 상태로 유지하며 완료 영수증을 만들지 않습니다.
+원격 GC 승인과 epoch는 이 장애 대응을 위해 변경하지 않습니다.
+
+수동 장기 배치는 고유한 컨테이너 이름을 지정하고 `--rm` 없이 detached로 시작합니다.
+예: 검증된 운영 wrapper의 `run -d --no-deps --name cardrag-prod-008-first worker run`.
+`docker logs -f --tail 50 cardrag-prod-008-first`로 관찰하고,
+`docker inspect cardrag-prod-008-first --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'`
+에서 `exited`와 exit 0을 함께 확인합니다. running 중 ExitCode 0은 완료 근거가 아닙니다.
+예약 배치와 같은 Worker state/lock을 사용하고 중복 기동하지 않습니다.

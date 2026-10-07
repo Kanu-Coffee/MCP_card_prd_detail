@@ -35,8 +35,14 @@ from .embedding import (
     qwen3_embedding_cache_namespace,
     qwen3_embedding_profile_id,
 )
-from .ocr import NativeOCRContract, OCRInput, native_ocr_reuse_key
+from .ocr import (
+    NativeOCRContract,
+    OCRInput,
+    content_addressed_ocr_reuse_key,
+    native_ocr_reuse_key,
+)
 from .paths import (
+    content_ocr_variant_root_path,
     generation_database_path,
     generation_manifest_path,
     generation_ready_path,
@@ -47,7 +53,7 @@ from .paths import (
 
 _DOCUMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 DocumentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")]
-OCRCacheKind = Literal["native", "adopted"]
+OCRCacheKind = Literal["native", "adopted", "content"]
 GenerationAvailability = Literal["available", "ocr_failed"]
 OCRFailureReasonCode = Annotated[
     str,
@@ -543,6 +549,7 @@ class GenerationDocument(StrictFrozenModel):
     ocr: ArtifactRef | None = None
     ocr_cache_kind: OCRCacheKind | None = None
     ocr_reuse_key: Sha256Hex | None = None
+    ocr_variant_id: Sha256Hex | None = Field(default=None, exclude_if=lambda value: value is None)
     page_count: PositiveInt
     # These fields are absent from v1-v3 canonical manifests. ``exclude_if``
     # preserves their exact historical bytes while allowing an explicit v4
@@ -572,6 +579,10 @@ class GenerationDocument(StrictFrozenModel):
             raise ValueError("OCR cache kind and reuse key must be provided together")
         if self.ocr is None and cache_fields_present[0]:
             raise ValueError("OCR cache identity requires a generation OCR artifact")
+        if self.ocr_cache_kind == "content" and self.ocr_variant_id is None:
+            raise ValueError("content OCR cache identity requires an exact variant ID")
+        if self.ocr_variant_id is not None and (self.ocr_cache_kind != "content" or self.ocr is None):
+            raise ValueError("OCR variant identity requires a content cache artifact")
         if self.availability == "available":
             if self.ocr is None or self.ocr_failure is not None:
                 raise ValueError("available generation document requires OCR and no failure")
@@ -1011,6 +1022,179 @@ class OCRReady(StrictFrozenModel):
 
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self)
+
+
+class ContentOCRMigrationSource(StrictFrozenModel):
+    kind: Literal["native", "adopted"]
+    reuse_key: Sha256Hex
+
+
+class ContentOCRImportedProvenance(StrictFrozenModel):
+    """Truthful origin when no native provider contract was ever recorded."""
+
+    schema_version: Literal["cardrag.ocr-imported-provenance.v1"] = "cardrag.ocr-imported-provenance.v1"
+    source_kind: Literal["adopted", "generation-only"]
+    provider: Literal["legacy-adoption", "generation-only"]
+    model: Literal["unrecorded"] = "unrecorded"
+    source_manifest_sha256: Sha256Hex | None = Field(default=None, exclude_if=lambda value: value is None)
+    generation_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    document_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def origin_fields_match_kind(self) -> Self:
+        if self.source_kind == "adopted":
+            if (
+                self.provider != "legacy-adoption"
+                or self.source_manifest_sha256 is None
+                or self.generation_id is not None
+                or self.document_id is not None
+            ):
+                raise ValueError("adopted OCR provenance requires only its source manifest hash")
+        elif (
+            self.provider != "generation-only"
+            or self.source_manifest_sha256 is not None
+            or self.generation_id is None
+            or self.document_id is None
+        ):
+            raise ValueError("generation-only OCR provenance requires generation and document IDs")
+        if self.generation_id is not None:
+            validate_identifier(self.generation_id, label="generation_id")
+        if self.document_id is not None:
+            validate_identifier(self.document_id, label="document_id")
+        return self
+
+
+class ContentOCRArtifactManifest(StrictFrozenModel):
+    """One immutable OCR variant for a PDF and reset epoch.
+
+    The variant ID hashes the normalized fields *excluding itself*. A hash of
+    the complete manifest cannot also be embedded in that same manifest.
+    """
+
+    schema_version: Literal["cardrag.ocr-content-artifact.v1"] = "cardrag.ocr-content-artifact.v1"
+    reuse_key: Sha256Hex
+    cache_epoch: NonNegativeInt = 0
+    source: OCRInput
+    output: ArtifactRef
+    ocr_chars: PositiveInt
+    page_output_sha256: tuple[Sha256Hex, ...] = Field(min_length=1)
+    created_at: AwareDatetime
+    provenance: NativeOCRContract | ContentOCRImportedProvenance
+    variant_id: Sha256Hex
+    migrated_from: ContentOCRMigrationSource | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    reprocess_request_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    restored_from: Sha256Hex | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        source: OCRInput,
+        cache_epoch: int,
+        output: ArtifactRef,
+        ocr_chars: int,
+        page_output_sha256: tuple[str, ...],
+        created_at: datetime,
+        provenance: NativeOCRContract | ContentOCRImportedProvenance,
+        migrated_from: ContentOCRMigrationSource | None = None,
+        reprocess_request_id: str | None = None,
+        restored_from: str | None = None,
+    ) -> Self:
+        """Create the self-identified variant from normalized manifest fields."""
+
+        fields = {
+            "schema_version": "cardrag.ocr-content-artifact.v1",
+            "reuse_key": content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch),
+            "cache_epoch": cache_epoch,
+            "source": source,
+            "output": output,
+            "ocr_chars": ocr_chars,
+            "page_output_sha256": page_output_sha256,
+            "created_at": created_at.astimezone(UTC),
+            "provenance": provenance,
+            "migrated_from": migrated_from,
+            "reprocess_request_id": reprocess_request_id,
+            "restored_from": restored_from,
+        }
+        draft = cls.model_construct(_fields_set=None, variant_id="0" * 64, **fields)
+        normalized = draft.model_dump(mode="json", exclude={"variant_id"})
+        return cls.model_validate_json(
+            canonical_json_bytes({**normalized, "variant_id": canonical_sha256(normalized)})
+        )
+
+    @field_validator("created_at")
+    @classmethod
+    def normalize_created_at(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
+
+    @field_validator("reprocess_request_id")
+    @classmethod
+    def request_id_is_safe(cls, value: str | None) -> str | None:
+        return None if value is None else validate_identifier(value, label="reprocess_request_id")
+
+    @model_validator(mode="after")
+    def content_variant_is_bound(self) -> Self:
+        if self.reuse_key != content_addressed_ocr_reuse_key(self.source, cache_epoch=self.cache_epoch):
+            raise ValueError("content OCR reuse key does not match source and epoch")
+        if self.output.media_type != "text/markdown; charset=utf-8":
+            raise ValueError("content OCR output media type is invalid")
+        if PurePosixPath(self.output.path) != object_path(self.output.sha256):
+            raise ValueError("content OCR output must use its CAS object path")
+        if len(self.page_output_sha256) != self.source.page_count:
+            raise ValueError("content OCR requires one page hash per source page")
+        if self.variant_id != self.expected_variant_id:
+            raise ValueError("content OCR variant ID does not match manifest fields")
+        return self
+
+    @property
+    def expected_variant_id(self) -> str:
+        return canonical_sha256(self.model_dump(mode="json", exclude={"variant_id"}))
+
+    @property
+    def manifest_sha256(self) -> str:
+        return canonical_sha256(self)
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self)
+
+    @property
+    def variant_label(self) -> str:
+        timestamp = self.created_at.strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{timestamp}-{self.manifest_sha256[:12]}"
+
+    @property
+    def variant_root(self) -> PurePosixPath:
+        return content_ocr_variant_root_path(self.reuse_key, self.variant_label)
+
+
+class ContentOCRReady(StrictFrozenModel):
+    schema_version: Literal["cardrag.ocr-content-ready.v1"] = "cardrag.ocr-content-ready.v1"
+    reuse_key: Sha256Hex
+    variant_id: Sha256Hex
+    manifest_sha256: Sha256Hex
+    ocr_sha256: Sha256Hex
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self)
+
+    @classmethod
+    def for_manifest(cls, manifest: ContentOCRArtifactManifest) -> Self:
+        return cls(
+            reuse_key=manifest.reuse_key,
+            variant_id=manifest.variant_id,
+            manifest_sha256=manifest.manifest_sha256,
+            ocr_sha256=manifest.output.sha256,
+        )
+
+    def verifies(self, manifest: ContentOCRArtifactManifest) -> bool:
+        return (
+            self.reuse_key == manifest.reuse_key
+            and self.variant_id == manifest.variant_id
+            and self.manifest_sha256 == manifest.manifest_sha256
+            and self.ocr_sha256 == manifest.output.sha256
+        )
 
 
 def adopted_ocr_reuse_key(

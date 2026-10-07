@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +11,10 @@ from cardrag_core import (
     LEGACY_OCR_APPROVED_PREFIX_SHA256,
     AdoptedOCRArtifactManifest,
     ArtifactRef,
+    ContentOCRArtifactManifest,
+    ContentOCRImportedProvenance,
+    ContentOCRMigrationSource,
+    ContentOCRReady,
     EmbeddingContract,
     GenerationCounts,
     GenerationDocument,
@@ -27,6 +32,7 @@ from cardrag_core import (
     adopted_ocr_reuse_key,
     canonical_sha256,
     content_addressed_ocr_reuse_key,
+    content_ocr_variant_root_path,
     generation_database_path,
     native_ocr_reuse_key,
     sha256_bytes,
@@ -553,6 +559,28 @@ def test_generation_ocr_cache_identity_is_exact_and_all_or_nothing() -> None:
     assert cached.ocr_cache_kind == "adopted"
     assert cached.ocr_reuse_key == reuse_key
 
+    content = GenerationDocument(
+        document_id="doc_content",
+        issuer="lotte",
+        pdf=pdf,
+        ocr=ocr,
+        ocr_cache_kind="content",
+        ocr_reuse_key=reuse_key,
+        ocr_variant_id=sha256_bytes(b"variant"),
+        page_count=2,
+    )
+    assert content.ocr_variant_id == sha256_bytes(b"variant")
+    with pytest.raises(ValidationError, match="exact variant ID"):
+        GenerationDocument(
+            document_id="doc_content_missing_variant",
+            issuer="lotte",
+            pdf=pdf,
+            ocr=ocr,
+            ocr_cache_kind="content",
+            ocr_reuse_key=reuse_key,
+            page_count=2,
+        )
+
     generation_only = GenerationDocument(
         document_id="doc_generation_only",
         issuer="lotte",
@@ -624,3 +652,90 @@ def test_content_addressed_ocr_reuse_key() -> None:
     assert key1 == key2
     assert key1 != key3
     assert len(key1) == 64
+    assert key1 != content_addressed_ocr_reuse_key(source1, cache_epoch=1)
+    assert native_ocr_reuse_key(_contract(), source1) == (
+        "792f9878acc6e3035ea2c5e9120c4f36f08bfcabfb818b0825f61fc9e61e316b"
+    )
+    with pytest.raises(ValueError, match="epoch"):
+        content_addressed_ocr_reuse_key(source1, cache_epoch=-1)
+
+
+def test_content_ocr_variant_binds_pdf_epoch_provenance_and_ready() -> None:
+    source = _source()
+    verified = verify_ocr_bytes(_ocr_payload(), expected_page_count=source.page_count)
+    output = ArtifactRef.for_cas(
+        sha256=verified.sha256,
+        size_bytes=verified.size_bytes,
+        media_type="text/markdown; charset=utf-8",
+    )
+    migrated = ContentOCRMigrationSource(kind="native", reuse_key=native_ocr_reuse_key(_contract(), source))
+    first = ContentOCRArtifactManifest.create(
+        source=source,
+        cache_epoch=0,
+        output=output,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+        provenance=_contract(),
+        migrated_from=migrated,
+    )
+    second = ContentOCRArtifactManifest.create(
+        source=source,
+        cache_epoch=0,
+        output=output,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+        provenance=_contract(provider="openrouter", model="other", reasoning_effort="medium"),
+    )
+    assert first.reuse_key == second.reuse_key
+    assert first.variant_id != second.variant_id
+    assert first.variant_root == content_ocr_variant_root_path(first.reuse_key, first.variant_label)
+    assert first.variant_root != second.variant_root
+    assert ContentOCRReady.for_manifest(first).verifies(first)
+    assert not ContentOCRReady.for_manifest(first).verifies(second)
+    assert ContentOCRArtifactManifest.model_validate_json(first.canonical_bytes()) == first
+
+    tampered = first.model_dump(mode="json")
+    tampered["variant_id"] = "0" * 64
+    with pytest.raises(ValidationError, match="variant ID"):
+        ContentOCRArtifactManifest.model_validate_json(json.dumps(tampered))
+    with pytest.raises(ValueError, match="OCR variant"):
+        content_ocr_variant_root_path(first.reuse_key, "../unsafe")
+
+
+def test_content_imported_provenance_is_truthful_and_round_trips() -> None:
+    source = _source()
+    verified = verify_ocr_bytes(_ocr_payload(), expected_page_count=source.page_count)
+    output = ArtifactRef.for_cas(
+        sha256=verified.sha256,
+        size_bytes=verified.size_bytes,
+        media_type="text/markdown; charset=utf-8",
+    )
+    adopted = ContentOCRImportedProvenance(
+        source_kind="adopted",
+        provider="legacy-adoption",
+        source_manifest_sha256=sha256_bytes(b"adopted manifest"),
+    )
+    manifest = ContentOCRArtifactManifest.create(
+        source=source,
+        cache_epoch=0,
+        output=output,
+        ocr_chars=verified.char_count,
+        page_output_sha256=verified.page_sha256,
+        created_at=NOW,
+        provenance=adopted,
+        migrated_from=ContentOCRMigrationSource(kind="adopted", reuse_key=sha256_bytes(b"key")),
+    )
+    assert ContentOCRArtifactManifest.model_validate_json(manifest.canonical_bytes()) == manifest
+    assert manifest.provenance.provider == "legacy-adoption"
+
+    generation = ContentOCRImportedProvenance(
+        source_kind="generation-only",
+        provider="generation-only",
+        generation_id="g-stable",
+        document_id="doc_example",
+    )
+    assert generation.source_kind == "generation-only"
+    with pytest.raises(ValidationError, match="source manifest hash"):
+        ContentOCRImportedProvenance(source_kind="adopted", provider="legacy-adoption")

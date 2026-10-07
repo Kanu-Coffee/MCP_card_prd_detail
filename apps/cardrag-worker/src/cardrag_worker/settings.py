@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -272,6 +274,11 @@ class WorkerSettings:
     paddleocr_pdf_dpi: int
     paddleocr_cpu_threads: int
     paddleocr_timeout_seconds: float
+    opencode_executable: str
+    opencode_config: Path | None
+    opencode_agent: str
+    opencode_api_key_env_var: str
+    opencode_ocr_reasoning_effort: str
     ocr_chunk_pages: int
     ocr_whole_document_max_pages: int
     ocr_context_pages_before: int
@@ -293,6 +300,8 @@ class WorkerSettings:
     sqlite_cache_mib: int
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
+    issuer_discovery_concurrency: int = 4
+    issuer_discovery_timeout_seconds: float = 300
     webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
     external_ocr_allowed: bool = False
     pdf_cache_force_revalidate: bool = False
@@ -335,7 +344,7 @@ class WorkerSettings:
             ("primary", ocr_provider),
             ("fallback", fallback_provider.strip().casefold() if fallback_provider else None),
         ):
-            if prov_name in {"codex-exec", "openrouter"} and not external_ocr_allowed:
+            if prov_name in {"codex-exec", "openrouter", "opencode"} and not external_ocr_allowed:
                 raise ValueError(
                     f"External OCR provider '{prov_name}' ({prov_label}) is not allowed "
                     "when CARDRAG_EXTERNAL_OCR_ALLOWED=false"
@@ -398,6 +407,74 @@ class WorkerSettings:
                 raise ValueError(
                     f"{codex_provider_env_key} must be set when CARDRAG_CODEX_MODEL_PROVIDER is configured"
                 )
+        opencode_executable = os.environ.get("CARDRAG_OPENCODE_EXECUTABLE", "opencode").strip() or "opencode"
+        opencode_config = (
+            Path(os.environ["CARDRAG_OPENCODE_CONFIG"]).resolve()
+            if os.environ.get("CARDRAG_OPENCODE_CONFIG")
+            else None
+        )
+        opencode_agent = os.environ.get("CARDRAG_OPENCODE_AGENT", "ocr").strip() or "ocr"
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", opencode_agent):
+            raise ValueError(f"CARDRAG_OPENCODE_AGENT must be a valid identifier: {opencode_agent!r}")
+        opencode_api_key_env_var = (
+            os.environ.get("CARDRAG_OPENCODE_API_KEY_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY").strip()
+            or "ALIBABA_TOKEN_PLAN_API_KEY"
+        )
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", opencode_api_key_env_var):
+            raise ValueError("CARDRAG_OPENCODE_API_KEY_ENV_KEY must name an uppercase environment variable")
+        opencode_effort_env = os.environ.get("CARDRAG_OPENCODE_OCR_REASONING_EFFORT", "").strip()
+        opencode_ocr_reasoning_effort = (
+            opencode_effort_env
+            if opencode_effort_env
+            else (
+                os.environ.get("CARDRAG_OCR_REASONING_EFFORT", "medium").strip()
+                if ocr_provider == "opencode"
+                else "medium"
+            )
+        )
+        is_opencode_ocr = ocr_provider == "opencode" or (
+            fallback_provider is not None and fallback_provider.strip().casefold() == "opencode"
+        )
+        if require_providers and is_opencode_ocr:
+            opencode_key = _read_secret(opencode_api_key_env_var, required=False)
+            if not opencode_key:
+                raise ValueError(
+                    f"OpenCode API key ({opencode_api_key_env_var}) is required when OpenCode OCR is configured"
+                )
+            resolved_exe = shutil.which(opencode_executable)
+            if not resolved_exe:
+                raise ValueError(f"OpenCode executable '{opencode_executable}' not found in PATH")
+            if not os.access(resolved_exe, os.X_OK):
+                raise ValueError(f"OpenCode executable '{resolved_exe}' is not executable")
+            if opencode_config is not None:
+                if not opencode_config.is_file():
+                    raise ValueError(f"OpenCode config file '{opencode_config}' not found")
+                try:
+                    cfg_data = json.loads(opencode_config.read_text(encoding="utf-8"))
+                except Exception as err:
+                    raise ValueError(f"OpenCode config file is not valid JSON: {err}") from None
+                if not isinstance(cfg_data, dict):
+                    raise ValueError("OpenCode config root must be a JSON object")
+                tools = cfg_data.get("tools")
+                if not isinstance(tools, dict) or tools.get("*") is not False:
+                    raise ValueError("OpenCode config must strictly set 'tools': {'*': False}")
+                perms = cfg_data.get("permission")
+                if not isinstance(perms, dict) or perms.get("*") != "deny":
+                    raise ValueError("OpenCode config must strictly set 'permission': {'*': 'deny'}")
+                agents = cfg_data.get("agent")
+                if isinstance(agents, dict) and opencode_agent in agents:
+                    ag_cfg = agents[opencode_agent]
+                    if isinstance(ag_cfg, dict):
+                        ag_tools = ag_cfg.get("tools")
+                        if not isinstance(ag_tools, dict) or ag_tools.get("*") is not False:
+                            raise ValueError(
+                                f"OpenCode agent '{opencode_agent}' must set 'tools': {'*': False}"
+                            )
+                        ag_perms = ag_cfg.get("permission")
+                        if not isinstance(ag_perms, dict) or ag_perms.get("*") != "deny":
+                            raise ValueError(
+                                f"OpenCode agent '{opencode_agent}' must set 'permission': {'*': 'deny'}"
+                            )
         ca_file = os.environ.get("CARDRAG_WEBDAV_CA_FILE")
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
@@ -511,7 +588,11 @@ class WorkerSettings:
             ocr_provider=ocr_provider,
             ocr_model=os.environ.get(
                 "CARDRAG_OCR_MODEL",
-                "PaddleOCR-VL-1.6" if ocr_provider == "local-paddleocr" else "gpt-5.6-sol",
+                "PaddleOCR-VL-1.6"
+                if ocr_provider == "local-paddleocr"
+                else "alibaba-token-plan/qwen3.8-flash"
+                if ocr_provider == "opencode"
+                else "gpt-5.6-sol",
             ),
             ocr_fallback_provider=fallback_provider.strip().casefold() if fallback_provider else None,
             ocr_fallback_model=os.environ.get("CARDRAG_OCR_FALLBACK_MODEL"),
@@ -526,7 +607,10 @@ class WorkerSettings:
                 for m in os.environ.get("CARDRAG_OCR_COMPATIBLE_MODELS", "gpt-5.6-sol,gpt-5.4").split(",")
                 if m.strip()
             ),
-            ocr_reasoning_effort=os.environ.get("CARDRAG_OCR_REASONING_EFFORT", "high"),
+            ocr_reasoning_effort=os.environ.get(
+                "CARDRAG_OCR_REASONING_EFFORT",
+                "medium" if ocr_provider == "opencode" else "high",
+            ),
             ocr_provider_timeout_seconds=_positive_float("CARDRAG_OCR_PROVIDER_TIMEOUT_SECONDS", 1800),
             ocr_cache_mode=ocr_cache_mode,
             ocr_cache_require_hit=ocr_cache_require_hit,
@@ -551,6 +635,11 @@ class WorkerSettings:
             paddleocr_pdf_dpi=_bounded_int("CARDRAG_PADDLEOCR_PDF_DPI", 300, minimum=72, maximum=576),
             paddleocr_cpu_threads=_bounded_int("CARDRAG_PADDLEOCR_CPU_THREADS", 8, minimum=1, maximum=64),
             paddleocr_timeout_seconds=_positive_float("CARDRAG_PADDLEOCR_TIMEOUT_SECONDS", 14_400),
+            opencode_executable=opencode_executable,
+            opencode_config=opencode_config,
+            opencode_agent=opencode_agent,
+            opencode_api_key_env_var=opencode_api_key_env_var,
+            opencode_ocr_reasoning_effort=opencode_ocr_reasoning_effort,
             ocr_chunk_pages=_bounded_int("CARDRAG_OCR_CHUNK_PAGES", 2, minimum=1, maximum=100),
             ocr_whole_document_max_pages=_bounded_int(
                 "CARDRAG_OCR_WHOLE_DOCUMENT_MAX_PAGES", 4, minimum=1, maximum=100
@@ -576,6 +665,10 @@ class WorkerSettings:
             pdf_concurrency_per_issuer=_bounded_int(
                 "CARDRAG_PDF_CONCURRENCY_PER_ISSUER", 2, minimum=1, maximum=8
             ),
+            issuer_discovery_concurrency=_bounded_int(
+                "CARDRAG_ISSUER_DISCOVERY_CONCURRENCY", 4, minimum=1, maximum=8
+            ),
+            issuer_discovery_timeout_seconds=_positive_float("CARDRAG_ISSUER_DISCOVERY_TIMEOUT_SECONDS", 300),
             local_processing_workers=_bounded_int(
                 "CARDRAG_LOCAL_PROCESSING_WORKERS", 4, minimum=1, maximum=8
             ),

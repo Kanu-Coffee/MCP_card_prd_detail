@@ -69,13 +69,13 @@ def _material(uri: str, algorithm: str, digest: str) -> dict[str, Any]:
 def _subject_name(role: str) -> str:
     return (
         "pkg:docker/ghcr.io/kanu-coffee/mcp-card-prd-detail-candidate"
-        f"@candidate-v1.0.32-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
+        f"@candidate-v1.0.33-{role}-{SOURCE_COMMIT}?platform=linux%2Famd64"
     )
 
 
 def _build_args() -> dict[str, str]:
     return {
-        "build-arg:APP_VERSION": "1.0.32",
+        "build-arg:APP_VERSION": "1.0.33",
         "build-arg:SOURCE_URL": "https://github.com/Kanu-Coffee/MCP_card_prd_detail",
         "build-arg:CODEX_SHA256": ("605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"),
         "build-arg:CODEX_VERSION": "0.151.0",
@@ -145,6 +145,13 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
                 "rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
                 "sha256",
                 "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
+            )
+        )
+        materials.append(
+            _material(
+                "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.34.tgz",
+                "sha256",
+                "b83e8ac66d752d05ead4b6a439d3a2cfa32bcd9817c708825a389b5d5cba4f19",
             )
         )
     else:
@@ -249,13 +256,13 @@ def _cardrag_spdx_package(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "SPDXID": f"SPDXRef-Package-python-{name}",
-        "versionInfo": "1.0.32",
+        "versionInfo": "1.0.33",
         "licenseDeclared": "Apache-2.0",
         "externalRefs": [
             {
                 "referenceCategory": "PACKAGE-MANAGER",
                 "referenceType": "purl",
-                "referenceLocator": f"pkg:pypi/{name}@1.0.32",
+                "referenceLocator": f"pkg:pypi/{name}@1.0.33",
             }
         ],
     }
@@ -638,8 +645,8 @@ def test_sbom_policy_matches_buildkit_032_shape_and_rejects_unbound_inventory() 
 
 @pytest.mark.parametrize("role", ("worker", "mcp"))
 def test_candidate_supply_chain_rejects_historical_release_artifacts(role: str) -> None:
-    historical_provenance = json.loads(json.dumps(_provenance(role)).replace("1.0.32", "1.0.14"))
-    historical_sbom = json.loads(json.dumps(_sbom(role)).replace("1.0.32", "1.0.14"))
+    historical_provenance = json.loads(json.dumps(_provenance(role)).replace("1.0.33", "1.0.14"))
+    historical_sbom = json.loads(json.dumps(_sbom(role)).replace("1.0.33", "1.0.14"))
 
     assert not _provenance_passes(historical_provenance, role)
     assert not _sbom_passes(historical_sbom, role)
@@ -700,3 +707,18 @@ def test_candidate_supply_chain_binds_configured_fork_source_and_package() -> No
         "https://github.com/other/source"
     )
     assert not _provenance_passes(tampered, source_repository=source, image_repository=image)
+
+
+def test_provenance_rejects_missing_or_modified_opencode_material() -> None:
+    for modified in (False, True):
+        payload = _provenance()
+        materials = payload["predicate"]["materials"]
+        if modified:
+            for material in materials:
+                if "opencode-linux-x64" in material["uri"]:
+                    material["digest"]["sha256"] = "0" * 64
+        else:
+            payload["predicate"]["materials"] = [
+                material for material in materials if "opencode-linux-x64" not in material["uri"]
+            ]
+        assert not _provenance_passes(payload)

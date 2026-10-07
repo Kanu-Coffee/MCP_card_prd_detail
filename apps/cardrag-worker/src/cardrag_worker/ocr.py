@@ -36,6 +36,7 @@ from cardrag_core.manifests import (
     LEGACY_ADOPTION_POLICY_V1,
     LEGACY_ADOPTION_POLICY_V2,
     AdoptedOCRArtifactManifest,
+    ContentOCRArtifactManifest,
     OCRArtifactManifest,
     OCRReady,
     adopted_ocr_reuse_key,
@@ -43,11 +44,13 @@ from cardrag_core.manifests import (
 from cardrag_core.ocr import (
     NativeOCRContract,
     OCRInput,
+    content_addressed_ocr_reuse_key,
     native_ocr_reuse_key,
     verify_ocr_bytes,
 )
-from cardrag_core.paths import ocr_manifest_path, ocr_ready_path
+from cardrag_core.paths import ocr_manifest_path, ocr_ready_path, validate_identifier
 
+from .content_cache import ContentOCRVariantStore
 from .contracts import PageRecord
 from .providers import (
     DEFAULT_OCR_PROMPT,
@@ -532,6 +535,7 @@ class OCRResult:
     reuse_key: str
     cache_kind: OCRCacheKind | None = None
     cache_reuse_key: str | None = None
+    cache_variant_id: str | None = None
     cache_publication_deferred: bool = False
     cache_publication_reason_code: str | None = None
     cache_reused: bool = False
@@ -543,6 +547,12 @@ class OCRResult:
             raise ValueError("OCR cache/provider metrics must be booleans")
         if (self.cache_kind is None) != (self.cache_reuse_key is None):
             raise ValueError("OCR cache kind and reuse key must be present together")
+        if self.cache_kind == "content" and (
+            self.cache_variant_id is None or not re.fullmatch(r"[0-9a-f]{64}", self.cache_variant_id)
+        ):
+            raise ValueError("content OCR result requires an exact variant ID")
+        if self.cache_kind != "content" and self.cache_variant_id is not None:
+            raise ValueError("OCR variant ID requires content cache kind")
         if self.cache_publication_deferred != (self.cache_publication_reason_code is not None):
             raise ValueError("deferred OCR cache publication and reason code must be present together")
         if self.cache_publication_reason_code is not None and not re.fullmatch(
@@ -837,6 +847,11 @@ class OCRResolver:
         self._cache_mode = cache_mode
         self._require_cache_hit = require_cache_hit
         self._state_root = Path(os.path.abspath(os.fspath(state.path.parent)))
+        self._content_store = (
+            ContentOCRVariantStore(webdav=webdav, state_root=self._state_root)
+            if webdav is not None and callable(getattr(webdav, "list_children", None))
+            else None
+        )
         self._seed_ledger = (
             seed_ledger if seed_ledger is not None else load_state_seed_ledger(self._state_root)
         )
@@ -878,6 +893,21 @@ class OCRResolver:
         )
         self._compatible_contracts = tuple(
             c for c in compatible_contracts if c.contract_sha256 != self.contract.contract_sha256
+        )
+
+    @property
+    def cache_epoch(self) -> int:
+        return self.contract.cache_epoch
+
+    async def freeze_content_snapshot(self, run_id: str) -> None:
+        if self._content_store is not None:
+            await self._content_store.freeze(run_id)
+
+    async def has_new_content_variant(self, *, run_id: str, source: OCRInput, cutoff: datetime) -> bool:
+        if self._content_store is None:
+            return False
+        return await self._content_store.has_verified_variant_after(
+            run_id=run_id, source=source, cache_epoch=self.cache_epoch, cutoff=cutoff
         )
 
     def set_compatible_contracts(self, compatible_contracts: Sequence[NativeOCRContract]) -> None:
@@ -1945,11 +1975,51 @@ class OCRResolver:
         output_dir: Path,
         source_document_id: str,
         expected_ocr_identity: tuple[str, int] | None = None,
+        reprocess_request_id: str | None = None,
     ) -> OCRResult:
         if body != result.ocr_bytes:
             raise OCRValidationError("local native OCR body does not match its verified result")
         if self.webdav is None or self.cache_mode == "read-only":
             return result
+        if self._content_store is not None:
+            # New publication is append-only by variant. Keep the document-local
+            # native seal for restart compatibility, but do not create another
+            # provider-bound remote native entry.
+            content_manifest = ContentOCRArtifactManifest.create(
+                source=manifest.source,
+                cache_epoch=self.cache_epoch,
+                output=manifest.output,
+                ocr_chars=manifest.ocr_chars,
+                page_output_sha256=manifest.page_output_sha256,
+                created_at=manifest.created_at,
+                provenance=manifest.contract,
+                reprocess_request_id=reprocess_request_id,
+            )
+            try:
+                await self._content_store.publish(content_manifest, body)
+            except Exception as exc:
+                error = _cache_publication_error("manifest", exc)
+                if not error.retryable:
+                    raise error from None
+                warnings.warn(
+                    "content OCR cache publication was deferred "
+                    f"(reason_code={error.reason_code}, phase={error.phase}); "
+                    "publishing generation-only OCR",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return replace(
+                    result,
+                    cache_publication_deferred=True,
+                    cache_publication_reason_code=error.reason_code,
+                )
+            return replace(
+                result,
+                reuse_key=content_manifest.reuse_key,
+                cache_kind="content",
+                cache_reuse_key=content_manifest.reuse_key,
+                cache_variant_id=content_manifest.variant_id,
+            )
         try:
             await self._publish_native_cache(manifest=manifest, body=body)
         except OCRCachePublicationError as exc:
@@ -2075,14 +2145,16 @@ class OCRResolver:
         page_count: int,
         output_dir: Path,
         prior_local_native: PriorLocalNativeSource | None = None,
+        retained_ocr_identity: tuple[str, int] | None = None,
+        reprocess_request_id: str | None = None,
     ) -> OCRResult:
         source = OCRInput(
             pdf_sha256=pdf_sha256,
             pdf_size_bytes=pdf_size_bytes,
             page_count=page_count,
         )
-        native_key = native_ocr_reuse_key(self.contract, source)
-        lock = self._native_run_locks.setdefault((run_id, native_key), asyncio.Lock())
+        content_key = content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
+        lock = self._native_run_locks.setdefault((run_id, content_key), asyncio.Lock())
         async with lock:
             return await self._resolve_serialized(
                 run_id=run_id,
@@ -2093,6 +2165,8 @@ class OCRResolver:
                 page_count=page_count,
                 output_dir=output_dir,
                 prior_local_native=prior_local_native,
+                retained_ocr_identity=retained_ocr_identity,
+                reprocess_request_id=reprocess_request_id,
             )
 
     async def _resolve_serialized(
@@ -2106,6 +2180,8 @@ class OCRResolver:
         page_count: int,
         output_dir: Path,
         prior_local_native: PriorLocalNativeSource | None = None,
+        retained_ocr_identity: tuple[str, int] | None = None,
+        reprocess_request_id: str | None = None,
     ) -> OCRResult:
         source = OCRInput(
             pdf_sha256=pdf_sha256,
@@ -2113,6 +2189,32 @@ class OCRResolver:
             page_count=page_count,
         )
         native_key = native_ocr_reuse_key(self.contract, source)
+        if reprocess_request_id is not None:
+            validate_identifier(reprocess_request_id, label="reprocess_request_id")
+            if self._content_store is None or self.cache_mode != "read-write":
+                raise OCRCacheMissError("OCR reprocess requires a writable content cache")
+            prior_attempt = await self._content_store.lookup_request(
+                source=source,
+                cache_epoch=self.cache_epoch,
+                request_id=reprocess_request_id,
+            )
+            if prior_attempt is not None:
+                verified = prior_attempt.verified
+                return OCRResult(
+                    pages=tuple(_page_body(page) for page in verified.pages),
+                    ocr_bytes=prior_attempt.body,
+                    ocr_text=verified.text,
+                    ocr_sha256=verified.sha256,
+                    size_bytes=verified.size_bytes,
+                    provenance="content-reprocess-resume",
+                    provider=prior_attempt.manifest.provenance.provider,
+                    model=prior_attempt.manifest.provenance.model,
+                    reuse_key=prior_attempt.manifest.reuse_key,
+                    cache_kind="content",
+                    cache_reuse_key=prior_attempt.manifest.reuse_key,
+                    cache_variant_id=prior_attempt.manifest.variant_id,
+                    cache_reused=True,
+                )
 
         # LLM OCR is not byte-deterministic, so the shared cache can legitimately hold
         # an alternate variant under a reuse key that a retained generation already
@@ -2122,10 +2224,21 @@ class OCRResolver:
         # rebound to other bytes.  The conflict stays observable as a warning, and
         # WorkerPipeline keeps its own identity guard as defence in depth.
         expected_ocr_identity = (
-            (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
-            if prior_local_native is not None
-            else None
+            None
+            if reprocess_request_id is not None
+            else (
+                (prior_local_native.ocr_sha256, prior_local_native.ocr_size_bytes)
+                if prior_local_native is not None
+                else retained_ocr_identity
+            )
         )
+        if (
+            reprocess_request_id is None
+            and retained_ocr_identity is not None
+            and prior_local_native is not None
+            and expected_ocr_identity != retained_ocr_identity
+        ):
+            raise OCRValidationError("retained generation and local OCR seals disagree")
 
         def _outside_retained_seal(result: OCRResult | None) -> bool:
             return bool(
@@ -2135,7 +2248,12 @@ class OCRResolver:
             )
 
         # 1. State Seed Ledger Lookup (Fast immutable local cache)
-        if self._seed_ledger is not None and document_id in self._seed_ledger.entries_by_doc_id:
+        if (
+            retained_ocr_identity is None
+            and reprocess_request_id is None
+            and self._seed_ledger is not None
+            and document_id in self._seed_ledger.entries_by_doc_id
+        ):
             seed_entry = self._seed_ledger.entries_by_doc_id[document_id]
             if (
                 expected_ocr_identity is not None
@@ -2164,6 +2282,37 @@ class OCRResolver:
                     stacklevel=2,
                 )
 
+        # The run-frozen content index is the provider-independent shared
+        # cache. Legacy native/adopted readers below remain a transition path.
+        if self._content_store is not None and reprocess_request_id is None:
+            content_hit = await self._content_store.lookup(
+                run_id=run_id,
+                document_id=document_id,
+                source=source,
+                cache_epoch=self.cache_epoch,
+                expected_ocr_identity=expected_ocr_identity,
+            )
+            if content_hit is not None:
+                content_manifest = content_hit.manifest
+                verified = content_hit.verified
+                return OCRResult(
+                    pages=tuple(_page_body(page) for page in verified.pages),
+                    ocr_bytes=content_hit.body,
+                    ocr_text=verified.text,
+                    ocr_sha256=verified.sha256,
+                    size_bytes=verified.size_bytes,
+                    provenance="content",
+                    provider=content_manifest.provenance.provider,
+                    model=content_manifest.provenance.model,
+                    reuse_key=content_manifest.reuse_key,
+                    cache_kind="content",
+                    cache_reuse_key=content_manifest.reuse_key,
+                    cache_variant_id=content_manifest.variant_id,
+                    cache_reused=True,
+                )
+            if retained_ocr_identity is not None:
+                raise OCRCacheMissError("retained OCR has no matching content variant")
+
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
             adopted_policies.append(LEGACY_ADOPTION_POLICY_V1)
@@ -2187,7 +2336,9 @@ class OCRResolver:
                 )
             )
         cache_candidates = tuple(cache_candidate_list)
-        for kind, lookup_key, candidate_policy in cache_candidates:
+        for kind, lookup_key, candidate_policy in (
+            () if reprocess_request_id is not None else cache_candidates
+        ):
             try:
                 found = await self._lookup_cache(
                     kind=kind,
@@ -2228,11 +2379,15 @@ class OCRResolver:
                             output_dir=output_dir,
                         )
                 return found
-        local = self._load_local_native(
-            output_dir=output_dir,
-            source=source,
-            reuse_key=native_key,
-            allow_compatible_contract=True,
+        local = (
+            None
+            if reprocess_request_id is not None
+            else self._load_local_native(
+                output_dir=output_dir,
+                source=source,
+                reuse_key=native_key,
+                allow_compatible_contract=True,
+            )
         )
         if (
             local is not None
@@ -2242,7 +2397,7 @@ class OCRResolver:
             # Generation cache healing is identity-bound per document. A valid
             # nondeterministic sibling cannot displace that retained hash.
             local = None
-        if local is None and prior_local_native is not None:
+        if local is None and prior_local_native is not None and reprocess_request_id is None:
             try:
                 local = self._materialize_prior_local_native(
                     prior=prior_local_native,
@@ -2261,7 +2416,7 @@ class OCRResolver:
                     stacklevel=2,
                 )
                 local = None
-        if local is None:
+        if local is None and reprocess_request_id is None:
             local = await self._lookup_indexed_run_local_native(
                 run_id=run_id,
                 source=source,
@@ -2269,7 +2424,7 @@ class OCRResolver:
                 output_dir=output_dir,
                 expected_ocr_identity=expected_ocr_identity,
             )
-        if local is None:
+        if local is None and reprocess_request_id is None:
             for prior_contract in self._compatible_contracts:
                 prior_key = native_ocr_reuse_key(prior_contract, source)
                 if prior_key == native_key:
@@ -2292,6 +2447,7 @@ class OCRResolver:
                 output_dir=output_dir,
                 source_document_id=document_id,
                 expected_ocr_identity=expected_ocr_identity,
+                reprocess_request_id=reprocess_request_id,
             )
             final_local = self._load_local_native(
                 output_dir=output_dir,
@@ -2310,8 +2466,12 @@ class OCRResolver:
             return committed
         if self._require_cache_hit:
             raise OCRCacheMissError("OCR cache miss in cache-only mode")
-        if self._seed_ledger is not None and (
-            document_id in self._seed_ledger.seed_doc_ids or pdf_sha256 in self._seed_ledger.seed_pdf_shas
+        if (
+            reprocess_request_id is None
+            and self._seed_ledger is not None
+            and (
+                document_id in self._seed_ledger.seed_doc_ids or pdf_sha256 in self._seed_ledger.seed_pdf_shas
+            )
         ):
             raise OCRSeedPreflightError(
                 f"Seed document {document_id} (pdf_sha256={pdf_sha256}) was not found in OCR cache/seed; "
@@ -2378,6 +2538,7 @@ class OCRResolver:
                 output_dir=output_dir,
                 source_document_id=document_id,
                 expected_ocr_identity=expected_ocr_identity,
+                reprocess_request_id=reprocess_request_id,
             )
             final_local = self._load_local_native(
                 output_dir=output_dir,
@@ -2557,6 +2718,7 @@ class OCRResolver:
             output_dir=output_dir,
             source_document_id=document_id,
             expected_ocr_identity=expected_ocr_identity,
+            reprocess_request_id=reprocess_request_id,
         )
         final_local = self._load_local_native(
             output_dir=output_dir,
@@ -2695,8 +2857,19 @@ class FailoverOCRResolver:
             raise ValueError("OCR resolvers no longer share one cache mode")
         return self.primary.cache_mode
 
+    @property
+    def cache_epoch(self) -> int:
+        return int(getattr(self.primary, "cache_epoch", 0))
+
     def clear_local_prefetch(self) -> None:
         self._local_prefetch.clear()
+
+    async def freeze_content_snapshot(self, run_id: str) -> None:
+        await self.primary.freeze_content_snapshot(run_id)
+        await self.fallback.freeze_content_snapshot(run_id)
+
+    async def has_new_content_variant(self, *, run_id: str, source: OCRInput, cutoff: datetime) -> bool:
+        return await self.primary.has_new_content_variant(run_id=run_id, source=source, cutoff=cutoff)
 
     def prefetch_local_native(
         self,
@@ -2733,6 +2906,8 @@ class FailoverOCRResolver:
     async def resolve(self, **kwargs: Any) -> OCRResult:
         output_dir = Path(kwargs.pop("output_dir"))
         raw_prior = kwargs.pop("prior_local_native", None)
+        if kwargs.get("reprocess_request_id") is not None:
+            raw_prior = None
         primary_prior: PriorLocalNativeSource | None = None
         fallback_prior: PriorLocalNativeSource | None = None
         if isinstance(raw_prior, PriorLocalNativeSource):

@@ -3508,6 +3508,44 @@ def test_serving_affecting_issuer_catalog_fields_change_worker_contract(tmp_path
     assert first != second
 
 
+def test_ocr_provider_provenance_does_not_change_worker_contract(tmp_path: Path) -> None:
+    adapter = Adapter((source(),))
+    first_ocr = FakeOCR()
+    first_ocr.contract = {
+        "provider": "codex-exec",
+        "model": "gpt-5.6-sol",
+        "processor_version": "old",
+        "reasoning_effort": "high",
+    }
+    second_ocr = FakeOCR()
+    second_ocr.contract = {
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash",
+        "processor_version": "new",
+        "reasoning_effort": "medium",
+    }
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        first = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[adapter],
+            ocr=first_ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        ).contract_sha256
+        second = WorkerPipeline(
+            state=state,
+            state_dir=tmp_path,
+            adapters=[adapter],
+            ocr=second_ocr,  # type: ignore[arg-type]
+            embeddings=FakeEmbeddings(),
+            webdav=FakeWebDAV(None),  # type: ignore[arg-type]
+            collect_remote_garbage=False,
+        ).contract_sha256
+    assert first == second
+
+
 def install_concurrent_pdf_http(monkeypatch: pytest.MonkeyPatch, handler: Any) -> list[httpx.AsyncClient]:
     real_client = httpx.AsyncClient
     clients: list[httpx.AsyncClient] = []
@@ -3662,7 +3700,10 @@ async def test_pdf_acquisition_failure_or_cancel_drains_requests_without_checkpo
         await asyncio.wait_for(both_started.wait(), timeout=3)
         if cancel:
             task.cancel()
-        with pytest.raises(asyncio.CancelledError if cancel else httpx.ConnectError):
+        with pytest.raises(
+            asyncio.CancelledError if cancel else RuntimeError,
+            match=None if cancel else "all issuer collection attempts failed",
+        ):
             await asyncio.wait_for(task, timeout=3)
         assert (active, drained) == (0, 2)
         assert ocr.calls == 0

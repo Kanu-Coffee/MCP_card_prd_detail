@@ -124,13 +124,20 @@ def native_ocr_reuse_key(contract: NativeOCRContract, source: OCRInput) -> str:
     )
 
 
-def content_addressed_ocr_reuse_key(source: OCRInput) -> str:
-    """Return a model-agnostic lookup key based solely on PDF content identity."""
+def content_addressed_ocr_reuse_key(source: OCRInput, *, cache_epoch: int = 0) -> str:
+    """Return a provider-independent PDF identity with an explicit reset epoch.
+
+    The historical native key is deliberately unchanged for legacy reads.
+    """
+
+    if isinstance(cache_epoch, bool) or not isinstance(cache_epoch, int) or cache_epoch < 0:
+        raise ValueError("OCR cache epoch must be a nonnegative integer")
 
     return canonical_sha256(
         {
+            "cache_epoch": cache_epoch,
             "input": source,
-            "schema_version": "cardrag.ocr-content-reuse-key.v1",
+            "schema_version": "cardrag.ocr-content-reuse-key.v2",
         }
     )
 

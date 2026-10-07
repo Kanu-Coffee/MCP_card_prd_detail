@@ -14,12 +14,15 @@ from pathlib import PurePosixPath
 from cardrag_core import (
     STABLE_POINTER_PATH,
     AdoptedOCRArtifactManifest,
+    ContentOCRArtifactManifest,
+    ContentOCRReady,
     GenerationManifest,
     GenerationPointer,
     GenerationReady,
     OCRArtifactManifest,
     OCRReady,
     WebDAVHTTPError,
+    canonical_json_bytes,
     channel_pointer_path,
     generation_database_path,
     generation_manifest_path,
@@ -28,8 +31,10 @@ from cardrag_core import (
     ocr_manifest_path,
     ocr_ready_path,
     validate_identifier,
+    verify_ocr_bytes,
 )
 
+from .content_cache import CONTENT_INDEX_ROOT, content_index_path
 from .state import WorkerState
 from .webdav import WebDAVClient
 
@@ -213,6 +218,112 @@ async def _optional_children(
         raise
 
 
+async def _mark_content_variants(
+    webdav: WebDAVClient,
+    *,
+    retained_variants: Mapping[tuple[str, str], tuple[str, int, str]],
+) -> tuple[set[str], dict[tuple[str, str], set[tuple[str, int, str]]]]:
+    """Verify and retain every immutable content variant, including old siblings."""
+
+    root = PurePosixPath("v1/ocr-cache/content")
+    indexed = await _optional_children(webdav, CONTENT_INDEX_ROOT)
+    if len(indexed) != len(set(indexed)):
+        raise GCMarkVerificationError("duplicate content OCR index entry")
+    index_set = set(indexed)
+    for entry in index_set:
+        if entry.parent != CONTENT_INDEX_ROOT or not entry.name.endswith(".json"):
+            raise GCMarkVerificationError("unexpected content OCR index entry")
+    marked: set[str] = set()
+    found_indexes: set[PurePosixPath] = set()
+    found_variants: set[tuple[str, str]] = set()
+    legacy_references: dict[tuple[str, str], set[tuple[str, int, str]]] = {}
+    prefixes = await _optional_children(webdav, root)
+    if len(prefixes) != len(set(prefixes)):
+        raise GCMarkVerificationError("duplicate content OCR prefix")
+    for prefix in prefixes:
+        if prefix.parent != root or _HEX_PREFIX.fullmatch(prefix.name) is None:
+            raise GCMarkVerificationError("unexpected content OCR prefix")
+        for reuse_root in await webdav.list_children(prefix):
+            key = reuse_root.name
+            if reuse_root.parent != prefix or _SHA256.fullmatch(key) is None or key[:2] != prefix.name:
+                raise GCMarkVerificationError("unexpected content OCR reuse directory")
+            if set(await webdav.list_children(reuse_root)) != {reuse_root / "variants"}:
+                raise GCMarkVerificationError("unexpected content OCR reuse shape")
+            variants_root = reuse_root / "variants"
+            for variant_root in await webdav.list_children(variants_root):
+                if variant_root.parent != variants_root:
+                    raise GCMarkVerificationError("unexpected content OCR variant path")
+                manifest_path = variant_root / "manifest.json"
+                ready_path = variant_root / "READY.json"
+                children = await webdav.list_children(variant_root)
+                if len(children) != 2 or set(children) != {manifest_path, ready_path}:
+                    raise GCMarkVerificationError("incomplete content OCR variant")
+                try:
+                    manifest_body = await _required_bytes(webdav, manifest_path)
+                    ready_body = await _required_bytes(webdav, ready_path)
+                    manifest = ContentOCRArtifactManifest.model_validate_json(manifest_body)
+                    ready = ContentOCRReady.model_validate_json(ready_body)
+                    index_path = content_index_path(manifest)
+                    if index_path not in index_set:
+                        raise ValueError("content OCR variant has no index")
+                    index_body = await _required_bytes(webdav, index_path)
+                    expected_index = {
+                        "schema_version": "cardrag.ocr-content-index.v1",
+                        "reuse_key": manifest.reuse_key,
+                        "variant_id": manifest.variant_id,
+                        "manifest_sha256": manifest.manifest_sha256,
+                        "variant_label": manifest.variant_label,
+                    }
+                    if (
+                        manifest.canonical_bytes() != manifest_body
+                        or ready.canonical_bytes() != ready_body
+                        or canonical_json_bytes(expected_index) != index_body
+                        or not ready.verifies(manifest)
+                        or manifest.reuse_key != key
+                        or manifest.variant_root != variant_root
+                    ):
+                        raise ValueError("content OCR variant controls disagree")
+                    binding = retained_variants.get((manifest.reuse_key, manifest.variant_id))
+                    if binding is not None and binding != (
+                        manifest.output.sha256,
+                        manifest.output.size_bytes,
+                        manifest.output.path,
+                    ):
+                        raise ValueError("retained content OCR binding differs")
+                    ocr_body = await _required_bytes(webdav, PurePosixPath(manifest.output.path))
+                    verify_ocr_bytes(
+                        ocr_body,
+                        expected_page_count=manifest.source.page_count,
+                        expected_sha256=manifest.output.sha256,
+                        expected_size_bytes=manifest.output.size_bytes,
+                        expected_char_count=manifest.ocr_chars,
+                        expected_page_sha256=manifest.page_output_sha256,
+                    )
+                except (ValueError, GCError) as exc:
+                    raise GCMarkVerificationError("content OCR variant failed mark verification") from exc
+                found_indexes.add(index_path)
+                found_variants.add((manifest.reuse_key, manifest.variant_id))
+                marked.update(
+                    {
+                        manifest_path.as_posix(),
+                        ready_path.as_posix(),
+                        index_path.as_posix(),
+                        manifest.output.path,
+                    }
+                )
+                if manifest.migrated_from is not None:
+                    legacy_key = (manifest.migrated_from.kind, manifest.migrated_from.reuse_key)
+                    legacy_binding = (
+                        manifest.output.sha256,
+                        manifest.output.size_bytes,
+                        manifest.output.path,
+                    )
+                    legacy_references.setdefault(legacy_key, set()).add(legacy_binding)
+    if found_indexes != index_set or not set(retained_variants).issubset(found_variants):
+        raise GCMarkVerificationError("content OCR index or retained generation variant is missing")
+    return marked, legacy_references
+
+
 def _is_incoming_temp_leaf(path: PurePosixPath | str) -> bool:
     candidate = PurePosixPath(path)
     return bool(
@@ -281,6 +392,7 @@ async def _mark_ocr_caches(
     webdav: WebDAVClient,
     *,
     retained_references: Mapping[tuple[str, str], set[tuple[str, int, str]]],
+    required_references: Mapping[tuple[str, str], set[tuple[str, int, str]]] | None = None,
 ) -> tuple[set[str], set[str]]:
     marked: set[str] = set()
     inactive: set[str] = set()
@@ -370,6 +482,11 @@ async def _mark_ocr_caches(
                             f"retained generation/cache binding differs for {kind}/{reuse_key}: "
                             f"cache points to {manifest_binding}, retained expects one of {sorted(retained_bindings)}"
                         )
+                    required_bindings = (
+                        required_references.get(reference_key) if required_references is not None else None
+                    )
+                    if required_bindings is not None and manifest_binding not in required_bindings:
+                        raise GCMarkVerificationError("migrated legacy OCR binding differs")
                     found_references.add(reference_key)
                     marked.update(
                         {
@@ -389,6 +506,8 @@ async def _mark_ocr_caches(
                 else:
                     inactive.add(reuse_root.as_posix())
     missing = set(retained_references).difference(found_references)
+    if required_references and set(required_references).intersection(missing):
+        raise GCMarkVerificationError("migrated legacy OCR provenance is missing")
     if missing:
         LOGGER.info(
             "Retained generations reference %d OCR caches not present on WebDAV (cache publication disabled or unseeded): %d native, %d adopted",
@@ -424,6 +543,7 @@ async def collect_garbage(
     retained = tuple(manifest.generation_id for manifest in manifests)
     marked: set[str] = {pointer_path.as_posix()}
     retained_cache_references: dict[tuple[str, str], set[tuple[str, int, str]]] = {}
+    retained_content_variants: dict[tuple[str, str], tuple[str, int, str]] = {}
     for manifest in manifests:
         generation_id = manifest.generation_id
         marked.update(
@@ -440,6 +560,20 @@ async def collect_garbage(
             if document.ocr is not None:
                 marked.add(document.ocr.path)
                 if document.ocr_cache_kind is not None and document.ocr_reuse_key is not None:
+                    if document.ocr_cache_kind == "content":
+                        if document.ocr_variant_id is None:
+                            raise GCMarkVerificationError("retained content OCR variant ID is missing")
+                        identity = (document.ocr_reuse_key, document.ocr_variant_id)
+                        binding = (document.ocr.sha256, document.ocr.size_bytes, document.ocr.path)
+                        if (
+                            identity in retained_content_variants
+                            and retained_content_variants[identity] != binding
+                        ):
+                            raise GCMarkVerificationError(
+                                "retained content OCR variant has conflicting bindings"
+                            )
+                        retained_content_variants[identity] = binding
+                        continue
                     cache_key = (document.ocr_cache_kind, document.ocr_reuse_key)
                     binding = (
                         document.ocr.sha256,
@@ -455,9 +589,16 @@ async def collect_garbage(
                 reuse_key,
                 sorted(bindings),
             )
+    content_marks, migrated_legacy = await _mark_content_variants(
+        webdav, retained_variants=retained_content_variants
+    )
+    marked.update(content_marks)
+    for identity, bindings in migrated_legacy.items():
+        retained_cache_references.setdefault(identity, set()).update(bindings)
     cache_marks, inactive_caches = await _mark_ocr_caches(
         webdav,
         retained_references=retained_cache_references,
+        required_references=migrated_legacy,
     )
     marked.update(cache_marks)
     all_generations = await _list_generation_ids(webdav)

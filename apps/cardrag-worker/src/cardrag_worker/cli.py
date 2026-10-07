@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from cardrag_core import STABLE_POINTER_PATH, OCRInput, content_addressed_ocr_reuse_key
 
 from .adoption import (
     ADOPTION_POLICY_VERSION,
@@ -48,6 +49,9 @@ from .capacity_v5 import (
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
 )
+from .content_cache import ContentOCRVariantStore
+from .content_inventory import inventory_content_migration
+from .content_migration import apply_content_migration, plan_content_migration
 from .corpus_baseline import CorpusBaselineError
 from .corpus_diff import CorpusDiffError
 from .embedding_seed_v122 import (
@@ -58,10 +62,11 @@ from .embedding_v5 import (
     OpenRouterQwenEmbeddingProviderV5,
     preflight_openrouter_qwen_providers,
 )
-from .gc import GCPartialFailure, collect_garbage
+from .gc import GCPartialFailure, _generation_chain, collect_garbage
 from .issuers import enabled_adapters
 from .ocr import FailoverOCRResolver, OCRResolver, discover_compatible_contracts
 from .ocr_recovery import OCRRecoveryError, restore_ocr_seed_from_generation
+from .ocr_requests import OCRReprocessRequest, plan_reprocess_requests, queue_reprocess_requests
 from .pdf_cache import PDFCache
 from .pipeline import (
     OCRDocumentFailuresError,
@@ -86,6 +91,8 @@ from .tokenizer_v5 import ensure_qwen_tokenizer
 from .webdav import WebDAVClient
 
 app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/embedding worker")
+ocr_cache_app = typer.Typer(no_args_is_help=True, help="OCR cache inspection and explicit maintenance")
+app.add_typer(ocr_cache_app, name="ocr-cache")
 
 _WORKER_SHUTDOWN_SIGNALS: tuple[int, int] = (int(signal.SIGTERM), int(signal.SIGINT))
 
@@ -114,6 +121,243 @@ def _configure_worker_logging() -> None:
 
 def _echo(payload: Any) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str))
+
+
+@ocr_cache_app.command("inventory")
+def ocr_cache_inventory() -> None:
+    """Verify legacy OCR and current stable text without writing state or WebDAV."""
+
+    async def inspect() -> dict[str, object]:
+        client = WebDAVClient.from_env()
+        try:
+            return (await inventory_content_migration(client)).summary()
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(inspect()))
+
+
+@ocr_cache_app.command("verify")
+def ocr_cache_verify() -> None:
+    """Verify every indexed content variant and current stable OCR binding."""
+
+    async def verify() -> dict[str, object]:
+        settings = WorkerSettings.from_env()
+        client = WebDAVClient.from_env()
+        try:
+            store = ContentOCRVariantStore(webdav=client, state_root=Path("."))
+            variants = await store.verify_all()
+            _pointer, (generation,) = await _generation_chain(
+                client, retain=1, pointer_path=STABLE_POINTER_PATH
+            )
+            by_key: dict[str, list[tuple[str, int, str]]] = {}
+            for variant in variants:
+                by_key.setdefault(variant.reuse_key, []).append(
+                    (variant.output.sha256, variant.output.size_bytes, variant.variant_id)
+                )
+            covered = 0
+            for document in generation.documents:
+                if document.ocr is None:
+                    continue
+                source = OCRInput(
+                    pdf_sha256=document.pdf.sha256,
+                    pdf_size_bytes=document.pdf.size_bytes,
+                    page_count=document.page_count,
+                )
+                key = content_addressed_ocr_reuse_key(source, cache_epoch=settings.ocr_cache_epoch)
+                if not any(
+                    sha == document.ocr.sha256
+                    and size == document.ocr.size_bytes
+                    and (document.ocr_variant_id is None or variant_id == document.ocr_variant_id)
+                    for sha, size, variant_id in by_key.get(key, ())
+                ):
+                    raise ValueError("stable generation OCR is not covered by verified content variants")
+                covered += 1
+            return {
+                "verified_variants": len(variants),
+                "stable_generation_id": generation.generation_id,
+                "stable_ocr_documents_covered": covered,
+                "read_only": True,
+            }
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(verify()))
+
+
+@ocr_cache_app.command("migrate")
+def ocr_cache_migrate(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    apply: bool = typer.Option(False, "--apply"),
+    confirm_stable_generation: str | None = typer.Option(None, "--confirm-stable-generation"),
+) -> None:
+    """Plan or explicitly apply all verified immutable OCR variants."""
+
+    if dry_run == apply:
+        raise typer.BadParameter("choose exactly one of --dry-run or --apply")
+    if apply and confirm_stable_generation is None:
+        raise typer.BadParameter("--apply requires --confirm-stable-generation from a dry-run")
+    if dry_run and confirm_stable_generation is not None:
+        raise typer.BadParameter("--confirm-stable-generation is only for --apply")
+
+    async def plan() -> dict[str, object]:
+        client = WebDAVClient.from_env()
+        try:
+            migration = await plan_content_migration(client)
+            if not apply:
+                return migration.summary()
+            if migration.stable_generation_id != confirm_stable_generation:
+                raise ValueError("stable generation differs from the confirmed migration plan")
+            settings = WorkerSettings.from_env()
+            with worker_lock(settings.state_dir / "worker.lock"):
+                published = await apply_content_migration(client, migration, state_root=settings.state_dir)
+            return {
+                **migration.summary(),
+                "read_only": False,
+                "migration_applied": True,
+                "variants_published": published,
+            }
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(plan()))
+
+
+@ocr_cache_app.command("reprocess")
+def ocr_cache_reprocess(
+    document_id: list[str] = typer.Option([], "--document-id"),
+    pdf_sha256: str | None = typer.Option(None, "--pdf-sha256"),
+    issuer: str | None = typer.Option(None, "--issuer"),
+    all_documents: bool = typer.Option(False, "--all"),
+    confirm_all: bool = typer.Option(False, "--confirm-all"),
+    max_documents: int = typer.Option(10, "--max-documents", min=1, max=100),
+    apply: bool = typer.Option(False, "--apply"),
+) -> None:
+    """Preview or queue bounded OCR reprocessing for later Worker runs."""
+
+    async def prepare() -> tuple[OCRReprocessRequest, ...]:
+        client = WebDAVClient.from_env()
+        try:
+            _pointer, (manifest,) = await _generation_chain(
+                client, retain=1, pointer_path=STABLE_POINTER_PATH
+            )
+            return plan_reprocess_requests(
+                manifest,
+                document_ids=tuple(document_id),
+                pdf_sha256=pdf_sha256,
+                issuer=issuer,
+                all_documents=all_documents,
+                confirm_all=confirm_all,
+                max_documents=max_documents,
+            )
+        finally:
+            await client.close()
+
+    requests = asyncio.run(prepare())
+    if apply:
+        settings = WorkerSettings.from_env()
+        queue_reprocess_requests(settings.state_dir, requests)
+    _echo(
+        {
+            "request_count": len(requests),
+            "document_count": sum(len(request.targets) for request in requests),
+            "page_count": sum(target.page_count for request in requests for target in request.targets),
+            "estimated_provider_document_calls": sum(len(request.targets) for request in requests),
+            "queued": apply,
+            "request_ids": [request.request_id for request in requests],
+        }
+    )
+
+
+@ocr_cache_app.command("restore")
+def ocr_cache_restore(
+    document_id: str = typer.Option(..., "--document-id"),
+    variant: str = typer.Option(..., "--variant"),
+    apply: bool = typer.Option(False, "--apply"),
+) -> None:
+    """Preview or promote verified historical OCR bytes without calling a provider."""
+
+    async def restore() -> dict[str, object]:
+        settings = WorkerSettings.from_env()
+        client = WebDAVClient.from_env()
+        try:
+            _pointer, (generation,) = await _generation_chain(
+                client, retain=1, pointer_path=STABLE_POINTER_PATH
+            )
+            document = next((doc for doc in generation.documents if doc.document_id == document_id), None)
+            if document is None or document.ocr is None:
+                raise ValueError("document is not served in the current generation")
+            source = OCRInput(
+                pdf_sha256=document.pdf.sha256,
+                pdf_size_bytes=document.pdf.size_bytes,
+                page_count=document.page_count,
+            )
+            store = ContentOCRVariantStore(webdav=client, state_root=settings.state_dir)
+            hits = await store.verified_variants(source=source, cache_epoch=settings.ocr_cache_epoch)
+            original = next((hit for hit in hits if hit.manifest.variant_id == variant), None)
+            if original is None:
+                raise ValueError("requested historical variant is not verified")
+            result: dict[str, object] = {
+                "document_id": document_id,
+                "source_variant_id": variant,
+                "source_ocr_sha256": original.manifest.output.sha256,
+                "current_ocr_sha256": document.ocr.sha256,
+                "variant_count": len(hits),
+                "applied": apply,
+            }
+            if apply:
+                published = await store.restore_variant(
+                    source=source, cache_epoch=settings.ocr_cache_epoch, variant_id=variant
+                )
+                result["new_variant_id"] = published.variant_id
+            return result
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(restore()))
+
+
+@ocr_cache_app.command("show")
+def ocr_cache_show(document_id: str = typer.Option(..., "--document-id")) -> None:
+    """Show verified OCR variant provenance for one served document."""
+
+    async def inspect() -> dict[str, object]:
+        settings = WorkerSettings.from_env()
+        client = WebDAVClient.from_env()
+        try:
+            _pointer, (generation,) = await _generation_chain(
+                client, retain=1, pointer_path=STABLE_POINTER_PATH
+            )
+            document = next((doc for doc in generation.documents if doc.document_id == document_id), None)
+            if document is None or document.ocr is None:
+                raise ValueError("document is not served in the current generation")
+            source = OCRInput(
+                pdf_sha256=document.pdf.sha256,
+                pdf_size_bytes=document.pdf.size_bytes,
+                page_count=document.page_count,
+            )
+            store = ContentOCRVariantStore(webdav=client, state_root=settings.state_dir)
+            hits = await store.verified_variants(source=source, cache_epoch=settings.ocr_cache_epoch)
+            return {
+                "document_id": document_id,
+                "served_ocr_sha256": document.ocr.sha256,
+                "selected_variant_id": hits[-1].manifest.variant_id if hits else None,
+                "variants": [
+                    {
+                        "variant_id": hit.manifest.variant_id,
+                        "ocr_sha256": hit.manifest.output.sha256,
+                        "created_at": hit.manifest.created_at,
+                        "provider": hit.manifest.provenance.provider,
+                        "restored_from": hit.manifest.restored_from,
+                        "reprocess_request_id": hit.manifest.reprocess_request_id,
+                    }
+                    for hit in hits
+                ],
+            }
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(inspect()))
 
 
 def _echo_ocr_failures(exc: OCRDocumentFailuresError) -> None:
@@ -231,7 +475,11 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
         codex_provider_env_key=settings.codex_model_provider_env_key,
         codex_provider_wire_api=settings.codex_model_provider_wire_api,
         codex_model_catalog_json=settings.codex_model_catalog_json,
-        reasoning_effort=settings.ocr_reasoning_effort,
+        reasoning_effort=(
+            settings.opencode_ocr_reasoning_effort
+            if name.strip().casefold() == "opencode"
+            else settings.ocr_reasoning_effort
+        ),
         timeout_seconds=settings.ocr_provider_timeout_seconds,
         openrouter_fallback_model=settings.openrouter_ocr_fallback_model,
         paddleocr_pipeline_version=settings.paddleocr_pipeline_version,
@@ -239,11 +487,17 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
         paddleocr_pdf_dpi=settings.paddleocr_pdf_dpi,
         paddleocr_cpu_threads=settings.paddleocr_cpu_threads,
         paddleocr_timeout_seconds=settings.paddleocr_timeout_seconds,
+        opencode_executable=settings.opencode_executable,
+        opencode_config_path=settings.opencode_config,
+        opencode_agent=settings.opencode_agent,
+        opencode_api_key_env_var=settings.opencode_api_key_env_var,
     )
 
 
 def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
     return {
+        "collection_status": result.collection_status,
+        "failed_issuers": list(result.failed_issuers),
         "run_id": result.run_id,
         "status": result.status,
         "generation_id": result.generation_id,
@@ -450,6 +704,8 @@ async def _run(resume: str | None) -> dict[str, Any]:
                             "paddleocr-vl",
                         }:
                             fallback_model = "PaddleOCR-VL-1.6"
+                        elif settings.ocr_fallback_provider.strip().casefold() == "opencode":
+                            fallback_model = "alibaba-token-plan/qwen3.8-flash"
                         else:
                             raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
                     fallback = OCRResolver(
@@ -484,6 +740,8 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     ocr=resolver,  # type: ignore[arg-type]
                     embeddings=embeddings,
                     webdav=webdav,
+                    issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
+                    issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
                     pdf_concurrency=settings.pdf_concurrency,
                     pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
                     local_processing_workers=settings.local_processing_workers,

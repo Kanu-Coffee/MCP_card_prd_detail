@@ -9,7 +9,7 @@ def exact_keys($expected):
 
 def expected_subject_name:
   "pkg:docker/\($image_repository)"
-  + "@candidate-v1.0.32-\($role)-\($source_commit)?platform=linux%2Famd64";
+  + "@candidate-v1.0.33-\($role)-\($source_commit)?platform=linux%2Famd64";
 
 def exact_subject:
   . == [{
@@ -19,7 +19,7 @@ def exact_subject:
 
 def expected_build_args:
   {
-    "build-arg:APP_VERSION": "1.0.32",
+    "build-arg:APP_VERSION": "1.0.33",
     "build-arg:SOURCE_URL": "https://github.com/\($source_repository)",
     "build-arg:CODEX_SHA256":
       "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
@@ -134,6 +134,10 @@ def expected_materials:
     {
       "uri": "https://github.com/openai/codex/releases/download/rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
       "digest": {"sha256": "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"}
+    },
+    {
+      "uri": "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.34.tgz",
+      "digest": {"sha256": "b83e8ac66d752d05ead4b6a439d3a2cfa32bcd9817c708825a389b5d5cba4f19"}
     }
   ] elif $role == "mcp" then [
     {
