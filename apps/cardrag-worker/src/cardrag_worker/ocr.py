@@ -903,6 +903,13 @@ class OCRResolver:
         if self._content_store is not None:
             await self._content_store.freeze(run_id)
 
+    async def has_new_content_variant(self, *, run_id: str, source: OCRInput, cutoff: datetime) -> bool:
+        if self._content_store is None:
+            return False
+        return await self._content_store.has_verified_variant_after(
+            run_id=run_id, source=source, cache_epoch=self.cache_epoch, cutoff=cutoff
+        )
+
     def set_compatible_contracts(self, compatible_contracts: Sequence[NativeOCRContract]) -> None:
         self._compatible_contracts = tuple(
             c for c in compatible_contracts if c.contract_sha256 != self.contract.contract_sha256
@@ -2860,6 +2867,9 @@ class FailoverOCRResolver:
     async def freeze_content_snapshot(self, run_id: str) -> None:
         await self.primary.freeze_content_snapshot(run_id)
         await self.fallback.freeze_content_snapshot(run_id)
+
+    async def has_new_content_variant(self, *, run_id: str, source: OCRInput, cutoff: datetime) -> bool:
+        return await self.primary.has_new_content_variant(run_id=run_id, source=source, cutoff=cutoff)
 
     def prefetch_local_native(
         self,

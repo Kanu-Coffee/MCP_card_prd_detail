@@ -96,3 +96,15 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 - 가짜 WebDAV에서 재처리 1회 호출·동일 요청 재개 0회 호출, 과거 OCR 복원 뒤 다음 run의 최신 선택, 원본 variant 불변, 큐 변경 중 재개 고정, 손상된 완료 영수증 차단을 확인했다. 전체 suite는 이번 코드의 영수증 검증 추가 직전 **2,323 passed, 기존 warning 9건**이었고, 추가 후 관련 145개 테스트가 통과했다. Ruff(Worker/core 범위), mypy(Worker 52 source files), `git diff --check`도 통과했다. 저장소 전체 Ruff는 이전 handoff 증거 스크립트에서 기존 오류 16건을 보고하므로 프로젝트 코드 범위로 검사했다.
 
 **아직 007 인수·배포 전:** 로컬 SQLite content 인덱스와 레거시 역조회 안전망, 실제 격리 WebDAV 후보 리허설, 운영 마이그레이션 apply/첫 generation 검증이 남았다. 특히 서비스 중 OCR을 문서별로 보존하는 규칙과 외부에서 새 variant가 게시된 다음 run의 최신 선택을 함께 검증해야 한다. 006 OpenCode 공급자는 코드에 통합됐지만 운영 활성화하지 않았다. 운영 WebDAV·state·timer·이미지·설정에는 쓰지 않았다. PLAN §6의 단계 6·7은 별도 승인 대상이다.
+
+## 2026-10-07 격리 WebDAV 리허설 및 운영 적용 명령 준비
+
+- `ocr-cache migrate`에 `--apply --confirm-stable-generation <dry-run의 ID>`를 추가했다. 전체 계획을 다시 검증한 뒤 확인한 stable ID와 다르면 거부하고, Worker 락을 잡아 불변 variant를 게시한다. 내부 apply는 처리 중 stable pointer 변경을 검사하며 재실행 가능하다. **이 명령을 운영 WebDAV에는 실행하지 않았다.**
+- 실제 `cardrag_core.WebDAVClient`와 Worker WebDAV facade를 사용하되 네트워크를 격리한 HTTP MockTransport에서 PROPFIND/HEAD/GET/MKCOL/PUT/MOVE/DELETE를 통과시켰다. generation-only OCR 이전을 2회 반복해 멱등을 확인하고, 기존 원격 파일의 바이트가 모두 남았으며, 006 OpenCode 설정 Resolver가 OCR 공급자를 호출하지 않고 이전 variant에 적중했다. 복원 variant의 최신 선택 및 run snapshot도 같은 경로로 확인했다. 이는 WebDAV 프로토콜 경로 리허설이지 운영 서버/전체 5,172건 쓰기 리허설은 아니다.
+- `restore` 등 별도 게시된 최신 variant가 다음 run에서 무시되는 문제를 발견했다. 같은 Worker contract의 stable generation 이후 생성된 **검증된** variant가 run 시작 snapshot에 있으면 그 PDF의 문서별 이전 OCR pin과 no-change 빠른 경로를 해제한다. 첫 contract 전환에서는 항상 이전 OCR pin을 유지해 D5의 기존 텍스트 보존을 우선한다. 새 variant가 run 도중 생기면 해당 run에는 반영되지 않는다.
+- 읽기 전용 `ocr-cache verify`를 추가했다. 원격 content index 전체를 1회 열거해 각 variant의 manifest·READY·index·CAS/OCR 바이트를 검증하고, 현재 stable OCR 문서마다 동일 PDF·동일 OCR SHA/크기의 variant(새 generation은 정확한 variant ID)를 확인한다. 격리 리허설에서 이전 직후 검증이 통과했고, 손상된 READY는 실패했다.
+- 계획의 로컬 SQLite content 인덱스는 현재 **원격 평면 index 1회 열거 → run 로컬 JSON snapshot → 메모리 key index → 문서별 불변 선택 파일**로 대체했다. 같은 run의 재개 결정성과 원격 목록 비용을 만족하면서 5,172행을 SQLite에 중복 적재하지 않는다. 레거시 역조회는 전체 5,172 variant를 먼저 이전하고 stable 5,512문서 매핑을 전량 dry-run과 소형 격리 apply로 확인한 뒤 Worker를 전환하는 게이트로 대체한다. 이전 variant가 누락된 서비스 문서는 provider를 대량 호출하지 않고 기존 OCR pin 검증에서 중단한다. 이 두 항목은 PLAN의 저장 방식/전환기 안전망에서 벗어난 **구현 편차**다.
+
+**운영 전환은 계속 보류:** 전체 corpus에 대한 운영 `migrate --apply`, MCP→Worker 이미지 배포, 첫 generation 관찰, 006 공급자 활성화는 아직 수행하지 않았다. PLAN §6 단계 6·7의 승인과 운영 창구가 필요하다. 운영 시스템의 WebDAV·state·timer·이미지·환경변수는 변경하지 않았다.
+
+검증: 전체 suite **2,327 passed, 기존 warning 9건**. 실행 중 독립 프로세스 lock 경합 테스트가 1회 실패했으나 단독 재실행 통과했고, 다음 전체 suite도 통과했다. 마지막 `verify` 추가 후 관련 144개 테스트, Ruff(Worker/core), mypy(Worker 52 source files), format, `git diff --check` 통과.

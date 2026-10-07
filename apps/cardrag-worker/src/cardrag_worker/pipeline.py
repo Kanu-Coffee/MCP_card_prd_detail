@@ -42,6 +42,7 @@ from cardrag_core import (
     GenerationOCRFailure,
     IssuerOCRCounts,
     OCRCacheKind,
+    OCRInput,
     StructureContract,
     StructureMajorClassCounts,
     StructureNodeCounts,
@@ -3626,6 +3627,7 @@ class WorkerPipeline:
                     raise RuntimeError("OCR reprocess target no longer matches an acquired PDF")
         current_remote = await self.webdav.validated_current_generation()
         transition_served_ocr: dict[str, tuple[str, int, int, str, int]] = {}
+        new_content_variant_documents: set[str] = set()
         if isinstance(self.webdav, WebDAVClient) and current_remote is not None:
             # Preserve each existing document's served OCR across the first
             # transition and later corpus revisions. A manual reprocess path
@@ -3647,17 +3649,44 @@ class WorkerPipeline:
                 or previous_manifest.contract_sha256 != current_remote.contract_sha256
             ):
                 raise RuntimeError("current generation manifest changed during OCR transition")
-            transition_served_ocr = {
-                document.document_id: (
+            inspect_new_variant = (
+                getattr(self.ocr, "has_new_content_variant", None)
+                if current_remote.contract_sha256 == contract_sha256
+                else None
+            )
+            new_by_pdf: dict[tuple[str, int, int], bool] = {}
+            for document in previous_manifest.documents:
+                if document.ocr is None:
+                    continue
+                pdf_identity = (
                     document.pdf.sha256,
                     document.pdf.size_bytes,
                     document.page_count,
-                    document.ocr.sha256,
-                    document.ocr.size_bytes,
                 )
-                for document in previous_manifest.documents
-                if document.ocr is not None
-            }
+                if pdf_identity not in new_by_pdf:
+                    new_by_pdf[pdf_identity] = (
+                        bool(
+                            await inspect_new_variant(
+                                run_id=run_id,
+                                source=OCRInput(
+                                    pdf_sha256=pdf_identity[0],
+                                    pdf_size_bytes=pdf_identity[1],
+                                    page_count=pdf_identity[2],
+                                ),
+                                cutoff=previous_manifest.created_at,
+                            )
+                        )
+                        if callable(inspect_new_variant)
+                        else False
+                    )
+                if new_by_pdf[pdf_identity]:
+                    new_content_variant_documents.add(document.document_id)
+                else:
+                    transition_served_ocr[document.document_id] = (
+                        *pdf_identity,
+                        document.ocr.sha256,
+                        document.ocr.size_bytes,
+                    )
         stable_body = await _observed_pointer_bytes(self.webdav)
         cache_healing_generation_id: str | None = None
         cache_healing_seal: dict[str, Any] | None = None
@@ -3721,6 +3750,7 @@ class WorkerPipeline:
             and current_remote.contract_sha256 == contract_sha256
             and current_remote.ocr_failed_document_count == 0
             and self._active_ocr_request is None
+            and not new_content_variant_documents
         )
         if (
             current_remote is not None

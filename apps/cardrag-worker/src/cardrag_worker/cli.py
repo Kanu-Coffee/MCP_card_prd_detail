@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
-from cardrag_core import STABLE_POINTER_PATH, OCRInput
+from cardrag_core import STABLE_POINTER_PATH, OCRInput, content_addressed_ocr_reuse_key
 
 from .adoption import (
     ADOPTION_POLICY_VERSION,
@@ -51,7 +51,7 @@ from .capacity_v5 import (
 )
 from .content_cache import ContentOCRVariantStore
 from .content_inventory import inventory_content_migration
-from .content_migration import plan_content_migration
+from .content_migration import apply_content_migration, plan_content_migration
 from .corpus_baseline import CorpusBaselineError
 from .corpus_diff import CorpusDiffError
 from .embedding_seed_v122 import (
@@ -137,17 +137,86 @@ def ocr_cache_inventory() -> None:
     _echo(asyncio.run(inspect()))
 
 
-@ocr_cache_app.command("migrate")
-def ocr_cache_migrate(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
-    """Plan every immutable variant and stable document pin, without remote writes."""
+@ocr_cache_app.command("verify")
+def ocr_cache_verify() -> None:
+    """Verify every indexed content variant and current stable OCR binding."""
 
-    if not dry_run:
-        raise typer.BadParameter("only --dry-run is implemented before migration rehearsal")
+    async def verify() -> dict[str, object]:
+        settings = WorkerSettings.from_env()
+        client = WebDAVClient.from_env()
+        try:
+            store = ContentOCRVariantStore(webdav=client, state_root=Path("."))
+            variants = await store.verify_all()
+            _pointer, (generation,) = await _generation_chain(
+                client, retain=1, pointer_path=STABLE_POINTER_PATH
+            )
+            by_key: dict[str, list[tuple[str, int, str]]] = {}
+            for variant in variants:
+                by_key.setdefault(variant.reuse_key, []).append(
+                    (variant.output.sha256, variant.output.size_bytes, variant.variant_id)
+                )
+            covered = 0
+            for document in generation.documents:
+                if document.ocr is None:
+                    continue
+                source = OCRInput(
+                    pdf_sha256=document.pdf.sha256,
+                    pdf_size_bytes=document.pdf.size_bytes,
+                    page_count=document.page_count,
+                )
+                key = content_addressed_ocr_reuse_key(source, cache_epoch=settings.ocr_cache_epoch)
+                if not any(
+                    sha == document.ocr.sha256
+                    and size == document.ocr.size_bytes
+                    and (document.ocr_variant_id is None or variant_id == document.ocr_variant_id)
+                    for sha, size, variant_id in by_key.get(key, ())
+                ):
+                    raise ValueError("stable generation OCR is not covered by verified content variants")
+                covered += 1
+            return {
+                "verified_variants": len(variants),
+                "stable_generation_id": generation.generation_id,
+                "stable_ocr_documents_covered": covered,
+                "read_only": True,
+            }
+        finally:
+            await client.close()
+
+    _echo(asyncio.run(verify()))
+
+
+@ocr_cache_app.command("migrate")
+def ocr_cache_migrate(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    apply: bool = typer.Option(False, "--apply"),
+    confirm_stable_generation: str | None = typer.Option(None, "--confirm-stable-generation"),
+) -> None:
+    """Plan or explicitly apply all verified immutable OCR variants."""
+
+    if dry_run == apply:
+        raise typer.BadParameter("choose exactly one of --dry-run or --apply")
+    if apply and confirm_stable_generation is None:
+        raise typer.BadParameter("--apply requires --confirm-stable-generation from a dry-run")
+    if dry_run and confirm_stable_generation is not None:
+        raise typer.BadParameter("--confirm-stable-generation is only for --apply")
 
     async def plan() -> dict[str, object]:
         client = WebDAVClient.from_env()
         try:
-            return (await plan_content_migration(client)).summary()
+            migration = await plan_content_migration(client)
+            if not apply:
+                return migration.summary()
+            if migration.stable_generation_id != confirm_stable_generation:
+                raise ValueError("stable generation differs from the confirmed migration plan")
+            settings = WorkerSettings.from_env()
+            with worker_lock(settings.state_dir / "worker.lock"):
+                published = await apply_content_migration(client, migration, state_root=settings.state_dir)
+            return {
+                **migration.summary(),
+                "read_only": False,
+                "migration_applied": True,
+                "variants_published": published,
+            }
         finally:
             await client.close()
 

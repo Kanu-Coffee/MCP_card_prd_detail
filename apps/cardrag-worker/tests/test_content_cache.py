@@ -147,6 +147,8 @@ async def test_content_variant_rejects_corrupt_latest_and_epoch_miss(tmp_path: P
     await store.publish(earlier, earlier_body)
     await store.publish(later, later_body)
     webdav.objects[str(later.variant_root / "READY.json")] = b"{}"
+    with pytest.raises(ContentCacheValidationError):
+        await store.verify_all()
     hit = await store.lookup(run_id="run3", source=earlier.source, cache_epoch=0)
     assert hit is not None and hit.manifest.variant_id == earlier.variant_id
     assert await store.lookup(run_id="run3", source=earlier.source, cache_epoch=1) is None
@@ -531,10 +533,28 @@ async def test_restore_promotes_historical_text_without_changing_original(tmp_pa
     )
     await store.publish(old, old_body)
     await store.publish(recent, recent_body)
+    assert (
+        await store.has_verified_variant_after(
+            run_id="before-restore",
+            source=old.source,
+            cache_epoch=0,
+            cutoff=recent.created_at,
+        )
+        is False
+    )
     restored = await store.restore_variant(source=old.source, cache_epoch=0, variant_id=old.variant_id)
     assert restored.restored_from == old.variant_id
     assert restored.output == old.output
     assert restored.created_at > recent.created_at
+    assert (
+        await store.has_verified_variant_after(
+            run_id="after-restore",
+            source=old.source,
+            cache_epoch=0,
+            cutoff=recent.created_at,
+        )
+        is True
+    )
     assert webdav.objects[str(old.variant_root / "manifest.json")] == old.canonical_bytes()
     latest = await store.lookup(run_id="after-restore", source=old.source, cache_epoch=0)
     assert latest is not None and latest.manifest.variant_id == restored.variant_id

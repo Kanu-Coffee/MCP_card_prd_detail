@@ -7,6 +7,7 @@ OCR-byte verification before it can be used.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -340,6 +341,30 @@ class ContentOCRVariantStore:
                 hits.append(await self._read_variant(entry, source=source, reuse_key=key))
         return tuple(sorted(hits, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256)))
 
+    async def has_verified_variant_after(
+        self, *, run_id: str, source: OCRInput, cache_epoch: int, cutoff: datetime
+    ) -> bool:
+        """Detect a new variant since the served generation without reading old variants."""
+
+        await self.freeze(run_id)
+        key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
+        for entry in self._snapshots[run_id].get(key, ()):
+            match = _INDEX_NAME.fullmatch(entry.name)
+            if match is None:
+                raise ContentCacheValidationError("content index entry name is invalid")
+            label_time = datetime.strptime(match["label"].split("-", 1)[0], "%Y%m%dT%H%M%S%fZ").replace(
+                tzinfo=UTC
+            )
+            if label_time <= cutoff:
+                continue
+            try:
+                hit = await self._read_variant(entry, source=source, reuse_key=key)
+            except ContentCacheValidationError:
+                continue
+            if hit.manifest.created_at > cutoff:
+                return True
+        return False
+
     async def restore_variant(
         self, *, source: OCRInput, cache_epoch: int, variant_id: str
     ) -> ContentOCRArtifactManifest:
@@ -364,6 +389,36 @@ class ContentOCRVariantStore:
         )
         await self.publish_existing(manifest)
         return manifest
+
+    async def verify_all(self) -> tuple[ContentOCRArtifactManifest, ...]:
+        """Read and verify every discoverable variant without changing remote state."""
+
+        try:
+            entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
+        except WebDAVHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            entries = ()
+        if len(entries) > _MAX_INDEX_ENTRIES:
+            raise ContentCacheValidationError("content index exceeds the verification limit")
+        semaphore = asyncio.Semaphore(16)
+
+        async def verify_one(entry: PurePosixPath) -> ContentOCRArtifactManifest:
+            async with semaphore:
+                key, root = _indexed_variant_path(entry)
+                manifest_body = await self.webdav.get_bytes(
+                    root / "manifest.json", max_bytes=CONTROL_OBJECT_MAX_BYTES
+                )
+                if manifest_body is None:
+                    raise ContentCacheValidationError("indexed content manifest is missing")
+                try:
+                    manifest = ContentOCRArtifactManifest.model_validate_json(manifest_body)
+                except ValueError as exc:
+                    raise ContentCacheValidationError("indexed content manifest is invalid") from exc
+                hit = await self._read_variant(entry, source=manifest.source, reuse_key=key)
+                return hit.manifest
+
+        return tuple(await asyncio.gather(*(verify_one(entry) for entry in entries)))
 
     async def publish(self, manifest: ContentOCRArtifactManifest, body: bytes) -> None:
         """Commit CAS, manifest, READY, then the discoverable index marker."""
