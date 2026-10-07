@@ -123,4 +123,6 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 
 두 번째 CI는 보안 감사·Ruff·mypy가 통과하고 테스트 2,326개가 통과했으나, `migrate --apply` 안전장치 테스트 1개가 CI 터미널의 색상·줄바꿈으로 출력 문자열을 분리해 실패했다. 실행은 의도대로 종료 코드 2로 거부됐다. 테스트를 WebDAV 연결 전에 종료 코드 2가 나오는지 직접 검증하도록 바꾸고 좁은 터미널/색상 환경에서 3개 테스트 통과를 확인했다. 이 변경은 제품 동작을 바꾸지 않는다.
 
+세 번째 CI(`d5bfdac`, GitHub Actions run `37562808348`)는 **success**다. 보안 감사, Ruff·mypy, 전체 런타임 테스트, 두 서비스 Compose 검증, MCP·Worker 이미지 빌드가 모두 통과했다. PR #40은 운영 단계 승인 전이므로 Draft를 유지한다. CI 성공 후 신한카드 공지 페이지를 다시 읽기 전용 GET으로 확인했으나 현재 호스트에서는 여전히 TLS 뒤 연결 reset으로 응답을 받지 못했다.
+
 PLAN §6 단계 6의 승인 후 실행 순서: (1) 신한카드 수집 경로의 복구와 현재 예약 배치 실패 원인 확인, (2) timer 중지 및 Worker 미실행 확인, (3) 새 MCP 이미지 먼저 활성화, (4) 새 Worker 이미지로 `migrate --dry-run`을 재확인하고 **그때의 stable ID**를 지정해 `migrate --apply --confirm-stable-generation` 실행, (5) `ocr-cache verify`에서 전체 variant와 stable 5,512문서 대응 확인, (6) 새 Worker의 첫 run에서 기존 문서 OCR 공급자 호출 0건·서비스 중 OCR SHA 불변·새 generation 게시를 확인, (7) timer 재개. 새 PDF가 발견되면 해당 문서의 OCR 호출은 별도로 집계한다. 전체 run 또는 데이터 게시가 실패하면 기존 이미지와 설정으로 되돌리고, 추가된 content variant는 불변 원본과 함께 남겨 재시도한다. PLAN §6 단계 7의 OpenCode 운영 활성화는 이 단계의 인수 후 별도 승인에 따른다.
