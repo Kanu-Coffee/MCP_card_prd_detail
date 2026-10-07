@@ -108,3 +108,15 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 **운영 전환은 계속 보류:** 전체 corpus에 대한 운영 `migrate --apply`, MCP→Worker 이미지 배포, 첫 generation 관찰, 006 공급자 활성화는 아직 수행하지 않았다. PLAN §6 단계 6·7의 승인과 운영 창구가 필요하다. 운영 시스템의 WebDAV·state·timer·이미지·환경변수는 변경하지 않았다.
 
 검증: 전체 suite **2,327 passed, 기존 warning 9건**. 실행 중 독립 프로세스 lock 경합 테스트가 1회 실패했으나 단독 재실행 통과했고, 다음 전체 suite도 통과했다. 마지막 `verify` 추가 후 관련 144개 테스트, Ruff(Worker/core), mypy(Worker 52 source files), format, `git diff --check` 통과.
+
+### 운영 적용 전 읽기 전용 재실사 (2026-10-07)
+
+현재 운영 stable ID는 `g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`로 이전 조사와 동일하다. 최신 `migrate --dry-run`도 **레거시 1,818 + generation-only 3,354 = 총 5,172 variant**, stable OCR **5,512문서 전부 매핑**, 충돌 PDF 키 87개로 동일했다. WebDAV 쓰기는 없었다. `/var/lib/cardrag-worker`가 있는 파일시스템은 392G 중 87G 사용 가능(78% 사용)으로 관측했다.
+
+별도 운영 이슈를 확인했다. 2026-10-07 03:00 예약 Worker는 신한카드 공지 페이지 발견 중 `httpx.ReadError`로 03:05에 실패했고 systemd service가 `failed`인 상태다. timer는 계속 `active`이며 다음 예약은 2026-10-08 03:00 KST다. 현재 호스트에서 같은 도메인의 홈·공지·모바일 페이지를 각각 읽기 전용 GET으로 확인했으나 모두 TLS 연결 뒤 약 4초에 원격 연결이 reset됐다. 이는 007 코드 적용 전 현재 운영 이미지에서 일어난 수집 네트워크 오류다. stable OCR/WebDAV 이전 수치는 그대로이며 자료 손실 징후는 관측하지 못했다. **외부 수집이 회복되거나 운영 배치의 실패 처리 방침이 결정되기 전에는 007 첫 run 결과를 기능 검증으로 해석하지 않는다.**
+
+### 배포 후보 이미지와 단계 6 실행 순서
+
+현재 브랜치 `ccae2c3`에서 운영 교체 없이 로컬 후보 이미지를 빌드했다. `cardrag-mcp:007-candidate`는 `sha256:6ae4f96a996f4e4c5737aece540bec1a8d54749f67c677a20120a286681416a8`(약 265MB), `cardrag-worker:007-candidate`는 `sha256:5d4ae0136b0341920077a45028a1487c8e7772631010e34de594e2398fda0b9a`(약 3.63GB)다. 두 이미지 모두 revision label이 `ccae2c3`이다. 격리 실행에서 MCP import, Worker `ocr-cache --help`, OpenCode `--version`(1.18.34)이 통과했다. 이미지는 로컬에만 있으며 운영 Compose는 이 태그를 가리키지 않는다.
+
+PLAN §6 단계 6의 승인 후 실행 순서: (1) 신한카드 수집 경로의 복구와 현재 예약 배치 실패 원인 확인, (2) timer 중지 및 Worker 미실행 확인, (3) 새 MCP 이미지 먼저 활성화, (4) 새 Worker 이미지로 `migrate --dry-run`을 재확인하고 **그때의 stable ID**를 지정해 `migrate --apply --confirm-stable-generation` 실행, (5) `ocr-cache verify`에서 전체 variant와 stable 5,512문서 대응 확인, (6) 새 Worker의 첫 run에서 기존 문서 OCR 공급자 호출 0건·서비스 중 OCR SHA 불변·새 generation 게시를 확인, (7) timer 재개. 새 PDF가 발견되면 해당 문서의 OCR 호출은 별도로 집계한다. 전체 run 또는 데이터 게시가 실패하면 기존 이미지와 설정으로 되돌리고, 추가된 content variant는 불변 원본과 함께 남겨 재시도한다. PLAN §6 단계 7의 OpenCode 운영 활성화는 이 단계의 인수 후 별도 승인에 따른다.
