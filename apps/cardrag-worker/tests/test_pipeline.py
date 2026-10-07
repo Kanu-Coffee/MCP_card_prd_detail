@@ -3700,7 +3700,10 @@ async def test_pdf_acquisition_failure_or_cancel_drains_requests_without_checkpo
         await asyncio.wait_for(both_started.wait(), timeout=3)
         if cancel:
             task.cancel()
-        with pytest.raises(asyncio.CancelledError if cancel else httpx.ConnectError):
+        with pytest.raises(
+            asyncio.CancelledError if cancel else RuntimeError,
+            match=None if cancel else "all issuer collection attempts failed",
+        ):
             await asyncio.wait_for(task, timeout=3)
         assert (active, drained) == (0, 2)
         assert ocr.calls == 0

@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import stat
 import struct
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, nullcontext, suppress
@@ -145,6 +146,7 @@ from .exporter_v5 import (
     ViewSourceSpanInput,
     unexpected_v5_integrity_errors,
 )
+from .issuer_collection import IssuerCollectionError, IssuerCollectionOutcome, origin_failure
 from .issuer_http import create_issuer_client
 from .ocr import (
     OCRCachePublicationError,
@@ -694,6 +696,8 @@ class PipelineResult:
     pdf_cache_pruned_objects: int = 0
     pdf_cache_pruned_bytes: int = 0
     pdf_cache_prune_error: str | None = None
+    collection_status: str = "complete"
+    failed_issuers: tuple[str, ...] = ()
     ocr_cache_publication_deferred: int = 0
     retired_count: int = 0
     retirement_candidate_count: int = 0
@@ -718,6 +722,11 @@ class _ProcessedDocument:
     structure_artifact: StructureArtifact | None = None
     embedding_views: tuple[DerivedView, ...] = ()
     structure_fallback_reason_code: StructureFallbackReasonCode | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuerSkippedDownload:
+    source: SourceRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -1910,17 +1919,29 @@ class WorkerPipeline:
         pdf_concurrency: int = 8,
         pdf_concurrency_per_issuer: int = 2,
         local_processing_workers: int = 4,
+        issuer_discovery_concurrency: int = 4,
+        issuer_discovery_timeout_seconds: float = 300,
         lock_held: bool = False,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
         for name, value, maximum in (
+            ("issuer_discovery_concurrency", issuer_discovery_concurrency, 8),
             ("pdf_concurrency", pdf_concurrency, 32),
             ("pdf_concurrency_per_issuer", pdf_concurrency_per_issuer, 8),
             ("local_processing_workers", local_processing_workers, 8),
         ):
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be an integer between 1 and {maximum}")
+        if not math.isfinite(issuer_discovery_timeout_seconds) or issuer_discovery_timeout_seconds <= 0:
+            raise ValueError("issuer discovery timeout must be finite and positive")
+        self.issuer_discovery_concurrency = issuer_discovery_concurrency
+        self.issuer_discovery_timeout_seconds = issuer_discovery_timeout_seconds
+        self._issuer_outcomes: dict[str, IssuerCollectionOutcome] = {}
+        self._unsupported_count = 0
+        self._carried_ocr_failures: dict[str, GenerationOCRFailure] = {}
+        self._carried_document_ids: set[str] = set()
+        self._deferred_reprocess_ids: set[str] = set()
         self.lock_held = lock_held
         self.pdf_concurrency = pdf_concurrency
         self.pdf_concurrency_per_issuer = pdf_concurrency_per_issuer
@@ -2404,6 +2425,11 @@ class WorkerPipeline:
             cancellation_requested = False
             unexpected_failure: WorkerUnexpectedFailureError | None = None
             try:
+                self._issuer_outcomes = {}
+                self._unsupported_count = 0
+                self._carried_ocr_failures = {}
+                self._carried_document_ids = set()
+                self._deferred_reprocess_ids = set()
                 self._active_ocr_request = select_run_reprocess_request(self.state_dir, run_id)
                 freeze_content = getattr(self.ocr, "freeze_content_snapshot", None)
                 if callable(freeze_content):
@@ -2525,7 +2551,11 @@ class WorkerPipeline:
                 gc_status = "skipped_candidate"
             result = replace(
                 result,
-                unsupported_document_count=self.state.stage_status_count(run_id, "download", "skipped"),
+                unsupported_document_count=self._unsupported_count,
+                collection_status="degraded"
+                if any(o.failed for o in self._issuer_outcomes.values())
+                else "complete",
+                failed_issuers=tuple(o.issuer for o in self._issuer_outcomes.values() if o.failed),
                 gc_status=gc_status,
                 gc_deleted=gc_deleted,
                 gc_error=gc_error,
@@ -2533,7 +2563,11 @@ class WorkerPipeline:
                 retirement_candidate_count=self._corpus_gate_counts.get("candidates", 0),
             )
             self._record_corpus_baseline(result)
-            if self._active_ocr_request is not None and result.status == "succeeded":
+            if (
+                self._active_ocr_request is not None
+                and result.status == "succeeded"
+                and not self._deferred_reprocess_ids
+            ):
                 try:
                     if result.generation_id is None:
                         raise ValueError("reprocess succeeded without generation ID")
@@ -2753,6 +2787,9 @@ class WorkerPipeline:
                 policy=policy,
                 baseline_total=len(prior.entries),
                 ledger=ledger,
+                frozen_issuers=frozenset(
+                    code for code, result in self._issuer_outcomes.items() if result.failed
+                ),
                 absent=tuple(absent.values()),
                 durable_ok=durable,
                 lineage_absent=lineage_absent,
@@ -2850,6 +2887,237 @@ class WorkerPipeline:
             # neither logged nor retained in an exception chain.
             return None
 
+    @property
+    def _has_active_reprocess_targets(self) -> bool:
+        return self._active_ocr_request is not None and any(
+            target.document_id not in self._deferred_reprocess_ids
+            for target in self._active_ocr_request.targets
+        )
+
+    def _write_issuer_collection(self, run_id: str) -> None:
+        outcomes = tuple(self._issuer_outcomes.values())
+        failed = sum(item.failed for item in outcomes)
+        successful = sum(item.download_status == "succeeded" for item in outcomes)
+        status = "failed" if failed == len(outcomes) else "degraded" if failed else "complete"
+        self.performance.set("collection_status", status)
+        self.performance.set("collection_failed_issuers", failed)
+        self.performance.set("collection_successful_issuers", successful)
+        _atomic_write(
+            self.state_dir / "runs" / run_id / "reports" / "issuer-collection.json",
+            canonical_json_bytes(
+                {
+                    "schema_version": "cardrag.issuer-collection.v1",
+                    "run_id": run_id,
+                    "collection_status": status,
+                    "terminal": all(
+                        o.download_status in {"succeeded", "failed", "skipped"} for o in outcomes
+                    ),
+                    "issuers": [o.payload() for o in outcomes],
+                    "deferred_reprocess_document_ids": sorted(self._deferred_reprocess_ids),
+                }
+            ),
+        )
+
+    async def _carry_failed_issuers(
+        self, run_id: str, expected_pointer: bytes | None
+    ) -> tuple[tuple[_AcquiredDocument, ...], tuple[UnsupportedProductRecord, ...]]:
+        """Rebuild inputs from the served database, without checking failed origins."""
+        if await _observed_pointer_bytes(self.webdav) != expected_pointer:
+            raise RuntimeError("stable changed during issuer collection")
+        current = await self.webdav.validated_current_generation()
+        if current is None:
+            if expected_pointer is not None:
+                raise RuntimeError("cannot carry from an invalid stable generation")
+            return (), ()
+        body = await self.webdav.get_bytes(
+            generation_manifest_path(current.generation_id), max_bytes=MAX_GENERATION_MANIFEST_BYTES
+        )
+        if body is None:
+            raise RuntimeError("stable manifest missing during issuer carry")
+        manifest = GenerationManifest.model_validate_json(body)
+        if (
+            manifest.canonical_bytes() != body
+            or manifest.generation_id != current.generation_id
+            or manifest.corpus_sha256 != current.corpus_sha256
+            or manifest.contract_sha256 != current.contract_sha256
+        ):
+            raise RuntimeError("stable manifest binding changed during issuer carry")
+        failed = {code for code, result in self._issuer_outcomes.items() if result.failed}
+        if not failed.intersection(manifest.issuer_codes):
+            return (), ()
+        # Prefer the one retained serving DB. No corpus/state clone is required.
+        reference = manifest.serving_database
+        database: Path | None = None
+        for retained_id in self.state.retained_publication_run_ids(limit=max(2, self.retained_generations)):
+            seal_path = self.state_dir / "runs" / retained_id / "sealed" / "publish.json"
+            if not seal_path.is_file() or seal_path.is_symlink():
+                continue
+            sealed = json.loads(seal_path.read_bytes())
+            if sealed.get("generation_id") != manifest.generation_id:
+                continue
+            path = Path(str(sealed.get("database_path") or ""))
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.resolve().is_relative_to((self.state_dir / "runs").resolve())
+                and path.stat().st_size == reference.size_bytes
+                and await to_thread_fenced(sha256_file, path) == (reference.sha256, reference.size_bytes)
+            ):
+                database = path
+                break
+        if database is None:
+            database = self.state_dir / "issuer-carry" / f"{reference.sha256}.sqlite3"
+            database.parent.mkdir(parents=True, exist_ok=True)
+            if database.is_symlink():
+                raise RuntimeError("unsafe issuer carry database")
+            if not (
+                database.is_file()
+                and database.stat().st_size == reference.size_bytes
+                and await to_thread_fenced(sha256_file, database) == (reference.sha256, reference.size_bytes)
+            ):
+                if shutil.disk_usage(database.parent).free < reference.size_bytes + 2 * 1024**3:
+                    raise RuntimeError("insufficient capacity for stable carry database")
+                await self._download_carry_artifact(reference, database)
+        known = _known_snapshot_sources(
+            self.state, self.adapters, (), seed_ledger=load_state_seed_ledger(self.state_dir)
+        )
+        manifest_docs = {doc.document_id: doc for doc in manifest.documents if doc.issuer in failed}
+        rows: list[dict[str, Any]]
+        unsupported_rows: list[dict[str, Any]]
+        with sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            tables = {
+                str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "contract_revisions" in tables:
+                rows = [
+                    dict(row)
+                    for row in connection.execute("""SELECT r.*, p.issuer, s.document_id AS supersedes_document_id
+                    FROM contract_revisions r JOIN product_lineages p USING(product_lineage_id)
+                    LEFT JOIN contract_revisions s ON r.supersedes_revision_id=s.contract_revision_id""")
+                    if row["issuer"] in failed
+                ]
+            else:
+                rows = [
+                    dict(row)
+                    for row in connection.execute("SELECT * FROM documents")
+                    if row["issuer"] in failed
+                ]
+            unsupported_rows = (
+                [
+                    dict(row)
+                    for row in connection.execute("SELECT * FROM unsupported_products")
+                    if row["issuer"] in failed
+                ]
+                if "unsupported_products" in tables
+                else []
+            )
+        by_id = {str(row["document_id"]): row for row in rows}
+        # v5 OCR-failed documents are in a separate table and not contract_revisions.
+        missing = set(manifest_docs) - set(by_id)
+        if missing:
+            with sqlite3.connect(
+                f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                for row in connection.execute("SELECT * FROM ocr_failed_products"):
+                    if row["document_id"] in missing:
+                        by_id[str(row["document_id"])] = dict(row)
+        if set(by_id) != set(manifest_docs):
+            raise RuntimeError("stable database and manifest disagree on carried documents")
+        carried: list[_AcquiredDocument] = []
+        for document_id, document in sorted(manifest_docs.items()):
+            row = by_id[document_id]
+            source = known.get(str(row.get("source_id") or ""))
+            if source is None:
+                candidates = [s for s in known.values() if s.document_id(document.pdf.sha256) == document_id]
+                if len(candidates) != 1:
+                    raise RuntimeError("carried source identity is unavailable or ambiguous")
+                source = candidates[0]
+            if source.issuer != document.issuer or source.document_id(document.pdf.sha256) != document_id:
+                raise RuntimeError("carried source identity disagrees with stable document")
+            path = self.pdf_cache.object_path(document.pdf.sha256)
+            if not path.exists():
+                with self.pdf_cache.temporary_download_path() as temporary:
+                    await self._download_carry_artifact(document.pdf, temporary)
+                    cached = self.pdf_cache.ingest(
+                        temporary,
+                        expected_sha256=document.pdf.sha256,
+                        expected_size_bytes=document.pdf.size_bytes,
+                        expected_page_count=document.page_count,
+                    )
+            else:
+                cached = self.pdf_cache.ingest(
+                    path,
+                    expected_sha256=document.pdf.sha256,
+                    expected_size_bytes=document.pdf.size_bytes,
+                    expected_page_count=document.page_count,
+                )
+            pdf = DownloadedPDF(
+                path=cached.path,
+                sha256=cached.sha256,
+                size_bytes=cached.size_bytes,
+                page_count=cached.page_count,
+                final_url=source.source_url,
+            )
+            temporal_status = str(row.get("temporal_status", "current"))
+            if temporal_status not in {"current", "superseded", "ambiguous"}:
+                raise RuntimeError("stable carry temporal status is invalid")
+            carried.append(
+                _AcquiredDocument(
+                    source,
+                    pdf,
+                    temporal_status=cast(TemporalStatusV5, temporal_status),
+                    supersedes_document_id=row.get("supersedes_document_id"),
+                    is_historical=temporal_status != "current",
+                )
+            )
+            if document.ocr_failure is not None:
+                self._carried_ocr_failures[document_id] = document.ocr_failure
+            outcome = self._issuer_outcomes[document.issuer]
+            outcome.carried_count += 1
+            outcome.carry_generation_id = manifest.generation_id
+        unsupported: list[UnsupportedProductRecord] = []
+        for row in unsupported_rows:
+            payload = json.loads(row["source_payload_json"])
+            snapshot = _restore_snapshot(
+                {
+                    "contract_version": "cardrag.source-snapshot.v1",
+                    "issuer": row["issuer"],
+                    "parser_version": "stable-carry",
+                    "records": [payload],
+                },
+                observed_at=manifest.created_at,
+                expected_issuer=row["issuer"],
+                expected_parser_version="stable-carry",
+            )
+            source = snapshot.records[0]
+            if source.source_id != row["source_id"]:
+                raise RuntimeError("stable DRM source identity is invalid")
+            unsupported.append(
+                UnsupportedProductRecord(
+                    source, row["protected_sha256"], row["protected_size_bytes"], row["protected_magic"]
+                )
+            )
+        if await _observed_pointer_bytes(self.webdav) != expected_pointer:
+            raise RuntimeError("stable changed while reconstructing carried inputs")
+        return tuple(carried), tuple(unsupported)
+
+    async def _download_carry_artifact(self, reference: ArtifactRef, destination: Path) -> None:
+        if isinstance(self.webdav, WebDAVClient):
+            await to_thread_fenced(
+                self.webdav.core.download,
+                reference.path,
+                destination.resolve(),
+                expected_sha256=reference.sha256,
+                expected_size_bytes=reference.size_bytes,
+            )
+        else:
+            body = await self.webdav.get_bytes(reference.path, max_bytes=reference.size_bytes)
+            if body is None or len(body) != reference.size_bytes or sha256_bytes(body) != reference.sha256:
+                raise RuntimeError("carried artifact byte identity is invalid")
+            _atomic_write(destination, body)
+
     async def _run_locked(self, run_id: str, *, refresh_sources: bool = False) -> PipelineResult:
         run_dir = self.state_dir / "runs" / run_id
         seal_path = run_dir / "sealed" / "publish.json"
@@ -2862,86 +3130,132 @@ class WorkerPipeline:
                 raise RuntimeError("resume publication seal is not a JSON object")
             deferred_seal = sealed
 
-        snapshots = []
-        async with create_issuer_client(
-            hyundai_legacy_tls=any(adapter.spec.code == "hyundai" for adapter in self.adapters)
-        ) as client:
-            for adapter in self.adapters:
+        self._issuer_outcomes = {
+            a.spec.code: IssuerCollectionOutcome(
+                a.spec.code,
+                last_successful_collection_at=self.state.last_successful_snapshot_observed_at(a.spec.code),
+            )
+            for a in self.adapters
+        }
+        collection_pointer = await _observed_pointer_bytes(self.webdav)
+
+        async def collect_discovery(adapter: IssuerAdapter, _slot: int) -> SourceSnapshot | None:
+            outcome = self._issuer_outcomes[adapter.spec.code]
+            started = time.monotonic()
+            # A client belongs to one issuer, including cookies and Hyundai's exact TLS exception.
+            async with create_issuer_client(hyundai_legacy_tls=adapter.spec.code == "hyundai") as client:
                 limited = RateLimitedClient(client, self.limiters[adapter.spec.code])
 
-                async def discover(
-                    current_adapter: IssuerAdapter = adapter,
-                    current_client: RateLimitedClient = limited,
-                ) -> SourceSnapshot:
-                    return await current_adapter.discover_current(current_client)  # type: ignore[arg-type]
+                async def discover() -> SourceSnapshot:
+                    try:
+                        snapshot = await adapter.discover_current(limited)  # type: ignore[arg-type]
+                        if snapshot.issuer != adapter.spec.code:
+                            raise ValueError("issuer snapshot identity changed")
+                        if len(snapshot.records) < adapter.spec.minimum_records:
+                            raise ValueError("issuer discovery below minimum records")
+                        baseline = self.state.last_successful_snapshot_count(snapshot.issuer)
+                        if (
+                            baseline is not None
+                            and len(snapshot.records) < baseline * adapter.spec.minimum_retention_ratio
+                        ):
+                            raise ValueError("issuer discovery below successful retention ratio")
+                        select_current(snapshot.records)
+                        return snapshot
+                    except Exception as exc:
+                        raise origin_failure(exc) from None
 
                 stage = self.state.get_stage(run_id, f"issuer-{adapter.spec.code}", "discovery")
                 stored = self.state.run_snapshot(run_id, adapter.spec.code)
-                if (
-                    not refresh_sources
-                    and stage is not None
-                    and stage.status == "succeeded"
-                    and stored is not None
-                ):
-                    snapshot = _restore_snapshot(
-                        stored[0],
-                        observed_at=stored[1],
-                        expected_issuer=adapter.spec.code,
-                        expected_parser_version=adapter.parser_version,
+                try:
+                    if (
+                        not refresh_sources
+                        and stage is not None
+                        and stage.status == "succeeded"
+                        and stored is not None
+                    ):
+                        snapshot = _restore_snapshot(
+                            stored[0],
+                            observed_at=stored[1],
+                            expected_issuer=adapter.spec.code,
+                            expected_parser_version=adapter.parser_version,
+                        )
+                    else:
+                        async with asyncio.timeout(self.issuer_discovery_timeout_seconds):
+                            snapshot = await self._finite_stage(
+                                run_id=run_id,
+                                document_id=f"issuer-{adapter.spec.code}",
+                                name="discovery",
+                                operation=discover,
+                                maximum_attempts=adapter.spec.maximum_retries,
+                                retry_base_seconds=adapter.spec.retry_base_seconds,
+                            )
+                except (IssuerCollectionError, TimeoutError) as exc:
+                    if isinstance(exc, TimeoutError):
+                        exc = IssuerCollectionError("issuer_discovery_deadline", "TimeoutError")
+                        self.state.stage_terminal_failed(
+                            run_id, f"issuer-{adapter.spec.code}", "discovery", exc.reason_code
+                        )
+                    outcome.discovery_status = "failed"
+                    outcome.download_status = "skipped"
+                    outcome.reason_code = exc.reason_code
+                    outcome.exception_class = exc.exception_class
+                    stage = self.state.get_stage(run_id, f"issuer-{adapter.spec.code}", "discovery")
+                    outcome.attempts = 0 if stage is None else stage.attempt_count
+                    outcome.elapsed_seconds = round(time.monotonic() - started, 3)
+                    self._write_issuer_collection(run_id)
+                    LOGGER.warning(
+                        "issuer collection failed issuer=%s stage=discovery reason_code=%s",
+                        outcome.issuer,
+                        outcome.reason_code,
                     )
-                else:
-                    snapshot = await self._finite_stage(
-                        run_id=run_id,
-                        document_id=f"issuer-{adapter.spec.code}",
-                        name="discovery",
-                        operation=discover,
-                        maximum_attempts=adapter.spec.maximum_retries,
-                        retry_base_seconds=adapter.spec.retry_base_seconds,
-                    )
-                if len(snapshot.records) < adapter.spec.minimum_records:
-                    raise RuntimeError(
-                        f"{snapshot.issuer} discovery returned {len(snapshot.records)} records; "
-                        f"minimum is {adapter.spec.minimum_records}"
-                    )
-                baseline = self.state.last_successful_snapshot_count(snapshot.issuer)
-                if (
-                    baseline is not None
-                    and len(snapshot.records) < baseline * adapter.spec.minimum_retention_ratio
-                ):
-                    raise RuntimeError(
-                        f"{snapshot.issuer} discovery count {len(snapshot.records)} fell below "
-                        f"{adapter.spec.minimum_retention_ratio:.2f} of successful baseline {baseline}"
-                    )
-                snapshots.append(snapshot)
-                LOGGER.info(
-                    "discovery completed issuer=%s records=%d warnings=%d",
-                    snapshot.issuer,
-                    len(snapshot.records),
-                    len(snapshot.warnings),
+                    return None
+            self.state.record_snapshot(
+                run_id=run_id,
+                snapshot_id=snapshot.snapshot_id,
+                issuer=snapshot.issuer,
+                source_sha256=snapshot.snapshot_id,
+                record_count=len(snapshot.records),
+                payload=snapshot.payload,
+            )
+            outcome.discovery_status = "succeeded"
+            outcome.discovered_count = len(snapshot.records)
+            outcome.elapsed_seconds = round(time.monotonic() - started, 3)
+            outcome.origin_freshness_at = snapshot.finished_at.isoformat()
+            stage = self.state.get_stage(run_id, f"issuer-{adapter.spec.code}", "discovery")
+            outcome.attempts = 0 if stage is None else stage.attempt_count
+            LOGGER.info(
+                "discovery completed issuer=%s records=%d warnings=%d",
+                snapshot.issuer,
+                len(snapshot.records),
+                len(snapshot.warnings),
+            )
+            if snapshot.warnings:
+                _atomic_write(
+                    run_dir / "discovery" / f"{snapshot.issuer}.warnings.json",
+                    canonical_json_bytes(
+                        {
+                            "issuer": snapshot.issuer,
+                            "snapshot_id": snapshot.snapshot_id,
+                            "warnings": list(snapshot.warnings),
+                        }
+                    ),
                 )
-                if snapshot.warnings:
-                    # Keep operator-visible exclusions outside the immutable
-                    # source snapshot identity, including across resumed runs.
-                    _atomic_write(
-                        run_dir / "discovery" / f"{snapshot.issuer}.warnings.json",
-                        canonical_json_bytes(
-                            {
-                                "issuer": snapshot.issuer,
-                                "snapshot_id": snapshot.snapshot_id,
-                                "warnings": list(snapshot.warnings),
-                            }
-                        ),
-                    )
-                    for warning in snapshot.warnings:
-                        LOGGER.warning("discovery warning issuer=%s: %s", snapshot.issuer, warning)
-                self.state.record_snapshot(
-                    run_id=run_id,
-                    snapshot_id=snapshot.snapshot_id,
-                    issuer=snapshot.issuer,
-                    source_sha256=snapshot.snapshot_id,
-                    record_count=len(snapshot.records),
-                    payload=snapshot.payload,
-                )
+                for warning in snapshot.warnings:
+                    LOGGER.warning("discovery warning issuer=%s: %s", snapshot.issuer, warning)
+            self._write_issuer_collection(run_id)
+            return snapshot
+
+        discoveries = await bounded_ordered_map(
+            self.adapters,
+            collect_discovery,
+            concurrency=self.issuer_discovery_concurrency,
+            group_key=lambda adapter: adapter.spec.code,
+            per_group=1,
+        )
+        snapshots = [snapshot for snapshot in discoveries if snapshot is not None]
+        self._write_issuer_collection(run_id)
+        if not snapshots:
+            raise RuntimeError("all issuer collection attempts failed")
         records = select_current([record for snapshot in snapshots for record in snapshot.records])
         contract_sha256 = self.contract_sha256
 
@@ -3079,10 +3393,21 @@ class WorkerPipeline:
                 for _ in range(min(self.pdf_concurrency, len(records)))
             ]
 
+            download_tasks: dict[str, set[asyncio.Task[Any]]] = {a.spec.code: set() for a in self.adapters}
+
             async def acquire_source(
                 source: SourceRecord, slot: int
-            ) -> _AcquiredDocument | UnsupportedProductRecord:
+            ) -> _AcquiredDocument | UnsupportedProductRecord | _IssuerSkippedDownload:
                 nonlocal completed
+                issuer_outcome = self._issuer_outcomes[source.issuer]
+                if issuer_outcome.failed:
+                    self.state.ensure_stage(run_id, source.source_id, "download", max_attempts=1)
+                    self.state.stage_skipped(
+                        run_id, source.source_id, "download", "issuer_download_quarantined"
+                    )
+                    completed += 1
+                    log_pdf_progress(completed)
+                    return _IssuerSkippedDownload(source)
                 adapter = next(item for item in self.adapters if item.spec.code == source.issuer)
                 client = clients[slot]
                 # Each document's prepare/download handshake owns its cookie jar.
@@ -3133,7 +3458,10 @@ class WorkerPipeline:
                         source.source_id,
                     )
                     with self.performance.measure("pdf_prepare_seconds"):
-                        request = await adapter.prepare_download(current_client, source)  # type: ignore[arg-type]
+                        try:
+                            request = await adapter.prepare_download(current_client, source)  # type: ignore[arg-type]
+                        except Exception as exc:
+                            raise origin_failure(exc) from None
                     if cached is not None and (cached.etag is not None or cached.last_modified is not None):
                         headers = {
                             key: value
@@ -3149,11 +3477,16 @@ class WorkerPipeline:
                     with self.pdf_cache.temporary_download_path() as destination:
                         try:
                             with self.performance.measure("pdf_download_seconds"):
-                                downloaded = await downloader.download(
-                                    current_client,  # type: ignore[arg-type]
-                                    request,
-                                    destination,
-                                )
+                                try:
+                                    downloaded = await downloader.download(
+                                        current_client,  # type: ignore[arg-type]
+                                        request,
+                                        destination,
+                                    )
+                                except (PDFNotModified, ProtectedDocumentError):
+                                    raise
+                                except Exception as exc:
+                                    raise origin_failure(exc) from None
                         except PDFNotModified as not_modified:
                             if cached is None:  # pragma: no cover - downloader guards this too
                                 raise RuntimeError("origin returned not-modified for a cache miss") from None
@@ -3233,6 +3566,10 @@ class WorkerPipeline:
                         and current_allowance.size_bytes == exc.size_bytes
                     )
 
+                task = asyncio.current_task()
+                if task is None:
+                    raise RuntimeError("PDF acquisition has no owning task")
+                download_tasks[source.issuer].add(task)
                 try:
                     pdf = await self._finite_stage(
                         run_id=run_id,
@@ -3243,6 +3580,36 @@ class WorkerPipeline:
                         retry_base_seconds=adapter.spec.retry_base_seconds,
                         non_retryable_predicate=lambda exc: isinstance(exc, ProtectedDocumentError),
                     )
+                except asyncio.CancelledError as exc:
+                    if exc.args != ("issuer_download_quarantined",) or not issuer_outcome.failed:
+                        raise
+                    self.state.stage_skipped(
+                        run_id, source.source_id, "download", "issuer_download_quarantined"
+                    )
+                    completed += 1
+                    task.uncancel()
+                    log_pdf_progress(completed)
+                    return _IssuerSkippedDownload(source)
+                except IssuerCollectionError as exc:
+                    if not issuer_outcome.failed:
+                        issuer_outcome.download_status = "failed"
+                        issuer_outcome.reason_code = exc.reason_code
+                        issuer_outcome.exception_class = exc.exception_class
+                        issuer_outcome.origin_freshness_at = None
+                        for sibling in tuple(download_tasks[source.issuer]):
+                            if sibling is not task:
+                                sibling.cancel("issuer_download_quarantined")
+                        stage = self.state.get_stage(run_id, source.source_id, "download")
+                        issuer_outcome.attempts += 0 if stage is None else stage.attempt_count
+                        self._write_issuer_collection(run_id)
+                        LOGGER.warning(
+                            "issuer collection failed issuer=%s stage=download reason_code=%s",
+                            source.issuer,
+                            exc.reason_code,
+                        )
+                    completed += 1
+                    log_pdf_progress(completed)
+                    return _IssuerSkippedDownload(source)
                 except ProtectedDocumentError as exc:
                     if not expected_protected(exc):
                         LOGGER.warning(
@@ -3270,6 +3637,9 @@ class WorkerPipeline:
                     outcome: _AcquiredDocument | UnsupportedProductRecord = unsupported_result
                 else:
                     outcome = _AcquiredDocument(source, pdf)
+                finally:
+                    download_tasks[source.issuer].discard(task)
+                issuer_outcome.acquired_count += 1
                 completed += 1
                 log_pdf_progress(completed)
                 return outcome
@@ -3291,11 +3661,38 @@ class WorkerPipeline:
                 raise RuntimeError("PDF acquisition result changed its source identity")
             stage = self.state.get_stage(run_id, source.source_id, "download")
             expected_status = "skipped" if isinstance(outcome, UnsupportedProductRecord) else "succeeded"
+            if isinstance(outcome, _IssuerSkippedDownload):
+                if stage is None or stage.status not in {"failed", "skipped"}:
+                    raise RuntimeError("quarantined PDF has no terminal stage")
+                continue
             if stage is None or stage.status != expected_status:
                 raise RuntimeError("PDF acquisition result has no matching terminal stage")
-        acquired = tuple(outcome for outcome in acquisition_results if isinstance(outcome, _AcquiredDocument))
+        successful_issuers = {code for code, outcome in self._issuer_outcomes.items() if not outcome.failed}
+        for code in self._issuer_outcomes:
+            fresh = next((snapshot for snapshot in snapshots if snapshot.issuer == code), None)
+            self.state.record_issuer_collection(
+                run_id,
+                code,
+                succeeded=code in successful_issuers,
+                record_count=None if fresh is None else len(fresh.records),
+            )
+        for snapshot in snapshots:
+            if snapshot.issuer in successful_issuers:
+                issuer_result = self._issuer_outcomes[snapshot.issuer]
+                issuer_result.download_status = "succeeded"
+                issuer_result.adopted_count = issuer_result.acquired_count
+        self._write_issuer_collection(run_id)
+        if not successful_issuers:
+            raise RuntimeError("all issuer collection attempts failed")
+        acquired = tuple(
+            outcome
+            for outcome in acquisition_results
+            if isinstance(outcome, _AcquiredDocument) and outcome.source.issuer in successful_issuers
+        )
         unsupported = [
-            outcome for outcome in acquisition_results if isinstance(outcome, UnsupportedProductRecord)
+            outcome
+            for outcome in acquisition_results
+            if isinstance(outcome, UnsupportedProductRecord) and outcome.source.issuer in successful_issuers
         ]
         self.performance.set("pdf_acquired_count", len(acquired))
         self.performance.set("pdf_unsupported_count", len(unsupported))
@@ -3411,6 +3808,34 @@ class WorkerPipeline:
                         ),
                     )
                 )
+        if any(outcome.failed for outcome in self._issuer_outcomes.values()):
+            carried, carried_unsupported = await self._carry_failed_issuers(run_id, collection_pointer)
+            acquired = tuple(
+                sorted(
+                    (*acquired, *carried),
+                    key=lambda item: (
+                        item.source.issuer,
+                        item.source.product_code,
+                        item.source.effective_date,
+                        item.source.source_version,
+                        item.pdf.sha256,
+                    ),
+                )
+            )
+            unsupported.extend(carried_unsupported)
+            self._carried_document_ids = {item.source.document_id(item.pdf.sha256) for item in carried}
+            if self._active_ocr_request is not None:
+                self._deferred_reprocess_ids = {
+                    t.document_id for t in self._active_ocr_request.targets
+                } & self._carried_document_ids
+            self._write_issuer_collection(run_id)
+        self._unsupported_count = len(unsupported)
+        LOGGER.info(
+            "collection barrier completed successful_issuers=%s failed_issuers=%s carried_documents=%d",
+            ",".join(sorted(successful_issuers)),
+            ",".join(sorted(code for code, outcome in self._issuer_outcomes.items() if outcome.failed)),
+            len(self._carried_document_ids),
+        )
         document_ids = tuple(item.source.document_id(item.pdf.sha256) for item in acquired)
         if len(document_ids) != len(set(document_ids)):
             raise RuntimeError("PDF acquisition produced duplicate document identities")
@@ -3557,7 +3982,9 @@ class WorkerPipeline:
                     ),
                 }
                 for source, outcome in zip(records, acquisition_results, strict=True)
+                if not isinstance(outcome, _IssuerSkippedDownload) and source.issuer in successful_issuers
             ],
+            "carried_document_ids": sorted(self._carried_document_ids),
             "documents": [
                 {
                     "document_id": document_id,
@@ -3619,6 +4046,8 @@ class WorkerPipeline:
                 for item in acquired
             }
             for target in self._active_ocr_request.targets:
+                if target.document_id in self._deferred_reprocess_ids:
+                    continue
                 if acquired_identity.get(target.document_id) != (
                     target.pdf_sha256,
                     target.pdf_size_bytes,
@@ -3679,7 +4108,7 @@ class WorkerPipeline:
                         if callable(inspect_new_variant)
                         else False
                     )
-                if new_by_pdf[pdf_identity]:
+                if new_by_pdf[pdf_identity] and document.document_id not in self._carried_document_ids:
                     new_content_variant_documents.add(document.document_id)
                 else:
                     transition_served_ocr[document.document_id] = (
@@ -3713,7 +4142,7 @@ class WorkerPipeline:
                     and current_remote.generation_id == validated_resume_seal.manifest.generation_id
                     and validated_resume_seal.ocr_cache_publication_deferred > 0
                 )
-                if not resume_seal_is_current_deferred or self._active_ocr_request is not None:
+                if not resume_seal_is_current_deferred or self._has_active_reprocess_targets:
                     return await finalize_pdf_activity(
                         await self._publish_sealed(
                             run_id,
@@ -3749,7 +4178,7 @@ class WorkerPipeline:
             current_remote.corpus_sha256 == corpus_sha256
             and current_remote.contract_sha256 == contract_sha256
             and current_remote.ocr_failed_document_count == 0
-            and self._active_ocr_request is None
+            and not self._has_active_reprocess_targets
             and not new_content_variant_documents
         )
         if (
@@ -3828,7 +4257,7 @@ class WorkerPipeline:
             )
         if current_remote is None and stable_body is not None:
             raise RuntimeError("remote stable generation is corrupt; refusing publication")
-        if existing is not None and current_remote is None and self._active_ocr_request is None:
+        if existing is not None and current_remote is None and not self._has_active_reprocess_targets:
             # Missing stable.json can be reconstructed from an exact seal.
             generation_id = str(existing["generation_id"])
             prior_seal_path = self.state_dir / "runs" / str(existing["run_id"]) / "sealed" / "publish.json"
@@ -4162,7 +4591,7 @@ class WorkerPipeline:
         completed_document_ids: set[str] = set()
         ocr_order = {item.source.document_id(item.pdf.sha256): index for index, item in enumerate(acquired)}
         reprocess_document_ids = (
-            {target.document_id for target in self._active_ocr_request.targets}
+            {target.document_id for target in self._active_ocr_request.targets} - self._deferred_reprocess_ids
             if self._active_ocr_request is not None
             else set()
         )
@@ -4181,6 +4610,43 @@ class WorkerPipeline:
             pdf = acquired_document.pdf
             document_id = source.document_id(pdf.sha256)
             ocr_output_dir = run_dir / "documents" / document_id / "ocr"
+
+            carried_failure = self._carried_ocr_failures.get(document_id)
+            if carried_failure is not None:
+                failed_documents.append(
+                    _OCRFailedDocument(
+                        record=OCRFailedProductRecord(
+                            document_id=document_id,
+                            issuer=source.issuer,
+                            product_code=source.product_code,
+                            product_name=source.product_name,
+                            title=source.product_name,
+                            pdf_sha256=pdf.sha256,
+                            pdf_size_bytes=pdf.size_bytes,
+                            page_count=pdf.page_count,
+                            reason_code=carried_failure.reason_code,
+                            reason=carried_failure.reason,
+                            attempts=carried_failure.attempts,
+                        ),
+                        pdf_path=pdf.path,
+                        is_historical=acquired_document.is_historical,
+                    )
+                )
+                ocr_failures.append(
+                    OCRFailureRecord(
+                        issuer=source.issuer,
+                        product_code=source.product_code,
+                        product_name=source.product_name,
+                        file_name=source.file_name,
+                        document_id=document_id,
+                        pdf_sha256=pdf.sha256,
+                        page_count=pdf.page_count,
+                        attempts=carried_failure.attempts,
+                        reason_code=carried_failure.reason_code,
+                        reason=carried_failure.reason,
+                    )
+                )
+                return
 
             prefetch = getattr(self.ocr, "prefetch_local_native", None)
             if (

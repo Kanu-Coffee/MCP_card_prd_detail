@@ -496,6 +496,8 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
 
 def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
     return {
+        "collection_status": result.collection_status,
+        "failed_issuers": list(result.failed_issuers),
         "run_id": result.run_id,
         "status": result.status,
         "generation_id": result.generation_id,
@@ -738,6 +740,8 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     ocr=resolver,  # type: ignore[arg-type]
                     embeddings=embeddings,
                     webdav=webdav,
+                    issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
+                    issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
                     pdf_concurrency=settings.pdf_concurrency,
                     pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
                     local_processing_workers=settings.local_processing_workers,

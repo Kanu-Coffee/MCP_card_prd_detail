@@ -300,6 +300,8 @@ class WorkerSettings:
     sqlite_cache_mib: int
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
+    issuer_discovery_concurrency: int = 4
+    issuer_discovery_timeout_seconds: float = 300
     webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
     external_ocr_allowed: bool = False
     pdf_cache_force_revalidate: bool = False
@@ -663,6 +665,10 @@ class WorkerSettings:
             pdf_concurrency_per_issuer=_bounded_int(
                 "CARDRAG_PDF_CONCURRENCY_PER_ISSUER", 2, minimum=1, maximum=8
             ),
+            issuer_discovery_concurrency=_bounded_int(
+                "CARDRAG_ISSUER_DISCOVERY_CONCURRENCY", 4, minimum=1, maximum=8
+            ),
+            issuer_discovery_timeout_seconds=_positive_float("CARDRAG_ISSUER_DISCOVERY_TIMEOUT_SECONDS", 300),
             local_processing_workers=_bounded_int(
                 "CARDRAG_LOCAL_PROCESSING_WORKERS", 4, minimum=1, maximum=8
             ),

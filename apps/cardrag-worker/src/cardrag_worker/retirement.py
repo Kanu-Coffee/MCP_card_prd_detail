@@ -427,6 +427,7 @@ def evaluate_retirements(
     durable_ok: dict[str, bool],
     lineage_absent: dict[str, bool],
     discovered_lineages: set[LineageKey],
+    frozen_issuers: frozenset[str] = frozenset(),
 ) -> RetirementOutcome:
     """Pure policy pass: classify each absent document and produce the new ledger.
 
@@ -449,6 +450,9 @@ def evaluate_retirements(
     effective_cap = max(1, min(grace_runs_cap, ratio_cap if baseline_total > 0 else grace_runs_cap))
 
     for item in ordered:
+        if item.issuer in frozen_issuers:
+            unjustified[item.document_id] = "issuer_collection_unavailable"
+            continue
         prior = previous.get(item.document_id)
         if prior is not None and prior.status == "reinstated":
             # Re-discovery then disappearance restarts grace continuity.
@@ -513,7 +517,11 @@ def evaluate_retirements(
 
     reinstated: list[str] = []
     for document_id, entry in previous.items():
-        if entry.status in {"candidate", "retired"} and entry.lineage_key in discovered_lineages:
+        if (
+            entry.issuer not in frozen_issuers
+            and entry.status in {"candidate", "retired"}
+            and entry.lineage_key in discovered_lineages
+        ):
             replacement = replace(
                 entry,
                 status="reinstated",

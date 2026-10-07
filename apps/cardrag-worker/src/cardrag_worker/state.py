@@ -291,6 +291,14 @@ CREATE TABLE IF NOT EXISTS run (
   error TEXT
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS issuer_collection (
+  run_id TEXT NOT NULL REFERENCES run(run_id),
+  issuer TEXT NOT NULL,
+  succeeded INTEGER NOT NULL CHECK(succeeded IN (0,1)),
+  record_count INTEGER CHECK(record_count >= 0),
+  observed_at TEXT,
+  PRIMARY KEY(run_id,issuer)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS snapshot (
   snapshot_id TEXT NOT NULL,
   run_id TEXT NOT NULL REFERENCES run(run_id),
@@ -1206,15 +1214,41 @@ class WorkerState:
                 ),
             )
 
-    def last_successful_snapshot_count(self, issuer: str) -> int | None:
+    def record_issuer_collection(
+        self, run_id: str, issuer: str, *, succeeded: bool, record_count: int | None = None
+    ) -> None:
+        self.connection.execute(
+            """INSERT OR REPLACE INTO issuer_collection (run_id,issuer,succeeded,record_count,observed_at)
+               VALUES (?,?,?,?,?)""",
+            (run_id, issuer, int(succeeded), record_count, _now().isoformat()),
+        )
+
+    def _last_successful_collection(self, issuer: str) -> sqlite3.Row | None:
+        # Snapshot IDs are content keys and can move to a later failed run.
+        # Keep each completed collection's count/time independently of that binding.
         row = self.connection.execute(
-            """SELECT s.record_count FROM snapshot s
-               JOIN run r ON r.run_id=s.run_id
-               WHERE s.issuer=? AND r.status IN ('succeeded','no_change')
+            """SELECT e.record_count,e.observed_at FROM (
+                 SELECT COALESCE(c.record_count,s.record_count) AS record_count,
+                        COALESCE(c.observed_at,s.observed_at) AS observed_at,c.run_id
+                 FROM issuer_collection c LEFT JOIN snapshot s ON s.run_id=c.run_id AND s.issuer=c.issuer
+                 WHERE c.issuer=? AND c.succeeded=1
+                 UNION ALL
+                 SELECT s.record_count,s.observed_at,s.run_id FROM snapshot s WHERE s.issuer=?
+                   AND NOT EXISTS (SELECT 1 FROM issuer_collection c WHERE c.run_id=s.run_id AND c.issuer=s.issuer)
+               ) e JOIN run r ON r.run_id=e.run_id
+               WHERE r.status IN ('succeeded','no_change') AND e.record_count IS NOT NULL
                ORDER BY COALESCE(r.finished_at,r.started_at) DESC LIMIT 1""",
-            (issuer,),
+            (issuer, issuer),
         ).fetchone()
+        return cast(sqlite3.Row | None, row)
+
+    def last_successful_snapshot_count(self, issuer: str) -> int | None:
+        row = self._last_successful_collection(issuer)
         return None if row is None else int(row["record_count"])
+
+    def last_successful_snapshot_observed_at(self, issuer: str) -> str | None:
+        row = self._last_successful_collection(issuer)
+        return None if row is None else str(row["observed_at"])
 
     def retained_publication_run_ids(self, *, limit: int = 2) -> tuple[str, ...]:
         if limit < 1:
