@@ -67,3 +67,7 @@ docker inspect cardrag-prod-008-first --format '{{.State.Status}} exit={{.State.
 ## 2026-10-07 — 운영 완료 후 최종 검증
 
 용량 확보 후 동일 run 재개가 21:40:32 KST에 exit 0으로 완료됐다. collection degraded(신한), 7 issuer 정상, 신한 931개 carry, 재개 OCR 호출 0 / 재사용 5,513개, 새 generation을 WebDAV stable 및 MCP에서 확인했다. 기존 공유 문서 5,511개의 PDF/OCR 바이트·신한 개정 행/검색 coverage 보존, 실제 상품·문서·페이지 HTTP 200을 검증했다. 롯데 1733 단종 후보 1개는 기존 정책에 따른 신규 목록 제외이며 원본 삭제는 없다. **008 핵심 기능 인수 가능**; 006 OpenCode 운영 활성화는 승인 전 미실행이다. 상세 결과·검증 한계는 [EXECUTOR_COMPLETION_20261007.md](EXECUTOR_COMPLETION_20261007.md), 오류 조치는 [EXECUTOR_RECOVERY_20261007.md](EXECUTOR_RECOVERY_20261007.md)를 참조한다. 추가 Worker 기동/장기 감시는 하지 않았다.
+
+## 2026-10-07 — OpenCode 운영 전환 승인 및 적용
+
+사용자의 별도 승인에 따라 OpenCode / alibaba-token-plan/qwen3.8-flash / medium으로 운영 overlay를 전환했다. 합성 1페이지 실호출 1회(8.57초), 실제 settings·WebDAV stable·cache/GC와 Compose 설정 검사 통과. 다음 2026-10-08 03시 timer부터 적용된다. 기존 키를 재사용하고 writable `/opt/cardrag`만 변경하여 sudo는 필요 없다. 추가 장기 Worker는 시작하지 않았다. 상세 수행·검증·rollback은 [EXECUTOR_OPENCODE_SWITCH_20261007.md](EXECUTOR_OPENCODE_SWITCH_20261007.md)에 기록했다. 앞선 보고서의 ‘OpenCode 미승인/미실행’ 상태는 이 시점의 승인 및 적용으로 해소됐다.
