@@ -99,3 +99,15 @@ controller의 문법 검사와 wrapper `shellcheck`는 통과했다. 백그라�
 실패 후 운영 WebDAV stable 포인터를 읽기 전용으로 확인했고 **`g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd` 그대로**다. MCP **healthy / ready HTTP 200**이며 기존 서비스가 유지된다. 앞서 이전·전량 검증된 **5,172 variant / 5,512 stable OCR 문서**의 성공 근거는 유효하다. 현재 새 배포 디렉터리와 추가형 캐시는 유지하며 원격 GC는 켜지 않는다. 정상 배치의 자동 반복 재기동은 수행하지 않았다.
 
 남은 단계는 **신한 수집 연결 복구 후 새 Worker 정상 run 1회**, 기존 동일 PDF OCR SHA/크기·호출 0·새 generation·MCP 반영 검증이다. 현재는 외부 수집 연결에서 막혀 FIX_01 완료/인수로 판정할 수 없다. 재개 전에 가벼운 신한 연결 확인으로 반복 실패를 피하고, 종료 컨테이너와 로그는 최종 확인까지 보존한다.
+
+## 2026-10-07 15:32 KST — 사용자 제공 모바일 URL 재검증 및 연결 복구 조사
+
+사용자가 직접 HTTP 호출·웹검색·필요시 네트워크 파싱 재점검을 지시하고 `https://www.shinhancard.com/mob/MOBFM12051N/MOBFM12051R01.shc?page=CRE`를 제공했다. 웹검색/공식 페이지 열람에서 query 없는 같은 모바일 경로가 **신한카드 공식 상품공시실의 약관(신용카드)**로 확인됐다. 공식 렌더링 텍스트에 `CRD_PD_GUI_NM`, `CRD_PD_GUI_BUL_D` 목록 템플릿과 PDF·더보기 기능이 나타난다. 참조: [공식 모바일 상품공시실](https://www.shinhancard.com/mob/MOBFM12051N/MOBFM12051R01.shc). 검색/열람 결과에는 캐시가 포함될 수 있으므로 이것을 운영 호스트의 현재 접속 성공 근거로 사용하지 않았다.
+
+- 운영 호스트에서 사용자 URL의 GET과 기존 모바일 AJAX `MOBFM12051R01C.ajax`의 POST(`nxtQyKey`, `crdTcd=0`, `crdPdGuiNm`, Referer/X-Requested-With)를 직접 실행했으나 **connection reset / HTTP 000**이었다. 응답 본문을 받지 못해 실제 JSON/HTML 파싱 비교는 할 수 없었다.
+- `m.shinhancard.com`, apex `shinhancard.com`, HTTP 모바일 URL, 공식 정적 PDF에서도 reset이었다. 검색에서 발견한 공식 `cardapply.shinhancard.com`도 별도 IP `210.112.177.198`에서 reset이었다. 검색에 나온 `cdnu.www.shinhancard.com`은 현재 DNS NXDOMAIN이며 대체 접속 경로로 채택하지 않았다.
+- local resolver와 Google DNS-over-HTTPS의 `www.shinhancard.com` 주소가 **210.112.177.1로 일치**했다. `openssl s_client`에서 **TLS 1.3 연결 수립 및 인증서 검증 OK**를 확인했다. 이전 TLS 1.2/HTTP2/User-Agent 변경도 reset이므로 DNS나 TLS 검증을 임의로 바꾸거나 끄지 않았다.
+- 설치된 Chromium을 일회성 별도 프로필로 실행하고 DevTools Network 이벤트를 수집했다. 모바일 문서 요청은 **`Network.loadingFailed: net::ERR_CONNECTION_RESET`**, HTTP response 이벤트 없음이었다. Chromium이 생성한 오류 페이지는 신한 HTML로 취급하지 않았다. 첫 시도는 호스트 AppArmor의 browser sandbox 제한으로 시작하지 못해, 진단용 공개 페이지에 한정한 headless 프로세스에서 sandbox 없이 재확인했다. 전역 설정·설치 패키지·사용자 브라우저 프로필은 변경하지 않았고 진단 브라우저는 종료했다.
+- 코드상 discovery는 여전히 PC 공지/목록을 사용하고 다운로드 refresh만 사용자 제공 모바일 페이지/JSON API를 사용한다. 전부 HTTP 응답 전 reset되는 현재 상태에서 discovery 경로만 교체해도 복구를 입증할 수 없으며, 검증되지 않은 source identity/파서 변경으로 기존 corpus를 흔들지 않았다.
+
+진단 요약과 문서 Network 이벤트는 `/opt/cardrag/007-31edb1d/operations/shinhan-connectivity-diagnostic.json`에 저장했다. **연결 복구는 아직 미완료**다. 현재 확인된 문제는 URL 오타나 HTML selector 실패가 아니라 HTTP 응답 전 연결 끊김이며, 신한 측 전체 장애와 현재 출구 IP/운영망 접근 제한은 구분되지 않았다. 사용자에게 동일 서버 또는 다른 기기의 실제 브라우저 접속 여부를 비동기로 요청했다. 해당 비교 결과 없이 운영망·라우터를 재설정하거나 임의의 프록시를 설치하지 않았다. 정상 응답이 확보된 다음 실제 목록 API와 다운로드를 재검증하고 필요한 parser/transport 수정 및 배치 재개를 진행해야 한다.
