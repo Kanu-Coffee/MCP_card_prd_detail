@@ -2507,10 +2507,15 @@ async def test_opencode_ocr_strict_json_parsing_and_error_handling(
     # 1. Non-JSON output must fail with provider_contract_invalid (no fallback to raw text)
     class NonJsonProcess:
         returncode = 0
+
         async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
             return b"Raw plain text output from model without json events", b""
-        def kill(self) -> None: pass
-        async def wait(self) -> None: pass
+
+        def kill(self) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
 
     async def mock_non_json(*a: Any, **k: Any) -> Any:
         return NonJsonProcess()
@@ -2518,56 +2523,77 @@ async def test_opencode_ocr_strict_json_parsing_and_error_handling(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_non_json)
     provider = OpenCodeOCRProvider()
     with pytest.raises(ProviderSystemicError) as exc_info:
-        await provider.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+        await provider.recognize(
+            (image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p"
+        )
     assert "provider_contract_invalid" in str(exc_info.value)
 
     # 2. Explicit error event in JSON stream must fail with provider_contract_invalid
     class ErrorEventProcess:
         returncode = 0
+
         async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
             return json.dumps({"type": "error", "message": "quota exceeded"}).encode(), b""
-        def kill(self) -> None: pass
-        async def wait(self) -> None: pass
+
+        def kill(self) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
 
     async def mock_error_event(*a: Any, **k: Any) -> Any:
         return ErrorEventProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_error_event)
     with pytest.raises(ProviderSystemicError) as exc_info:
-        await provider.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+        await provider.recognize(
+            (image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p"
+        )
     assert "provider_contract_invalid" in str(exc_info.value)
 
     # 3. Valid JSON events but empty text must fail with provider_contract_invalid
     class EmptyTextProcess:
         returncode = 0
+
         async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
             return json.dumps({"type": "step_finish", "part": {}}).encode(), b""
-        def kill(self) -> None: pass
-        async def wait(self) -> None: pass
+
+        def kill(self) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
 
     async def mock_empty_text(*a: Any, **k: Any) -> Any:
         return EmptyTextProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_empty_text)
     with pytest.raises(ProviderSystemicError) as exc_info:
-        await provider.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+        await provider.recognize(
+            (image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p"
+        )
     assert "provider_contract_invalid" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_opencode_ocr_custom_config_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_opencode_ocr_custom_config_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     image = tmp_path / "page-1.png"
     image.write_bytes(b"png")
     monkeypatch.setenv("ALIBABA_TOKEN_PLAN_API_KEY", "test-key")
 
     class MockProcess:
         returncode = 0
+
         async def communicate(self, body: bytes) -> tuple[bytes, bytes]:
-            return json.dumps({"type": "text", "part": {"type": "text", "text": "## Page 1\nOK"}}).encode(), b""
-        def kill(self) -> None: pass
-        async def wait(self) -> None: pass
+            return json.dumps(
+                {"type": "text", "part": {"type": "text", "text": "## Page 1\nOK"}}
+            ).encode(), b""
+
+        def kill(self) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
 
     async def mock_process(*a: Any, **k: Any) -> Any:
         return MockProcess()
@@ -2579,7 +2605,9 @@ async def test_opencode_ocr_custom_config_validation(
     bad_cfg.write_text(json.dumps({"tools": {"*": False}, "permission": {"*": "allow"}}))
     provider_bad = OpenCodeOCRProvider(config_path=bad_cfg)
     with pytest.raises(ProviderSystemicError) as exc_info:
-        await provider_bad.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+        await provider_bad.recognize(
+            (image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p"
+        )
     assert "provider_systemic_failure" in str(exc_info.value)
 
     # Insecure config (tools not disabled)
@@ -2587,19 +2615,26 @@ async def test_opencode_ocr_custom_config_validation(
     bad_tools.write_text(json.dumps({"tools": {"bash": True}, "permission": {"*": "deny"}}))
     provider_bad_tools = OpenCodeOCRProvider(config_path=bad_tools)
     with pytest.raises(ProviderSystemicError) as exc_info:
-        await provider_bad_tools.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+        await provider_bad_tools.recognize(
+            (image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p"
+        )
     assert "provider_systemic_failure" in str(exc_info.value)
-
 
     # Secure config succeeds
     good_cfg = tmp_path / "good_config.json"
-    good_cfg.write_text(json.dumps({
-        "tools": {"*": False},
-        "permission": {"*": "deny"},
-        "agent": {"ocr": {"name": "ocr", "tools": {"*": False}, "permission": {"*": "deny"}}}
-    }))
+    good_cfg.write_text(
+        json.dumps(
+            {
+                "tools": {"*": False},
+                "permission": {"*": "deny"},
+                "agent": {"ocr": {"name": "ocr", "tools": {"*": False}, "permission": {"*": "deny"}}},
+            }
+        )
+    )
     provider_good = OpenCodeOCRProvider(config_path=good_cfg, agent="ocr")
-    result = await provider_good.recognize((image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p")
+    result = await provider_good.recognize(
+        (image,), page_numbers=(1,), target_page_numbers=(1,), total_pages=1, prompt="p"
+    )
     assert result == "## Page 1\nOK"
 
 
@@ -2672,6 +2707,7 @@ def test_fallback_opencode_uses_medium_reasoning_effort(
     assert s.opencode_ocr_reasoning_effort == "medium"
 
     from cardrag_worker.cli import _provider
+
     fallback_p = _provider(s, "opencode", "alibaba-token-plan/qwen3.8-flash")
     assert isinstance(fallback_p, OpenCodeOCRProvider)
     assert fallback_p.reasoning_effort == "medium"

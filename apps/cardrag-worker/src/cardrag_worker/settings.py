@@ -414,13 +414,12 @@ class WorkerSettings:
         opencode_agent = os.environ.get("CARDRAG_OPENCODE_AGENT", "ocr").strip() or "ocr"
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", opencode_agent):
             raise ValueError(f"CARDRAG_OPENCODE_AGENT must be a valid identifier: {opencode_agent!r}")
-        opencode_api_key_env_var = os.environ.get(
-            "CARDRAG_OPENCODE_API_KEY_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY"
-        ).strip() or "ALIBABA_TOKEN_PLAN_API_KEY"
+        opencode_api_key_env_var = (
+            os.environ.get("CARDRAG_OPENCODE_API_KEY_ENV_KEY", "ALIBABA_TOKEN_PLAN_API_KEY").strip()
+            or "ALIBABA_TOKEN_PLAN_API_KEY"
+        )
         if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", opencode_api_key_env_var):
-            raise ValueError(
-                "CARDRAG_OPENCODE_API_KEY_ENV_KEY must name an uppercase environment variable"
-            )
+            raise ValueError("CARDRAG_OPENCODE_API_KEY_ENV_KEY must name an uppercase environment variable")
         opencode_effort_env = os.environ.get("CARDRAG_OPENCODE_OCR_REASONING_EFFORT", "").strip()
         opencode_ocr_reasoning_effort = (
             opencode_effort_env
@@ -442,13 +441,9 @@ class WorkerSettings:
                 )
             resolved_exe = shutil.which(opencode_executable)
             if not resolved_exe:
-                raise ValueError(
-                    f"OpenCode executable '{opencode_executable}' not found in PATH"
-                )
+                raise ValueError(f"OpenCode executable '{opencode_executable}' not found in PATH")
             if not os.access(resolved_exe, os.X_OK):
-                raise ValueError(
-                    f"OpenCode executable '{resolved_exe}' is not executable"
-                )
+                raise ValueError(f"OpenCode executable '{resolved_exe}' is not executable")
             if opencode_config is not None:
                 if not opencode_config.is_file():
                     raise ValueError(f"OpenCode config file '{opencode_config}' not found")
@@ -470,10 +465,14 @@ class WorkerSettings:
                     if isinstance(ag_cfg, dict):
                         ag_tools = ag_cfg.get("tools")
                         if not isinstance(ag_tools, dict) or ag_tools.get("*") is not False:
-                            raise ValueError(f"OpenCode agent '{opencode_agent}' must set 'tools': {'*': False}")
+                            raise ValueError(
+                                f"OpenCode agent '{opencode_agent}' must set 'tools': {'*': False}"
+                            )
                         ag_perms = ag_cfg.get("permission")
                         if not isinstance(ag_perms, dict) or ag_perms.get("*") != "deny":
-                            raise ValueError(f"OpenCode agent '{opencode_agent}' must set 'permission': {'*': 'deny'}")
+                            raise ValueError(
+                                f"OpenCode agent '{opencode_agent}' must set 'permission': {'*': 'deny'}"
+                            )
         ca_file = os.environ.get("CARDRAG_WEBDAV_CA_FILE")
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)

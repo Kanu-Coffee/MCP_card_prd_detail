@@ -830,7 +830,6 @@ async def _communicate_bounded(
     stdout_reader = process.stdout
     stderr_reader = process.stderr
 
-
     async def _write_stdin() -> None:
         try:
             stdin_writer.write(input_data)
@@ -869,8 +868,6 @@ async def _communicate_bounded(
     )
     await process.wait()
     return stdout, stderr
-
-
 
 
 class OpenCodeOCRProvider:
@@ -993,7 +990,9 @@ class OpenCodeOCRProvider:
                 "provider": {
                     "alibaba-token-plan": {
                         "models": {
-                            "qwen3.8-flash": {"options": {"reasoningEffort": self.reasoning_effort or "medium"}},
+                            "qwen3.8-flash": {
+                                "options": {"reasoningEffort": self.reasoning_effort or "medium"}
+                            },
                             "qwen3.8-max": {"options": {"reasoningEffort": "high"}},
                         }
                     }
@@ -1041,7 +1040,6 @@ class OpenCodeOCRProvider:
                 process.kill()
             await process.wait()
             raise
-
 
         if process.returncode:
             raise ProviderSystemicError(
@@ -1307,7 +1305,11 @@ def make_ocr_provider(
     opencode_api_key_env_var: str = "ALIBABA_TOKEN_PLAN_API_KEY",
 ) -> OCRProvider:
     normalized = provider.casefold()
-    effective_effort = reasoning_effort if reasoning_effort is not None else ("medium" if normalized == "opencode" else "high")
+    effective_effort = (
+        reasoning_effort
+        if reasoning_effort is not None
+        else ("medium" if normalized == "opencode" else "high")
+    )
     if normalized == "openrouter":
         return OpenRouterOCRProvider(
             api_key=api_key or "",
