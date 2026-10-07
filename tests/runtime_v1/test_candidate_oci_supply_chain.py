@@ -147,6 +147,13 @@ def _provenance(role: str = "worker") -> dict[str, Any]:
                 "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6",
             )
         )
+        materials.append(
+            _material(
+                "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.34.tgz",
+                "sha256",
+                "b83e8ac66d752d05ead4b6a439d3a2cfa32bcd9817c708825a389b5d5cba4f19",
+            )
+        )
     else:
         materials.append(
             _material(
@@ -700,3 +707,18 @@ def test_candidate_supply_chain_binds_configured_fork_source_and_package() -> No
         "https://github.com/other/source"
     )
     assert not _provenance_passes(tampered, source_repository=source, image_repository=image)
+
+
+def test_provenance_rejects_missing_or_modified_opencode_material() -> None:
+    for modified in (False, True):
+        payload = _provenance()
+        materials = payload["predicate"]["materials"]
+        if modified:
+            for material in materials:
+                if "opencode-linux-x64" in material["uri"]:
+                    material["digest"]["sha256"] = "0" * 64
+        else:
+            payload["predicate"]["materials"] = [
+                material for material in materials if "opencode-linux-x64" not in material["uri"]
+            ]
+        assert not _provenance_passes(payload)

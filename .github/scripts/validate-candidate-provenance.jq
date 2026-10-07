@@ -134,6 +134,10 @@ def expected_materials:
     {
       "uri": "https://github.com/openai/codex/releases/download/rust-v0.151.0/codex-x86_64-unknown-linux-musl.tar.gz",
       "digest": {"sha256": "605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6"}
+    },
+    {
+      "uri": "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.34.tgz",
+      "digest": {"sha256": "b83e8ac66d752d05ead4b6a439d3a2cfa32bcd9817c708825a389b5d5cba4f19"}
     }
   ] elif $role == "mcp" then [
     {
