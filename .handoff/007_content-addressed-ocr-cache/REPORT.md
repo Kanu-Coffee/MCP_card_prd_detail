@@ -126,3 +126,13 @@ PLAN 부록 A의 “manifest 필드 `variant_id` = manifest 전체 SHA-256”은
 세 번째 CI(`d5bfdac`, GitHub Actions run `37562808348`)는 **success**다. 보안 감사, Ruff·mypy, 전체 런타임 테스트, 두 서비스 Compose 검증, MCP·Worker 이미지 빌드가 모두 통과했다. PR #40은 운영 단계 승인 전이므로 Draft를 유지한다. CI 성공 후 신한카드 공지 페이지를 다시 읽기 전용 GET으로 확인했으나 현재 호스트에서는 여전히 TLS 뒤 연결 reset으로 응답을 받지 못했다.
 
 PLAN §6 단계 6의 승인 후 실행 순서: (1) 신한카드 수집 경로의 복구와 현재 예약 배치 실패 원인 확인, (2) timer 중지 및 Worker 미실행 확인, (3) 새 MCP 이미지 먼저 활성화, (4) 새 Worker 이미지로 `migrate --dry-run`을 재확인하고 **그때의 stable ID**를 지정해 `migrate --apply --confirm-stable-generation` 실행, (5) `ocr-cache verify`에서 전체 variant와 stable 5,512문서 대응 확인, (6) 새 Worker의 첫 run에서 기존 문서 OCR 공급자 호출 0건·서비스 중 OCR SHA 불변·새 generation 게시를 확인, (7) timer 재개. 새 PDF가 발견되면 해당 문서의 OCR 호출은 별도로 집계한다. 전체 run 또는 데이터 게시가 실패하면 기존 이미지와 설정으로 되돌리고, 추가된 content variant는 불변 원본과 함께 남겨 재시도한다. PLAN §6 단계 7의 OpenCode 운영 활성화는 이 단계의 인수 후 별도 승인에 따른다.
+
+## Executor 종료 기록 및 Reviewer 인계 — 2026-10-07
+
+사용자는 PLAN §6 **단계 6 진행을 승인**했지만, 앞으로의 장시간 운영 전환은 이 Executor가 직접 수행하지 않고 별도 저비용 에이전트에 상세 지시로 넘기도록 변경했다. 이에 따라 이 REPORT로 현재 Executor 작업을 종료한다. 단계 7(006 OpenCode 공급자 운영 활성화)까지 승인받은 것으로 해석하지 않는다. 다음 문서 `FIX_01.md`는 Reviewer가 작성하는 단계 6 잔여 작업 지시이며, 그 실행 결과는 후임 Executor가 `FIX_01_REPORT.md`에 기록한다. 위의 과거 "승인 전" 또는 "CI 대기" 문구는 해당 시점의 기록이고, 이 단락이 최신 상태다.
+
+- 최종 코드 기준은 `feat/007-content-ocr-cache`의 `159c71a30cd663ac7cd445f14f0d76cd1fc710bb`다. Draft PR #40의 이 커밋에 대한 GitHub Actions run `37563250492`가 **success**로 종료됐다(`runtime` 4분 38초). 보안 감사, Ruff/mypy, 전체 테스트 2,327개, Compose 검증, MCP/Worker 빌드가 통과했다. 이 커밋 뒤 현재 작업 트리는 깨끗하다.
+- 앞서 만든 로컬 후보 이미지 2개는 코드 커밋 `ccae2c3` 기준이다. 이후 변경은 포맷, 테스트, 보고서였으나 후임은 배포 전 정확한 대상 커밋으로 이미지를 다시 확인·빌드하고 태그/다이제스트/설정의 대응을 기록해야 한다. 이 이미지를 운영에 적용한 적은 없다.
+- 운영 WebDAV의 content 마이그레이션 **apply 0회**, 새 MCP/Worker 이미지 전환 **0회**, 007 첫 운영 run **0회**다. 기존 stable ID `g-03fbc4f18a3c450bb017e2fd-36bae25dd8cd`와 5,512개 OCR 문서 전량의 dry-run 매핑은 2026-10-07 당시 읽기 전용으로 확인했다. 수치는 후임 실행 시 다시 측정해야 한다.
+- 운영 `/opt/cardrag/current`는 여전히 `/opt/cardrag/v1.0.29`를 가리킨다. 현재 MCP 컨테이너 `cardrag-stable-v1026-mcp-1`은 기존 이미지로 healthy이고, Worker timer는 active이며 Worker service는 기존 코드의 2026-10-07 03:00 신한카드 수집 오류로 failed 상태다. 별도 `cardrag-mcp.service`가 inactive인 것은 MCP가 Docker Compose 컨테이너로 운영되는 구조이므로 그 자체로 서비스 장애를 뜻하지 않는다.
+- 운영 state·timer·환경변수·WebDAV·이미지 포인터에는 이 Executor가 쓰거나 재기동하지 않았다. CI 통과는 코드 검증 근거이며 **단계 6 운영 인수 근거는 아직 아니다**. 신한카드 외부 수집 오류는 007 도입 전에 발생한 별도 문제로 취급한다.
