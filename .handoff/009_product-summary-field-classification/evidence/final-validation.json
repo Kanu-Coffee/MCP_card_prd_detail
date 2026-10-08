@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-08",
+  "role": "Executor",
+  "report_addendum": "After REPORT.md was written, frozen PDF replay was additionally bound to pending OCR request identity, forced reprocess ID, and durable content variant; no false completion receipt. Legacy publication bypass was also covered. The historical REPORT counts remain the recorded earlier successful runs.",
+  "full_runtime_suite": {
+    "passed": 2381,
+    "warnings": 9,
+    "elapsed_seconds": 55.33
+  },
+  "final_followup_suite": {
+    "paths": [
+      "apps/cardrag-worker/tests/test_partial_execution.py",
+      "apps/cardrag-worker/tests/test_seal.py",
+      "apps/cardrag-worker/tests/test_cli_settings_provider.py"
+    ],
+    "passed": 160,
+    "elapsed_seconds": 6.54,
+    "partial_execution_cases": 24
+  },
+  "ruff": "passed",
+  "format": "220 files formatted",
+  "mypy": "106 source files passed",
+  "diff_check": "passed",
+  "live_ready": true,
+  "deployment": false,
+  "paid_ocr_or_embedding_calls": 0
+}

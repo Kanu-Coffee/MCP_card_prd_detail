@@ -1,0 +1,64 @@
+{
+  "synthetic_documents": 1,
+  "baseline_seconds": 0.09788651400594972,
+  "partial_seconds": 0.039795,
+  "baseline_calls": {
+    "pdf": 1,
+    "ocr": 1,
+    "embedding": 1
+  },
+  "partial_calls": {
+    "pdf": 0,
+    "ocr": 0,
+    "embedding": 0
+  },
+  "partial_execution": {
+    "schema_version": "cardrag.execution-plan.v1",
+    "source_run_id": "549f486a32ff41bb9dd2e40c26d326fa",
+    "channel": "candidate-009",
+    "skipped_stages": [
+      "pdf",
+      "ocr",
+      "embedding",
+      "webdav"
+    ],
+    "execution_mode": "reprocess",
+    "dry_run": false,
+    "no_op": false,
+    "stages": {
+      "pdf": {
+        "action": "reused",
+        "document_count": 1,
+        "elapsed_seconds": 0.000397,
+        "origin_downloads": 0,
+        "origin_revalidations": 0
+      },
+      "ocr": {
+        "action": "reused",
+        "document_count": 1,
+        "elapsed_seconds": 0.000448,
+        "provider_calls": 0
+      },
+      "structure": {
+        "action": "executed",
+        "document_count": 1,
+        "elapsed_seconds": 0.003443
+      },
+      "embedding": {
+        "action": "reused",
+        "elapsed_seconds": 0.002474,
+        "provider_calls": 0
+      },
+      "export": {
+        "action": "executed",
+        "elapsed_seconds": 0.016318
+      },
+      "webdav": {
+        "action": "skipped",
+        "elapsed_seconds": 0,
+        "published": false
+      }
+    },
+    "elapsed_seconds": 0.039795
+  }
+}

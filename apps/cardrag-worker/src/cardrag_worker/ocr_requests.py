@@ -240,3 +240,66 @@ def complete_reprocess_request(
     except FileExistsError:
         if path.is_symlink() or path.read_bytes() != body:
             raise ValueError("OCR request completion receipt conflicts") from None
+
+
+def reprocess_success_proof(
+    request: OCRReprocessRequest,
+    target: OCRRequestTarget,
+    *,
+    ocr_sha256: str,
+    ocr_size_bytes: int,
+    reuse_key: str | None,
+    variant_id: str | None,
+) -> dict[str, object]:
+    """Bind the resolver's durable content result to this immutable request."""
+    import hashlib
+
+    return {
+        "schema_version": "cardrag.ocr-reprocess-proof.v1",
+        "request_sha256": hashlib.sha256(request.canonical_bytes()).hexdigest(),
+        "target": target.model_dump(mode="json"),
+        "ocr_sha256": ocr_sha256,
+        "ocr_size_bytes": ocr_size_bytes,
+        "reuse_key": reuse_key,
+        "variant_id": variant_id,
+    }
+
+
+def pending_reprocess_targets(
+    state_dir: Path, request: OCRReprocessRequest, *, run_id: str, manifest: GenerationManifest
+) -> list[dict[str, str]]:
+    """Require both request-bound success and its presence in the validated seal."""
+    documents = {doc.document_id: doc for doc in manifest.documents}
+    pending = []
+    for target in request.targets:
+        doc = documents.get(target.document_id)
+        reason = "reprocess_target_unavailable"
+        if doc is not None and doc.ocr is not None and doc.availability != "ocr_failed":
+            reason = "reprocess_target_identity_mismatch"
+            if (doc.pdf.sha256, doc.pdf.size_bytes, doc.page_count) == (
+                target.pdf_sha256,
+                target.pdf_size_bytes,
+                target.page_count,
+            ):
+                reason = "reprocess_variant_unverified"
+                if doc.ocr_cache_kind == "content" and doc.ocr_variant_id is not None:
+                    path = state_dir / "runs" / run_id / "ocr-reprocess-proofs" / f"{target.document_id}.json"
+                    try:
+                        if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
+                            raise ValueError("unverified proof")
+                        expected = canonical_json_bytes(
+                            reprocess_success_proof(
+                                request,
+                                target,
+                                ocr_sha256=doc.ocr.sha256,
+                                ocr_size_bytes=doc.ocr.size_bytes,
+                                reuse_key=doc.ocr_reuse_key,
+                                variant_id=doc.ocr_variant_id,
+                            )
+                        )
+                        if path.read_bytes() == expected:
+                            continue
+                    except (OSError, ValueError):
+                        pass
+        pending.append({"document_id": target.document_id, "reason_code": reason})
+    return pending

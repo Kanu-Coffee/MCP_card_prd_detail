@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import signal
 import stat
 import time
@@ -525,6 +526,9 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "retired_count": result.retired_count,
         "retirement_candidate_count": result.retirement_candidate_count,
         "v5_metrics": result.v5_metrics,
+        "execution": result.execution,
+        "published": result.published,
+        "local_artifacts": result.local_artifacts,
     }
 
 
@@ -591,6 +595,80 @@ def _guard_v114_publication_channel(settings: WorkerSettings | PublicationResume
             "stable v1.0.14 publication requires explicit CARDRAG_STABLE_PUBLICATION_APPROVED=true approval"
         )
     raise ValueError("v1.0.14 Worker publication channel must be candidate-v1.0.11 or stable")
+
+
+def _ocr_resolver(
+    settings: WorkerSettings, state: WorkerState, webdav: Any, *, skip: bool = False
+) -> OCRResolver | FailoverOCRResolver:
+    from .partial_execution import SkippedOCRProvider
+
+    primary = OCRResolver(
+        provider=SkippedOCRProvider()
+        if skip
+        else _provider(settings, settings.ocr_provider, settings.ocr_model),
+        state=state,
+        webdav=webdav,
+        chunk_pages=settings.ocr_chunk_pages,
+        whole_document_max_pages=settings.ocr_whole_document_max_pages,
+        context_pages_before=settings.ocr_context_pages_before,
+        context_pages_after=settings.ocr_context_pages_after,
+        render_scale_milli=settings.ocr_render_scale_milli,
+        cache_epoch=settings.ocr_cache_epoch,
+        prompt_version=settings.ocr_prompt_version,
+        cache_mode=settings.ocr_cache_mode,
+        require_cache_hit=settings.ocr_cache_require_hit,
+    )
+    compatible_contracts = (
+        ()
+        if skip
+        else discover_compatible_contracts(
+            state_dir=settings.state_dir,
+            current_contract=primary.contract,
+            compatible_models=settings.compatible_ocr_models,
+        )
+    )
+    if compatible_contracts:
+        primary.set_compatible_contracts(compatible_contracts)
+        logging.getLogger("cardrag_worker.cli").info(
+            "OCR discovered %d compatible contracts: %s",
+            len(compatible_contracts),
+            ", ".join(c.model for c in compatible_contracts),
+        )
+    resolver: OCRResolver | FailoverOCRResolver = primary
+    if settings.ocr_fallback_provider and not skip:
+        fallback_model = settings.ocr_fallback_model
+        if not fallback_model:
+            if settings.ocr_fallback_provider.strip().casefold() == "openrouter":
+                fallback_model = settings.openrouter_ocr_model
+            elif settings.ocr_fallback_provider.strip().casefold() in {"codex", "codex-exec"}:
+                fallback_model = "gpt-5.6-terra"
+            elif settings.ocr_fallback_provider.strip().casefold() in {
+                "local-paddleocr",
+                "paddleocr",
+                "paddleocr-vl",
+            }:
+                fallback_model = "PaddleOCR-VL-1.6"
+            elif settings.ocr_fallback_provider.strip().casefold() == "opencode":
+                fallback_model = "alibaba-token-plan/qwen3.8-flash"
+            else:
+                raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
+        fallback = OCRResolver(
+            provider=_provider(settings, settings.ocr_fallback_provider, fallback_model),
+            state=state,
+            webdav=webdav,
+            chunk_pages=settings.ocr_chunk_pages,
+            whole_document_max_pages=settings.ocr_whole_document_max_pages,
+            context_pages_before=settings.ocr_context_pages_before,
+            context_pages_after=settings.ocr_context_pages_after,
+            render_scale_milli=settings.ocr_render_scale_milli,
+            cache_epoch=settings.ocr_cache_epoch,
+            prompt_version=settings.ocr_prompt_version,
+            cache_mode=settings.ocr_cache_mode,
+            require_cache_hit=settings.ocr_cache_require_hit,
+            compatible_contracts=compatible_contracts,
+        )
+        resolver = FailoverOCRResolver(primary, fallback)
+    return resolver
 
 
 async def _run(resume: str | None) -> dict[str, Any]:
@@ -664,66 +742,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
             ) as state:
                 if isinstance(webdav, WebDAVClient):
                     webdav.configure_verification(state, settings.webdav_verification)
-                primary = OCRResolver(
-                    provider=_provider(settings, settings.ocr_provider, settings.ocr_model),
-                    state=state,
-                    webdav=webdav,
-                    chunk_pages=settings.ocr_chunk_pages,
-                    whole_document_max_pages=settings.ocr_whole_document_max_pages,
-                    context_pages_before=settings.ocr_context_pages_before,
-                    context_pages_after=settings.ocr_context_pages_after,
-                    render_scale_milli=settings.ocr_render_scale_milli,
-                    cache_epoch=settings.ocr_cache_epoch,
-                    prompt_version=settings.ocr_prompt_version,
-                    cache_mode=settings.ocr_cache_mode,
-                    require_cache_hit=settings.ocr_cache_require_hit,
-                )
-                compatible_contracts = discover_compatible_contracts(
-                    state_dir=settings.state_dir,
-                    current_contract=primary.contract,
-                    compatible_models=settings.compatible_ocr_models,
-                )
-                if compatible_contracts:
-                    primary.set_compatible_contracts(compatible_contracts)
-                    logging.getLogger("cardrag_worker.cli").info(
-                        "OCR discovered %d compatible contracts: %s",
-                        len(compatible_contracts),
-                        ", ".join(c.model for c in compatible_contracts),
-                    )
-                resolver: OCRResolver | FailoverOCRResolver = primary
-                if settings.ocr_fallback_provider:
-                    fallback_model = settings.ocr_fallback_model
-                    if not fallback_model:
-                        if settings.ocr_fallback_provider.strip().casefold() == "openrouter":
-                            fallback_model = settings.openrouter_ocr_model
-                        elif settings.ocr_fallback_provider.strip().casefold() in {"codex", "codex-exec"}:
-                            fallback_model = "gpt-5.6-terra"
-                        elif settings.ocr_fallback_provider.strip().casefold() in {
-                            "local-paddleocr",
-                            "paddleocr",
-                            "paddleocr-vl",
-                        }:
-                            fallback_model = "PaddleOCR-VL-1.6"
-                        elif settings.ocr_fallback_provider.strip().casefold() == "opencode":
-                            fallback_model = "alibaba-token-plan/qwen3.8-flash"
-                        else:
-                            raise ValueError("CARDRAG_OCR_FALLBACK_MODEL is required with fallback provider")
-                    fallback = OCRResolver(
-                        provider=_provider(settings, settings.ocr_fallback_provider, fallback_model),
-                        state=state,
-                        webdav=webdav,
-                        chunk_pages=settings.ocr_chunk_pages,
-                        whole_document_max_pages=settings.ocr_whole_document_max_pages,
-                        context_pages_before=settings.ocr_context_pages_before,
-                        context_pages_after=settings.ocr_context_pages_after,
-                        render_scale_milli=settings.ocr_render_scale_milli,
-                        cache_epoch=settings.ocr_cache_epoch,
-                        prompt_version=settings.ocr_prompt_version,
-                        cache_mode=settings.ocr_cache_mode,
-                        require_cache_hit=settings.ocr_cache_require_hit,
-                        compatible_contracts=compatible_contracts,
-                    )
-                    resolver = FailoverOCRResolver(primary, fallback)
+                resolver = _ocr_resolver(settings, state, webdav)
                 logging.getLogger("cardrag_worker.cli").info(
                     "Remote OCR cache access mode=%s require_hit=%s",
                     settings.ocr_cache_mode,
@@ -888,9 +907,65 @@ def _echo_worker_busy() -> None:
 @app.command("run")
 def run_command(
     resume: str | None = typer.Option(None, "--resume", help="Resume one failed finite run ID."),
+    skip_stage: list[str] | None = typer.Option(
+        None, "--skip-stage", help="Repeat: pdf, ocr, structure, embedding, export, webdav."
+    ),
+    skip_pdf: bool = typer.Option(False, "--skip-pdf"),
+    skip_ocr: bool = typer.Option(False, "--skip-ocr"),
+    skip_embedding: bool = typer.Option(False, "--skip-embedding"),
+    reuse_from_run: str | None = typer.Option(None, "--reuse-from-run"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    publish_channel: str = typer.Option("candidate-009", "--publish-channel"),
 ) -> None:
+    from .partial_cli import run_partial
+    from .partial_execution import ExecutionPlan, PartialExecutionError
+
     try:
-        _echo(asyncio.run(_run_with_signal_shutdown(resume)))
+        skipped = set(skip_stage or [])
+        skipped.update(
+            s
+            for s, enabled in (("pdf", skip_pdf), ("ocr", skip_ocr), ("embedding", skip_embedding))
+            if enabled
+        )
+        persisted = None
+        if resume:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", resume):
+                raise ValueError("invalid resume run ID")
+            resume_settings = WorkerSettings.from_env()
+            resume_plan_path = resume_settings.state_dir / "runs" / resume / "execution-plan.json"
+            if resume_plan_path.is_file():
+                persisted = json.loads(resume_plan_path.read_bytes())
+                if not skipped and reuse_from_run is None:
+                    skipped = set(persisted["skipped_stages"])
+                    reuse_from_run = persisted["source_run_id"]
+                    publish_channel = persisted.get("channel", "candidate-009")
+        if skipped or reuse_from_run or dry_run or persisted:
+            if resume and reuse_from_run and resume != reuse_from_run:
+                # A resumed partial run uses its persisted original source below.
+                settings = WorkerSettings.from_env()
+                path = settings.state_dir / "runs" / resume / "execution-plan.json"
+                if not path.is_file() or json.loads(path.read_bytes()).get("source_run_id") != reuse_from_run:
+                    raise ValueError("resume source differs from the persisted execution plan")
+            plan = ExecutionPlan(frozenset(skipped), reuse_from_run or resume, dry_run, publish_channel)
+            _echo(
+                asyncio.run(
+                    _operation_with_signal_shutdown(
+                        lambda: run_partial(plan, resume), task_name="worker-partial"
+                    )
+                )
+            )
+        else:
+            _echo(asyncio.run(_run_with_signal_shutdown(resume)))
+    except PartialExecutionError as exc:
+        _echo(
+            {
+                "status": "blocked",
+                "reason_code": exc.reason_code,
+                "stage": exc.stage,
+                "document_id": exc.document_id,
+            }
+        )
+        raise typer.Exit(code=1) from None
     except WorkerSignalShutdown as exc:
         raise typer.Exit(code=_echo_signal_shutdown(exc)) from None
     except OCRDocumentFailuresError as exc:
@@ -960,27 +1035,17 @@ def paddleocr_prefetch_command() -> None:
 
 @app.command("resume")
 def resume_command(run_id: str = typer.Argument(..., help="Failed finite run ID.")) -> None:
-    try:
-        _echo(asyncio.run(_run_with_signal_shutdown(run_id)))
-    except WorkerSignalShutdown as exc:
-        raise typer.Exit(code=_echo_signal_shutdown(exc)) from None
-    except OCRDocumentFailuresError as exc:
-        _echo_ocr_failures(exc)
-        raise typer.Exit(code=1) from None
-    except OCRSystemicFailureError as exc:
-        _echo_ocr_systemic_failure(exc)
-        raise typer.Exit(code=1) from None
-    except CorpusDiffError as exc:
-        _echo_corpus_diff_error(exc)
-        raise typer.Exit(code=1) from None
-    except AlreadyRunning:
-        _echo_worker_busy()
-    except WorkerUnexpectedFailureError as exc:
-        _echo_worker_unexpected_failure(exc)
-        raise typer.Exit(code=1) from None
-    except Exception:
-        _echo_worker_unexpected_failure()
-        raise typer.Exit(code=1) from None
+    # Use the same persisted-plan dispatch as `run --resume`; never rediscover a frozen run.
+    run_command(
+        resume=run_id,
+        skip_stage=None,
+        skip_pdf=False,
+        skip_ocr=False,
+        skip_embedding=False,
+        reuse_from_run=None,
+        dry_run=False,
+        publish_channel="candidate-009",
+    )
 
 
 def _require_existing_publication_state(settings: PublicationResumeSettings) -> None:
@@ -1056,8 +1121,20 @@ def resume_publication_command(
 ) -> None:
     """Resume only sealed WebDAV publication; never run providers or discovery."""
 
+    from .partial_execution import PartialExecutionError
+
     try:
         _echo(asyncio.run(_resume_publication_with_signal_shutdown(run_id)))
+    except PartialExecutionError as exc:
+        _echo(
+            {
+                "status": "blocked",
+                "reason_code": exc.reason_code,
+                "stage": exc.stage,
+                "reason": "Partial runs require run --resume with their persisted execution plan.",
+            }
+        )
+        raise typer.Exit(code=1) from None
     except WorkerSignalShutdown as exc:
         raise typer.Exit(code=_echo_signal_shutdown(exc)) from None
     except AlreadyRunning:

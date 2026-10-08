@@ -1,0 +1,20 @@
+{
+  "reviewed_commit": "614b2e5",
+  "role": "Reviewer",
+  "related_tests": {"passed": 147, "seconds": 14.65},
+  "executor_full_suite_verified_from_log": {"passed": 2449, "warnings": 9},
+  "new_reproduction": {
+    "file": "reviewer-fix01-pending-repro.py",
+    "failed": 1,
+    "seconds": 2.72,
+    "expected": "OCR-failed manual target remains pending after 19/20 publication",
+    "observed": "publication succeeded and a completed receipt was created for the failed target",
+    "providers_and_publication": "fake only; temporary Worker state"
+  },
+  "operational_readiness": true,
+  "github_runs_for_branch": [],
+  "operational_writes": 0,
+  "paid_calls": 0,
+  "summary_change": "accepted",
+  "overall_acceptance": "FIX_02 required: one manual reprocess completion bug"
+}

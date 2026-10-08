@@ -1,0 +1,40 @@
+{
+  "reviewed_commit": "f0cf8a9",
+  "decision": "changes_requested",
+  "operating_system_modified": false,
+  "existing_regression": {
+    "passed": 82,
+    "elapsed_seconds": 4.32
+  },
+  "current_bug_reproductions": {
+    "passed": 4,
+    "elapsed_seconds": 1.65,
+    "meaning": "Tests assert undesired current behavior; these passing probes demonstrate the gaps, not a fix."
+  },
+  "findings": [
+    {
+      "id": "R1",
+      "priority": "P1",
+      "summary": "Frozen stable source can be chained after a newer head before export/publish."
+    },
+    {
+      "id": "R2",
+      "priority": "P2",
+      "summary": "Percentage-bearing discount exclusion appears in benefits."
+    },
+    {
+      "id": "R3",
+      "priority": "P2",
+      "summary": "Percentage-only table data discarded before contextual classification."
+    },
+    {
+      "id": "R4",
+      "priority": "P2",
+      "summary": "OCR-failed source document unconditionally carried even when OCR stage is selected.",
+      "evidence_scope": "Control-flow double, not full failed-generation integration validation."
+    }
+  ],
+  "required_correction": ".handoff/009_product-summary-field-classification/FIX_01.md",
+  "long_worker_runs_required": 0,
+  "paid_provider_calls": 0
+}

@@ -1,0 +1,53 @@
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  8%]
+........................................................................ [ 11%]
+........................................................................ [ 14%]
+........................................................................ [ 17%]
+........................................................................ [ 20%]
+........................................................................ [ 23%]
+........................................................................ [ 26%]
+........................................................................ [ 29%]
+........................................................................ [ 32%]
+........................................................................ [ 35%]
+........................................................................ [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 43%]
+........................................................................ [ 46%]
+........................................................................ [ 49%]
+........................................................................ [ 52%]
+........................................................................ [ 55%]
+........................................................................ [ 58%]
+........................................................................ [ 61%]
+........................................................................ [ 64%]
+........................................................................ [ 67%]
+........................................................................ [ 70%]
+........................................................................ [ 73%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+........................................................................ [ 81%]
+........................................................................ [ 84%]
+........................................................................ [ 87%]
+........................................................................ [ 90%]
+........................................................................ [ 93%]
+........................................................................ [ 96%]
+........................................................................ [ 99%]
+..............                                                           [100%]
+=============================== warnings summary ===============================
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[single-remote-conflict]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[primary-remote-conflict]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-remote-conflict]
+  /home/lee/projects/MCP_card_prd_detail/apps/cardrag-worker/src/cardrag_worker/ocr.py:2443: RuntimeWarning: native OCR cache publication skipped because the remote entry already holds a different variant (reason_code=ocr_cache_publication_manifest_unexpected, phase=manifest); publishing generation-only OCR
+    committed = await self._commit_local_native(
+
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-cas]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-manifest]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-ready]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-remote-conflict]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-generation-manifest-conflict]
+apps/cardrag-worker/tests/test_pipeline.py::test_exact_generation_with_deferred_seal_repairs_native_cache_without_provider[fallback-resume-generation-manifest-conflict]
+  /home/lee/projects/MCP_card_prd_detail/apps/cardrag-worker/src/cardrag_worker/pipeline.py:4933: RuntimeWarning: primary OCR failed; starting fresh whole-document fallback
+    result = await self.ocr.resolve(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2462 passed, 9 warnings in 68.97s (0:01:08)

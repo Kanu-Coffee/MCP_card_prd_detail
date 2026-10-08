@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -747,6 +747,7 @@ class WebDAVBundlePublisher:
         database: Path,
         manifest: Mapping[str, Any],
         vectors: Path | None = None,
+        before_pointer_replace: Callable[[], Awaitable[None]] | None = None,
     ) -> PublishedBundle:
         manifest_body = canonical_json_bytes(dict(manifest))
         validated_manifest = GenerationManifest.model_validate_json(manifest_body)
@@ -860,6 +861,8 @@ class WebDAVBundlePublisher:
             media_type="application/json",
             path=channel_pointer_path(getattr(self.client, "channel", "stable")).as_posix(),
         )
+        if before_pointer_replace is not None:
+            await before_pointer_replace()
         published_pointer = await to_thread_fenced(
             self.client.stable.atomic_replace_bytes,
             pointer_body,
