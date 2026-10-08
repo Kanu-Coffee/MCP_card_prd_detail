@@ -1,0 +1,16 @@
+                                                                                
+ Usage: cardrag-worker run [OPTIONS]                                            
+                                                                                
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --resume                 <str>  Resume one failed finite run ID.             │
+│ --skip-stage             <str>  Repeat: pdf, ocr, structure, embedding,      │
+│                                 export, webdav.                              │
+│ --skip-pdf                                                                   │
+│ --skip-ocr                                                                   │
+│ --skip-embedding                                                             │
+│ --reuse-from-run         <str>                                               │
+│ --dry-run                                                                    │
+│ --publish-channel        <str>  [default: candidate-009]                     │
+│ --help                          Show this message and exit.                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+

@@ -1,0 +1,15 @@
+{
+  "images": {
+    "worker": {
+      "image_id": "sha256:bb457d7d675278bb6eaefa6dd7c61375ef7005dda9fc5296e7eb57677ca349fb",
+      "tag": "cardrag-worker:009-b544a80",
+      "revision": "b544a80"
+    },
+    "mcp": {
+      "image_id": "sha256:307bdccc2cbcb9c035c8b0a4bd5274c4cb7dde09527e77b234e231183645c908",
+      "tag": "cardrag-mcp:009-b544a80",
+      "revision": "b544a80"
+    }
+  },
+  "worker_help_verified": true
+}
