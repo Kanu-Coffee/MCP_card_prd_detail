@@ -70,3 +70,47 @@ def test_invalid_completion_receipt_cannot_silently_skip_reprocessing(tmp_path: 
     (completed / f"{request.request_id}.json").write_bytes(b"{}")
     with pytest.raises(ValueError, match="completion receipt contract"):
         load_next_reprocess_request(tmp_path)
+
+
+@pytest.mark.parametrize("alteration", ["none", "missing", "request", "pdf", "ocr", "variant", "unavailable"])
+def test_completion_requires_request_bound_proof_and_sealed_identity(tmp_path, alteration):
+    import json
+
+    from cardrag_core import canonical_json_bytes
+
+    from cardrag_worker.ocr_requests import pending_reprocess_targets, reprocess_success_proof
+
+    original = _stable_manifest()
+    request = plan_reprocess_requests(original, document_ids=("doc_kb",))[0]
+    target = request.targets[0]
+    document = original.documents[0].model_copy(
+        update={"ocr_cache_kind": "content", "ocr_reuse_key": "a" * 64, "ocr_variant_id": "b" * 64}
+    )
+    manifest = original.model_copy(update={"documents": (document,)})
+    proof = reprocess_success_proof(
+        request,
+        target,
+        ocr_sha256=document.ocr.sha256,
+        ocr_size_bytes=document.ocr.size_bytes,
+        reuse_key=document.ocr_reuse_key,
+        variant_id=document.ocr_variant_id,
+    )
+    path = tmp_path / "runs/run-test/ocr-reprocess-proofs/doc_kb.json"
+    path.parent.mkdir(parents=True)
+    if alteration == "request":
+        proof["request_sha256"] = "c" * 64
+    if alteration == "pdf":
+        proof["target"] = {**target.model_dump(mode="json"), "pdf_sha256": "c" * 64}
+    if alteration == "ocr":
+        proof["ocr_sha256"] = "c" * 64
+    if alteration == "variant":
+        proof["variant_id"] = "c" * 64
+    if alteration == "unavailable":
+        manifest = manifest.model_copy(
+            update={"documents": (document.model_copy(update={"ocr": None, "availability": "ocr_failed"}),)}
+        )
+    if alteration != "missing":
+        path.write_bytes(canonical_json_bytes(proof))
+        assert isinstance(json.loads(path.read_bytes()), dict)
+    pending = pending_reprocess_targets(tmp_path, request, run_id="run-test", manifest=manifest)
+    assert bool(pending) is (alteration != "none")

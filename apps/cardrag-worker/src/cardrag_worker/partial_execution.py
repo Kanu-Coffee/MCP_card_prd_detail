@@ -570,6 +570,8 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
                 result.cache_kind != "content" or result.cache_variant_id is None
             ):
                 raise PartialExecutionError("skip_artifact_incompatible", "ocr", doc_id)
+            if doc_id in requested_ids:
+                pipeline._record_reprocess_success(run_id, doc_id, result)
             provider_called += int(result.provider_called)
         plan.record("ocr", "reused" if plan.skips("ocr") else "executed", seconds=time.monotonic() - started)
         started = time.monotonic()

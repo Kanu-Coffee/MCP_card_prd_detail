@@ -160,6 +160,8 @@ from .ocr import (
 from .ocr_requests import (
     OCRReprocessRequest,
     complete_reprocess_request,
+    pending_reprocess_targets,
+    reprocess_success_proof,
     select_run_reprocess_request,
 )
 from .partial_execution import ExecutionPlan, PartialExecutionError, ReuseSource, replay_pdf_source
@@ -2726,17 +2728,67 @@ class WorkerPipeline:
                 try:
                     if result.generation_id is None:
                         raise ValueError("reprocess succeeded without generation ID")
-                    complete_reprocess_request(
+                    from .partial_execution import read_json
+
+                    sealed = read_json(
+                        self.state_dir, self.state_dir / "runs" / run_id / "sealed/publish.json", "ocr"
+                    )
+                    validated = await self._validate_local_seal(sealed)
+                    if validated.manifest.generation_id != result.generation_id:
+                        raise ValueError("reprocess generation differs from validated seal")
+                    pending = pending_reprocess_targets(
                         self.state_dir,
                         self._active_ocr_request,
                         run_id=run_id,
-                        generation_id=result.generation_id,
+                        manifest=validated.manifest,
                     )
+                    _atomic_write(
+                        self.state_dir / "runs" / run_id / "reports/reprocess-completion.json",
+                        canonical_json_bytes(
+                            {
+                                "schema_version": "cardrag.ocr-reprocess-status.v1",
+                                "request_id": self._active_ocr_request.request_id,
+                                "generation_id": result.generation_id,
+                                "status": "pending" if pending else "complete",
+                                "pending_targets": pending,
+                            }
+                        ),
+                    )
+                    if not pending:
+                        complete_reprocess_request(
+                            self.state_dir,
+                            self._active_ocr_request,
+                            run_id=run_id,
+                            generation_id=result.generation_id,
+                        )
                 except Exception:
                     LOGGER.error("OCR reprocess completion receipt could not be written")
             self._cleanup_local_runs_safely(exclude_run_id=run_id, phase="after_run")
             self._active_ocr_request = None
             return result
+
+    def _record_reprocess_success(self, run_id: str, document_id: str, result: OCRResult) -> None:
+        request = self._active_ocr_request
+        if request is None:
+            return
+        target = next((item for item in request.targets if item.document_id == document_id), None)
+        if target is None or document_id in self._deferred_reprocess_ids:
+            return
+        if result.cache_kind != "content" or result.cache_variant_id is None:
+            raise ValueError("reprocess success requires a durable content variant")
+        _atomic_write(
+            self.state_dir / "runs" / run_id / "ocr-reprocess-proofs" / f"{document_id}.json",
+            canonical_json_bytes(
+                reprocess_success_proof(
+                    request,
+                    target,
+                    ocr_sha256=result.ocr_sha256,
+                    ocr_size_bytes=result.size_bytes,
+                    reuse_key=result.cache_reuse_key,
+                    variant_id=result.cache_variant_id,
+                )
+            ),
+        )
 
     def _cleanup_local_runs_safely(self, *, exclude_run_id: str, phase: str) -> None:
         if self.execution_plan is not None:
@@ -4899,6 +4951,8 @@ class WorkerPipeline:
                     result.cache_kind != "content" or result.cache_variant_id is None
                 ):
                     raise RuntimeError("OCR reprocess result was not durably published as a content variant")
+                if current_document_id in reprocess_document_ids:
+                    self._record_reprocess_success(run_id, current_document_id, result)
                 prior_local_native = prior_local_native_sources.get(current_document_id)
                 if (
                     current_document_id not in reprocess_document_ids
@@ -7591,7 +7645,11 @@ class WorkerPipeline:
                     ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
                     v5_metrics=validated.v5_metrics,
                 )
-            if current.ocr_failed_document_count == 0 and self.execution_plan is None:
+            if (
+                current.ocr_failed_document_count == 0
+                and self.execution_plan is None
+                and not self._has_active_reprocess_targets
+            ):
                 if isinstance(self.webdav, WebDAVClient):
                     await self.webdav.verification_gate()
                 self.state.finish_run(

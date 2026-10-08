@@ -666,3 +666,125 @@ async def test_failed_historical_replay_is_never_isolated(failed_corpus):
     ocr.failed_ids.add(historical_id)
     with pytest.raises(OCRDocumentFailuresError):
         await factory({"pdf"}).run()
+
+
+def pending_publication_runner(corpus, source, runner):
+    from cardrag_worker.ocr_requests import OCRReprocessRequest, OCRRequestTarget, queue_reprocess_requests
+    from cardrag_worker.webdav import RemoteGenerationIdentity
+
+    document = (
+        source.documents[source.failed[0]["document_id"]]
+        if source.failed
+        else next(iter(source.documents.values()))
+    )
+    request = OCRReprocessRequest(
+        request_id="ocr-fix02-target",
+        source_generation_id=source.manifest.generation_id,
+        created_at=datetime.now(UTC),
+        targets=(
+            OCRRequestTarget(
+                document_id=document.document_id,
+                pdf_sha256=document.pdf.sha256,
+                pdf_size_bytes=document.pdf.size_bytes,
+                page_count=document.page_count,
+            ),
+        ),
+    )
+    queue_reprocess_requests(source.root, (request,))
+    dav = corpus[-1]
+    runner.execution_plan = ExecutionPlan(frozenset({"pdf"}), source.run_id)
+    runner.webdav = dav
+    dav.current = RemoteGenerationIdentity(
+        generation_id=source.manifest.generation_id,
+        corpus_sha256=source.manifest.corpus_sha256,
+        contract_sha256=source.manifest.contract_sha256,
+        generation_schema=source.manifest.schema_version,
+        serving_schema=source.manifest.serving_schema,
+        ocr_failed_document_count=len(source.failed),
+    )
+    return request, document, dav
+
+
+async def test_failed_manual_target_stays_pending_after_publication_and_resume(failed_corpus, corpus):
+    from dataclasses import replace
+
+    from cardrag_worker.ocr_requests import load_next_reprocess_request
+
+    factory, source, ocr, _ = failed_corpus
+    runner = factory({"pdf"})
+    request, document, dav = pending_publication_runner(corpus, source, runner)
+    before = len(ocr.attempted)
+    result = await runner.run()
+    assert result.status == "succeeded"
+    assert document.document_id in ocr.attempted[before:]
+    assert load_next_reprocess_request(source.root) == request
+    report = source.root / "runs" / result.run_id / "reports/reprocess-completion.json"
+    assert json.loads(report.read_bytes())["pending_targets"] == [
+        {"document_id": document.document_id, "reason_code": "reprocess_target_unavailable"}
+    ]
+    seal = json.loads((source.root / "runs" / result.run_id / "sealed/publish.json").read_bytes())
+    assert seal["manifest"]["issuer_ocr_counts"][0]["failed"] == 1
+    dav.current = replace(dav.current, generation_id=result.generation_id)
+    runner.state.finish_run(result.run_id, "interrupted", error="fixture lost local receipt")
+    before = len(ocr.attempted), dict(dav.objects)
+    resumed = await runner.run(resume_run_id=result.run_id)
+    assert resumed.status == "succeeded"
+    assert (len(ocr.attempted), dav.objects) == before
+    assert load_next_reprocess_request(source.root) == request
+    assert json.loads(report.read_bytes())["status"] == "pending"
+
+
+@pytest.mark.parametrize("mode", ["partial", "full", "missing-proof", "changed-proof", "local-only"])
+async def test_manual_success_completes_only_with_bound_durable_proof(corpus, monkeypatch, mode):
+    from dataclasses import replace
+
+    from cardrag_worker.ocr_requests import load_next_reprocess_request
+
+    pipeline, source, state, _, _, ocr, _ = corpus
+    runner = pipeline(ExecutionPlan(frozenset({"pdf"}), source.run_id), source)
+    request, document, dav = pending_publication_runner(corpus, source, runner)
+    if mode == "full":
+        runner.execution_plan = None
+        runner.reuse_source = None
+    original = ocr.resolve
+
+    async def durable(**kwargs):
+        assert kwargs["reprocess_request_id"] == request.request_id
+        result = await original(**kwargs)
+        return replace(result, cache_kind="content", cache_reuse_key="a" * 64, cache_variant_id="b" * 64)
+
+    monkeypatch.setattr(ocr, "resolve", durable)
+    if mode == "local-only":
+        runner.execution_plan = ExecutionPlan(frozenset({"pdf", "webdav"}), source.run_id)
+        runner.webdav = LocalWebDAV()
+        result = await runner.run()
+        assert result.status == "local_only"
+        assert load_next_reprocess_request(source.root) == request
+        return
+    result = await runner.run()
+    assert result.status == "succeeded"
+    assert load_next_reprocess_request(source.root) is None
+    receipt = source.root / "ocr-requests/completed" / f"{request.request_id}.json"
+    proof = source.root / "runs" / result.run_id / "ocr-reprocess-proofs" / f"{document.document_id}.json"
+    assert proof.exists()
+    if mode == "full":
+        return
+    # Simulate publication committed but request/local completion not acknowledged.
+    receipt.unlink()
+    if mode == "missing-proof":
+        proof.unlink()
+    elif mode == "changed-proof":
+        body = json.loads(proof.read_bytes())
+        body["request_sha256"] = "c" * 64
+        proof.write_text(json.dumps(body))
+    dav.current = replace(dav.current, generation_id=result.generation_id)
+    state.finish_run(result.run_id, "interrupted", error="fixture lost local receipt")
+    before = ocr.calls
+    resumed = await runner.run(resume_run_id=result.run_id)
+    assert resumed.status == "succeeded" and ocr.calls == before
+    if mode in {"missing-proof", "changed-proof"}:
+        assert load_next_reprocess_request(source.root) == request
+        assert not receipt.exists()
+    else:
+        assert load_next_reprocess_request(source.root) is None
+        assert receipt.exists()
