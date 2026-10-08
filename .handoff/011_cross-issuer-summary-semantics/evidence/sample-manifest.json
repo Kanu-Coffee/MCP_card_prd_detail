@@ -1,0 +1,215 @@
+{
+  "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+  "note": "Previous 009 sample is 9 Woori + 3 each other issuer, not the user random 30. User list not provided at planning time. Keep four reported cases plus this distinct fallback panel.",
+  "requests": [
+    {
+      "issuer": "woori",
+      "identifier": "500107",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "bc",
+      "identifier": "p-2e276f343490eedf1e219a5d6516c955e00a6e944162c7c84f4e2090c0a07332--v-e3b0c44298fc1c14",
+      "contract_revision_id": "revision_8e735e606cf6a1d5e9020c8963499760b4e35879d6c0cac6bad69bcab1699256",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "bc",
+      "identifier": "p-8c233ba2f2376879af558bd4c61f0c2d5e870b25ae4edb2c9b6fecb695a4f64a--v-e3b0c44298fc1c14",
+      "contract_revision_id": "revision_8a2e62fe630fb309cc5f138e6fe03cb2f6af5f4fb0e386a4cdae606fd98380d5",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "bc",
+      "identifier": "p-59de026dcec6437fb1397e6fd20a0dcee78a36de3dac9c90bb514794863e157b--v-e3b0c44298fc1c14",
+      "contract_revision_id": "revision_4f94f86a647d125e2f29abc42a6410047c5178a1fb707f86e60130d421c8dbba",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "hana",
+      "identifier": "15911",
+      "contract_revision_id": "revision_1f104fb5a9beb6fce92281b1a9dc64d87c4dc28ae5c0c1d8ae8410981a653fc3",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "hana",
+      "identifier": "15758",
+      "contract_revision_id": "revision_d6417811a07e9a2bf43ebb0243d4a9aaf4e35f9bdbb324899c3a9018a0bcc0c6",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "hana",
+      "identifier": "15968",
+      "contract_revision_id": "revision_35b4acf2c22b230e0aa94ab28931c90e4d86fec34fa3388549e4212ef58ded69",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "hyundai",
+      "identifier": "149297",
+      "contract_revision_id": "revision_124b4556a2204f66f5486813cbed6715a14e338afd5e4a1cb37045eb072f98eb",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "hyundai",
+      "identifier": "149298",
+      "contract_revision_id": "revision_78afbcd222dbea8f1df46a1c3e8059496468cae2f9a6afdb8abef4683c47d5e2",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "hyundai",
+      "identifier": "169508",
+      "contract_revision_id": "revision_9889f2513e5baab0bbddc1b37c574b746dc94b35a3d99ea99a4a729cbb2f2e3c",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "kb",
+      "identifier": "04404",
+      "contract_revision_id": "revision_6de40b5b402d132dbeb736f9756dd306a7cad06e129d932996128f4fa0a1dc6a",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "kb",
+      "identifier": "09570",
+      "contract_revision_id": "revision_aaabe1f703795ae874fc3993627712bdbe2ffa088b41f5a12014948388bcf3f1",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "kb",
+      "identifier": "09058",
+      "contract_revision_id": "revision_5bb3a430f5fee3eaeb089e4a1a5f514eeb4751a17f2353cf5c30e86d985e7b44",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "lotte",
+      "identifier": "1489",
+      "contract_revision_id": "revision_3cd17c8dc82ac24574d18b08cc486a5e1e88920b585681fdf22a66be6ea12822",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "lotte",
+      "identifier": "1118",
+      "contract_revision_id": "revision_f93fd8d8c4ea5300e97a6cd6caeb129c3ae1000f7aaab6b3b43497629fd87695",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "lotte",
+      "identifier": "1629",
+      "contract_revision_id": "revision_8e3758234479e275a3d1f640ece803cb87e4993bcc3f91cacf308ec8a65d8ca8",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "samsung",
+      "identifier": "AAP1920--v-bea85425b2934e8f",
+      "contract_revision_id": "revision_74846de387d51c08289098c5edc721b115220f27a1e1dbf9d71671ba4ab75e0a",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "samsung",
+      "identifier": "ABP1917--v-c92a1d90aa64296d",
+      "contract_revision_id": "revision_8dd6f296d167801e6aeb715aaa5198d0f62944987be2bb95c260c8e1e7aac714",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "samsung",
+      "identifier": "AAP1919--v-543bc5f3e3d57169",
+      "contract_revision_id": "revision_dedea201b1764dcf876d0327aa29e63440085a38a2cc2198b0386ba53f016d46",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "00447",
+      "contract_revision_id": "revision_e8d863f4656f1d196ab1929365b2742b8d33fa0b77b596e168853685eec414d5",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "00368",
+      "contract_revision_id": "revision_1f0c6227ee5840a6d1ccef12210a82818c411d6ded659ee2d96a34c518271f21",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "00549",
+      "contract_revision_id": "revision_be6f049f5c3caaf56361ff97f29a8164c8b8ba7c750820a7316802fd5f882828",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "500105",
+      "contract_revision_id": "revision_fba283b8648093de80e3fd2031a699cd03ce086c050a0df61752f4008ebf28f3",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "832333",
+      "contract_revision_id": "revision_4919b0ed08ef291d96414e13a2026d92f0d51aa54fccb92b85fe93d400a6c465",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "832388",
+      "contract_revision_id": "revision_aec56fda60c20ca45350f991e533ea2d7c731b88c81d2b35d65cfdb6c5c4838c",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "104022",
+      "contract_revision_id": "revision_ef5a96270291ede6c0a7ff31c9e39e966b2ba5d60cf9693197c3b3e49d1cf7b5",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "104023",
+      "contract_revision_id": "revision_9ad15899102bb6a94fbbefbcebfdcc25eaeef2161f7d5277007f2959f09c1e53",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "500104",
+      "contract_revision_id": "revision_2c1d7fe955f6f10ba66ac877823ffa398ee273e8bfd2bc56c155274412e24854",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "500103",
+      "contract_revision_id": "revision_1f39f6e7f4577491633da863211cc5286c81a833b48e8051acf9d40b0c94cbe0",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "woori",
+      "identifier": "100068",
+      "contract_revision_id": "revision_45b32f67791d49a1f99a42d5e3b9097bb451591f9888eb11af8a067579e58c7e",
+      "source": "prior_009_fixed_sample"
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "01208",
+      "product_code": "01208",
+      "contract_revision_id": "revision_22a21fa811355fa00c5dd875ca6d81c2550f0d8c0a8cffe64648ca3be8a5f931",
+      "source": "user_reported_case"
+    },
+    {
+      "issuer": "kb",
+      "identifier": "00917",
+      "product_code": "00917",
+      "contract_revision_id": "revision_aadda0fb851f23ccdaf7a69d039a3afcaf209c8ba55151877379e7c8d7461917",
+      "source": "user_reported_case"
+    },
+    {
+      "issuer": "bc",
+      "identifier": "BD001",
+      "product_code": "p-8774e6f41277e4177bd29fcbdd0714656e1e457e557ca66fca79f2e0126211a2--v-e3b0c44298fc1c14",
+      "contract_revision_id": "revision_ef305b02ea17c0d5b413462b9772695e19fae99f4c9dca6b1b61c3fdff8ef424",
+      "source": "user_reported_case"
+    },
+    {
+      "issuer": "kb",
+      "identifier": "09063",
+      "product_code": "09063",
+      "contract_revision_id": "revision_74e716f81dbaeaf0987071dc126f58a18eea3b22ed6a83f4a5c063031bbab0db",
+      "source": "user_reported_case"
+    }
+  ],
+  "unique_revision_count": 34
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ def node(text, *, kind="PARAGRAPH", parent=None, heading=None, node_id="n"):
         ("이용금액은 캐시백 대상에서 제외됩니다", False, True),
         ("캐시백 금액은 당사 매출접수일 이후 지급됩니다", False, False),
         ("생활 5% 캐시백 서비스", True, False),
-        ("무이자 할부 이용건은 할인 혜택 제공하지 않음", False, False),
+        ("무이자 할부 이용건은 할인 혜택 제공하지 않음", False, True),
         ("무이자 할부 거래 연체 시: 유이자 할부금리 적용", False, False),
         ("상품 출시일 및 부가서비스 변경 안내", False, False),
         ("'할인 제공 시 유의사항' 참고", False, False),
@@ -148,8 +149,16 @@ def test_multiple_real_products_preserve_source_candidates_and_evidence(fixture)
         assert " ".join(evidence["excerpt"].split()) in " ".join(
             by_id[evidence["node_id"]]["display_text"].split()
         )
-    for text in summary["benefit_summary_texts"]:
-        assert any(c.field == "benefit" and c.text == text for c in candidates)
+    # v4 can split old row-wide summaries into source cells and remove old misclassifications.
+    # Preserve provenance rather than freezing the v3 output as a semantic oracle.
+    for candidate in candidates:
+        source = " ".join(by_id[candidate.node_id]["display_text"].split())
+        excerpt = candidate.source_excerpt or candidate.text
+
+        def normalize(text):
+            return " ".join(re.sub(r"<br\s*/?>", " ", text).split())
+
+        assert normalize(excerpt) in normalize(source)
     assert not any(
         "상품 출시일 및 부가서비스 변경 안내" in text for text in summary["benefit_headings"]
     )

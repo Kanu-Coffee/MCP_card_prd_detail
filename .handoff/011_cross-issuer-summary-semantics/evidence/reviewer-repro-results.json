@@ -1,0 +1,66 @@
+[
+  {
+    "case": "fee_regression",
+    "issuer": "kb",
+    "product_code": "00917",
+    "before": "| 국내전용 | 실버 | 3,000원 | 10,000원 | 13,000원 |",
+    "after": "3,000원",
+    "revision": "revision_aadda0fb851f23ccdaf7a69d039a3afcaf209c8ba55151877379e7c8d7461917"
+  },
+  {
+    "case": "fee_regression",
+    "issuer": "shinhan",
+    "product_code": "00549",
+    "before": "| MASTER | 1만 5천원 | 5천원 | 1만원 |",
+    "after": "1만원",
+    "revision": "revision_be6f049f5c3caaf56361ff97f29a8164c8b8ba7c750820a7316802fd5f882828"
+  },
+  {
+    "case": "fee_regression",
+    "issuer": "shinhan",
+    "product_code": "00157",
+    "before": "| 본인 | 11만 5천원 | 12만원 |",
+    "after": "※ 기존 신한카드 소지회원의 경우 추가 발급 시 본인카드에 부과되는 기본연회비 5천원이 면제됩니다.",
+    "revision": "revision_4a04a3b6607e7afd639bab44c085a48510023b960ef42208278cbaa8f482ae8a"
+  },
+  {
+    "case": "negative_offer",
+    "source": {
+      "node_id": "review-table",
+      "node_type": "TABLE_ROW",
+      "parent_id": null,
+      "raw_heading": null,
+      "display_text": "| 온라인 | 5% 포인트 미적립 |",
+      "table_role": "BODY",
+      "table_headers_json": "[\"\\uad6c\\ubd84\", \"\\ud61c\\ud0dd\"]",
+      "table_cells_json": "[\"온라인\", \"5% 포인트 미적립\"]"
+    },
+    "returned": [
+      {
+        "field": "benefit",
+        "heading": false,
+        "text": "온라인 | 5% 포인트 미적립"
+      }
+    ]
+  },
+  {
+    "case": "negative_offer",
+    "source": {
+      "node_id": "review-table",
+      "node_type": "TABLE_ROW",
+      "parent_id": null,
+      "raw_heading": null,
+      "display_text": "| 마일리지 적립 | × |",
+      "table_role": "BODY",
+      "table_headers_json": "[\"\\uad6c\\ubd84\", \"\\ud61c\\ud0dd\"]",
+      "table_cells_json": "[\"마일리지 적립\", \"×\"]"
+    },
+    "returned": [
+      {
+        "field": "benefit",
+        "heading": true,
+        "text": "마일리지 적립"
+      }
+    ]
+  }
+]

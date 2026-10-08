@@ -668,7 +668,8 @@ class CatalogRepository:
                 nodes: dict[str, list[sqlite3.Row]] = {revision_id: [] for revision_id in missing}
                 for node in connection.execute(
                     "SELECT node_id,contract_revision_id,node_type,major_class,"  # noqa: S608 - placeholders only
-                    "raw_heading,ordinal,display_text,parent_id,table_role,table_headers_json "
+                    "raw_heading,ordinal,display_text,parent_id,table_role,"
+                    "table_headers_json,table_cells_json "
                     "FROM structure_nodes "
                     "WHERE contract_revision_id IN (" + placeholders + ") "
                     "ORDER BY contract_revision_id,ordinal",
@@ -755,8 +756,17 @@ class CatalogRepository:
             key=lambda item: -item.score,
         )
         selected_fee = next((item for item in fees if bounded_source_text(item.text, 250)), None)
-        for item in candidates:
+        has_benefit_detail = any(
+            item.field == "benefit"
+            and not item.heading
+            and not item.label_detail
+            and bounded_source_text(item.text, 180)
+            for item in candidates
+        )
+        for item in sorted(candidates, key=lambda item: -item.score):
             if item.field == "annual_fee" and item != selected_fee:
+                continue
+            if item.label_detail and has_benefit_detail:
                 continue
             limit = 250 if item.field == "annual_fee" else 180
             excerpt = bounded_source_text(item.text, limit)
@@ -782,7 +792,7 @@ class CatalogRepository:
                     pages=tuple(
                         sorted(pages.get((str(row["contract_revision_id"]), item.node_id), set()))
                     ),
-                    excerpt=excerpt,
+                    excerpt=item.source_excerpt or excerpt,
                     contract_revision_id=str(row["contract_revision_id"]),
                 )
             )

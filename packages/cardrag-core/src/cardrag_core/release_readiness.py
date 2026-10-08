@@ -77,6 +77,7 @@ class ReleaseReadinessEffectiveConfig(_CanonicalModel):
         "1.0.31",
         "1.0.32",
         "1.0.33",
+        "1.0.34",
     ]
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
@@ -173,7 +174,7 @@ class ReleaseReadinessEffectiveConfig(_CanonicalModel):
 
 class ReleaseReadinessReceipt(_CanonicalModel):
     schema_version: Literal["cardrag.release-readiness-receipt.v1"]
-    release_version: Literal["1.0.32", "1.0.33"]
+    release_version: Literal["1.0.32", "1.0.33", "1.0.34"]
     source_commit: SourceCommit
     compose_project: Literal["cardrag-v122-candidate"]
     channel: Literal["candidate-v1.0.11"]
