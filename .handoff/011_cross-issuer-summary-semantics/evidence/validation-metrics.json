@@ -1,0 +1,30 @@
+{
+  "counts": {
+    "fixed": 34,
+    "random": 30,
+    "total": 64
+  },
+  "before": {
+    "whole_benefit_repeated_as_condition_products": 31,
+    "empty_benefit_summary_products": 4,
+    "empty_headings_products": 7
+  },
+  "after": {
+    "whole_benefit_repeated_as_condition_products": 0,
+    "empty_benefit_summary_products": 6,
+    "empty_headings_products": 6
+  },
+  "source_evidence_checked": 766,
+  "source_evidence_issues": 0,
+  "random_issuer_counts": {
+    "bc": 2,
+    "hana": 5,
+    "hyundai": 2,
+    "kb": 5,
+    "lotte": 4,
+    "samsung": 3,
+    "shinhan": 6,
+    "woori": 3
+  },
+  "quality_note": "Counts diagnose outputs, not an accuracy score. Review source and remaining caveats separately."
+}

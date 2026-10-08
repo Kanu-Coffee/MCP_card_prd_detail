@@ -452,3 +452,18 @@ async def test_fifty_summary_inputs_resolve_once_and_cache_source_changes(
     updated = await repository.get_product_summary("kb", "ALPHA")
     assert updated.launch_date == date(2026, 8, 12)
     assert updated.pdf_sha256 == "f" * 64
+
+
+@pytest.mark.asyncio
+async def test_summary_classifier_change_recomputes_same_revision(v5_runtime, monkeypatch):
+    _, repository, _ = v5_runtime
+    monkeypatch.setattr(catalog_module, "SUMMARY_CLASSIFIER_VERSION", "cardrag.product-summary.v3")
+    first = await repository.get_product_summary("kb", "ALPHA")
+    await repository.get_product_summary("kb", "ALPHA")
+    before = repository.metadata_cache.snapshot()
+    monkeypatch.setattr(catalog_module, "SUMMARY_CLASSIFIER_VERSION", "cardrag.product-summary.v4")
+    updated = await repository.get_product_summary("kb", "ALPHA")
+    after = repository.metadata_cache.snapshot()
+    assert first.contract_revision_id == updated.contract_revision_id
+    assert first.generation_id == updated.generation_id
+    assert after["misses"] > before["misses"]

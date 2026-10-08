@@ -1,0 +1,248 @@
+{
+  "seed": 20261008,
+  "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+  "population_count": 5060,
+  "selection": "two per issuer then remainder random; exclude old34 by issuer/product_code, no output filtering",
+  "products": [
+    {
+      "request": {
+        "issuer": "bc",
+        "identifier": "revision_e22735e913d7a482e8477f9ec5862831e80d70b9de3f1dc982e13ed33a656d95"
+      },
+      "product_code": "p-672df8700cd0c8239af3d06a8ba4bde8ec8e9791afe66a44f6fd12cf28394375--v-e3b0c44298fc1c14",
+      "contract_revision_id": "revision_e22735e913d7a482e8477f9ec5862831e80d70b9de3f1dc982e13ed33a656d95"
+    },
+    {
+      "request": {
+        "issuer": "bc",
+        "identifier": "revision_1496ceebf57126773513d11fb7d6578b1d1f84b2b8b3c96d4cd5597ce985bb06"
+      },
+      "product_code": "p-0efa4f17aa3b6f8e6bd8476d1104bedf1bd46bc01291f5e32e77abf3a4a3a858--v-e3b0c44298fc1c14",
+      "contract_revision_id": "revision_1496ceebf57126773513d11fb7d6578b1d1f84b2b8b3c96d4cd5597ce985bb06"
+    },
+    {
+      "request": {
+        "issuer": "hana",
+        "identifier": "revision_70195ab3166a59fdcf43d0481d5e2a6e57159cfc8ea73c578183b0420bfeb8a4"
+      },
+      "product_code": "13725",
+      "contract_revision_id": "revision_70195ab3166a59fdcf43d0481d5e2a6e57159cfc8ea73c578183b0420bfeb8a4"
+    },
+    {
+      "request": {
+        "issuer": "hana",
+        "identifier": "revision_1da3ca224c00a6cc308fd0b4b85d5bf7e58ad8ec177c10413c433093ffa6d256"
+      },
+      "product_code": "11420",
+      "contract_revision_id": "revision_1da3ca224c00a6cc308fd0b4b85d5bf7e58ad8ec177c10413c433093ffa6d256"
+    },
+    {
+      "request": {
+        "issuer": "hyundai",
+        "identifier": "revision_ba78c5971340f0660c83ef93652f4930ac664d05ce39ef6b4252d7c83191a126"
+      },
+      "product_code": "13645",
+      "contract_revision_id": "revision_ba78c5971340f0660c83ef93652f4930ac664d05ce39ef6b4252d7c83191a126"
+    },
+    {
+      "request": {
+        "issuer": "hyundai",
+        "identifier": "revision_19fafd8407607b2bbdc1502b54d534b4839e2c84b727657f001d215610dbb503"
+      },
+      "product_code": "15784",
+      "contract_revision_id": "revision_19fafd8407607b2bbdc1502b54d534b4839e2c84b727657f001d215610dbb503"
+    },
+    {
+      "request": {
+        "issuer": "kb",
+        "identifier": "revision_13e4fbde0786c3f3937045becb6215e1f082536ab8ddc07e52492347254c2736"
+      },
+      "product_code": "01507",
+      "contract_revision_id": "revision_13e4fbde0786c3f3937045becb6215e1f082536ab8ddc07e52492347254c2736"
+    },
+    {
+      "request": {
+        "issuer": "kb",
+        "identifier": "revision_cf20d2ee838eeca89a238b38b07fb5ae8c975a4d9466e178e695e5c3be7c7df1"
+      },
+      "product_code": "A0033",
+      "contract_revision_id": "revision_cf20d2ee838eeca89a238b38b07fb5ae8c975a4d9466e178e695e5c3be7c7df1"
+    },
+    {
+      "request": {
+        "issuer": "lotte",
+        "identifier": "revision_0df316526748ec3226c4bd408d1350c2ec9bd25a6a8e04b9e9b17919714f6ba4"
+      },
+      "product_code": "1506",
+      "contract_revision_id": "revision_0df316526748ec3226c4bd408d1350c2ec9bd25a6a8e04b9e9b17919714f6ba4"
+    },
+    {
+      "request": {
+        "issuer": "lotte",
+        "identifier": "revision_804f77ad3f3e0649be9544e1d4cc8acca27cc8e6e3080e05d23df47bcd2a0f0e"
+      },
+      "product_code": "1659",
+      "contract_revision_id": "revision_804f77ad3f3e0649be9544e1d4cc8acca27cc8e6e3080e05d23df47bcd2a0f0e"
+    },
+    {
+      "request": {
+        "issuer": "samsung",
+        "identifier": "revision_098b5fc48c1f835c8cacaa82832498c6ced8fbbe401f109c2a992e6339a24f18"
+      },
+      "product_code": "AAP1533--v-a267c4875731ff91",
+      "contract_revision_id": "revision_098b5fc48c1f835c8cacaa82832498c6ced8fbbe401f109c2a992e6339a24f18"
+    },
+    {
+      "request": {
+        "issuer": "samsung",
+        "identifier": "revision_f6ea46b969203c40e938236726416faf38b6b3cde78b1b89e23e7b360fa388e0"
+      },
+      "product_code": "AAP1785--v-2477d9ff1527f9f1",
+      "contract_revision_id": "revision_f6ea46b969203c40e938236726416faf38b6b3cde78b1b89e23e7b360fa388e0"
+    },
+    {
+      "request": {
+        "issuer": "shinhan",
+        "identifier": "revision_77fb32ddff71c727b46e97cc1dff2a3212ab04e15980183282d6a2f2a2e0c0e9"
+      },
+      "product_code": "00201",
+      "contract_revision_id": "revision_77fb32ddff71c727b46e97cc1dff2a3212ab04e15980183282d6a2f2a2e0c0e9"
+    },
+    {
+      "request": {
+        "issuer": "shinhan",
+        "identifier": "revision_7f684c5b162c3db1e984cbed6e06c8afc1b7e385e6f1deddb52a05cb9ca7e584"
+      },
+      "product_code": "00942",
+      "contract_revision_id": "revision_7f684c5b162c3db1e984cbed6e06c8afc1b7e385e6f1deddb52a05cb9ca7e584"
+    },
+    {
+      "request": {
+        "issuer": "woori",
+        "identifier": "revision_2c474e187d7af3315e9fa47893afd5c2b231b2ad7a11f7f45a1abd068451fa07"
+      },
+      "product_code": "830225",
+      "contract_revision_id": "revision_2c474e187d7af3315e9fa47893afd5c2b231b2ad7a11f7f45a1abd068451fa07"
+    },
+    {
+      "request": {
+        "issuer": "woori",
+        "identifier": "revision_47d2edcb74610fd865bdf97d24eef48c83332e9b7b613da6325302c40b90d079"
+      },
+      "product_code": "204221",
+      "contract_revision_id": "revision_47d2edcb74610fd865bdf97d24eef48c83332e9b7b613da6325302c40b90d079"
+    },
+    {
+      "request": {
+        "issuer": "hana",
+        "identifier": "revision_78faa878e87823df51ae184a9fe35bd5f1d9c93532bdb68cea67f9ee74a14987"
+      },
+      "product_code": "03622",
+      "contract_revision_id": "revision_78faa878e87823df51ae184a9fe35bd5f1d9c93532bdb68cea67f9ee74a14987"
+    },
+    {
+      "request": {
+        "issuer": "shinhan",
+        "identifier": "revision_a789fd5db879d8e5687ca78713110a788eab424bd099fbcf02020e9b986ff0c9"
+      },
+      "product_code": "00054",
+      "contract_revision_id": "revision_a789fd5db879d8e5687ca78713110a788eab424bd099fbcf02020e9b986ff0c9"
+    },
+    {
+      "request": {
+        "issuer": "samsung",
+        "identifier": "revision_260fcc472660b60b32fa6da18ec0817d7b0189a889b9bb5703292e6847c8fa1f"
+      },
+      "product_code": "AAP1659--v-700ddb91fda94ef5",
+      "contract_revision_id": "revision_260fcc472660b60b32fa6da18ec0817d7b0189a889b9bb5703292e6847c8fa1f"
+    },
+    {
+      "request": {
+        "issuer": "kb",
+        "identifier": "revision_eaa448baa1005bba68b2f4ebb70b6bf5a2144808acdfe8a128dd7cb1849e5e6a"
+      },
+      "product_code": "04552",
+      "contract_revision_id": "revision_eaa448baa1005bba68b2f4ebb70b6bf5a2144808acdfe8a128dd7cb1849e5e6a"
+    },
+    {
+      "request": {
+        "issuer": "kb",
+        "identifier": "revision_e9b2547d3c479291deb7cf26f4a003e8a2f99cf48eb8bef6e2ef46c33fafdbd5"
+      },
+      "product_code": "09062",
+      "contract_revision_id": "revision_e9b2547d3c479291deb7cf26f4a003e8a2f99cf48eb8bef6e2ef46c33fafdbd5"
+    },
+    {
+      "request": {
+        "issuer": "lotte",
+        "identifier": "revision_4b912fa62225e6514bab50d5d587ee62c968999db7a0a0ee99440528b5168e9e"
+      },
+      "product_code": "1483",
+      "contract_revision_id": "revision_4b912fa62225e6514bab50d5d587ee62c968999db7a0a0ee99440528b5168e9e"
+    },
+    {
+      "request": {
+        "issuer": "shinhan",
+        "identifier": "revision_6758a761778ef9792b604626d31afd6b21110eb351d4ebe66483dad7c03b3d6c"
+      },
+      "product_code": "00800",
+      "contract_revision_id": "revision_6758a761778ef9792b604626d31afd6b21110eb351d4ebe66483dad7c03b3d6c"
+    },
+    {
+      "request": {
+        "issuer": "hana",
+        "identifier": "revision_1e6723165f142d4859ab10fc2f0e9b9806ac1f97a55470fb9e7892307e4acabb"
+      },
+      "product_code": "13009",
+      "contract_revision_id": "revision_1e6723165f142d4859ab10fc2f0e9b9806ac1f97a55470fb9e7892307e4acabb"
+    },
+    {
+      "request": {
+        "issuer": "kb",
+        "identifier": "revision_ee0d3617505cb72276f9f64ea24e5ca550b59fafa5fac51337a88d83b7b74ce0"
+      },
+      "product_code": "02028",
+      "contract_revision_id": "revision_ee0d3617505cb72276f9f64ea24e5ca550b59fafa5fac51337a88d83b7b74ce0"
+    },
+    {
+      "request": {
+        "issuer": "hana",
+        "identifier": "revision_23347cb348db86b54bb4b316698d6ac620a1603607cf110f2dd38edfbc733486"
+      },
+      "product_code": "80781",
+      "contract_revision_id": "revision_23347cb348db86b54bb4b316698d6ac620a1603607cf110f2dd38edfbc733486"
+    },
+    {
+      "request": {
+        "issuer": "woori",
+        "identifier": "revision_5c9b9bd1520d5cbd24c6e933065b1af094743dcab047a3e6d26b73e0365fe5a8"
+      },
+      "product_code": "200253",
+      "contract_revision_id": "revision_5c9b9bd1520d5cbd24c6e933065b1af094743dcab047a3e6d26b73e0365fe5a8"
+    },
+    {
+      "request": {
+        "issuer": "lotte",
+        "identifier": "revision_57db41d3c0c92c32bded3509e36bf5327ef89d7471d72220fc5097533a9abd8c"
+      },
+      "product_code": "1520",
+      "contract_revision_id": "revision_57db41d3c0c92c32bded3509e36bf5327ef89d7471d72220fc5097533a9abd8c"
+    },
+    {
+      "request": {
+        "issuer": "shinhan",
+        "identifier": "revision_4a04a3b6607e7afd639bab44c085a48510023b960ef42208278cbaa8f482ae8a"
+      },
+      "product_code": "00157",
+      "contract_revision_id": "revision_4a04a3b6607e7afd639bab44c085a48510023b960ef42208278cbaa8f482ae8a"
+    },
+    {
+      "request": {
+        "issuer": "shinhan",
+        "identifier": "revision_494ce43f5e03292fa2479f75ea3942e3e4716e9577d34d5379618a2fe8641e68"
+      },
+      "product_code": "01199",
+      "contract_revision_id": "revision_494ce43f5e03292fa2479f75ea3942e3e4716e9577d34d5379618a2fe8641e68"
+    }
+  ]
+}
