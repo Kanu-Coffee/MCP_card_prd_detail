@@ -38,7 +38,7 @@
 | ordinal 80 TABLE/83 TABLE_ROW, 연회비 안내 아래 | 본인15,000원, 가족 없음의 원문 존재 | 올바른 annual_fee 근거 후보 |
 | 제외 항목 “각종 수수료 및 이자, 연회비” | annual_fee_text로 잘못 채택 | 제외 목록을 연회비 금액으로 채택하지 않음 |
 
-증거 JSON에 대상의 전체 structure_nodes, node_spans, 7페이지 원문과 30건의 변경 전 요약을 저장했다. node_id·페이지·parent_id·table_role을 사용하여 작은 테스트 fixture에 필요한 부분만 옮긴다. 운영 DB 전체를 Git에 넣지 않는다.
+증거 JSON에 대상의 전체 structure_nodes, node_spans, 8페이지 원문과 30건의 변경 전 요약을 저장했다. node_id·페이지·parent_id·table_role을 사용하여 작은 테스트 fixture에 필요한 부분만 옮긴다. 운영 DB 전체를 Git에 넣지 않는다.
 
 30건 탐색 표본은 대상500107, 다른 최근 우리 상품8건, 다른 issuer마다3건이며 전수 품질평가가 아니다. 이 표본에서 변경 고지가 benefit_headings에 들어가는 다른 사례도 확인했다.
 
