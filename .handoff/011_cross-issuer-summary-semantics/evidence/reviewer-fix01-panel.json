@@ -1,0 +1,210 @@
+{
+  "commit": "72c28ac",
+  "products": 64,
+  "reported_output_matches": 64,
+  "raw_fee_matches": 61,
+  "normalized_fee_matches": 64,
+  "whole_offer_duplicates": 0,
+  "source_evidence_checked": 756,
+  "source_issues": 0,
+  "changes_since_pre_fix": [
+    {
+      "issuer": "woori",
+      "product_code": "500107",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "bc",
+      "product_code": "p-8c233ba2f2376879af558bd4c61f0c2d5e870b25ae4edb2c9b6fecb695a4f64a--v-e3b0c44298fc1c14",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "bc",
+      "product_code": "p-59de026dcec6437fb1397e6fd20a0dcee78a36de3dac9c90bb514794863e157b--v-e3b0c44298fc1c14",
+      "changed_fields": [
+        "annual_fee_text",
+        "benefit_headings"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "09058",
+      "changed_fields": [
+        "annual_fee_text",
+        "benefit_summary_texts",
+        "condition_summary_texts"
+      ]
+    },
+    {
+      "issuer": "lotte",
+      "product_code": "1489",
+      "changed_fields": [
+        "annual_fee_text",
+        "condition_summary_texts"
+      ]
+    },
+    {
+      "issuer": "lotte",
+      "product_code": "1629",
+      "changed_fields": [
+        "annual_fee_text",
+        "condition_summary_texts"
+      ]
+    },
+    {
+      "issuer": "samsung",
+      "product_code": "AAP1920--v-bea85425b2934e8f",
+      "changed_fields": [
+        "benefit_headings"
+      ]
+    },
+    {
+      "issuer": "samsung",
+      "product_code": "ABP1917--v-c92a1d90aa64296d",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "samsung",
+      "product_code": "AAP1919--v-543bc5f3e3d57169",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "shinhan",
+      "product_code": "00549",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "woori",
+      "product_code": "100068",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "00917",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "bc",
+      "product_code": "p-8774e6f41277e4177bd29fcbdd0714656e1e457e557ca66fca79f2e0126211a2--v-e3b0c44298fc1c14",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "09063",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "bc",
+      "product_code": "p-672df8700cd0c8239af3d06a8ba4bde8ec8e9791afe66a44f6fd12cf28394375--v-e3b0c44298fc1c14",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "bc",
+      "product_code": "p-0efa4f17aa3b6f8e6bd8476d1104bedf1bd46bc01291f5e32e77abf3a4a3a858--v-e3b0c44298fc1c14",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "hana",
+      "product_code": "13725",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "hana",
+      "product_code": "11420",
+      "changed_fields": [
+        "benefit_headings"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "01507",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "lotte",
+      "product_code": "1659",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "samsung",
+      "product_code": "AAP1533--v-a267c4875731ff91",
+      "changed_fields": [
+        "annual_fee_text",
+        "benefit_headings"
+      ]
+    },
+    {
+      "issuer": "woori",
+      "product_code": "830225",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "woori",
+      "product_code": "204221",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "04552",
+      "changed_fields": [
+        "annual_fee_text"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "09062",
+      "changed_fields": [
+        "annual_fee_text",
+        "benefit_headings",
+        "condition_summary_texts"
+      ]
+    },
+    {
+      "issuer": "kb",
+      "product_code": "02028",
+      "changed_fields": [
+        "benefit_headings"
+      ]
+    },
+    {
+      "issuer": "shinhan",
+      "product_code": "00157",
+      "changed_fields": [
+        "annual_fee_text",
+        "benefit_headings"
+      ]
+    }
+  ]
+}
