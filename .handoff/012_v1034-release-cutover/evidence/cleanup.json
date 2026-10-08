@@ -1,0 +1,30 @@
+{
+  "removed_source": "/opt/cardrag/008-6b42a1a",
+  "removed_source_bytes": 20630682,
+  "removed_images": [
+    {
+      "tag": "cardrag-worker:008-6b42a1a",
+      "image_id": "sha256:2eed6edbeb4f1d57d69481bd0d576dfbfcc957d29cb3bd89a5591619f5e9d121"
+    },
+    {
+      "tag": "cardrag-worker:007-31edb1d",
+      "image_id": "sha256:2b1a1257f3348c1a8b2465282847ef633c0ca6514025f394c646ae344c598522"
+    },
+    {
+      "tag": "cardrag-mcp:007-31edb1d",
+      "image_id": "sha256:1ddf263a7024c4ddf982ee5956938fd7fa195f9318e97901293301ebbaf9f6f7"
+    }
+  ],
+  "free_bytes_before": 173813710848,
+  "free_bytes_after": 181215186944,
+  "observed_free_space_increase_bytes": 7401476096,
+  "active_snapshot": "/opt/cardrag/v1.0.34",
+  "retained_rollback_snapshot": "/opt/cardrag/009-b544a80",
+  "retained_images": [
+    "cardrag-mcp:009-b544a80",
+    "cardrag-worker:009-b544a80"
+  ],
+  "worker_image_still_active": "cardrag-worker:009-b544a80",
+  "volumes_removed": [],
+  "builder_created_for_release_already_removed": "cardrag-release-v1034"
+}

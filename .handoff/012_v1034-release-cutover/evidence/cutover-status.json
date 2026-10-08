@@ -1,0 +1,79 @@
+{
+  "status": "succeeded",
+  "new_snapshot": "/opt/cardrag/v1.0.34",
+  "old_snapshot": "/opt/cardrag/009-b544a80",
+  "image": "ymtop59/mcp-card-prd-detail@sha256:371895b40861244405a7ee5e6c23def3aa460e1d5da647a729afc405e4139d80",
+  "timer_before": "active",
+  "timer_writes": 0,
+  "worker_launched": false,
+  "next_scheduled_run": "Fri 2026-10-09 03:00:00 KST",
+  "started_at": "2026-10-08T19:55:34.555864",
+  "products": [
+    {
+      "issuer": "woori",
+      "identifier": "500107",
+      "product_code": "500107",
+      "revision": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "00549",
+      "product_code": "00549",
+      "revision": "revision_be6f049f5c3caaf56361ff97f29a8164c8b8ba7c750820a7316802fd5f882828",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "01208",
+      "product_code": "01208",
+      "revision": "revision_22a21fa811355fa00c5dd875ca6d81c2550f0d8c0a8cffe64648ca3be8a5f931",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    },
+    {
+      "issuer": "kb",
+      "identifier": "00917",
+      "product_code": "00917",
+      "revision": "revision_aadda0fb851f23ccdaf7a69d039a3afcaf209c8ba55151877379e7c8d7461917",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    },
+    {
+      "issuer": "bc",
+      "identifier": "BD001",
+      "product_code": "p-8774e6f41277e4177bd29fcbdd0714656e1e457e557ca66fca79f2e0126211a2--v-e3b0c44298fc1c14",
+      "revision": "revision_ef305b02ea17c0d5b413462b9772695e19fae99f4c9dca6b1b61c3fdff8ef424",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    },
+    {
+      "issuer": "kb",
+      "identifier": "09063",
+      "product_code": "09063",
+      "revision": "revision_74e716f81dbaeaf0987071dc126f58a18eea3b22ed6a83f4a5c063031bbab0db",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    },
+    {
+      "issuer": "shinhan",
+      "identifier": "00157",
+      "product_code": "00157",
+      "revision": "revision_4a04a3b6607e7afd639bab44c085a48510023b960ef42208278cbaa8f482ae8a",
+      "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+      "summary_fields_match": true,
+      "same_revision_bundle": true
+    }
+  ],
+  "timer_after": "active",
+  "librechat_authenticated_smoke": true,
+  "completed_at": "2026-10-08T20:02:39.718367"
+}

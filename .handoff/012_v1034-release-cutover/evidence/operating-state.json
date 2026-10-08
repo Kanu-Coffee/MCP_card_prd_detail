@@ -1,0 +1,20 @@
+{
+  "current_snapshot": "/opt/cardrag/v1.0.34",
+  "mcp_image_id": "sha256:371895b40861244405a7ee5e6c23def3aa460e1d5da647a729afc405e4139d80",
+  "mcp_image_ref": "ymtop59/mcp-card-prd-detail@sha256:371895b40861244405a7ee5e6c23def3aa460e1d5da647a729afc405e4139d80",
+  "mcp_health": "healthy",
+  "mcp_version": "1.0.34",
+  "mcp_source": "3a3cb60abfdbacb64cd55f1a4a196e1093e3f246",
+  "mcp_state_volumes": [
+    "cardrag-mcp-state"
+  ],
+  "worker_image": "cardrag-worker:009-b544a80",
+  "worker_provider": "opencode",
+  "worker_model": "alibaba-token-plan/qwen3.8-flash",
+  "worker_effort": "medium",
+  "worker_fallback_provider": "",
+  "worker_fallback_model": "",
+  "worker_service": "inactive",
+  "worker_timer": "active",
+  "next_run": "Fri 2026-10-09 03:00:00 KST"
+}

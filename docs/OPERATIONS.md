@@ -15,6 +15,20 @@ MCP에는 가능하면 읽기 전용 WebDAV 계정을 사용합니다. Worker의
 시험 객체를 쓰고 확인하는 외부 작업이므로 대상 저장소를 확인한 뒤 실행합니다.
 디스크에는 Worker와 MCP가 각각 보관하는 PDF·DB·vector 복사본과 임시 공간을 모두 계산합니다.
 
+## 관리 운영 호스트의 배포 식별자
+
+v1.0.34 전환 결과와 검증 내역은 [.handoff/012 배포 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)를 기준으로 확인합니다.
+
+- 설치 진입점: `/opt/cardrag/current`, 정상 전환 후 `/opt/cardrag/v1.0.34`를 가리킵니다.
+- MCP 컨테이너/Compose project: `cardrag-mcp`, 네트워크: `cardrag-mcp_default`.
+- 운영 볼륨: `cardrag-mcp-state`, `cardrag-worker-state`, `cardrag-worker-auth`, `cardrag-worker-paddleocr-models`.
+- 이번 반영은 MCP를 공개 v1.0.34의 immutable digest로 교체합니다. Worker는 인수된 `cardrag-worker:009-b544a80` 및 OpenCode 설정을 유지합니다.
+- Worker 예약은 매일 03:00 Asia/Seoul이며 이번 반영에서 전량 배치를 추가 실행하지 않습니다.
+- host-local `compose.secrets.yaml`은 운영 이미지·secret 경로·external 볼륨을 지정합니다. 소스 갱신 후 이 overlay를 보존하고 렌더링된 설정을 다시 확인하십시오.
+- systemd 실행 계정 `cardrag`는 설치 경로를 탐색하고 Worker Compose/env 파일을 읽을 수 있어야 합니다. 비밀 파일의 내용이나 권한을 공개 설정에 복사하지 않습니다.
+
+아래 신규 설치용 기본 볼륨 이름은 기존 설치의 운영 볼륨을 자동 선택하는 이름이 아닙니다. 기존 호스트의 전환에서는 실제 external 볼륨을 유지합니다.
+
 ## 새 설치의 설정
 
 아래 `/opt/cardrag`, `/etc/cardrag`는 예시 경로입니다. 환경에 맞게 선택하고, 인증 파일은
