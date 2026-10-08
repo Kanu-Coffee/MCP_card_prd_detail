@@ -27,12 +27,34 @@ _EXEMPTION = re.compile(
     r"(?:\s*(?:조건|제한))?\s*(?:없음|없이|무관)|무실적|무제한"
 )
 _NEGATED_OFFER = re.compile(
-    r"(?:할인|적립|캐시백|포인트|마일리지|무료|무이자\s*할부)"
+    r"(?:할인|적립|캐시백|포인트|마일(?:리지)?|무료|무이자\s*할부)"
     r"\s*(?:혜택\s*)?(?:(?:서비스|이용|제공)\s*)?"
-    r"(?:대상(?:에서)?\s*)?(?:제외|불가|미적용|미제공|제공하지\s*않(?:음|습니다)?)"
+    r"(?:대상(?:에서)?\s*)?(?:제외|불가|미적용|미제공|미적립|제공하지\s*않(?:음|습니다)?)"
 )
 _FEE_BAD = re.compile(r"반환|산정|중도해지|제외|수수료\s*및|이자|연체|일할")
 _AMOUNT = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:만\s*)?원|면제|없음|무료")
+
+
+def _is_cell_unavailable(text: str) -> bool:
+    cleaned = text.strip()
+    if re.fullmatch(r"[×xX\-―ㅡ_]|미제공|불가|제외", cleaned):
+        return True
+    main_text = re.sub(r"\([^()]*\)", " ", cleaned)
+    if _NEGATED_OFFER.search(main_text):
+        positive = _NEGATED_OFFER.sub("", main_text)
+        if not _BENEFIT.search(positive):
+            return True
+    if re.search(r"미적립|미제공|제공하지\s*않|제공되지\s*않", main_text):
+        positive = re.sub(
+            r"(?:미적립|미제공|제공하지\s*않(?:음|습니다)?|제공되지\s*않(?:음|습니다)?)",
+            "",
+            main_text,
+        )
+        if not _BENEFIT.search(positive):
+            return True
+    return False
+
+
 _TYPES = {
     "MAJOR_SECTION",
     "ITEM",
@@ -98,6 +120,8 @@ def _table_fragments(
     headers = _strings(node.get("table_headers_json")) or _strings(parent.get("table_headers_json"))
     if not cells or not headers or len(cells) != len(headers):
         return [dict(node)]
+    offer_cells = [c for h, c in zip(headers, cells, strict=True) if _TABLE_OFFER.search(h)]
+    row_unavailable = bool(offer_cells) and all(_is_cell_unavailable(c) for c in offer_cells)
     fragments = []
     for index, cell in enumerate(cells):
         text = _clean(cell)
@@ -126,10 +150,8 @@ def _table_fragments(
         )
         fragment["_table_label"] = _clean(label)
         fragment["_offer_value"] = text
-        fragment["_unavailable"] = any(
-            re.fullmatch(r"[×xX-]|미제공|불가", c.strip())
-            for h, c in zip(headers, cells, strict=True)
-            if _TABLE_OFFER.search(h)
+        fragment["_unavailable"] = row_unavailable or (
+            role == "offer" and _is_cell_unavailable(cell)
         )
         if role == "offer" and label and _clean(label) not in text:
             raw = " ".join(str(node["display_text"]).split())
@@ -157,6 +179,28 @@ def _condition_fragments(text: str) -> list[str]:
     return list(dict.fromkeys(fragments))
 
 
+def _is_fee_node(node: Mapping[str, Any], by_id: Mapping[str, Mapping[str, Any]]) -> bool:
+    if str(node.get("node_type")) != "TABLE_ROW":
+        return False
+    text = str(node.get("display_text") or "")
+    headers = str(node.get("table_headers_json") or "")
+    if "연회비" in headers or "연회비" in text:
+        return True
+    parent = node.get("parent_id")
+    visited = {str(node.get("node_id"))}
+    while parent and str(parent) in by_id and str(parent) not in visited and len(visited) < 64:
+        visited.add(str(parent))
+        anc = by_id[str(parent)]
+        if (
+            "연회비" in str(anc.get("raw_heading") or "")
+            or "연회비" in str(anc.get("table_headers_json") or "")
+            or "연회비" in str(anc.get("display_text") or "")
+        ):
+            return True
+        parent = anc.get("parent_id")
+    return False
+
+
 def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandidate]:
     by_id = {str(n["node_id"]): n for n in nodes}
     candidates: list[SummaryCandidate] = []
@@ -179,7 +223,9 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
         fragment
         for node in prepared
         for fragment in (
-            _table_fragments(node, by_id) if str(node["node_type"]) == "TABLE_ROW" else [dict(node)]
+            [dict(node)]
+            if str(node["node_type"]) != "TABLE_ROW" or _is_fee_node(node, by_id)
+            else _table_fragments(node, by_id)
         )
     ]
     for node in expanded:
@@ -228,6 +274,8 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
                 if kind == "TABLE":
                     score -= 2
                 if "가족" in text and "본인" not in text:
+                    score -= 5
+                if re.search(r"기본\s*연회비.{0,15}면제|추가\s*발급\s*시", text):
                     score -= 5
                 candidates.append(SummaryCandidate(node_id, text, "annual_fee", score=score))
             continue
@@ -295,23 +343,22 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
                 r"조건|한도|제외|안내|방법|유의|지급|접수|절사|금액을|신청|계산", heading
             )
         )
+        is_negated = bool(
+            node.get("_unavailable")
+            or negated_offer_only
+            or re.search(r"미적립|미제공|제공되지|제공하지|면제되지|제공\s*불가", text)
+            or re.search(r"\[예시\]|^예시|계산\s*예|연체\s*시|유이자|할부금리|연체이자", text)
+        )
         benefit = (
             ((bool(_BENEFIT.search(text)) and concrete) or table_offer or offer_label)
             and not restriction_only
             and not exclusion_context
-            and not negated_offer_only
+            and not is_negated
         )
-        if re.search(
-            r"\[예시\]|^예시|계산\s*예|연체\s*시|유이자|할부금리|연체이자"
-            r"|제공하지\s*않|제공\s*불가",
-            text,
-        ):
+        if is_negated:
             benefit = False
-        if re.search(r"미적립|미제공|제공되지|제공하지|면제되지", text):
-            benefit = False
-            restricted = True
-        if node.get("_unavailable"):
-            benefit = False
+            if re.search(r"미적립|미제공|제공되지|제공하지|면제되지|제외", text):
+                restricted = True
         if column_role == "condition":
             benefit = False
             restricted = True
@@ -323,13 +370,12 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
             benefit = (
                 (bool(_BENEFIT.search(text) and concrete) or table_offer and concrete)
                 and not restriction_only
-                and not negated_offer_only
+                and not is_negated
             )
-        elif column_role == "offer" and not node.get("_unavailable"):
+        elif column_role == "offer" and not is_negated:
             benefit = benefit or (
                 bool(node.get("_table_label"))
                 and concrete
-                and not negated_offer_only
                 and not restriction_only
                 and not re.search(r"금리|이자|수수료|통계", context)
             )
@@ -351,17 +397,36 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
             for a in ancestors
             if a
         )
-        if column_role == "label" and text and not re.search(r"기본|추가|구간", text):
+        if (
+            column_role == "label"
+            and text
+            and not node.get("_unavailable")
+            and not re.search(r"기본|추가|구간", text)
+        ):
             siblings = _strings(node.get("table_cells_json"))
+            parent_table = by_id.get(str(node.get("parent_id")), {})
+            headers_list = _strings(node.get("table_headers_json")) or _strings(
+                parent_table.get("table_headers_json")
+            )
+            offer_siblings = (
+                [
+                    c
+                    for h, c in zip(headers_list, siblings, strict=True)
+                    if _TABLE_OFFER.search(h) and not _is_cell_unavailable(c)
+                ]
+                if len(headers_list) == len(siblings)
+                else siblings
+            )
             if any(
-                _BENEFIT.search(c) or re.search(r"\d+(?:\.\d+)?\s*%|\d+원/ℓ", c) for c in siblings
+                _BENEFIT.search(c) or re.search(r"\d+(?:\.\d+)?\s*%|\d+원/ℓ", c)
+                for c in offer_siblings
             ):
                 candidates.append(
                     SummaryCandidate(
                         node_id, text, "benefit", heading=True, source_excerpt=source_excerpt
                     )
                 )
-        if benefit:
+        if benefit and not is_negated:
             if (
                 heading
                 and kind in {"MAJOR_SECTION", "ITEM"}

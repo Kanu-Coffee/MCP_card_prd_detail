@@ -120,3 +120,66 @@ def test_mileage_offer_without_provide_verb_is_not_only_a_condition():
     assert any(c.field == "benefit" and "1마일" in c.text for c in candidates)
     assert any(c.field == "condition" and "30만원 이상" in c.text for c in candidates)
     assert not any(c.field == "condition" and c.text == text for c in candidates)
+
+
+@pytest.mark.parametrize(
+    ("product_code", "expected_fee"),
+    [
+        ("00917", "| 국내전용 | 실버 | 3,000원 | 10,000원 | 13,000원 |"),
+        ("00549", "| MASTER | 1만 5천원 | 5천원 | 1만원 |"),
+        ("00157", "| 본인 | 11만 5천원 | 12만원 |"),
+    ],
+    ids=["kb-00917-total-fee", "shinhan-00549-total-fee", "shinhan-00157-no-waiver-footnote"],
+)
+def test_fee_preservation_for_three_reviewer_cases(product_code: str, expected_fee: str):
+    fixtures_path = ROOT / "readonly-comparison.json"
+    saved = json.loads(fixtures_path.read_text())
+    fixture = next(f for f in saved["fixtures"] if f["summary"]["product_code"] == product_code)
+    row = fixture["summary"]
+    actual = CatalogRepository._summary(
+        SimpleNamespace(generation_id=row["generation_id"]),
+        row,
+        fixture["nodes"],
+        {},
+        LaunchDateResolution(None, "missing"),
+        (),
+        (),
+    )
+    assert actual.annual_fee_text == expected_fee
+
+
+def test_negative_table_offers_blocked_from_benefit_headings_and_details():
+    uncredited = node(
+        "| 온라인 | 5% 포인트 미적립 |",
+        kind="TABLE_ROW",
+        table_headers_json=json.dumps(["구분", "혜택"]),
+        table_cells_json=json.dumps(["온라인", "5% 포인트 미적립"], ensure_ascii=False),
+        table_role="BODY",
+    )
+    uncredited_candidates = summary_candidates([uncredited])
+    assert not any(c.field == "benefit" for c in uncredited_candidates)
+    assert any(c.field == "condition" and "미적립" in c.text for c in uncredited_candidates)
+
+    unavailable_mileage = node(
+        "| 마일리지 적립 | × |",
+        kind="TABLE_ROW",
+        table_headers_json=json.dumps(["구분", "혜택"]),
+        table_cells_json=json.dumps(["마일리지 적립", "×"], ensure_ascii=False),
+        table_role="BODY",
+    )
+    mileage_candidates = summary_candidates([unavailable_mileage])
+    assert not any(c.field == "benefit" for c in mileage_candidates)
+    assert not any(c.heading for c in mileage_candidates)
+
+
+def test_positive_offer_with_partial_exception_preserves_both():
+    row = node(
+        "| 쇼핑 | 국내 5% 할인(무이자할부 제외) |",
+        kind="TABLE_ROW",
+        table_headers_json=json.dumps(["구분", "혜택"]),
+        table_cells_json=json.dumps(["쇼핑", "국내 5% 할인(무이자할부 제외)"], ensure_ascii=False),
+        table_role="BODY",
+    )
+    candidates = summary_candidates([row])
+    assert any(c.field == "benefit" and "5% 할인" in c.text for c in candidates)
+    assert any(c.field == "condition" and "무이자할부 제외" in c.text for c in candidates)
