@@ -1,0 +1,7 @@
+MCP startup validation in progress; waiting up to 15 minutes. No Worker is launched.
+Cutover complete: cardrag-mcp ready, Worker timer active. Old empty volume metadata retained pending final smoke.
+successful migration: passed, file inodes/content preserved
+MCP startup validation in progress; waiting up to 15 minutes. No Worker is launched.
+Restoring original volume locations and deployment.
+Original deployment ready; timer active.
+rollback: passed, file inodes/content preserved

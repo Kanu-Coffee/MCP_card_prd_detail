@@ -1,0 +1,38 @@
+[
+  {
+    "snapshot": "008-6b42a1a",
+    "service": "mcp",
+    "environment_image_ports_secret_files_preserved": true,
+    "external_volumes": [
+      "cardrag-mcp-state"
+    ]
+  },
+  {
+    "snapshot": "008-6b42a1a",
+    "service": "worker",
+    "environment_image_ports_secret_files_preserved": true,
+    "external_volumes": [
+      "cardrag-worker-auth",
+      "cardrag-worker-paddleocr-models",
+      "cardrag-worker-state"
+    ]
+  },
+  {
+    "snapshot": "009-b544a80",
+    "service": "mcp",
+    "environment_image_ports_secret_files_preserved": true,
+    "external_volumes": [
+      "cardrag-mcp-state"
+    ]
+  },
+  {
+    "snapshot": "009-b544a80",
+    "service": "worker",
+    "environment_image_ports_secret_files_preserved": true,
+    "external_volumes": [
+      "cardrag-worker-auth",
+      "cardrag-worker-paddleocr-models",
+      "cardrag-worker-state"
+    ]
+  }
+]
