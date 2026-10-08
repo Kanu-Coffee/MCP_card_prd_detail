@@ -90,7 +90,21 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
             if plan.channel == "stable" and source is not None and not plan.skips("webdav"):
                 current = await webdav.validated_current_generation()
                 if current is None or current.generation_id != source.manifest.generation_id:
-                    raise PartialExecutionError("skip_source_unavailable", "webdav")
+                    from .partial_execution import read_json
+
+                    own_seal = (
+                        settings.state_dir / "runs" / resume / "sealed/publish.json" if resume else None
+                    )
+                    own_generation = (
+                        read_json(settings.state_dir, own_seal, "webdav")
+                        .get("manifest", {})
+                        .get("generation_id")
+                        if own_seal is not None and own_seal.is_file()
+                        else None
+                    )
+                    # Exact seal/remote reconciliation occurs before any publication in the pipeline.
+                    if current is None or current.generation_id != own_generation:
+                        raise PartialExecutionError("skip_source_unavailable", "webdav")
             with WorkerState(
                 settings.state_database,
                 sqlite_cache_mib=settings.sqlite_cache_mib,

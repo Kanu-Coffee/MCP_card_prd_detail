@@ -6654,6 +6654,7 @@ class WorkerPipeline:
                 replace_incomplete_owned_targets=True,
                 extra_metadata=extra_metadata,
             )
+        await self._guard_partial_stable_source()
         previous_id: str | None
         if self.document_aggregation is not None:
             current_aggregation_head = await self._validated_document_aggregation_head()
@@ -6968,6 +6969,23 @@ class WorkerPipeline:
         }
         _atomic_write(seal_path, canonical_json_bytes(sealed))
         return await self._publish_sealed(run_id, sealed)
+
+    async def _guard_partial_stable_source(self) -> None:
+        """Never rechain a frozen source behind a newer stable collection."""
+        if (
+            self.execution_plan is None
+            or not self.execution_plan.skips("pdf")
+            or self.execution_plan.skips("webdav")
+            or self.webdav.channel != "stable"
+        ):
+            return
+        if self.reuse_source is None:
+            raise PartialExecutionError("skip_source_unavailable", "webdav")
+        current = await self.webdav.validated_current_generation(
+            **({"force_refresh": True} if isinstance(self.webdav, WebDAVClient) else {})
+        )
+        if current is None or current.generation_id != self.reuse_source.manifest.generation_id:
+            raise PartialExecutionError("skip_source_unavailable", "webdav")
 
     async def _align_seal_to_current(
         self,
@@ -7497,6 +7515,7 @@ class WorkerPipeline:
             database=validated.database_path,
             manifest=sealed["manifest"],
             vectors=validated.vector_path,
+            before_pointer_replace=self._guard_partial_stable_source,
         )
         return published, validated
 
@@ -7572,7 +7591,7 @@ class WorkerPipeline:
                     ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
                     v5_metrics=validated.v5_metrics,
                 )
-            if current.ocr_failed_document_count == 0:
+            if current.ocr_failed_document_count == 0 and self.execution_plan is None:
                 if isinstance(self.webdav, WebDAVClient):
                     await self.webdav.verification_gate()
                 self.state.finish_run(
@@ -7596,6 +7615,7 @@ class WorkerPipeline:
             # A different partial generation with the same corpus is not a
             # no-change proof. Fall through to the predecessor fence, which
             # prevents this stale seal from overwriting that head.
+        await self._guard_partial_stable_source()
         aligned = await self._align_seal_to_current(
             sealed,
             validated=validated,
@@ -7607,6 +7627,8 @@ class WorkerPipeline:
                 aligned,
                 validated=validated,
             )
+        except PartialExecutionError:
+            raise
         except Exception as exc:
             # MOVE can commit stable.json immediately before its destination
             # readback fails. Retain only an allowlisted diagnostic snapshot,

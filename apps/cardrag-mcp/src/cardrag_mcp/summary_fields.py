@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-SUMMARY_CLASSIFIER_VERSION = "cardrag.product-summary.v2"
+SUMMARY_CLASSIFIER_VERSION = "cardrag.product-summary.v3"
 _NOTICE = re.compile(
     r"부가\s*서비스\s*(?:변경|축소|폐지)|상품\s*출시일|금융소비자|휴업|파산|수익성|법적\s*고지"
 )
@@ -19,6 +19,11 @@ _CONDITION = re.compile(
 _EXEMPTION = re.compile(
     r"조건\s*[,·및 ]*\s*한도\s*없이|(?:전월\s*)?(?:실적|조건|한도)"
     r"(?:\s*(?:조건|제한))?\s*(?:없음|없이|무관)|무실적|무제한"
+)
+_NEGATED_OFFER = re.compile(
+    r"(?:할인|적립|캐시백|포인트|마일리지|무료|무이자\s*할부)"
+    r"\s*(?:혜택\s*)?(?:(?:서비스|이용|제공)\s*)?"
+    r"(?:대상(?:에서)?\s*)?(?:제외|불가|미적용|미제공|제공하지\s*않(?:음|습니다)?)"
 )
 _FEE_BAD = re.compile(r"반환|산정|중도해지|제외|수수료\s*및|이자|연체|일할")
 _AMOUNT = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:만\s*)?원|면제|없음|무료")
@@ -65,6 +70,7 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
         if node.get("table_role") == "header" or (
             kind == "TABLE_ROW"
             and not _AMOUNT.search(text)
+            and "%" not in text
             and not _BENEFIT.search(text)
             and not _CONDITION.search(text)
         ):
@@ -96,6 +102,13 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
         exempt = bool(_EXEMPTION.search(text))
         remaining = _EXEMPTION.sub("", text)
         restricted = bool(_CONDITION.search(remaining)) or "조건" in remaining
+        # Remove an explicitly negated offer before deciding whether a separate
+        # positive offer remains. Parenthesized exceptions do not negate the main offer.
+        main_text = re.sub(r"\([^()]*\)", " ", text)
+        positive_text = _NEGATED_OFFER.sub("", main_text)
+        negated_offer_only = bool(_NEGATED_OFFER.search(main_text)) and not _BENEFIT.search(
+            positive_text
+        )
         # Offer quantities and services differ from procedures, caps and exclusions.
         concrete = bool(
             re.search(
@@ -120,6 +133,7 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
         table_offer = (
             kind == "TABLE_ROW"
             and bool(_BENEFIT.search(context))
+            and not re.search(r"금리|이자|수수료|통계", context)
             and bool(_AMOUNT.search(text) or "%" in text)
         )
         offer_label = (
@@ -134,6 +148,7 @@ def summary_candidates(nodes: Sequence[Mapping[str, Any]]) -> list[SummaryCandid
             ((bool(_BENEFIT.search(text)) and concrete) or table_offer or offer_label)
             and not restriction_only
             and not exclusion_context
+            and not negated_offer_only
         )
         if re.search(
             r"\[예시\]|^예시|계산\s*예|연체\s*시|유이자|할부금리|연체이자"

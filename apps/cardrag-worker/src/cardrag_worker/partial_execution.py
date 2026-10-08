@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from cardrag_core import GenerationManifest
+from cardrag_core import GenerationManifest, IssuerOCRCounts
 
 from .contracts import canonical_json_bytes, canonical_sha256
 from .downloader import DownloadedPDF
@@ -376,11 +376,18 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
     from .ocr import page_records
     from .pipeline import (
         V5_VIEW_MAXIMUM_CHARACTERS,
+        OCRDocumentFailuresError,
+        OCRFailureBookkeepingError,
+        OCRFailureRecord,
         _atomic_write,
+        _bounded_report_text,
         _known_snapshot_sources,
         _OCRFailedDocument,
         _ProcessedDocument,
         _restore_snapshot,
+        _write_ocr_failure_report,
+        classify_ocr_failure,
+        is_isolatable_document_ocr_failure,
     )
     from .structure import build_derived_views, parse_structure_artifact
 
@@ -400,16 +407,17 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
     failed = []
     unsupported = []
     provider_called = 0
+    failures = []
+    failure_report = pipeline.state_dir / "runs" / run_id / "reports/ocr-failures.json"
     request = pipeline._active_ocr_request
     requested_ids = set()
     if request is not None:
         for target in request.targets:
             retained = source.documents.get(target.document_id)
-            if (
-                retained is None
-                or target.document_id not in source.revisions
-                or (retained.pdf.sha256, retained.pdf.size_bytes, retained.page_count)
-                != (target.pdf_sha256, target.pdf_size_bytes, target.page_count)
+            if retained is None or (retained.pdf.sha256, retained.pdf.size_bytes, retained.page_count) != (
+                target.pdf_sha256,
+                target.pdf_size_bytes,
+                target.page_count,
             ):
                 raise PartialExecutionError("skip_artifact_incompatible", "ocr", target.document_id)
             requested_ids.add(target.document_id)
@@ -424,7 +432,7 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
     for doc_id, doc in source.documents.items():
         started = time.monotonic()
         row = source.revisions.get(doc_id)
-        if row is None:
+        if row is None and plan.skips("ocr"):
             failure = next(r for r in source.failed if r["document_id"] == doc_id)
             pdf = source.pdf(doc_id, "")
             failed.append(
@@ -446,6 +454,21 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
                 )
             )
             continue
+        if row is None:
+            failure = next(r for r in source.failed if r["document_id"] == doc_id)
+            matches = [
+                record
+                for record in known.values()
+                if (record.issuer, record.product_code) == (failure["issuer"], failure["product_code"])
+                and record.document_id(doc.pdf.sha256) == doc_id
+            ]
+            if len(matches) != 1:
+                raise PartialExecutionError("skip_source_unavailable", "pdf", doc_id)
+            row = {
+                "source_id": matches[0].source_id,
+                "temporal_status": "current",
+                "supersedes_document_id": None,
+            }
         record = known.get(row["source_id"])
         if record is None or record.document_id(doc.pdf.sha256) != doc_id:
             raise PartialExecutionError("skip_source_unavailable", "pdf", doc_id)
@@ -485,9 +508,64 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
                     ),
                 )
 
-            result = await pipeline._finite_stage(
-                run_id=run_id, document_id=doc_id, name="ocr", operation=recognize
-            )
+            try:
+                result = await pipeline._finite_stage(
+                    run_id=run_id,
+                    document_id=doc_id,
+                    name="ocr",
+                    operation=recognize,
+                    non_retryable_predicate=lambda exc: not is_isolatable_document_ocr_failure(exc),
+                    error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
+                    non_retryable_error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
+                )
+            except Exception as exc:
+                if not is_isolatable_document_ocr_failure(exc):
+                    raise
+                reason = classify_ocr_failure(exc)
+                stage = pipeline.state.get_stage(run_id, doc_id, "ocr")
+                if (
+                    stage is None
+                    or stage.status != "failed"
+                    or stage.attempt_count != stage.max_attempts
+                    or stage.last_error != reason.stored_error
+                ):
+                    raise OCRFailureBookkeepingError() from None
+                failures.append(
+                    OCRFailureRecord(
+                        issuer=_bounded_report_text(record.issuer, maximum=64),
+                        product_code=_bounded_report_text(record.product_code, maximum=256),
+                        product_name=_bounded_report_text(record.product_name, maximum=512),
+                        file_name=_bounded_report_text(record.file_name, maximum=512),
+                        document_id=doc_id,
+                        pdf_sha256=pdf.sha256,
+                        page_count=pdf.page_count,
+                        attempts=stage.attempt_count,
+                        reason_code=reason.reason_code,
+                        reason=reason.reason,
+                    )
+                )
+                failed.append(
+                    _OCRFailedDocument(
+                        record=OCRFailedProductRecord(
+                            document_id=doc_id,
+                            issuer=record.issuer,
+                            product_code=record.product_code,
+                            product_name=record.product_name,
+                            title=record.product_name,
+                            pdf_sha256=pdf.sha256,
+                            pdf_size_bytes=pdf.size_bytes,
+                            page_count=pdf.page_count,
+                            reason_code=reason.reason_code,
+                            reason=reason.reason,
+                            attempts=stage.attempt_count,
+                        ),
+                        pdf_path=pdf.path,
+                        is_historical=row["temporal_status"] != "current",
+                    )
+                )
+                _write_ocr_failure_report(failure_report, run_id=run_id, failures=failures)
+                plan.record("ocr", "executed", seconds=time.monotonic() - started)
+                continue
             if doc_id in requested_ids and (
                 result.cache_kind != "content" or result.cache_variant_id is None
             ):
@@ -593,6 +671,26 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
             )
         )
     pipeline._unsupported_count = len(unsupported)
+    issuers = {item.record.issuer for item in processed} | {item.record.issuer for item in failed}
+    raw_counts = [
+        (
+            issuer,
+            sum(item.record.issuer == issuer for item in processed),
+            sum(item.record.issuer == issuer for item in failed),
+        )
+        for issuer in sorted(issuers)
+    ]
+    if any(item.is_historical for item in failed) or any(
+        succeeded < 1 or succeeded * 100 < (succeeded + failed_count) * 95
+        for _, succeeded, failed_count in raw_counts
+    ):
+        raise OCRDocumentFailuresError(run_id=run_id, report_path=failure_report, failures=tuple(failures))
+    issuer_counts = tuple(
+        IssuerOCRCounts(
+            issuer=issuer, acquired=succeeded + failed_count, succeeded=succeeded, failed=failed_count
+        )
+        for issuer, succeeded, failed_count in raw_counts
+    )
     # No new collection snapshot or retirement grace is recorded by frozen replay.
     built: PipelineResult = await pipeline._build_v5_generation(
         run_id=run_id,
@@ -603,7 +701,7 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
         processed=processed,
         unsupported=unsupported,
         failed_documents=failed,
-        issuer_ocr_counts=source.manifest.issuer_ocr_counts,
+        issuer_ocr_counts=issuer_counts,
         ocr_cache_publication_deferred=0,
         unresolved_revision_ledger=source.seal["v5_metrics"]["historical_revision_unresolved_identities"],
         unresolved_revision_sha256=source.seal["v5_metrics"]["historical_revision_unresolved_sha256"],

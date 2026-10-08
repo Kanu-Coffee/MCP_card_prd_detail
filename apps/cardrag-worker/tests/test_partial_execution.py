@@ -435,3 +435,234 @@ async def test_pending_ocr_request_cannot_be_falsely_completed(corpus, skip_ocr)
     if skip_ocr:
         assert ocr.calls == before
     assert not (source.root / "ocr-requests" / "completed" / (request.request_id + ".json")).exists()
+
+
+def stable_source_runner(corpus):
+    from cardrag_core import channel_pointer_path
+
+    from cardrag_worker.webdav import RemoteGenerationIdentity
+
+    pipeline, source, _, _, _, _, dav = corpus
+    runner = pipeline(
+        ExecutionPlan(frozenset({"pdf", "ocr", "embedding"}), source.run_id, channel="stable"), source
+    )
+    dav.channel = "stable"
+    dav.pointer_path = channel_pointer_path("stable")
+    dav.stable_publication_approved = True
+    runner.stable_publication_approved = True
+    dav.current = RemoteGenerationIdentity(
+        generation_id=source.manifest.generation_id,
+        corpus_sha256=source.manifest.corpus_sha256,
+        contract_sha256=source.manifest.contract_sha256,
+        generation_schema=source.manifest.schema_version,
+        serving_schema=source.manifest.serving_schema,
+    )
+    return runner, dav
+
+
+@pytest.mark.parametrize("boundary", ["export", "upload"])
+async def test_frozen_stable_source_change_is_fenced(corpus, monkeypatch, boundary):
+    runner, dav = stable_source_runner(corpus)
+    if boundary == "export":
+        original = runner.exporter_v5.export
+
+        def changed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            dav.install_other_candidate_head()
+            return result
+
+        monkeypatch.setattr(runner.exporter_v5, "export", changed)
+    else:
+        original_upload = dav.put_cas_file
+
+        async def changed_upload(*args, **kwargs):
+            result = await original_upload(*args, **kwargs)
+            dav.install_other_candidate_head()
+            return result
+
+        monkeypatch.setattr(dav, "put_cas_file", changed_upload)
+    with pytest.raises(PartialExecutionError, match="skip_source_unavailable"):
+        await runner.run()
+    assert dav.current.generation_id == "g-other-candidate-head"
+    assert json.loads(dav.objects[str(dav.pointer_path)])["generation_id"] == "g-other-candidate-head"
+
+
+async def test_frozen_stable_matching_source_publishes(corpus):
+    runner, dav = stable_source_runner(corpus)
+    result = await runner.run()
+    assert result.status == "succeeded"
+    assert json.loads(dav.objects[str(dav.pointer_path)])["generation_id"] == result.generation_id
+
+
+@pytest.fixture
+async def failed_corpus(corpus):
+    from dataclasses import replace
+
+    from test_pipeline_v5 import _MultiAdapter
+
+    from cardrag_worker.ocr import OCRValidationError
+
+    pipeline, source, state, pdf_calls, embed_calls, _, dav = corpus
+    original_runner = pipeline()
+    base = original_runner.adapters[0].record
+    records = (base,) + tuple(
+        replace(
+            base, product_code=f"test-{i:03}", source_post_id=f"post-{i}", product_name=f"테스트 카드 {i}"
+        )
+        for i in range(2, 21)
+    )
+
+    class RecoverableOCR(_OCR):
+        def __init__(self):
+            super().__init__()
+            self.failed_ids = {records[-1].document_id(next(iter(source.documents.values())).pdf.sha256)}
+            self.attempted = []
+            self.systemic = False
+
+        async def resolve(self, **kwargs):
+            self.attempted.append(kwargs["document_id"])
+            if kwargs["document_id"] in self.failed_ids:
+                if self.systemic:
+                    raise ValueError("fixture configuration failure")
+                raise OCRValidationError("fixture document failure")
+            return await super().resolve(**kwargs)
+
+    ocr = RecoverableOCR()
+    original_runner.adapters = [_MultiAdapter(records)]
+    original_runner.ocr = ocr
+    dav.objects.pop(str(dav.pointer_path), None)
+    initial = await original_runner.run()
+    failed_source = ReuseSource(source.root, initial.run_id, state.path)
+    assert len(failed_source.failed) == 1
+    assert failed_source.manifest.issuer_ocr_counts[0].succeeded == 19
+
+    def factory(skipped):
+        runner = pipeline(
+            ExecutionPlan(frozenset(skipped | {"webdav"}), failed_source.run_id), failed_source, local=True
+        )
+        runner.ocr = ocr
+        return runner
+
+    yield factory, failed_source, ocr, pdf_calls
+
+
+@pytest.mark.parametrize("skip_ocr", [False, True])
+async def test_failed_frozen_document_recovers_only_when_ocr_selected(failed_corpus, skip_ocr):
+    factory, source, ocr, pdf_calls = failed_corpus
+    before = len(pdf_calls), len(ocr.attempted)
+    ocr.failed_ids.clear()
+    result = await factory({"pdf", "ocr"} if skip_ocr else {"pdf"}).run()
+    assert result.status == "local_only"
+    seal = json.loads(Path(result.local_artifacts, "publish.json").read_text())
+    count = seal["manifest"]["issuer_ocr_counts"][0]
+    assert count == {
+        "issuer": "testbank",
+        "acquired": 20,
+        "succeeded": 19 if skip_ocr else 20,
+        "failed": 1 if skip_ocr else 0,
+    }
+    assert len(pdf_calls) == before[0]
+    if skip_ocr:
+        assert len(ocr.attempted) == before[1]
+    else:
+        assert source.failed[0]["document_id"] in ocr.attempted[before[1] :]
+        assert result.document_count == 20
+
+
+async def test_failed_frozen_document_retries_and_keeps_bounded_failure(failed_corpus):
+    factory, _, ocr, _ = failed_corpus
+    runner = factory({"pdf"})
+    runner.maximum_attempts = 2
+    before = len(ocr.attempted)
+    result = await runner.run()
+    assert result.status == "local_only"
+    failure_id = next(iter(ocr.failed_ids))
+    assert ocr.attempted[before:].count(failure_id) == 2
+    report = json.loads((runner.state_dir / "runs" / result.run_id / "reports/ocr-failures.json").read_text())
+    assert report["failures"][0]["attempts"] == 2
+
+
+async def test_failed_replay_below_95_percent_cannot_export(failed_corpus):
+    from cardrag_worker.pipeline import OCRDocumentFailuresError
+
+    factory, source, ocr, _ = failed_corpus
+    ocr.failed_ids.add(next(iter(source.revisions)))
+    with pytest.raises(OCRDocumentFailuresError):
+        await factory({"pdf"}).run()
+
+
+async def test_failed_replay_missing_identity_blocks_without_inference(failed_corpus, monkeypatch):
+    from cardrag_worker import pipeline as module
+
+    factory, source, ocr, _ = failed_corpus
+    failed_id = source.failed[0]["document_id"]
+    source.documents = {failed_id: source.documents[failed_id]}
+    monkeypatch.setattr(module, "_known_snapshot_sources", lambda *args, **kwargs: {})
+    before = len(ocr.attempted)
+    with pytest.raises(PartialExecutionError, match="skip_source_unavailable"):
+        await factory({"pdf"}).run()
+    assert len(ocr.attempted) == before
+
+
+async def test_exact_committed_partial_stable_resume_is_idempotent(corpus):
+    from dataclasses import replace
+
+    runner, dav = stable_source_runner(corpus)
+    result = await runner.run()
+    dav.current = replace(dav.current, generation_id=result.generation_id)
+    runner.state.finish_run(result.run_id, "interrupted", error="fixture lost local receipt")
+    before = dict(dav.objects)
+    resumed = await runner.run(resume_run_id=result.run_id)
+    assert resumed.status == "succeeded"
+    assert dav.objects == before
+
+
+async def test_failed_frozen_systemic_error_is_not_retried(failed_corpus):
+    from cardrag_worker.pipeline import WorkerUnexpectedFailureError
+
+    factory, _, ocr, _ = failed_corpus
+    ocr.systemic = True
+    before = len(ocr.attempted)
+    runner = factory({"pdf"})
+    runner.maximum_attempts = 3
+    with pytest.raises(WorkerUnexpectedFailureError):
+        await runner.run()
+    assert ocr.attempted[before:].count(next(iter(ocr.failed_ids))) == 1
+
+
+async def test_failed_target_reprocess_requires_durable_variant(failed_corpus):
+    from cardrag_worker.ocr_requests import OCRReprocessRequest, OCRRequestTarget, queue_reprocess_requests
+
+    factory, source, ocr, _ = failed_corpus
+    document = source.documents[source.failed[0]["document_id"]]
+    request = OCRReprocessRequest(
+        request_id="ocr-failed-target",
+        source_generation_id=source.manifest.generation_id,
+        created_at=datetime.now(UTC),
+        targets=(
+            OCRRequestTarget(
+                document_id=document.document_id,
+                pdf_sha256=document.pdf.sha256,
+                pdf_size_bytes=document.pdf.size_bytes,
+                page_count=document.page_count,
+            ),
+        ),
+    )
+    queue_reprocess_requests(source.root, (request,))
+    ocr.failed_ids.clear()
+    with pytest.raises(PartialExecutionError, match="skip_artifact_incompatible"):
+        await factory({"pdf"}).run()
+    assert document.document_id in ocr.attempted
+    assert not (source.root / "ocr-requests/completed/ocr-failed-target.json").exists()
+
+
+async def test_failed_historical_replay_is_never_isolated(failed_corpus):
+    from cardrag_worker.pipeline import OCRDocumentFailuresError
+
+    factory, source, ocr, _ = failed_corpus
+    ocr.failed_ids.clear()
+    historical_id = next(iter(source.revisions))
+    source.revisions[historical_id] = {**source.revisions[historical_id], "temporal_status": "superseded"}
+    ocr.failed_ids.add(historical_id)
+    with pytest.raises(OCRDocumentFailuresError):
+        await factory({"pdf"}).run()

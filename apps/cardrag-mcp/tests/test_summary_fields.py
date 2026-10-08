@@ -84,3 +84,94 @@ def test_real_solid_nodes():
 
 def test_long_sentence_does_not_lose_tail_negation():
     assert bounded_source_text("할인 " + "설명 " * 100 + "제외", 180) is None
+
+
+@pytest.mark.parametrize("text", ["1.2% 할인 대상에서 제외", "5% 적립 미적용", "2% 캐시백 불가"])
+def test_negated_rate_is_not_a_benefit(text):
+    assert not any(c.field == "benefit" for c in summary_candidates([node(text)]))
+
+
+@pytest.mark.parametrize(
+    "text", ["국내 1.2% 할인(무이자 할부 제외)", "전월 30만원 이상 5% 캐시백", "실적 없이 2% 적립"]
+)
+def test_positive_rate_survives_conditions_and_exceptions(text):
+    assert any(c.field == "benefit" for c in summary_candidates([node(text)]))
+
+
+@pytest.mark.parametrize(
+    "heading,expected",
+    [
+        ("국내외 할인", True),
+        ("포인트 적립", True),
+        ("캐시백 혜택", True),
+        ("할부금리", False),
+        ("할인금리", False),
+        ("수수료 안내", False),
+        ("통계", False),
+    ],
+)
+def test_rate_only_table_uses_offer_context(heading, expected):
+    nodes = [
+        node(heading, kind="MAJOR_SECTION", heading=heading, node_id="h"),
+        node("| 국내 | 1.2% |", kind="TABLE_ROW", parent="h"),
+    ]
+    assert (
+        any(c.node_id == "n" and c.field == "benefit" for c in summary_candidates(nodes))
+        is expected
+    )
+
+
+_EVIDENCE = (
+    Path(__file__).resolve().parents[3]
+    / ".handoff/009_product-summary-field-classification/evidence"
+)
+_REAL_FIXTURES = json.loads((_EVIDENCE / "fix01-product-fixtures.json").read_text())["fixtures"]
+_REAL_SUMMARIES = json.loads((_EVIDENCE / "fix01-summary-sample.json").read_text())["summaries"]
+
+
+@pytest.mark.parametrize(
+    "fixture", _REAL_FIXTURES, ids=lambda f: f["issuer"] + ":" + f["product_code"]
+)
+def test_multiple_real_products_preserve_source_candidates_and_evidence(fixture):
+    candidates = summary_candidates(fixture["nodes"])
+    summary = next(
+        s for s in _REAL_SUMMARIES if s["contract_revision_id"] == fixture["contract_revision_id"]
+    )
+    by_id = {n["node_id"]: n for n in fixture["nodes"]}
+    for evidence in summary["evidence"]:
+        if evidence["field"] == "launch_date":
+            assert evidence["contract_revision_id"] in summary["launch_date_source_revision_ids"]
+            continue
+        assert evidence["contract_revision_id"] == fixture["contract_revision_id"]
+        assert evidence["node_id"] in by_id
+        assert evidence["pages"]
+        assert " ".join(evidence["excerpt"].split()) in " ".join(
+            by_id[evidence["node_id"]]["display_text"].split()
+        )
+    for text in summary["benefit_summary_texts"]:
+        assert any(c.field == "benefit" and c.text == text for c in candidates)
+    assert not any(
+        "상품 출시일 및 부가서비스 변경 안내" in text for text in summary["benefit_headings"]
+    )
+
+
+@pytest.mark.parametrize(
+    "issuer,code,expected",
+    [
+        ("woori", "500107", "1.2%"),
+        ("woori", "104022", "0.8%"),
+        ("woori", "104023", "5%"),
+        ("hana", "15911", "캐시백"),
+        ("hana", "15758", "바우처"),
+        ("hyundai", "149298", "M포인트"),
+        ("kb", "04404", "단체보험"),
+        ("lotte", "1118", "5~7%"),
+        ("samsung", "AAP1920--v-bea85425b2934e8f", "10%"),
+        ("shinhan", "00368", "15%"),
+    ],
+)
+def test_diverse_real_benefit_types(issuer, code, expected):
+    fixture = next(f for f in _REAL_FIXTURES if (f["issuer"], f["product_code"]) == (issuer, code))
+    assert any(
+        c.field == "benefit" and expected in c.text for c in summary_candidates(fixture["nodes"])
+    )
