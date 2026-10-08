@@ -1,0 +1,63 @@
+{
+  "generation_id": "g-eba5ca0d13924abdb1f36937-71a5fd98d58b",
+  "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7",
+  "method": "Production get_contract_bundle graph selector (scope=benefits), readonly DB; vector preflight omitted for this source comparison; authenticated full HTTP bundle checked separately on a small fixture",
+  "bundle_node_count": 87,
+  "summary_benefit_evidence": [
+    {
+      "field": "benefit",
+      "node_id": "node_6bb56127eef7a6fa817af2ae5c82dccb76b3729dd1eb40f72a046eb51a3864e3",
+      "pages": [
+        2
+      ],
+      "excerpt": "조건, 한도 없이 든든한 1.2% 할인",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7"
+    },
+    {
+      "field": "benefit",
+      "node_id": "node_6310bd1d7c00f510932db73484cb99b44244c6d116f0dde72bd0591b5bbb4f74",
+      "pages": [
+        2
+      ],
+      "excerpt": "조건, 한도 없이 든든한 1.2% 할인",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7"
+    },
+    {
+      "field": "benefit",
+      "node_id": "node_57cd4b50d410bbba501a6e19a12d6174ada72caba0b48cebc3b02f704bc16c6a",
+      "pages": [
+        3
+      ],
+      "excerpt": "**탄탄한 기본, 국내외 1.2% 할인**",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7"
+    },
+    {
+      "field": "benefit",
+      "node_id": "node_f76dc17ee366f9125b587e1d03da3e783031d2debd2fa02bdf89856246346072",
+      "pages": [
+        3
+      ],
+      "excerpt": "**국내/해외 가맹점 1.2% 청구할인**",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7"
+    },
+    {
+      "field": "benefit",
+      "node_id": "node_e32664928358a2c99f56d3ce6e8412c1669c8c8a288d0cd045b48d3a428d8473",
+      "pages": [
+        3
+      ],
+      "excerpt": "※ Two-in-One 결제서비스(국내체크 매출) 이용 시 0.3% 청구할인",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7"
+    },
+    {
+      "field": "benefit",
+      "node_id": "node_11b67c6dfb951542b4f20cbcb84e35180887977e92081bba04a3ff23d9839242",
+      "pages": [
+        3
+      ],
+      "excerpt": "**2~3개월 무이자 할부 서비스**",
+      "contract_revision_id": "revision_b7edb706176f9ddd019c3d5a9c4338e94c36f035d0fb1ea3f41faf5f398ac6b7"
+    }
+  ],
+  "all_summary_benefit_nodes_in_bundle": true
+}

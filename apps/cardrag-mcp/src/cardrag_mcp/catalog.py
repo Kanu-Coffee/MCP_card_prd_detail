@@ -7,7 +7,7 @@ import json
 import sqlite3
 import unicodedata
 from datetime import date
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from cardrag_core import (
     DerivedTextSegment,
@@ -36,6 +36,11 @@ from cardrag_mcp.models import (
     TemporalStatus,
 )
 from cardrag_mcp.store import GenerationHandle
+from cardrag_mcp.summary_fields import (
+    SUMMARY_CLASSIFIER_VERSION,
+    bounded_source_text,
+    summary_candidates,
+)
 
 _CURRENT_PRODUCTS = """SELECT pl.issuer, pl.product_code, pl.product_lineage_id,
     pl.name AS product_name, pl.document_type, cr.contract_revision_id,
@@ -585,6 +590,7 @@ class CatalogRepository:
                     str(row["pdf_sha256"]),
                     "product_summary",
                     PARSER_VERSION,
+                    SUMMARY_CLASSIFIER_VERSION,
                 )
                 cached = self.cache.get(key)
                 if cached is not None:
@@ -662,12 +668,9 @@ class CatalogRepository:
                 nodes: dict[str, list[sqlite3.Row]] = {revision_id: [] for revision_id in missing}
                 for node in connection.execute(
                     "SELECT node_id,contract_revision_id,node_type,major_class,"  # noqa: S608 - placeholders only
-                    "raw_heading,ordinal,display_text FROM structure_nodes "
-                    "WHERE contract_revision_id IN ("
-                    + placeholders
-                    + ") AND (major_class IN ('BENEFIT','NOTICE','MIXED') "
-                    "OR display_text LIKE '%출시%' OR display_text LIKE '%발매%' "
-                    "OR display_text LIKE '%판매%개시%' OR display_text LIKE '%연회비%') "
+                    "raw_heading,ordinal,display_text,parent_id,table_role,table_headers_json "
+                    "FROM structure_nodes "
+                    "WHERE contract_revision_id IN (" + placeholders + ") "
                     "ORDER BY contract_revision_id,ordinal",
                     tuple(missing),
                 ):
@@ -699,6 +702,7 @@ class CatalogRepository:
                             str(row["pdf_sha256"]),
                             "product_summary",
                             PARSER_VERSION,
+                            SUMMARY_CLASSIFIER_VERSION,
                         ),
                         summary.model_dump(mode="json"),
                     )
@@ -725,79 +729,63 @@ class CatalogRepository:
         benefits: list[str] = []
         conditions: list[str] = []
         evidence: list[SummaryEvidence] = list(launch_summary_evidence)
-        for node in nodes:
-            text = " ".join(str(node["display_text"]).split())
-            fields: list[Literal["launch_date", "annual_fee", "benefit", "condition"]] = []
-            if (
-                "출시" in text
-                and len([item for item in evidence if item.field == "launch_date"]) < 8
-            ):
-                fields.append("launch_date")
-            if (
-                annual_fee is None
-                and "연회비" in text
-                and len(text) > 10
-                and not any(word in text for word in ("반환", "기준", "산정", "중도해지"))
-            ):
-                annual_fee = text[:250]
-                fields.append("annual_fee")
-            if str(node["major_class"]) == "BENEFIT":
-                heading = str(node["raw_heading"] or "").replace("#", "").strip()
-                if (
-                    heading
-                    and node["node_type"] in ("MAJOR_SECTION", "ITEM")
-                    and len(heading) > 2
-                    and heading not in headings
-                    and not any(
-                        word in heading for word in ("유의사항", "이용안내", "공통", "기준", "기타")
-                    )
-                ):
-                    headings.append(heading)
-                if (
-                    node["node_type"] in ("ITEM", "PARAGRAPH", "TABLE_ROW")
-                    and len(benefits) < 5
-                    and len(text) > 10
-                    and any(
-                        word in text
-                        for word in ("할인", "적립", "캐시백", "면제", "무료", "제공", "포인트")
-                    )
-                    and not any(
-                        word in text
-                        for word in ("유의사항", "연회비", "금융소비자", "기준", "실적제외")
-                    )
-                    and text[:180] not in benefits
-                ):
-                    benefits.append(text[:180])
-                    fields.append("benefit")
-            if (
-                str(node["major_class"]) in {"NOTICE", "MIXED"}
-                and node["node_type"] in ("ITEM", "PARAGRAPH", "TABLE_ROW", "FOOTNOTE")
-                and len(conditions) < 5
-                and len(text) > 8
-                and any(
-                    word in text
-                    for word in ("전월", "한도", "횟수", "제외", "유의", "조건", "이상", "미만")
-                )
-                and text[:180] not in conditions
-            ):
-                conditions.append(text[:180])
-                fields.append("condition")
-            for field in fields:
-                evidence.append(
-                    SummaryEvidence(
-                        field=field,
-                        node_id=str(node["node_id"]),
-                        pages=tuple(
-                            sorted(
-                                pages.get(
-                                    (str(row["contract_revision_id"]), str(node["node_id"])), set()
+        if not launch_summary_evidence:
+            for node in nodes:
+                text = " ".join(str(node["display_text"]).split())
+                if "출시" in text and len(evidence) < 8:
+                    evidence.append(
+                        SummaryEvidence(
+                            field="launch_date",
+                            node_id=str(node["node_id"]),
+                            pages=tuple(
+                                sorted(
+                                    pages.get(
+                                        (str(row["contract_revision_id"]), str(node["node_id"])),
+                                        set(),
+                                    )
                                 )
-                            )
-                        ),
-                        excerpt=text[:300],
-                        contract_revision_id=str(row["contract_revision_id"]),
+                            ),
+                            excerpt=text[:300],
+                            contract_revision_id=str(row["contract_revision_id"]),
+                        )
                     )
+        candidates = summary_candidates([dict(node) for node in nodes])
+        fees = sorted(
+            (item for item in candidates if item.field == "annual_fee"),
+            key=lambda item: -item.score,
+        )
+        selected_fee = next((item for item in fees if bounded_source_text(item.text, 250)), None)
+        for item in candidates:
+            if item.field == "annual_fee" and item != selected_fee:
+                continue
+            limit = 250 if item.field == "annual_fee" else 180
+            excerpt = bounded_source_text(item.text, limit)
+            if excerpt is None:
+                continue
+            if item.field == "annual_fee":
+                annual_fee = excerpt
+            else:
+                target = (
+                    headings
+                    if item.heading
+                    else benefits
+                    if item.field == "benefit"
+                    else conditions
                 )
+                if len(target) >= 5 or excerpt in target:
+                    continue
+                target.append(excerpt)
+            evidence.append(
+                SummaryEvidence(
+                    field=item.field,
+                    node_id=item.node_id,
+                    pages=tuple(
+                        sorted(pages.get((str(row["contract_revision_id"]), item.node_id), set()))
+                    ),
+                    excerpt=excerpt,
+                    contract_revision_id=str(row["contract_revision_id"]),
+                )
+            )
         return ProductSummary(
             generation_id=handle.generation_id,
             issuer=row["issuer"],

@@ -27,6 +27,9 @@ class FakeEmbedder:
     def __init__(self, vector: np.ndarray) -> None:
         self.vector = vector
 
+    async def close(self) -> None:
+        pass
+
     async def embed(self, *args, **kwargs) -> list[float]:
         return [float(v) for v in self.vector]
 
@@ -327,3 +330,78 @@ async def test_get_product_summary_not_found(v5_runtime) -> None:
 
     with pytest.raises(ValueError, match="identifier must not be blank"):
         await repository.get_product_summary("kb", "   ")
+
+
+def test_summary_and_bundle_through_authenticated_http(v5_runtime):
+    from fastapi.testclient import TestClient
+
+    from cardrag_mcp.app import build_app
+
+    store, repository, fixture = v5_runtime
+    token = "test-static-bearer-token-000000000000"  # noqa: S105 - isolated fixture
+    app = build_app(
+        repository,
+        store,
+        Settings(
+            environment="test",
+            mcp_bearer_token=token,
+            mcp_state_dir=store.root,
+            mcp_public_base_url="http://testserver",
+        ),
+    )
+    with TestClient(app) as client:
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json, text/event-stream",
+        }
+        initialized = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "009-fixture", "version": "1"},
+                },
+            },
+        )
+        assert initialized.status_code == 200 and "result" in initialized.json()
+        summary = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_product_summary",
+                    "arguments": {"issuer": "kb", "identifier": "ALPHA"},
+                },
+            },
+        )
+        assert summary.status_code == 200
+        result = summary.json()["result"]
+        assert not result.get("isError", False), result
+        assert result["structuredContent"]["product_code"] == "ALPHA"
+        revision = result["structuredContent"]["contract_revision_id"]
+        bundle = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_contract_bundle",
+                    "arguments": {
+                        "contract_revision_id": revision,
+                        "scope": "benefits",
+                        "include_links": True,
+                    },
+                },
+            },
+        )
+        assert bundle.status_code == 200 and not bundle.json()["result"].get("isError", False)

@@ -162,6 +162,7 @@ from .ocr_requests import (
     complete_reprocess_request,
     select_run_reprocess_request,
 )
+from .partial_execution import ExecutionPlan, PartialExecutionError, ReuseSource, replay_pdf_source
 from .pdf_cache import PDFCache, PDFCachePruneError, PDFSourceIdentity
 from .performance import ExactTokenMemo, WorkerPerformance
 from .providers import (
@@ -702,6 +703,9 @@ class PipelineResult:
     retired_count: int = 0
     retirement_candidate_count: int = 0
     v5_metrics: Mapping[str, Any] | None = None
+    execution: Mapping[str, Any] | None = None
+    published: bool = True
+    local_artifacts: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1891,6 +1895,10 @@ async def validate_document_aggregation_head(
 
 
 class WorkerPipeline:
+    # Publication-only resume deliberately constructs a provider-free pipeline.
+    execution_plan: ExecutionPlan | None = None
+    reuse_source: ReuseSource | None = None
+
     def __init__(
         self,
         *,
@@ -1922,6 +1930,8 @@ class WorkerPipeline:
         issuer_discovery_concurrency: int = 4,
         issuer_discovery_timeout_seconds: float = 300,
         lock_held: bool = False,
+        execution_plan: ExecutionPlan | None = None,
+        reuse_source: ReuseSource | None = None,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
@@ -1943,6 +1953,8 @@ class WorkerPipeline:
         self._carried_document_ids: set[str] = set()
         self._deferred_reprocess_ids: set[str] = set()
         self.lock_held = lock_held
+        self.execution_plan = execution_plan
+        self.reuse_source = reuse_source
         self.pdf_concurrency = pdf_concurrency
         self.pdf_concurrency_per_issuer = pdf_concurrency_per_issuer
         self.local_processing_workers = local_processing_workers
@@ -2177,8 +2189,32 @@ class WorkerPipeline:
         selected = self.document_aggregation
         if selected is None:
             raise RuntimeError("document aggregation head validation was not configured")
+        head: Any = self.webdav
+        if self.execution_plan is not None and self.execution_plan.skips("webdav"):
+            if self.reuse_source is None:
+                raise PartialExecutionError("skip_source_unavailable", "export")
+            manifest = self.reuse_source.manifest
+            from types import SimpleNamespace
+
+            class RetainedHead:
+                async def validated_current_generation(self) -> Any:
+                    return SimpleNamespace(
+                        generation_id=manifest.generation_id,
+                        corpus_sha256=manifest.corpus_sha256,
+                        contract_sha256=manifest.contract_sha256,
+                        generation_schema=manifest.schema_version,
+                        serving_schema=manifest.serving_schema,
+                        ocr_failed_document_count=sum(
+                            d.availability == "ocr_failed" for d in manifest.documents
+                        ),
+                    )
+
+                async def get_bytes(self, *args: Any, **kwargs: Any) -> bytes:
+                    return manifest.canonical_bytes()
+
+            head = RetainedHead()
         return await validate_document_aggregation_head(
-            self.webdav,
+            head,
             selected,
             expected_m1_contract_sha256=self.contract_sha256,
         )
@@ -2196,6 +2232,38 @@ class WorkerPipeline:
         non_retryable_error_formatter: Callable[[Exception], str] | None = None,
         error_formatter: Callable[[Exception], str] | None = None,
     ) -> T:
+        if (
+            self.execution_plan is not None
+            and name in {"structure", "views"}
+            and self.execution_plan.skips("structure")
+        ):
+            assert self.reuse_source is not None and self.v5_profile is not None
+            artifact, views = self.reuse_source.structure(document_id, profile_id=self.v5_profile.profile_id)
+            ocr_path = self.state_dir / "runs" / run_id / "documents" / document_id / "ocr/ocr.md"
+            retained = self.reuse_source.documents.get(document_id)
+            if (
+                retained is None
+                or retained.ocr is None
+                or hashlib.sha256(ocr_path.read_bytes()).hexdigest() != retained.ocr.sha256
+            ):
+                raise PartialExecutionError("skip_artifact_incompatible", "structure", document_id)
+            if self.contract_sha256 != self.reuse_source.manifest.contract_sha256:
+                raise PartialExecutionError("skip_artifact_incompatible", "structure", document_id)
+            destination = ocr_path.parent.parent / "structure"
+            _atomic_write(destination / "structure.v2.json", artifact.canonical_bytes)
+            _atomic_write(
+                destination / "views.v1.json",
+                canonical_json_bytes(
+                    {
+                        "schema_version": "cardrag.embedding-views.v1",
+                        "embedding_profile_id": self.v5_profile.profile_id,
+                        "input_structure_sha256": artifact.artifact_sha256,
+                        "views": [v.payload for v in views],
+                    }
+                ),
+            )
+            self.execution_plan.record("structure", "reused")
+            return cast(T, (artifact, None) if name == "structure" else (artifact, views, None))
         maximum = maximum_attempts or self.maximum_attempts
         self.state.ensure_stage(run_id, document_id, name, max_attempts=maximum)
         row = self.state.get_stage(run_id, document_id, name)
@@ -2414,6 +2482,14 @@ class WorkerPipeline:
                 # run row or retention cleanup can mutate candidate state.
                 await self._validated_document_aggregation_head()
             run_id = resume_run_id or self.state.start_run()
+            if self.execution_plan is not None:
+                plan_path = self.state_dir / "runs" / run_id / "execution-plan.json"
+                if (
+                    plan_path.exists()
+                    and json.loads(plan_path.read_bytes()) != self.execution_plan.identity()
+                ):
+                    raise PartialExecutionError("skip_artifact_incompatible", "plan")
+                _atomic_write(plan_path, canonical_json_bytes(self.execution_plan.identity()))
             self.state.mark_stale_running_runs_interrupted(exclude_run_id=run_id)
             if resume_run_id:
                 self.state.assert_resumable(run_id)
@@ -2431,6 +2507,12 @@ class WorkerPipeline:
                 self._carried_document_ids = set()
                 self._deferred_reprocess_ids = set()
                 self._active_ocr_request = select_run_reprocess_request(self.state_dir, run_id)
+                if (
+                    self.execution_plan is not None
+                    and self.execution_plan.skips("ocr")
+                    and self._active_ocr_request is not None
+                ):
+                    raise PartialExecutionError("skip_artifact_incompatible", "ocr")
                 freeze_content = getattr(self.ocr, "freeze_content_snapshot", None)
                 if callable(freeze_content):
                     await freeze_content(run_id)
@@ -2463,6 +2545,22 @@ class WorkerPipeline:
                         error="worker_cancelled: Pipeline execution was interrupted.",
                     )
                 cancellation_requested = True
+            except PartialExecutionError as exc:
+                self.state.finish_run(run_id, "failed", error=str(exc))
+                if self.execution_plan is not None:
+                    self.execution_plan.record(exc.stage, "blocked")
+                    _atomic_write(
+                        self.state_dir / "runs" / run_id / "execution-result.json",
+                        canonical_json_bytes(
+                            {
+                                **self.execution_plan.payload(),
+                                "status": "blocked",
+                                "reason_code": exc.reason_code,
+                                "published": False,
+                            }
+                        ),
+                    )
+                raise
             except (
                 OCRDocumentFailuresError,
                 OCRFailureBookkeepingError,
@@ -2515,7 +2613,11 @@ class WorkerPipeline:
             gc_status: str | None = None
             gc_deleted = 0
             gc_error: str | None = None
-            if self.collect_remote_garbage and self.webdav.channel in {"stable", "candidate-v1.0.11"}:
+            if (
+                self.execution_plan is None
+                and self.collect_remote_garbage
+                and self.webdav.channel in {"stable", "candidate-v1.0.11"}
+            ):
                 try:
                     from .gc import GCPartialFailure, collect_garbage
 
@@ -2562,6 +2664,59 @@ class WorkerPipeline:
                 retired_count=self._corpus_gate_counts.get("retired", 0),
                 retirement_candidate_count=self._corpus_gate_counts.get("candidates", 0),
             )
+            if self.execution_plan is not None:
+                self.execution_plan.actions.setdefault(
+                    "embedding",
+                    {"action": "reused" if self.execution_plan.skips("embedding") else "executed"},
+                )
+                self.execution_plan.actions.setdefault(
+                    "export", {"action": "reused" if self.execution_plan.skips("export") else "executed"}
+                )
+                self.execution_plan.actions.setdefault(
+                    "webdav", {"action": "skipped" if self.execution_plan.skips("webdav") else "executed"}
+                )
+                for stage in ("pdf", "ocr", "structure"):
+                    self.execution_plan.actions.setdefault(
+                        stage,
+                        {
+                            "action": "reused" if self.execution_plan.skips(stage) else "executed",
+                            "document_count": result.document_count,
+                        },
+                    )
+                elapsed = self.performance.snapshot()["accumulated_seconds"]
+                names = {
+                    "pdf": ("stage.discovery", "pdf_acquisition_seconds"),
+                    "ocr": ("stage.ocr",),
+                    "structure": ("stage.structure", "stage.views"),
+                    "embedding": ("stage.embedding-v5",),
+                    "export": ("export",),
+                    "webdav": ("stage.publish",),
+                }
+                for stage, keys in names.items():
+                    self.execution_plan.actions[stage].setdefault(
+                        "elapsed_seconds", round(sum(elapsed.get(k, 0) for k in keys), 6)
+                    )
+                details = result.v5_metrics or {}
+                self.execution_plan.actions["pdf"]["origin_downloads"] = result.pdf_downloads
+                self.execution_plan.actions["pdf"]["origin_revalidations"] = result.pdf_cache_revalidations
+                self.execution_plan.actions["ocr"]["provider_calls"] = details.get(
+                    "ocr_provider_called_count", 0
+                )
+                self.execution_plan.actions["embedding"]["provider_calls"] = details.get(
+                    "embedding_provider_call_count", 0
+                )
+                self.execution_plan.actions["webdav"]["published"] = result.published
+                result = replace(result, execution=self.execution_plan.payload())
+                _atomic_write(
+                    self.state_dir / "runs" / run_id / "execution-result.json",
+                    canonical_json_bytes(
+                        {
+                            **self.execution_plan.payload(),
+                            "status": result.status,
+                            "published": result.published,
+                        }
+                    ),
+                )
             self._record_corpus_baseline(result)
             if (
                 self._active_ocr_request is not None
@@ -2584,6 +2739,8 @@ class WorkerPipeline:
             return result
 
     def _cleanup_local_runs_safely(self, *, exclude_run_id: str, phase: str) -> None:
+        if self.execution_plan is not None:
+            return
         try:
             self._cleanup_local_runs(exclude_run_id=exclude_run_id)
         except Exception:
@@ -2603,6 +2760,22 @@ class WorkerPipeline:
         retained = set(self.state.retained_publication_run_ids(limit=self.retained_generations))
         removable = set(self.state.completed_run_ids())
         removable.update(self.state.prunable_incomplete_run_ids(keep=self.retained_incomplete_runs))
+        # Protect transitive source references while a retained/resumable run owns them.
+        protected = retained | {exclude_run_id} | (set(self.state.completed_run_ids()) - removable)
+        protected.update({p.name for p in runs_root.iterdir() if p.is_dir() and p.name not in removable})
+        pending = list(protected)
+        while pending:
+            plan_path = runs_root / pending.pop() / "execution-plan.json"
+            if plan_path.is_file() and not plan_path.is_symlink():
+                source_id = json.loads(plan_path.read_bytes()).get("source_run_id")
+                if (
+                    isinstance(source_id, str)
+                    and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", source_id)
+                    and source_id not in protected
+                ):
+                    protected.add(source_id)
+                    pending.append(source_id)
+        retained.update(protected)
         for run_id in sorted(removable):
             if run_id == exclude_run_id:
                 continue
@@ -2630,6 +2803,8 @@ class WorkerPipeline:
         remain justified through the sealed retirement ledger.
         """
 
+        if self.execution_plan is not None:
+            return
         if (
             result.status != "succeeded"
             or result.generation_id is None
@@ -2808,6 +2983,8 @@ class WorkerPipeline:
         return resolve
 
     def _commit_pending_retirement_ledger(self) -> None:
+        if self.execution_plan is not None and self.execution_plan.skips("pdf"):
+            return
         pending = getattr(self, "_pending_retirement_ledger", None)
         if pending is not None:
             try:
@@ -3119,6 +3296,16 @@ class WorkerPipeline:
             _atomic_write(destination, body)
 
     async def _run_locked(self, run_id: str, *, refresh_sources: bool = False) -> PipelineResult:
+        if self.execution_plan is not None and self.execution_plan.skips("pdf"):
+            retained_seal = self.state_dir / "runs" / run_id / "sealed/publish.json"
+            if retained_seal.is_file():
+                from .partial_execution import read_json
+
+                sealed = read_json(self.state_dir, retained_seal, "export")
+                if sealed.get("contract_sha256") != self.contract_sha256:
+                    raise PartialExecutionError("skip_artifact_incompatible", "export")
+                return await self._publish_sealed(run_id, sealed)
+            return await replay_pdf_source(self, run_id)
         run_dir = self.state_dir / "runs" / run_id
         seal_path = run_dir / "sealed" / "publish.json"
         deferred_seal: Mapping[str, Any] | None = None
@@ -4173,9 +4360,14 @@ class WorkerPipeline:
                 cache_healing_seal = dict(deferred_seal)
                 cache_healing_seal_path = seal_path
                 cache_healing_validated_seal = validated_resume_seal
-        existing = self.state.ready_publish(corpus_sha256, contract_sha256)
+        existing = (
+            None
+            if self.execution_plan is not None
+            else self.state.ready_publish(corpus_sha256, contract_sha256)
+        )
         current_is_exact_complete = current_remote is not None and (
-            current_remote.corpus_sha256 == corpus_sha256
+            self.execution_plan is None
+            and current_remote.corpus_sha256 == corpus_sha256
             and current_remote.contract_sha256 == contract_sha256
             and current_remote.ocr_failed_document_count == 0
             and not self._has_active_reprocess_targets
@@ -4653,6 +4845,7 @@ class WorkerPipeline:
                 self.v5_profile is not None
                 and callable(prefetch)
                 and document_id not in reprocess_document_ids
+                and not (self.execution_plan and self.execution_plan.skips("ocr"))
             ):
                 with self.performance.measure("ocr_local_prefetch"):
                     await to_thread_fenced(
@@ -4670,6 +4863,13 @@ class WorkerPipeline:
                 current_pdf: DownloadedPDF = pdf,
                 current_output_dir: Path = ocr_output_dir,
             ) -> OCRResult:
+                if self.execution_plan is not None and self.execution_plan.skips("ocr"):
+                    assert self.reuse_source is not None
+                    if current_document_id in reprocess_document_ids:
+                        raise PartialExecutionError("skip_artifact_incompatible", "ocr", current_document_id)
+                    result = self.reuse_source.ocr(current_document_id, current_pdf.sha256)
+                    self.execution_plan.record("ocr", "reused")
+                    return result
                 served = transition_served_ocr.get(current_document_id)
                 retained_identity = (
                     (served[3], served[4])
@@ -4808,6 +5008,8 @@ class WorkerPipeline:
                             ocr_stopped = True
                         raise
             except Exception as exc:
+                if isinstance(exc, PartialExecutionError):
+                    raise
                 if not is_isolatable_document_ocr_failure(exc):
                     if systemic_error is None or exc is not systemic_source_exception:
                         raise OCRFailureBookkeepingError() from None
@@ -5674,6 +5876,33 @@ class WorkerPipeline:
             raise RuntimeError("v5 generation lost its sealed embedding provider")
         if not processed:
             raise RuntimeError("v5 generation requires at least one structured document")
+        if self.execution_plan is not None and self.execution_plan.skips("export"):
+            assert self.reuse_source is not None
+            source = self.reuse_source
+            if (
+                contract_sha256 != source.manifest.contract_sha256
+                or corpus_sha256 != source.manifest.corpus_sha256
+                or {d.record.document_id for d in processed} != set(source.revisions)
+            ):
+                raise PartialExecutionError("skip_artifact_incompatible", "export")
+            for document in processed:
+                source_artifact, views = source.structure(
+                    document.record.document_id, profile_id=profile.profile_id
+                )
+                source_document = source.documents[document.record.document_id]
+                assert source_document.ocr is not None
+                if (
+                    document.structure_artifact != source_artifact
+                    or document.embedding_views != views
+                    or document.ocr_sha256 != source_document.ocr.sha256
+                ):
+                    raise PartialExecutionError(
+                        "skip_artifact_incompatible", "export", document.record.document_id
+                    )
+            sealed = {**source.seal, "run_id": run_id}
+            _atomic_write(seal_path, canonical_json_bytes(sealed))
+            return await self._publish_sealed(run_id, sealed)
+
         ordered_documents = tuple(
             sorted(
                 processed,
@@ -6096,6 +6325,8 @@ class WorkerPipeline:
                     for index in bound_indices:
                         embedding_cache_hit_counts[ordered_view_pairs[index][1].view_type] += 1
 
+            if self.execution_plan is not None and self.execution_plan.skips("embedding") and unique_misses:
+                raise PartialExecutionError("skip_artifact_missing", "embedding")
             try:
                 try:
                     wal_baseline = self.state.observe_embedding_cache_v5_wal()
@@ -6777,7 +7008,15 @@ class WorkerPipeline:
             if candidate.is_symlink() or not candidate.is_file():
                 raise RuntimeError(f"sealed {label} is not a regular non-symlink file")
             resolved = candidate.resolve(strict=True)
-            approved_roots = (local_root, pdf_cache_root) if allow_pdf_cache else (local_root,)
+            approved_roots: tuple[Path, ...] = (
+                (local_root, pdf_cache_root) if allow_pdf_cache else (local_root,)
+            )
+            if (
+                self.execution_plan is not None
+                and self.execution_plan.skips("export")
+                and self.reuse_source is not None
+            ):
+                approved_roots += (self.reuse_source.directory.resolve(strict=True),)
             if not any(resolved.is_relative_to(root) for root in approved_roots):
                 raise RuntimeError(f"sealed {label} escapes approved worker storage")
             return resolved
@@ -7274,6 +7513,22 @@ class WorkerPipeline:
             validated = await self._validate_local_seal(sealed)
         elif canonical_sha256(sealed) != validated.seal_sha256:
             raise RuntimeError("validated worker publication seal identity changed")
+        if self.execution_plan is not None and self.execution_plan.skips("webdav"):
+            self.state.finish_run(
+                run_id, "interrupted", error="local_only: local artifacts completed; not published"
+            )
+            return PipelineResult(
+                run_id,
+                "local_only",
+                validated.manifest.corpus_sha256,
+                validated.manifest.contract_sha256,
+                validated.manifest.generation_id,
+                validated.manifest.counts.documents,
+                validated.manifest.counts.chunks,
+                v5_metrics=validated.v5_metrics,
+                published=False,
+                local_artifacts=str(self.state_dir / "runs" / run_id / "sealed"),
+            )
         current = await self.webdav.validated_current_generation()
         stable_body = await _observed_pointer_bytes(self.webdav)
         if current is None and stable_body is not None:
@@ -7657,6 +7912,9 @@ async def resume_sealed_publication(
     """Lock, open existing state, and run the provider-free publication API."""
 
     SealedPublicationResumer._validate_run_id(run_id)
+    if (state_dir / "runs" / run_id / "execution-plan.json").exists():
+        # Provider-free legacy recovery does not understand frozen-source/channel fences.
+        raise PartialExecutionError("skip_artifact_incompatible", "plan")
     SealedPublicationResumer._guard_publication_channel(webdav, stable_publication_approved)
     with (
         worker_lock(state_dir / "worker.lock"),
