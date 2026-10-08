@@ -1,0 +1,28 @@
+{
+  "worker": {
+    "image": "cardrag-worker:009-b544a80",
+    "volumes": {
+      "codex-home": "cardrag-worker-auth",
+      "paddle-models": "cardrag-worker-paddleocr-models",
+      "worker-state": "cardrag-worker-state"
+    },
+    "ocr": {
+      "CARDRAG_OCR_PROVIDER": "opencode",
+      "CARDRAG_OCR_MODEL": "alibaba-token-plan/qwen3.8-flash",
+      "CARDRAG_OCR_REASONING_EFFORT": "medium",
+      "CARDRAG_OCR_FALLBACK_PROVIDER": ""
+    }
+  },
+  "mcp": {
+    "image": "cardrag-mcp:009-b544a80",
+    "volumes": {
+      "mcp-state": "cardrag-mcp-state"
+    }
+  },
+  "proxy_smoke": {
+    "librechat_authenticated_mcp": true,
+    "product_code": "500107"
+  },
+  "mcp_health": "healthy",
+  "proxy_health": "healthy"
+}

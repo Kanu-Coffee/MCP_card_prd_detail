@@ -1,0 +1,27 @@
+{
+  "removed": [
+    {
+      "volume": "cardrag-mcp-v129-candidate-state",
+      "unreferenced_and_empty": true,
+      "removed_in_first_cleanup_pass": true
+    },
+    {
+      "volume": "cardrag-worker-v130-candidate-state",
+      "unreferenced_and_empty": true
+    },
+    {
+      "volume": "cardrag-worker-v120-recovery-auth-20260910",
+      "unreferenced_and_empty": true
+    },
+    {
+      "network": "cardrag-stable-v1026_default",
+      "no_endpoints": true
+    },
+    {
+      "source_snapshot": "/opt/cardrag/007-31edb1d",
+      "removed_bytes": 21497667
+    }
+  ],
+  "rollback": "008 snapshot + Worker008/MCP007 image pair retained; same canonical volumes",
+  "no_operating_data_removed": true
+}
