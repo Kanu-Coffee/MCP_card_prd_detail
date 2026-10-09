@@ -859,9 +859,7 @@ class OCRResolver:
             ContentOCRVariantStore(webdav=webdav, state_root=self._state_root)
             if webdav is not None and callable(getattr(webdav, "list_children", None))
             else (
-                ContentOCRVariantStore(webdav=None, state_root=self._state_root)
-                if webdav is None
-                else None
+                ContentOCRVariantStore(webdav=None, state_root=self._state_root) if webdav is None else None
             )
         )
         self._seed_ledger = (
@@ -1968,7 +1966,10 @@ class OCRResolver:
                 or resolved_document_root.parent != resolved_documents_root
                 or resolved_outer_output_dir.parent != resolved_document_root
                 or (prior.resolver_subdir is None and resolved_output_dir != resolved_outer_output_dir)
-                or (prior.resolver_subdir is not None and resolved_output_dir.parent != resolved_outer_output_dir)
+                or (
+                    prior.resolver_subdir is not None
+                    and resolved_output_dir.parent != resolved_outer_output_dir
+                )
             ):
                 return None
         except Exception:
@@ -2011,7 +2012,6 @@ class OCRResolver:
                     os.chmod(tmp, 0o600)
                     tmp.replace(target_ocr)
 
-
         cache_kind: Literal["native", "adopted", "content"] = (
             cast(Literal["native", "adopted", "content"], prior.cache_kind)
             if prior.cache_kind in {"native", "adopted", "content"}
@@ -2025,7 +2025,9 @@ class OCRResolver:
         else:
             if self.cache_epoch != 0:
                 return None
-            reuse_key = prior.reuse_key or content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
+            reuse_key = prior.reuse_key or content_addressed_ocr_reuse_key(
+                source, cache_epoch=self.cache_epoch
+            )
 
         provider = prior.provider
         model = prior.model
@@ -2088,7 +2090,6 @@ class OCRResolver:
                                         provider = str(prov["provider"])
                                     if model is None and prov.get("model"):
                                         model = str(prov["model"])
-
 
         variant_id = (
             prior.variant_id
@@ -2153,7 +2154,6 @@ class OCRResolver:
             )
         except (OCRValidationError, ValueError):
             return False
-
 
     @staticmethod
     def _cache_publication_diagnostic_path(output_dir: Path) -> Path:
@@ -2539,7 +2539,6 @@ class OCRResolver:
             if retained_ocr_identity is not None:
                 raise OCRCacheMissError("retained OCR has no matching content variant")
 
-
         adopted_policies = [self.adoption_policy_version]
         if LEGACY_ADOPTION_POLICY_V1 not in adopted_policies:
             adopted_policies.append(LEGACY_ADOPTION_POLICY_V1)
@@ -2640,12 +2639,9 @@ class OCRResolver:
                     document_id=document_id,
                     output_dir=output_dir,
                 )
-                if (
-                    sealed_prior is not None
-                    and (
-                        expected_ocr_identity is None
-                        or (sealed_prior.ocr_sha256, sealed_prior.size_bytes) == expected_ocr_identity
-                    )
+                if sealed_prior is not None and (
+                    expected_ocr_identity is None
+                    or (sealed_prior.ocr_sha256, sealed_prior.size_bytes) == expected_ocr_identity
                 ):
                     shutil.rmtree(output_dir / "rendered", ignore_errors=True)
                     return sealed_prior

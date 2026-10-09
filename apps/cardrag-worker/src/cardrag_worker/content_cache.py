@@ -148,7 +148,8 @@ class ContentOCRVariantStore:
                                 p_cand = json.loads(cand_bytes)
                                 if (
                                     isinstance(p_cand, dict)
-                                    and p_cand.get("schema_version") == "cardrag.ocr-content-index-snapshot.v1"
+                                    and p_cand.get("schema_version")
+                                    == "cardrag.ocr-content-index-snapshot.v1"
                                     and isinstance(p_cand.get("entries"), list)
                                 ):
                                     retained_body = cand_bytes
@@ -196,9 +197,7 @@ class ContentOCRVariantStore:
             raise ContentCacheValidationError("content index key does not match PDF")
         webdav = self._require_webdav()
         index_body = await webdav.get_bytes(entry, max_bytes=CONTROL_OBJECT_MAX_BYTES)
-        manifest_body = await webdav.get_bytes(
-            root / "manifest.json", max_bytes=CONTROL_OBJECT_MAX_BYTES
-        )
+        manifest_body = await webdav.get_bytes(root / "manifest.json", max_bytes=CONTROL_OBJECT_MAX_BYTES)
         ready_body = await webdav.get_bytes(root / "READY.json", max_bytes=CONTROL_OBJECT_MAX_BYTES)
         if index_body is None or manifest_body is None or ready_body is None:
             raise ContentCacheValidationError("content variant control file is missing")
@@ -341,14 +340,12 @@ class ContentOCRVariantStore:
                     created_at_val = datetime.fromtimestamp(publish_path.stat().st_mtime, tz=UTC)
 
                 cand_gen_id = str(manifest_data.get("generation_id") or cand_run.name)
-                provenance: NativeOCRContract | ContentOCRImportedProvenance = (
-                    ContentOCRImportedProvenance(
-                        source_kind="generation-only",
-                        provider="generation-only",
-                        model="unrecorded",
-                        generation_id=cand_gen_id,
-                        document_id=cand_doc_id,
-                    )
+                provenance: NativeOCRContract | ContentOCRImportedProvenance = ContentOCRImportedProvenance(
+                    source_kind="generation-only",
+                    provider="generation-only",
+                    model="unrecorded",
+                    generation_id=cand_gen_id,
+                    document_id=cand_doc_id,
                 )
 
                 native_man_path = cand_run / "documents" / cand_doc_id / "ocr" / "native-manifest.json"
@@ -695,9 +692,7 @@ class ContentOCRVariantStore:
             root / "manifest.json", manifest.canonical_bytes(), content_type="application/json"
         )
         ready = ContentOCRReady.for_manifest(manifest)
-        await webdav.put_bytes(
-            root / "READY.json", ready.canonical_bytes(), content_type="application/json"
-        )
+        await webdav.put_bytes(root / "READY.json", ready.canonical_bytes(), content_type="application/json")
         index = {
             "schema_version": "cardrag.ocr-content-index.v1",
             "reuse_key": manifest.reuse_key,

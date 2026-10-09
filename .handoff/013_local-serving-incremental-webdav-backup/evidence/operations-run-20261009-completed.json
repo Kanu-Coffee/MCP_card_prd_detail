@@ -1,0 +1,161 @@
+{
+  "worker_state": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-09T11:26:36.485048294Z",
+    "FinishedAt": "2026-10-09T13:10:11.519313526Z"
+  },
+  "result": {
+    "backup_bytes_uploaded": 2155648404,
+    "backup_requests": 1051,
+    "backup_status": "degraded",
+    "collection_status": "degraded",
+    "contract_sha256": "b7b0c5a0989edeeac48b4daa89bfb83b4ca9cb7c53b2afed1d7b5bb1abaaca0c",
+    "corpus_sha256": "035c4632e0859ed3eb9b32b0e9115308683a33e4a3bb24b448c504963e597d70",
+    "evidence": 616407,
+    "execution": null,
+    "failed_issuers": [
+      "shinhan"
+    ],
+    "gc_deleted": 0,
+    "gc_error": null,
+    "gc_status": null,
+    "generation_id": "g-8adb7603eef640dd9984a93d-035c4632e085",
+    "last_backup_at": "2026-10-09T13:09:57.796316+00:00",
+    "local_artifacts": null,
+    "local_generation_published": true,
+    "ocr_cache_publication_deferred": 0,
+    "oldest_pending_at": "2026-10-09T06:31:56.596126+00:00",
+    "pdf_cache_hits": 4177,
+    "pdf_cache_misses": 8,
+    "pdf_cache_not_modified": 0,
+    "pdf_cache_prune_error": null,
+    "pdf_cache_prune_status": "succeeded",
+    "pdf_cache_pruned_bytes": 0,
+    "pdf_cache_pruned_objects": 0,
+    "pdf_cache_revalidations": 0,
+    "pdf_downloads": 0,
+    "pdf_revisions": 0,
+    "pending_bytes": 1289084865,
+    "pending_ocr_count": 5065,
+    "publication_transport": "local",
+    "published": true,
+    "retired_count": 0,
+    "retirement_candidate_count": 0,
+    "run_id": "8adb7603eef640dd9984a93da09b8ab0",
+    "runs_since_last_backup": 2,
+    "status": "succeeded",
+    "unsupported_documents": 8,
+    "v5_metrics": {
+      "ocr_cache_reused_count": 5519,
+      "ocr_provider_called_count": 1,
+      "structure_failed_document_count": 0,
+      "structure_fallback_document_count": 2,
+      "source_coverage_percent": 100.0,
+      "vector_sidecar_size_bytes": 10099212288
+    }
+  },
+  "performance": {
+    "accumulated_seconds": {
+      "corpus_diff_seconds": 0.05986402201233432,
+      "export": 2238.169150786998,
+      "ocr_and_local_processing": 1452.1268024499877,
+      "ocr_local_prefetch": 1157.3351899654954,
+      "pdf_acquisition_seconds": 114.48167976198602,
+      "pdf_cache_lookup_seconds": 115.18509630806511,
+      "pdf_download_seconds": 289.2886267879803,
+      "pdf_prepare_seconds": 0.011538116028532386,
+      "pdf_revision_expansion_seconds": 23.120476779993623,
+      "stage.discovery": 469.3001152299403,
+      "stage.download": 393.0478505305073,
+      "stage.embedding-v5": 125.38114117001533,
+      "stage.ocr": 298.6907710483065,
+      "stage.structure": 1564.230590998166,
+      "stage.views": 2286.5677272453613,
+      "token_count": 262.2097521061951
+    },
+    "elapsed_seconds": 5902.643962686998,
+    "metrics": {
+      "collection_failed_issuers": 1,
+      "collection_status": "degraded",
+      "collection_successful_issuers": 7,
+      "contract_sha256": "b7b0c5a0989edeeac48b4daa89bfb83b4ca9cb7c53b2afed1d7b5bb1abaaca0c",
+      "corpus_sha256": "035c4632e0859ed3eb9b32b0e9115308683a33e4a3bb24b448c504963e597d70",
+      "embedding_cache_lookups": 393733,
+      "export_cache_lookups": 616407,
+      "ocr_cache_reused": 5519,
+      "ocr_completed": 5520,
+      "ocr_expected": 5520,
+      "ocr_failed": 0,
+      "ocr_missing": 0,
+      "ocr_provider_documents": 1,
+      "ocr_succeeded": 5520,
+      "pdf_acquired_count": 4177,
+      "pdf_cache_lookup_count": 4616,
+      "pdf_unsupported_count": 8,
+      "retired_lineage_count": 0,
+      "retirement_candidate_count": 0,
+      "run_id": "8adb7603eef640dd9984a93da09b8ab0",
+      "settings": {
+        "local_processing_workers": 4,
+        "pdf_cache_force_revalidate": false,
+        "pdf_concurrency": 8,
+        "pdf_concurrency_per_issuer": 2,
+        "sqlite": {
+          "cache_size": -262144,
+          "mmap_size": 2147418112,
+          "temp_store": 0
+        },
+        "webdav_verification": null
+      },
+      "status": "succeeded",
+      "structure_failed": 0,
+      "token_cache_hits": 2071897,
+      "token_counter_calls": 393735
+    },
+    "process_io_delta": {
+      "cancelled_write_bytes": 106586112,
+      "rchar": 3395837866305,
+      "read_bytes": 285428400128,
+      "syscr": 1012098743,
+      "syscw": 3938153,
+      "wchar": 41043947423,
+      "write_bytes": 41996582912
+    },
+    "process_peak_rss_bytes": 9069752320,
+    "schema_version": "cardrag.worker-performance.v1"
+  },
+  "mcp": {
+    "generation_id": "g-8adb7603eef640dd9984a93d-035c4632e085",
+    "activated_at_kst": "2026-10-09T22:06:52.247661+09:00",
+    "ready": true,
+    "summary_smoke": [
+      {
+        "issuer": "hana",
+        "product_code": "15911",
+        "success": true,
+        "generation_id": "g-8adb7603eef640dd9984a93d-035c4632e085"
+      },
+      {
+        "issuer": "woori",
+        "product_code": "500107",
+        "success": true,
+        "generation_id": "g-8adb7603eef640dd9984a93d-035c4632e085"
+      },
+      {
+        "issuer": "kb",
+        "product_code": "09063",
+        "success": true,
+        "generation_id": "g-8adb7603eef640dd9984a93d-035c4632e085"
+      }
+    ]
+  },
+  "backup_notes": "degraded: inline timeout; pending retained. backup_requests are helper calls and backup_bytes_uploaded are committed processed bytes, not proven actual HTTP PUT traffic."
+}

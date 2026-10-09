@@ -858,7 +858,6 @@ class BackupLedger:
                         receipts_reused_bytes += expected_size
                         continue
 
-
                     if not local_path.is_file():
                         spool_candidate = spool_dir / expected_sha
                         if spool_candidate.is_file():
@@ -957,7 +956,6 @@ class BackupLedger:
                     try:
                         elapsed = time.monotonic() - started
                         rem_time = max(10.0, timeout_seconds - elapsed)
-
 
                         async def _publish_index_and_pointer() -> None:
                             nonlocal requests, control_requests

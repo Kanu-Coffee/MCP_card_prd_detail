@@ -4722,10 +4722,7 @@ class WorkerPipeline:
                         continue
 
                     prior_ocr_path = runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
-                    if (
-                        not prior_ocr_path.is_file()
-                        or prior_ocr_path.is_symlink()
-                    ):
+                    if not prior_ocr_path.is_file() or prior_ocr_path.is_symlink():
                         continue
 
                     try:
@@ -4781,10 +4778,7 @@ class WorkerPipeline:
                     prior_ocr_path = (
                         runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "ocr.md"
                     )
-                    if (
-                        not prior_ocr_path.is_file()
-                        or prior_ocr_path.is_symlink()
-                    ):
+                    if not prior_ocr_path.is_file() or prior_ocr_path.is_symlink():
                         continue
                     try:
                         resolved_prior_ocr = prior_ocr_path.resolve(strict=True)

@@ -91,7 +91,6 @@ async def test_sealed_prior_content_without_native_manifest_resolves_provider_ze
     pdf_path = tmp_path / "sample.pdf"
     pdf_path.write_text("1", encoding="utf-8")
 
-
     output_dir = runs_root / "run-2" / "documents" / doc_id / "ocr"
     prior_source = PriorLocalNativeSource(
         runs_root=runs_root,
@@ -137,6 +136,7 @@ async def test_sealed_prior_native_manifest_recovers_contract_provenance_provide
 ) -> None:
     """FIX_08: Sealed prior native OCR recovers contract provider/model when prior provider is None."""
     import datetime
+
     from cardrag_core import NativeOCRContract, OCRArtifactManifest
     from cardrag_core.manifests import ArtifactRef
     from cardrag_core.ocr import native_ocr_reuse_key
@@ -175,7 +175,7 @@ async def test_sealed_prior_native_manifest_recovers_contract_provenance_provide
         whole_document_max_pages=4,
     )
     native_key = native_ocr_reuse_key(contract, source)
-    page_sha = hashlib.sha256("## Page 1\n\n카드 상품 혜택 안내입니다.\n".encode("utf-8")).hexdigest()
+    page_sha = hashlib.sha256("## Page 1\n\n카드 상품 혜택 안내입니다.\n".encode()).hexdigest()
     native_manifest = OCRArtifactManifest(
         reuse_key=native_key,
         source=source,
@@ -188,7 +188,7 @@ async def test_sealed_prior_native_manifest_recovers_contract_provenance_provide
         ),
         ocr_chars=len(ocr_text),
         page_output_sha256=(page_sha,),
-        created_at=datetime.datetime(2026, 10, 8, 18, 51, 48, tzinfo=datetime.timezone.utc),
+        created_at=datetime.datetime(2026, 10, 8, 18, 51, 48, tzinfo=datetime.UTC),
     )
     (prior_doc_ocr / "native-manifest.json").write_bytes(native_manifest.canonical_bytes())
 
@@ -287,7 +287,6 @@ async def test_sealed_prior_native_manifest_recovers_contract_provenance_provide
     state.close()
 
 
-
 @pytest.mark.asyncio
 async def test_corrupt_prior_ocr_fails_and_calls_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -326,7 +325,12 @@ async def test_corrupt_prior_ocr_fails_and_calls_provider(
                 "availability": "available",
                 "page_count": 1,
                 "pdf": {"sha256": PDF_SHA, "size_bytes": 1000, "media_type": "application/pdf", "path": "p"},
-                "ocr": {"sha256": good_sha, "size_bytes": len(good_bytes), "media_type": "text/markdown; charset=utf-8", "path": "o"},
+                "ocr": {
+                    "sha256": good_sha,
+                    "size_bytes": len(good_bytes),
+                    "media_type": "text/markdown; charset=utf-8",
+                    "path": "o",
+                },
                 "ocr_cache_kind": "content",
                 "ocr_reuse_key": reuse_key,
                 "ocr_variant_id": "v1",
@@ -435,7 +439,9 @@ async def test_backup_budget_reserve_commits_partial_batch_and_retry_zero_reques
         def __init__(self) -> None:
             self.storage: dict[str, bytes] = {}
 
-        async def put_bytes(self, path: str, body: bytes, *, content_type: str = "application/octet-stream") -> None:
+        async def put_bytes(
+            self, path: str, body: bytes, *, content_type: str = "application/octet-stream"
+        ) -> None:
             if path.startswith("v1/backup/"):
                 call_counts["control_puts"] += 1
             else:
@@ -449,7 +455,9 @@ async def test_backup_budget_reserve_commits_partial_batch_and_retry_zero_reques
             call_counts["get_bytes"] += 1
             return self.storage.get(path)
 
-        async def atomic_replace_bytes(self, path: str, body: bytes, *, content_type: str = "application/json") -> None:
+        async def atomic_replace_bytes(
+            self, path: str, body: bytes, *, content_type: str = "application/json"
+        ) -> None:
             self.storage[path] = body
 
         async def close(self) -> None:
@@ -467,7 +475,9 @@ async def test_backup_budget_reserve_commits_partial_batch_and_retry_zero_reques
 
     # Verify remaining pending is reduced by flushed_first_round
     with ledger._get_connection() as conn:
-        rem_pending = conn.execute("SELECT COUNT(*) FROM backup_pending WHERE status = 'pending'").fetchone()[0]
+        rem_pending = conn.execute("SELECT COUNT(*) FROM backup_pending WHERE status = 'pending'").fetchone()[
+            0
+        ]
     assert rem_pending == 4 - flushed_first_round
 
     # Flush 2: Retry with remaining items
@@ -527,7 +537,9 @@ async def test_backup_index_commit_failure_preserves_pending_and_retry_zero_body
             self.storage: dict[str, bytes] = {}
             self.fail_index = fail_index
 
-        async def put_bytes(self, path: str, body: bytes, *, content_type: str = "application/octet-stream") -> None:
+        async def put_bytes(
+            self, path: str, body: bytes, *, content_type: str = "application/octet-stream"
+        ) -> None:
             if path.startswith("v1/backup/"):
                 call_stats["control_puts"] += 1
             else:
@@ -538,7 +550,9 @@ async def test_backup_index_commit_failure_preserves_pending_and_retry_zero_body
             call_stats["get_bytes"] += 1
             return self.storage.get(path)
 
-        async def atomic_replace_bytes(self, path: str, body: bytes, *, content_type: str = "application/json") -> None:
+        async def atomic_replace_bytes(
+            self, path: str, body: bytes, *, content_type: str = "application/json"
+        ) -> None:
             if self.fail_index:
                 raise RuntimeError("simulated index pointer commit failure")
             self.storage[path] = body
@@ -556,7 +570,9 @@ async def test_backup_index_commit_failure_preserves_pending_and_retry_zero_body
 
     # Pending items must be preserved!
     with ledger._get_connection() as conn:
-        rem_pending = conn.execute("SELECT COUNT(*) FROM backup_pending WHERE status = 'pending'").fetchone()[0]
+        rem_pending = conn.execute("SELECT COUNT(*) FROM backup_pending WHERE status = 'pending'").fetchone()[
+            0
+        ]
         receipt_count = conn.execute("SELECT COUNT(*) FROM backup_receipts").fetchone()[0]
     assert rem_pending == 3
     assert receipt_count == 3
