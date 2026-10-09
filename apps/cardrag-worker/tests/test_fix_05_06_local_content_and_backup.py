@@ -132,6 +132,163 @@ async def test_sealed_prior_content_without_native_manifest_resolves_provider_ze
 
 
 @pytest.mark.asyncio
+async def test_sealed_prior_native_manifest_recovers_contract_provenance_provider_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX_08: Sealed prior native OCR recovers contract provider/model when prior provider is None."""
+    import datetime
+    from cardrag_core import NativeOCRContract, OCRArtifactManifest
+    from cardrag_core.manifests import ArtifactRef
+    from cardrag_core.ocr import native_ocr_reuse_key
+
+    monkeypatch.setattr("cardrag_worker.ocr.render_pdf", fake_render)
+    runs_root = tmp_path / "runs"
+    prior_run_id = "025ce35739944d8facfdda4c99961f0c"
+    doc_id = "doc_native_001"
+    prior_doc_ocr = runs_root / prior_run_id / "documents" / doc_id / "ocr"
+    prior_doc_ocr.mkdir(parents=True)
+
+    ocr_text = "## Page 1\n\n카드 상품 혜택 안내입니다.\n"
+    ocr_bytes = ocr_text.encode("utf-8")
+    ocr_sha = hashlib.sha256(ocr_bytes).hexdigest()
+    ocr_size = len(ocr_bytes)
+    (prior_doc_ocr / "ocr.md").write_bytes(ocr_bytes)
+
+    source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=1000, page_count=1)
+    reuse_key = content_addressed_ocr_reuse_key(source, cache_epoch=0)
+    variant_id = "d" * 64
+
+    contract = NativeOCRContract(
+        processor_version="cardrag-worker/1.0.4",
+        prompt_version="cardrag-ocr.ko.v2",
+        prompt_sha256="1448d7e530d4f8412102c67cd44dc9c9cdab9e3aa165eddb88b3a980a245b946",
+        renderer_id="pypdfium2/5.12.1",
+        render_scale_milli=6000,
+        provider="opencode",
+        model="alibaba-token-plan/qwen3.8-flash",
+        reasoning_effort="medium",
+        output_policy="target-pages-only",
+        segmentation_strategy_id="cardrag.ocr.windowed-continuity.v1",
+        target_pages_per_call=2,
+        context_pages_before=1,
+        context_pages_after=1,
+        whole_document_max_pages=4,
+    )
+    native_key = native_ocr_reuse_key(contract, source)
+    page_sha = hashlib.sha256("## Page 1\n\n카드 상품 혜택 안내입니다.\n".encode("utf-8")).hexdigest()
+    native_manifest = OCRArtifactManifest(
+        reuse_key=native_key,
+        source=source,
+        contract=contract,
+        output=ArtifactRef(
+            media_type="text/markdown; charset=utf-8",
+            path=f"v1/objects/sha256/{ocr_sha[:2]}/{ocr_sha}",
+            sha256=ocr_sha,
+            size_bytes=ocr_size,
+        ),
+        ocr_chars=len(ocr_text),
+        page_output_sha256=(page_sha,),
+        created_at=datetime.datetime(2026, 10, 8, 18, 51, 48, tzinfo=datetime.timezone.utc),
+    )
+    (prior_doc_ocr / "native-manifest.json").write_bytes(native_manifest.canonical_bytes())
+
+    # Create sealed publish.json for prior run
+    sealed_dir = runs_root / prior_run_id / "sealed"
+    sealed_dir.mkdir(parents=True)
+    manifest_data = {
+        "generation_id": prior_run_id,
+        "corpus_sha256": "a" * 64,
+        "contract_sha256": contract.contract_sha256,
+        "created_at": "2026-10-08T18:00:00+00:00",
+        "documents": [
+            {
+                "document_id": doc_id,
+                "issuer": "shinhan",
+                "availability": "available",
+                "page_count": 1,
+                "pdf": {
+                    "sha256": PDF_SHA,
+                    "size_bytes": 1000,
+                    "media_type": "application/pdf",
+                    "path": f"v1/objects/sha256/{PDF_SHA[:2]}/{PDF_SHA}",
+                },
+                "ocr": {
+                    "sha256": ocr_sha,
+                    "size_bytes": ocr_size,
+                    "media_type": "text/markdown; charset=utf-8",
+                    "path": f"v1/objects/sha256/{ocr_sha[:2]}/{ocr_sha}",
+                },
+                "ocr_cache_kind": "content",
+                "ocr_reuse_key": reuse_key,
+                "ocr_variant_id": variant_id,
+            }
+        ],
+    }
+    publish_data = {
+        "schema_version": "cardrag.publish-seal.v1",
+        "run_id": prior_run_id,
+        "generation_id": prior_run_id,
+        "manifest": manifest_data,
+        "objects": [],
+    }
+    (sealed_dir / "publish.json").write_text(json.dumps(publish_data), encoding="utf-8")
+
+    state = WorkerState(tmp_path / "state.sqlite3")
+    provider = FakeProvider()
+    resolver = OCRResolver(
+        provider=provider,
+        state=state,
+        webdav=None,
+        chunk_pages=1,
+    )
+
+    state.start_run(run_id="run-native")
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_text("1", encoding="utf-8")
+
+    output_dir = runs_root / "run-native" / "documents" / doc_id / "ocr"
+    prior_source = PriorLocalNativeSource(
+        runs_root=runs_root,
+        run_id=prior_run_id,
+        generation_id=prior_run_id,
+        corpus_sha256="a" * 64,
+        contract_sha256=contract.contract_sha256,
+        document_id=doc_id,
+        pdf_sha256=PDF_SHA,
+        pdf_size_bytes=1000,
+        page_count=1,
+        ocr_sha256=ocr_sha,
+        ocr_size_bytes=ocr_size,
+        cache_kind="content",
+        reuse_key=reuse_key,
+        variant_id=variant_id,
+        provider=None,
+        model=None,
+    )
+
+    result = await resolver.resolve(
+        run_id="run-native",
+        document_id=doc_id,
+        pdf_path=pdf_path,
+        pdf_sha256=PDF_SHA,
+        pdf_size_bytes=1000,
+        page_count=1,
+        output_dir=output_dir,
+        prior_local_native=prior_source,
+    )
+
+    assert result.cache_reused is True
+    assert result.provider_called is False
+    assert provider.calls == []
+    assert result.ocr_sha256 == ocr_sha
+    assert result.cache_variant_id == variant_id
+    assert result.provider == "opencode"
+    assert result.model == "alibaba-token-plan/qwen3.8-flash"
+    state.close()
+
+
+
+@pytest.mark.asyncio
 async def test_corrupt_prior_ocr_fails_and_calls_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

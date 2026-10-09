@@ -2029,15 +2029,66 @@ class OCRResolver:
 
         provider = prior.provider
         model = prior.model
-        if provider is None and prior_manifest_path.is_file() and not prior_manifest_path.is_symlink():
+        if (
+            (provider is None or model is None)
+            and prior_manifest_path.is_file()
+            and not prior_manifest_path.is_symlink()
+        ):
             with suppress(Exception):
-                p_man = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
-                prov = p_man.get("provenance", {})
-                if isinstance(prov, dict):
-                    if prov.get("provider"):
-                        provider = str(prov["provider"])
-                    if prov.get("model"):
-                        model = str(prov["model"])
+                mode = prior_manifest_path.lstat().st_mode
+                if (
+                    stat.S_ISREG(mode)
+                    and prior_manifest_path.resolve(strict=True).parent == resolved_output_dir
+                    and 0 < prior_manifest_path.stat().st_size <= LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES
+                ):
+                    manifest_bytes = prior_manifest_path.read_bytes()
+                    manifest: OCRArtifactManifest | None = None
+                    try:
+                        parsed_manifest = OCRArtifactManifest.model_validate_json(manifest_bytes)
+                        if parsed_manifest.canonical_bytes() == manifest_bytes:
+                            manifest = parsed_manifest
+                    except Exception:
+                        manifest = None
+
+                    if manifest is not None:
+                        if (
+                            manifest.source.pdf_sha256 == source.pdf_sha256
+                            and manifest.source.pdf_size_bytes == source.pdf_size_bytes
+                            and manifest.source.page_count == source.page_count
+                            and manifest.output.sha256 == prior.ocr_sha256
+                            and manifest.output.size_bytes == prior.ocr_size_bytes
+                        ):
+                            if provider is None and manifest.contract.provider:
+                                provider = str(manifest.contract.provider)
+                            if model is None and manifest.contract.model:
+                                model = str(manifest.contract.model)
+                    else:
+                        p_man = json.loads(manifest_bytes.decode("utf-8"))
+                        if isinstance(p_man, dict):
+                            src = p_man.get("source", {})
+                            out = p_man.get("output", {})
+                            if (
+                                isinstance(src, dict)
+                                and isinstance(out, dict)
+                                and src.get("pdf_sha256") == source.pdf_sha256
+                                and src.get("pdf_size_bytes") == source.pdf_size_bytes
+                                and src.get("page_count") == source.page_count
+                                and out.get("sha256") == prior.ocr_sha256
+                                and out.get("size_bytes") == prior.ocr_size_bytes
+                            ):
+                                contract_data = p_man.get("contract", {})
+                                if isinstance(contract_data, dict):
+                                    if provider is None and contract_data.get("provider"):
+                                        provider = str(contract_data["provider"])
+                                    if model is None and contract_data.get("model"):
+                                        model = str(contract_data["model"])
+                                prov = p_man.get("provenance", {})
+                                if isinstance(prov, dict):
+                                    if provider is None and prov.get("provider"):
+                                        provider = str(prov["provider"])
+                                    if model is None and prov.get("model"):
+                                        model = str(prov["model"])
+
 
         variant_id = (
             prior.variant_id
