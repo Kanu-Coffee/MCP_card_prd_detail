@@ -29,3 +29,17 @@ id = "github-fine-grained-personal-access-token"
 description = "GitHub fine-grained personal access token"
 regex = '''\bgithub_pat_[A-Za-z0-9_]{20,255}\b'''
 keywords = ["github_pat_"]
+
+[[allowlists]]
+description = "Public Handoff 013 OCR content hashes (not authentication keys)"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  '''epoch1_returned_key["']?\s*:\s*["']0d759b4b8967dd1f047032335f55e159206f953fc5fa27adc1bd1d4d17ce3894["']''',
+  '''epoch1_expected_key["']?\s*:\s*["']9195f9a06744ac63326491fac4f4b9069cc4c8862333f2cc20c098085eeba3b8["']''',
+  '''reuse_key["']?\s*:\s*["']7b23441dbce06c0b80e97a7d2bdb25029ec0c4c44bd709e10c665f34a3dd090f["']''',
+  '''reuse_key["']?\s*:\s*["']153fce621e31a61f2abaa11ec6c555feaf827623791aaaafe4c27439b714c39e["']''',
+  '''reuse_key["']?\s*:\s*["']a4274c45067c0f853dcb5c69482af0613719162f877ce56139771ae34ddab4d1["']''',
+  '''reuse_key["']?\s*:\s*["']4774228792a90184c61851a466f97c02152ff840f3889eb2c3a27612ffebd86f["']''',
+  '''reuse_key["']?\s*:\s*["']387db64b6ff467abc49a5d0e29a5bd188ea839df0c38cf973c4ffe4a43dfa11c["']''',
+]
