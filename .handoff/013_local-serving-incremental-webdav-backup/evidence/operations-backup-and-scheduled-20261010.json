@@ -1,0 +1,116 @@
+{
+  "backup_events": [
+    {
+      "event": "backup_drain_started",
+      "at": "2026-10-09T14:14:50.719182+00:00",
+      "budget_seconds": 7200,
+      "status": {
+        "mode": "immediate",
+        "status": "pending",
+        "pending_count": 12977,
+        "pending_ocr_count": 5065,
+        "pending_bytes": 1289084865,
+        "lost_count": 0,
+        "lost_bytes": 0,
+        "oldest_pending_at": "2026-10-09T06:31:56.596126+00:00",
+        "last_backup_at": "2026-10-09T13:09:57.796316+00:00",
+        "runs_since_last_backup": 2,
+        "should_trigger": true,
+        "trigger_reasons": [
+          "immediate_pending_items"
+        ]
+      }
+    },
+    {
+      "event": "backup_flush_started",
+      "at": "2026-10-09T14:14:50.751365+00:00",
+      "attempt": 1,
+      "pending_count": 12977,
+      "pending_bytes": 1289084865,
+      "remaining_seconds": 7199.9
+    },
+    {
+      "event": "backup_flush_finished",
+      "at": "2026-10-09T15:01:21.701364+00:00",
+      "attempt": 1,
+      "result": {
+        "status": "succeeded",
+        "flushed_count": 12977,
+        "processed_count": 12977,
+        "processed_bytes": 1289084865,
+        "uploaded_count": 12977,
+        "uploaded_bytes": 1289084865,
+        "actual_uploaded_count": null,
+        "actual_uploaded_bytes": null,
+        "verified_existing_count": 0,
+        "verified_existing_bytes": 0,
+        "receipts_reused_count": 0,
+        "requests": 12980,
+        "body_requests": 12977,
+        "control_requests": 3,
+        "remaining_pending": 0,
+        "error": null
+      }
+    },
+    {
+      "event": "backup_drain_completed",
+      "at": "2026-10-09T15:01:21.728839+00:00",
+      "elapsed_seconds": 2791.071,
+      "status": {
+        "mode": "immediate",
+        "status": "ready",
+        "pending_count": 0,
+        "pending_ocr_count": 0,
+        "pending_bytes": 0,
+        "lost_count": 0,
+        "lost_bytes": 0,
+        "oldest_pending_at": null,
+        "last_backup_at": "2026-10-09T15:01:21.214807+00:00",
+        "runs_since_last_backup": 0,
+        "should_trigger": false,
+        "trigger_reasons": []
+      }
+    }
+  ],
+  "backup_http_methods": {
+    "HEAD": 12979,
+    "GET": 19861,
+    "MKCOL": 55034,
+    "PUT": 6881,
+    "MOVE": 6882,
+    "DELETE": 6882
+  },
+  "remote_index_check": {
+    "index_bytes": 8017974,
+    "remote_items": 16783,
+    "local_receipts": 16783,
+    "mismatches": 0,
+    "full_pdf_ocr_redownload_performed": false
+  },
+  "empty_queue_flush_check": {
+    "status": "unchanged",
+    "requests": 0,
+    "uploaded_count": 0,
+    "uploaded_bytes": 0,
+    "remaining_pending": 0
+  },
+  "scheduled_0300": {
+    "actually_started_worker": false,
+    "failure": "ExecStartPre 200/CHDIR Permission denied",
+    "cause": "deployment root/deploy/worker directories mode0700; service Usercardrag UID10001 could not traverse",
+    "repair": "chmod0755 deployment root and deploy/worker/mcp/operations/docs directories only; secret contents/modes preserved",
+    "uid10001_directory_compose_env_access_verified": true,
+    "systemctl_restart": "requires interactive authentication; did not bypass",
+    "timer": "active; next2026-10-11 03:00KST"
+  },
+  "retry_worker": {
+    "name": "cardrag-worker-013-retry-20261010",
+    "container_id": "eccd401454a13cde5a596109c89da28c7ae9fd4e2b7a3ed84fcd78dd544fd36d",
+    "image": "cardrag-worker:013-50a0129",
+    "started_at": "2026-10-09T20:33:13.187045008Z",
+    "startup_completed_at_kst": "2026-10-10T05:33:33.198+09:00",
+    "state_at_handoff": "running",
+    "first_discovery": "samsung565 at05:33:46.225",
+    "completed": false
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "container_name": "cardrag-backup-bootstrap",
+  "container_id": "2b25959d7c9968eb8885b22d4fc5edbe521a050530c3c61e1be378309d7f2ded",
+  "image": "cardrag-worker:013-50a0129",
+  "started_at": "2026-10-09T14:14:50.026935118Z",
+  "status_at_handoff": "running",
+  "restart_policy": "no",
+  "initial": {
+    "event": "backup_drain_started",
+    "at": "2026-10-09T14:14:50.719182+00:00",
+    "budget_seconds": 7200,
+    "status": {
+      "mode": "immediate",
+      "status": "pending",
+      "pending_count": 12977,
+      "pending_ocr_count": 5065,
+      "pending_bytes": 1289084865,
+      "lost_count": 0,
+      "lost_bytes": 0,
+      "oldest_pending_at": "2026-10-09T06:31:56.596126+00:00",
+      "last_backup_at": "2026-10-09T13:09:57.796316+00:00",
+      "runs_since_last_backup": 2,
+      "should_trigger": true,
+      "trigger_reasons": [
+        "immediate_pending_items"
+      ]
+    }
+  },
+  "script": "/opt/cardrag/013-50a0129/operations/manual-backup-drain.py",
+  "daily_worker_budget_seconds": 300,
+  "next_worker_timer_kst": "2026-10-10T03:00:00+09:00",
+  "completion_not_yet_verified": true
+}

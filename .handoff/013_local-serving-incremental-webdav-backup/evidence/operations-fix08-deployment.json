@@ -1,0 +1,34 @@
+{
+  "commit": "50a0129dcc210be06e49e7b5389e9e49383046f1",
+  "images": {
+    "worker": "sha256:a3b93b8dcc3e91c3a35c80af9f1d01922388ca2d965244f9a2007d79686fc0f2",
+    "mcp": "sha256:708ef48fca873add73f39f24b31b8ef537b402dceb8f055023864f03c8ff89bc"
+  },
+  "previous": "/opt/cardrag/v1.0.34",
+  "previous_runtime": "/opt/cardrag/013-3eaa35d",
+  "transport": "local",
+  "serving_volume": "cardrag-serving",
+  "backup_mode": "immediate",
+  "background_backup": "stopped to avoid concurrent processing; Worker optional inline backup retained",
+  "worker_name": "cardrag-worker-013",
+  "worker_container_id": "ed329b195cb2c9de6faa0364cdd0ea989083ac43469d2058f15ad165a931c0c3",
+  "worker_started_at": "2026-10-09T11:26:36.485048294Z",
+  "startup_completed_at_kst": "2026-10-09T20:27:09.914+09:00",
+  "worker_state_at_handoff": "running",
+  "manual_entrypoint_diagnostic_wrapper": "operations/worker-entry.py",
+  "runtime_image_preflight": {
+    "count": 328,
+    "cache_hits": 328,
+    "provider_calls": 0
+  },
+  "startup_repairs": [
+    "restored UID/GID10001 on prior preflight_state.sqlite3-wal",
+    "archived two interrupted OpenCode temporary node_modules trees outside Worker state; retained PDF/OCR/checkpoints"
+  ],
+  "cutover_ready": true,
+  "mcp_readiness": {
+    "http_status": 200,
+    "ready": true,
+    "checked_at": "2026-10-09T11:31:24.053231+00:00"
+  }
+}

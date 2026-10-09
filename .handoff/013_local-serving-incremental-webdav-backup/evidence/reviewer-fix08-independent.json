@@ -1,0 +1,90 @@
+{
+  "commit": "50a0129dcc210be06e49e7b5389e9e49383046f1",
+  "targeted_pytest": {
+    "passed": 53,
+    "failed": 0,
+    "warnings": 1,
+    "seconds": 3.29
+  },
+  "mypy": "Success: no issues found in 4 source files",
+  "previous_repro": "provider0; original variant and Paddle provenance preserved; repeated variant stable; epoch1 miss",
+  "volume_execution": {
+    "network": "none",
+    "production_volume": "cardrag-worker-state:/state:ro",
+    "repository": "/workspace:ro",
+    "state_and_outputs": "temporary directory",
+    "source_code": "current Git working tree",
+    "runtime_dependencies": "cardrag-worker:013-3eaa35d",
+    "uid": 0
+  },
+  "actual_inventory": {
+    "count": 328,
+    "content_count": 323,
+    "native_count": 5,
+    "calls": 0,
+    "hits": 328,
+    "same_ocr": 328,
+    "variant_matches": 328,
+    "exceptions": [],
+    "native_results": [
+      {
+        "document_id": "doc_0e4b7f9e9f9f5d26269563bd9ed9846445946be7c8d2fac928004c71f111900e",
+        "native": true,
+        "cache_hit": true,
+        "provider_called": false,
+        "same_ocr": true,
+        "same_variant": true,
+        "cache_kind": "content",
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash"
+      },
+      {
+        "document_id": "doc_36ccc79a452843549c896126b620d293fdcee1ced9c19d0eb5848a7b29a8a56c",
+        "native": true,
+        "cache_hit": true,
+        "provider_called": false,
+        "same_ocr": true,
+        "same_variant": true,
+        "cache_kind": "content",
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash"
+      },
+      {
+        "document_id": "doc_55086e8736bd18279b84736878c27863731a3f3853fbf5236f77aeb7241ebd49",
+        "native": true,
+        "cache_hit": true,
+        "provider_called": false,
+        "same_ocr": true,
+        "same_variant": true,
+        "cache_kind": "content",
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash"
+      },
+      {
+        "document_id": "doc_55f60361cf7cda5cbfcca403e66191ddb09c2843f8a1035c008f30a76909554f",
+        "native": true,
+        "cache_hit": true,
+        "provider_called": false,
+        "same_ocr": true,
+        "same_variant": true,
+        "cache_kind": "content",
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash"
+      },
+      {
+        "document_id": "doc_eb9a7a10463c2e72501d8e8d7d028cd7c94c7a63c05e29d4d1c3500b3de8c733",
+        "native": true,
+        "cache_hit": true,
+        "provider_called": false,
+        "same_ocr": true,
+        "same_variant": true,
+        "cache_kind": "content",
+        "provider": "opencode",
+        "model": "alibaba-token-plan/qwen3.8-flash"
+      }
+    ],
+    "content_variant_mismatches": []
+  },
+  "production_modified": false,
+  "worker_launched": false
+}

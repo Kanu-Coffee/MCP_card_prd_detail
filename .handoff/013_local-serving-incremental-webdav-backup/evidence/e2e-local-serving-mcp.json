@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "mcp_activated_generation": "gen-003",
+  "retained_generations": [
+    "gen-002",
+    "gen-003"
+  ],
+  "live_ocr_provider_calls": 0,
+  "live_embedding_provider_calls": 0,
+  "serving_transport": "local",
+  "webdav_configured": false
+}

@@ -217,3 +217,38 @@ cardrag-worker restore-ocr-seed --apply --concurrency 8
 - **복원 소요 시간**: 네트워크 상태에 따라 약 1~2분 소요
 - **주의사항**: 이 복구 경로는 OCR 데이터의 온전한 보존과 재사용만을 보장하며,
   임베딩 재계산 및 전체 배치 완주 시간은 호스트 사양과 GPU/CPU 자원에 따라 달라집니다.
+
+## 증분 WebDAV 백업 운영 (013 아키텍처)
+
+Worker는 로컬 볼륨(`/var/lib/cardrag-serving`)에 generation을 원자적으로 직접 게시하여 MCP가 서빙하도록 하며, WebDAV는 선택적 증분 백업 채널로 동작합니다.
+SQLite 원장(`$CARDRAG_WORKER_STATE_DIR/backup-ledger.sqlite3`)이 미전송 OCR 결과 및 참조 CAS 객체를 추적합니다.
+
+### 1. 백업 정책 설정 (`CARDRAG_BACKUP_MODE`)
+
+- `disabled` (기본값): WebDAV 백업 비활성화. 원장에 미전송 항목을 누적하지 않아 디스크를 절약합니다.
+- `immediate`: 각 Worker 배치 성공 후 대기 항목을 즉시 WebDAV에 업로드합니다.
+- `hybrid`: 다음 네 가지 조건 중 하나라도 만족되면 인라인 백업을 실행합니다:
+  - 7회 배치 누적 (`CARDRAG_BACKUP_EVERY_RUNS=7`)
+  - 신규 OCR 결과 30건 누적 (`CARDRAG_BACKUP_NEW_OCR_COUNT=30`)
+  - 신규 데이터 1 GiB 누적 (`CARDRAG_BACKUP_NEW_BYTES=1073741824`)
+  - 미전송 항목 경과 7일(`CARDRAG_BACKUP_MAX_PENDING_AGE_HOURS=168`)
+- `manual`: 주기적 자동 업로드를 하지 않고 CLI 명령(`backup flush`)으로만 실행합니다.
+
+### 2. 백업 CLI 명령어
+
+Worker 컨테이너 내에서 `backup` 하위 명령어 그룹을 지원합니다:
+
+```bash
+# 1. 백업 원장 상태 및 트리거 조건 조회
+cardrag-worker backup status
+
+# 2. 대기 중인 증분 백업 항목 강제 업로드
+cardrag-worker backup flush --force
+
+# 3. WebDAV 백업 수신증(receipts) 표본 무결성 검증
+cardrag-worker backup audit [--full]
+
+# 4. WebDAV로부터 백업된 OCR 캐시를 Worker state root 디렉터리로 복원 (기본값: $CARDRAG_STATE_DIR)
+cardrag-worker backup restore [--target-dir /var/lib/cardrag-worker]
+```
+

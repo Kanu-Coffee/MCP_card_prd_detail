@@ -598,6 +598,14 @@ class PriorLocalNativeSource:
     ocr_sha256: str
     ocr_size_bytes: int
     resolver_subdir: Literal["primary", "fallback"] | None = None
+    cache_kind: str | None = None
+    reuse_key: str | None = None
+    variant_id: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+PriorLocalOCRSource = PriorLocalNativeSource
 
 
 _NativeSealKey = tuple[str, str, str, str, str]
@@ -850,7 +858,9 @@ class OCRResolver:
         self._content_store = (
             ContentOCRVariantStore(webdav=webdav, state_root=self._state_root)
             if webdav is not None and callable(getattr(webdav, "list_children", None))
-            else None
+            else (
+                ContentOCRVariantStore(webdav=None, state_root=self._state_root) if webdav is None else None
+            )
         )
         self._seed_ledger = (
             seed_ledger if seed_ledger is not None else load_state_seed_ledger(self._state_root)
@@ -1900,6 +1910,208 @@ class OCRResolver:
             return materialized
         return local
 
+    def _lookup_prior_local_sealed_ocr(
+        self,
+        *,
+        prior: PriorLocalNativeSource,
+        source: OCRInput,
+        document_id: str,
+        output_dir: Path,
+    ) -> OCRResult | None:
+        """Verify and return OCRResult directly from a sealed prior generation's ocr.md."""
+
+        if (
+            prior.pdf_sha256 != source.pdf_sha256
+            or prior.pdf_size_bytes != source.pdf_size_bytes
+            or prior.page_count != source.page_count
+            or not re.fullmatch(r"[0-9a-f]{64}", prior.ocr_sha256)
+            or prior.ocr_size_bytes < 1
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", prior.run_id)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", prior.generation_id)
+            or prior.resolver_subdir not in {None, "primary", "fallback"}
+        ):
+            return None
+
+        run_root = prior.runs_root / prior.run_id
+        document_root = run_root / "documents" / prior.document_id
+        outer_output_dir = document_root / "ocr"
+        prior_output_dir = (
+            outer_output_dir / prior.resolver_subdir
+            if prior.resolver_subdir is not None
+            else outer_output_dir
+        )
+        directory_chain = [
+            prior.runs_root,
+            run_root,
+            run_root / "documents",
+            document_root,
+            outer_output_dir,
+        ]
+        if prior.resolver_subdir is not None:
+            directory_chain.append(prior_output_dir)
+        try:
+            for directory in directory_chain:
+                mode = directory.lstat().st_mode
+                if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                    return None
+            resolved_runs_root = prior.runs_root.resolve(strict=True)
+            resolved_run_root = run_root.resolve(strict=True)
+            resolved_documents_root = (run_root / "documents").resolve(strict=True)
+            resolved_document_root = document_root.resolve(strict=True)
+            resolved_outer_output_dir = outer_output_dir.resolve(strict=True)
+            resolved_output_dir = prior_output_dir.resolve(strict=True)
+            if (
+                resolved_run_root.parent != resolved_runs_root
+                or resolved_documents_root.parent != resolved_run_root
+                or resolved_document_root.parent != resolved_documents_root
+                or resolved_outer_output_dir.parent != resolved_document_root
+                or (prior.resolver_subdir is None and resolved_output_dir != resolved_outer_output_dir)
+                or (
+                    prior.resolver_subdir is not None
+                    and resolved_output_dir.parent != resolved_outer_output_dir
+                )
+            ):
+                return None
+        except Exception:
+            return None
+
+        prior_ocr_path = prior_output_dir / "ocr.md"
+        prior_manifest_path = prior_output_dir / "native-manifest.json"
+        try:
+            if prior_manifest_path.is_symlink():
+                return None
+            mode = prior_ocr_path.lstat().st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                return None
+            if prior_ocr_path.resolve(strict=True).parent != resolved_output_dir:
+                return None
+            if prior_ocr_path.stat().st_size != prior.ocr_size_bytes:
+                return None
+
+            body = prior_ocr_path.read_bytes()
+            if hashlib.sha256(body).hexdigest() != prior.ocr_sha256:
+                return None
+            reject_credential_bearing_ocr(body)
+            verified = verify_ocr_bytes(
+                body,
+                expected_page_count=source.page_count,
+                expected_sha256=prior.ocr_sha256,
+                expected_size_bytes=prior.ocr_size_bytes,
+            )
+        except Exception:
+            return None
+
+        # Materialize to output_dir if needed
+        if output_dir != prior_output_dir:
+            with suppress(Exception):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                target_ocr = output_dir / "ocr.md"
+                if not target_ocr.is_file() or target_ocr.read_bytes() != body:
+                    tmp = output_dir / f".ocr.{secrets.token_hex(8)}.tmp"
+                    tmp.write_bytes(body)
+                    os.chmod(tmp, 0o600)
+                    tmp.replace(target_ocr)
+
+        cache_kind: Literal["native", "adopted", "content"] = (
+            cast(Literal["native", "adopted", "content"], prior.cache_kind)
+            if prior.cache_kind in {"native", "adopted", "content"}
+            else "content"
+        )
+        if cache_kind == "content":
+            expected_content_key = content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
+            if prior.reuse_key is not None and prior.reuse_key != expected_content_key:
+                return None
+            reuse_key = expected_content_key
+        else:
+            if self.cache_epoch != 0:
+                return None
+            reuse_key = prior.reuse_key or content_addressed_ocr_reuse_key(
+                source, cache_epoch=self.cache_epoch
+            )
+
+        provider = prior.provider
+        model = prior.model
+        if (
+            (provider is None or model is None)
+            and prior_manifest_path.is_file()
+            and not prior_manifest_path.is_symlink()
+        ):
+            with suppress(Exception):
+                mode = prior_manifest_path.lstat().st_mode
+                if (
+                    stat.S_ISREG(mode)
+                    and prior_manifest_path.resolve(strict=True).parent == resolved_output_dir
+                    and 0 < prior_manifest_path.stat().st_size <= LOCAL_OCR_CACHE_MANIFEST_MAX_BYTES
+                ):
+                    manifest_bytes = prior_manifest_path.read_bytes()
+                    manifest: OCRArtifactManifest | None = None
+                    try:
+                        parsed_manifest = OCRArtifactManifest.model_validate_json(manifest_bytes)
+                        if parsed_manifest.canonical_bytes() == manifest_bytes:
+                            manifest = parsed_manifest
+                    except Exception:
+                        manifest = None
+
+                    if manifest is not None:
+                        if (
+                            manifest.source.pdf_sha256 == source.pdf_sha256
+                            and manifest.source.pdf_size_bytes == source.pdf_size_bytes
+                            and manifest.source.page_count == source.page_count
+                            and manifest.output.sha256 == prior.ocr_sha256
+                            and manifest.output.size_bytes == prior.ocr_size_bytes
+                        ):
+                            if provider is None and manifest.contract.provider:
+                                provider = str(manifest.contract.provider)
+                            if model is None and manifest.contract.model:
+                                model = str(manifest.contract.model)
+                    else:
+                        p_man = json.loads(manifest_bytes.decode("utf-8"))
+                        if isinstance(p_man, dict):
+                            src = p_man.get("source", {})
+                            out = p_man.get("output", {})
+                            if (
+                                isinstance(src, dict)
+                                and isinstance(out, dict)
+                                and src.get("pdf_sha256") == source.pdf_sha256
+                                and src.get("pdf_size_bytes") == source.pdf_size_bytes
+                                and src.get("page_count") == source.page_count
+                                and out.get("sha256") == prior.ocr_sha256
+                                and out.get("size_bytes") == prior.ocr_size_bytes
+                            ):
+                                contract_data = p_man.get("contract", {})
+                                if isinstance(contract_data, dict):
+                                    if provider is None and contract_data.get("provider"):
+                                        provider = str(contract_data["provider"])
+                                    if model is None and contract_data.get("model"):
+                                        model = str(contract_data["model"])
+                                prov = p_man.get("provenance", {})
+                                if isinstance(prov, dict):
+                                    if provider is None and prov.get("provider"):
+                                        provider = str(prov["provider"])
+                                    if model is None and prov.get("model"):
+                                        model = str(prov["model"])
+
+        variant_id = (
+            prior.variant_id
+            if (prior.variant_id and re.fullmatch(r"[0-9a-f]{64}", prior.variant_id))
+            else prior.ocr_sha256
+        )
+        return OCRResult(
+            pages=tuple(_page_body(page) for page in verified.pages),
+            ocr_bytes=body,
+            ocr_text=verified.text,
+            ocr_sha256=verified.sha256,
+            size_bytes=verified.size_bytes,
+            provenance="sealed-prior-generation",
+            provider=provider or "generation-only",
+            model=model or "unrecorded",
+            reuse_key=reuse_key,
+            cache_kind=cache_kind,
+            cache_reuse_key=reuse_key,
+            cache_variant_id=variant_id,
+            cache_reused=True,
+        )
+
     def matches_prior_local_native(
         self,
         *,
@@ -1922,11 +2134,19 @@ class OCRResolver:
             prior_output_dir = (
                 run_root / prior.resolver_subdir if prior.resolver_subdir is not None else run_root
             )
+            materialized = self._materialize_prior_local_native(
+                prior=prior,
+                source=source,
+                reuse_key=reuse_key,
+                document_id=document_id,
+                output_dir=prior_output_dir,
+            )
+            if materialized is not None:
+                return True
             return (
-                self._materialize_prior_local_native(
+                self._lookup_prior_local_sealed_ocr(
                     prior=prior,
                     source=source,
-                    reuse_key=reuse_key,
                     document_id=document_id,
                     output_dir=prior_output_dir,
                 )
@@ -1981,8 +2201,9 @@ class OCRResolver:
             raise OCRValidationError("local native OCR body does not match its verified result")
         if self.webdav is None or self.cache_mode == "read-only":
             return result
-        if self._content_store is not None:
+        if self._content_store is not None and self._content_store.webdav is not None:
             # New publication is append-only by variant. Keep the document-local
+
             # native seal for restart compatibility, but do not create another
             # provider-bound remote native entry.
             content_manifest = ContentOCRArtifactManifest.create(
@@ -2282,9 +2503,7 @@ class OCRResolver:
                     stacklevel=2,
                 )
 
-        # The run-frozen content index is the provider-independent shared
-        # cache. Legacy native/adopted readers below remain a transition path.
-        if self._content_store is not None and reprocess_request_id is None:
+        if self._content_store is not None and prior_local_native is None and reprocess_request_id is None:
             content_hit = await self._content_store.lookup(
                 run_id=run_id,
                 document_id=document_id,
@@ -2295,6 +2514,13 @@ class OCRResolver:
             if content_hit is not None:
                 content_manifest = content_hit.manifest
                 verified = content_hit.verified
+                output_dir.mkdir(parents=True, exist_ok=True)
+                target_ocr = output_dir / "ocr.md"
+                if not target_ocr.is_file() or target_ocr.read_bytes() != content_hit.body:
+                    tmp = output_dir / f".ocr.{secrets.token_hex(8)}.tmp"
+                    tmp.write_bytes(content_hit.body)
+                    os.chmod(tmp, 0o600)
+                    tmp.replace(target_ocr)
                 return OCRResult(
                     pages=tuple(_page_body(page) for page in verified.pages),
                     ocr_bytes=content_hit.body,
@@ -2407,6 +2633,19 @@ class OCRResolver:
                     output_dir=output_dir,
                 )
             except OCRValidationError:
+                sealed_prior = self._lookup_prior_local_sealed_ocr(
+                    prior=prior_local_native,
+                    source=source,
+                    document_id=document_id,
+                    output_dir=output_dir,
+                )
+                if sealed_prior is not None and (
+                    expected_ocr_identity is None
+                    or (sealed_prior.ocr_sha256, sealed_prior.size_bytes) == expected_ocr_identity
+                ):
+                    shutil.rmtree(output_dir / "rendered", ignore_errors=True)
+                    return sealed_prior
+
                 # A retained local artifact is only an optimization.  Any
                 # ambiguity or tampering is a strict miss: do not reuse its
                 # bytes, and let the ordinary provider path rebuild the OCR.
@@ -2945,17 +3184,37 @@ class FailoverOCRResolver:
                 )
                 shutil.rmtree(output_dir / "primary" / "rendered", ignore_errors=True)
                 return result
-            # Zero matches is unavailable/invalid; two matches cannot prove
-            # which resolver produced the sealed generation OCR.  Both are a
-            # strict miss, so neither sibling may consume retained bytes.
-            primary_prior = None
-            fallback_prior = None
+
+            # When both branches matched, it is ambiguous and a strict miss.
+            # Only when neither subdirectory matched (e.g. sealed generation-level
+            # documents in ocr/ocr.md without primary/fallback subdirectories),
+            # check raw_prior directly on primary branch:
+            if not primary_matches and not fallback_matches and raw_prior.resolver_subdir is None:
+                if self.primary.matches_prior_local_native(
+                    prior=raw_prior,
+                    document_id=document_id,
+                    pdf_sha256=pdf_sha256,
+                    pdf_size_bytes=pdf_size_bytes,
+                    page_count=page_count,
+                ):
+                    return await self.primary.resolve(
+                        **kwargs,
+                        output_dir=output_dir / "primary",
+                        prior_local_native=raw_prior,
+                    )
+                primary_prior = raw_prior
+                fallback_prior = raw_prior
+            else:
+                primary_prior = None
+                fallback_prior = None
+
         try:
             return await self.primary.resolve(
                 **kwargs,
                 output_dir=output_dir / "primary",
                 prior_local_native=primary_prior,
             )
+
         except (
             ProviderDocumentError,
             OCRValidationError,

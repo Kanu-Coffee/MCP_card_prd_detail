@@ -304,3 +304,157 @@ async def test_download_cancellation_waits_for_blocking_writer_to_finish(tmp_pat
     with pytest.raises(asyncio.CancelledError):
         await task
     assert destination.read_bytes() == b"bounded-download"
+
+
+@pytest.mark.asyncio
+async def test_local_artifact_reader_reads_generation_and_downloads_files(tmp_path: Path) -> None:
+    from cardrag_core import sha256_bytes
+
+    from cardrag_mcp.transport import LocalArtifactReader, RemoteArtifact
+
+    serving_dir = tmp_path / "serving"
+    serving_dir.mkdir(parents=True)
+    base = current_v5_generation()
+    gen_id = base.manifest.generation_id
+
+    db_bytes = b"sqlite3 database test content"
+    db_sha = sha256_bytes(db_bytes)
+    vec_bytes = b"v" * (4096 * 4)
+    vec_sha = sha256_bytes(vec_bytes)
+    pdf_bytes = b"%PDF-test-pdf-bytes"
+    pdf_sha = sha256_bytes(pdf_bytes)
+
+    assert base.manifest.vector_sidecar is not None
+    new_doc = base.manifest.documents[0].model_copy(
+        update={
+            "availability": "available",
+            "ocr": ArtifactRef(
+                sha256="c" * 64,
+                size_bytes=10,
+                media_type="text/markdown; charset=utf-8",
+                path=f"v1/objects/sha256/{'c' * 2}/{'c' * 64}",
+            ),
+            "pdf": ArtifactRef(
+                sha256=pdf_sha,
+                size_bytes=len(pdf_bytes),
+                media_type="application/pdf",
+                path=f"v1/objects/sha256/{pdf_sha[:2]}/{pdf_sha}",
+            ),
+        }
+    )
+    new_sidecar = base.manifest.vector_sidecar.model_copy(
+        update={
+            "artifact": ArtifactRef(
+                sha256=vec_sha,
+                size_bytes=len(vec_bytes),
+                media_type="application/octet-stream",
+                path=f"v1/generations/{gen_id}/vectors.f32",
+            ),
+        }
+    )
+    from cardrag_core import IssuerOCRCounts
+
+    manifest_data = base.manifest.model_copy(
+        update={
+            "serving_database": ArtifactRef(
+                sha256=db_sha,
+                size_bytes=len(db_bytes),
+                media_type="application/vnd.sqlite3",
+                path=f"v1/generations/{gen_id}/index.sqlite3",
+            ),
+            "vector_sidecar": new_sidecar,
+            "counts": GenerationCounts(documents=1, pdf_objects=1, ocr_objects=1, chunks=1),
+            "issuer_ocr_counts": (
+                IssuerOCRCounts(issuer="woori", acquired=1, succeeded=1, failed=0),
+            ),
+            "documents": (new_doc,),
+        }
+    )
+    manifest_bytes = manifest_data.canonical_bytes()
+    manifest_sha = manifest_data.manifest_sha256
+
+    ready_data = GenerationReady(
+        generation_id=gen_id,
+        manifest_sha256=manifest_sha,
+        serving_database_sha256=db_sha,
+        serving_database_size_bytes=len(db_bytes),
+        vector_sidecar_sha256=vec_sha,
+        vector_sidecar_size_bytes=len(vec_bytes),
+    )
+    ready_bytes = ready_data.canonical_bytes()
+    ready_sha = sha256_bytes(ready_bytes)
+
+    pointer_data = GenerationPointer(
+        generation_id=gen_id,
+        manifest_sha256=manifest_sha,
+        ready_sha256=ready_sha,
+    )
+    pointer_bytes = pointer_data.canonical_bytes()
+
+    # Write files to serving_dir
+    gen_dir = serving_dir / "v1" / "generations" / gen_id
+    gen_dir.mkdir(parents=True)
+    (gen_dir / "manifest.json").write_bytes(manifest_bytes)
+    (gen_dir / "READY.json").write_bytes(ready_bytes)
+    (gen_dir / "index.sqlite3").write_bytes(db_bytes)
+    (gen_dir / "vectors.f32").write_bytes(vec_bytes)
+
+    obj_dir = serving_dir / "v1" / "objects" / "sha256" / pdf_sha[:2]
+    obj_dir.mkdir(parents=True)
+    (obj_dir / pdf_sha).write_bytes(pdf_bytes)
+
+    channel_dir = serving_dir / "v1" / "channels"
+    channel_dir.mkdir(parents=True)
+    (channel_dir / "stable.json").write_bytes(pointer_bytes)
+
+    reader = LocalArtifactReader(serving_dir, channel="stable")
+    remote = await reader.read_stable_generation()
+    assert remote is not None
+    assert remote.generation_id == gen_id
+    assert remote.serving_schema == "cardrag.serving-db.v5"
+
+    dest_db = tmp_path / "downloaded_db.sqlite3"
+    await reader.download_database(remote, dest_db)
+    assert dest_db.read_bytes() == db_bytes
+
+    dest_vec = tmp_path / "downloaded_vec.f32"
+    await reader.download_vector_sidecar(remote, dest_vec)
+    assert dest_vec.read_bytes() == vec_bytes
+
+    dest_pdf = tmp_path / "downloaded_doc.pdf"
+    remote_art = RemoteArtifact(
+        sha256=pdf_sha,
+        size_bytes=len(pdf_bytes),
+        path=f"v1/objects/sha256/{pdf_sha[:2]}/{pdf_sha}",
+        media_type="application/pdf",
+    )
+    await reader.download_object(remote_art, dest_pdf)
+    assert dest_pdf.read_bytes() == pdf_bytes
+
+
+@pytest.mark.asyncio
+async def test_local_artifact_reader_missing_channel_returns_none(tmp_path: Path) -> None:
+    from cardrag_mcp.transport import LocalArtifactReader
+
+    serving_dir = tmp_path / "empty_serving"
+    serving_dir.mkdir()
+    reader = LocalArtifactReader(serving_dir, channel="stable")
+    assert await reader.read_stable_generation() is None
+
+
+@pytest.mark.asyncio
+async def test_local_artifact_reader_rejects_path_traversal(tmp_path: Path) -> None:
+    from cardrag_mcp.transport import LocalArtifactReader, RemoteArtifact
+
+    serving_dir = tmp_path / "serving"
+    serving_dir.mkdir()
+    reader = LocalArtifactReader(serving_dir, channel="stable")
+    escaped_art = RemoteArtifact(
+        sha256="a" * 64,
+        size_bytes=10,
+        path="../../etc/passwd",
+        media_type="application/octet-stream",
+    )
+    dest = tmp_path / "escaped.out"
+    with pytest.raises((RuntimeError, ValueError)):
+        await reader.download_object(escaped_art, dest)

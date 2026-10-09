@@ -1,0 +1,73 @@
+{
+  "first_backup": {
+    "status": "succeeded",
+    "flushed_count": 1,
+    "uploaded_count": 1,
+    "uploaded_bytes": 5,
+    "requests": 3,
+    "remaining_pending": 0,
+    "error": null
+  },
+  "first_remote_index_items": 1,
+  "second_backup": {
+    "status": "succeeded",
+    "flushed_count": 1,
+    "uploaded_count": 1,
+    "uploaded_bytes": 6,
+    "requests": 3,
+    "remaining_pending": 0,
+    "error": null
+  },
+  "second_remote_index_items": 2,
+  "fresh_restore_after_second_backup": {
+    "status": "succeeded",
+    "restored_count": 2,
+    "restored_bytes": 11,
+    "failed_count": 0,
+    "errors": null
+  },
+  "missing_source_flush": {
+    "status": "failed",
+    "flushed_count": 0,
+    "uploaded_count": 0,
+    "uploaded_bytes": 0,
+    "requests": 0,
+    "remaining_pending": 1,
+    "error": "Source file missing for missing: /tmp/cardrag-review-fix02-_hmmrp2f/worker/missing.md"
+  },
+  "missing_source_status": {
+    "mode": "immediate",
+    "status": "failed",
+    "pending_count": 0,
+    "pending_ocr_count": 0,
+    "pending_bytes": 0,
+    "lost_count": 1,
+    "lost_bytes": 5,
+    "oldest_pending_at": null,
+    "last_backup_at": "2026-10-09T03:54:13.048240+00:00",
+    "runs_since_last_backup": 0,
+    "should_trigger": false,
+    "trigger_reasons": []
+  },
+  "new_remote_root_enqueued_objects": 1,
+  "actual_updater_activated": true,
+  "actual_active_generation": "gen-valid",
+  "native_backup": {
+    "status": "succeeded",
+    "flushed_count": 3,
+    "uploaded_count": 3,
+    "uploaded_bytes": 1762,
+    "requests": 5,
+    "remaining_pending": 0,
+    "error": null
+  },
+  "native_restore": {
+    "status": "succeeded",
+    "restored_count": 3,
+    "restored_bytes": 1762,
+    "failed_count": 0,
+    "errors": null
+  },
+  "restored_native_resolver_result": "cache hit",
+  "native_validation_live_provider_calls": 0
+}

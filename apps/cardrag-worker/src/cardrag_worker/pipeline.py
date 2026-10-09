@@ -148,6 +148,7 @@ from .exporter_v5 import (
 )
 from .issuer_collection import IssuerCollectionError, IssuerCollectionOutcome, origin_failure
 from .issuer_http import create_issuer_client
+from .local_publisher import LocalServingTransport
 from .ocr import (
     OCRCachePublicationError,
     OCRResolver,
@@ -198,6 +199,7 @@ from .revision_history_v5 import (
     plan_revision_history_v5,
     unresolved_revision_ledger_sha256_v5,
 )
+from .settings import WorkerSettings
 from .state import WorkerState, WorkerStateWALCapacityError, retry_delay, worker_lock
 from .state_seed_v122 import StateSeedLedger, load_state_seed_ledger
 from .structure import (
@@ -1900,6 +1902,7 @@ class WorkerPipeline:
     # Publication-only resume deliberately constructs a provider-free pipeline.
     execution_plan: ExecutionPlan | None = None
     reuse_source: ReuseSource | None = None
+    settings: WorkerSettings | None = None
 
     def __init__(
         self,
@@ -1910,6 +1913,7 @@ class WorkerPipeline:
         ocr: OCRResolver,
         embeddings: EmbeddingProvider | OpenRouterQwenEmbeddingProviderV5,
         webdav: WebDAVClient,
+        settings: WorkerSettings | None = None,
         maximum_attempts: int = 4,
         retry_cap_seconds: float = 30,
         pdf_cache_refresh_hours: float = 168,
@@ -1957,6 +1961,7 @@ class WorkerPipeline:
         self.lock_held = lock_held
         self.execution_plan = execution_plan
         self.reuse_source = reuse_source
+        self.settings = settings
         self.pdf_concurrency = pdf_concurrency
         self.pdf_concurrency_per_issuer = pdf_concurrency_per_issuer
         self.local_processing_workers = local_processing_workers
@@ -4628,6 +4633,9 @@ class WorkerPipeline:
                     page_count=document.page_count,
                     ocr_sha256=document.ocr.sha256,
                     ocr_size_bytes=document.ocr.size_bytes,
+                    cache_kind=document.ocr_cache_kind,
+                    reuse_key=document.ocr_reuse_key,
+                    variant_id=document.ocr_variant_id,
                 )
 
         # Cross-run local OCR cache lookup:
@@ -4714,15 +4722,7 @@ class WorkerPipeline:
                         continue
 
                     prior_ocr_path = runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
-                    prior_manifest_path = (
-                        runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "native-manifest.json"
-                    )
-                    if (
-                        not prior_manifest_path.is_file()
-                        or prior_manifest_path.is_symlink()
-                        or not prior_ocr_path.is_file()
-                        or prior_ocr_path.is_symlink()
-                    ):
+                    if not prior_ocr_path.is_file() or prior_ocr_path.is_symlink():
                         continue
 
                     try:
@@ -4745,6 +4745,9 @@ class WorkerPipeline:
                         page_count=c_doc.page_count,
                         ocr_sha256=c_doc.ocr.sha256,
                         ocr_size_bytes=c_doc.ocr.size_bytes,
+                        cache_kind=c_doc.ocr_cache_kind,
+                        reuse_key=c_doc.ocr_reuse_key,
+                        variant_id=c_doc.ocr_variant_id,
                     )
                     unbound_doc_ids.remove(doc_id)
                     matched_in_this_run += 1
@@ -4775,20 +4778,7 @@ class WorkerPipeline:
                     prior_ocr_path = (
                         runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "ocr.md"
                     )
-                    prior_manifest_path = (
-                        runs_root
-                        / candidate_run_id
-                        / "documents"
-                        / prior_doc_id
-                        / "ocr"
-                        / "native-manifest.json"
-                    )
-                    if (
-                        not prior_manifest_path.is_file()
-                        or prior_manifest_path.is_symlink()
-                        or not prior_ocr_path.is_file()
-                        or prior_ocr_path.is_symlink()
-                    ):
+                    if not prior_ocr_path.is_file() or prior_ocr_path.is_symlink():
                         continue
                     try:
                         resolved_prior_ocr = prior_ocr_path.resolve(strict=True)
@@ -4808,6 +4798,9 @@ class WorkerPipeline:
                         page_count=c_doc.page_count,
                         ocr_sha256=c_doc.ocr.sha256,
                         ocr_size_bytes=c_doc.ocr.size_bytes,
+                        cache_kind=c_doc.ocr_cache_kind,
+                        reuse_key=c_doc.ocr_reuse_key,
+                        variant_id=c_doc.ocr_variant_id,
                     )
                     unbound_doc_ids.remove(doc_id)
                     matched_in_this_run += 1
@@ -4953,6 +4946,23 @@ class WorkerPipeline:
                     raise RuntimeError("OCR reprocess result was not durably published as a content variant")
                 if current_document_id in reprocess_document_ids:
                     self._record_reprocess_success(run_id, current_document_id, result)
+                if (
+                    self.settings is not None
+                    and getattr(self.settings, "backup_mode", "disabled") != "disabled"
+                ):
+                    try:
+                        from .backup import BackupLedger
+
+                        b_ledger = BackupLedger(self.state_dir / "backup-ledger.sqlite3")
+                        b_ledger.record_document_ocr(
+                            run_id, current_document_id, self.state_dir, self.settings
+                        )
+                    except Exception as b_exc:
+                        LOGGER.warning(
+                            "Failed to record document OCR backup intent for %s: %s",
+                            current_document_id,
+                            b_exc,
+                        )
                 prior_local_native = prior_local_native_sources.get(current_document_id)
                 if (
                     current_document_id not in reprocess_document_ids
@@ -7538,6 +7548,20 @@ class WorkerPipeline:
         generation_id = validated.manifest.generation_id
 
         # No remote mutation occurs until every seal/database/object check above succeeds.
+        if isinstance(self.webdav, LocalServingTransport):
+            unique_objects_local: dict[tuple[str, int], tuple[Path, str, str, int]] = {}
+            for row in validated.objects:
+                unique_objects_local.setdefault((row[2], row[3]), row)
+            published = await self.webdav.publish(
+                generation_id=generation_id,
+                database=validated.database_path,
+                manifest=sealed["manifest"],
+                vectors=validated.vector_path,
+                unique_objects=unique_objects_local.values(),
+                before_pointer_replace=self._guard_partial_stable_source,
+            )
+            return published, validated
+
         if isinstance(self.webdav, WebDAVClient):
             self.webdav.bind_publication_seal(validated.seal_sha256, generation_id)
         unique_objects: dict[tuple[str, int], tuple[Path, str, str, int]] = {}

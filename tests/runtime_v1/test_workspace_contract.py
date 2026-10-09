@@ -36,7 +36,7 @@ def test_workspace_has_three_independent_packages_at_one_version() -> None:
         "cardrag-mcp",
     ]
     versions = {project["version"] for project in projects}
-    assert versions == {"1.0.34"}
+    assert versions == {"1.0.35"}
     assert worker_runtime_version == versions.pop()
 
 
@@ -205,7 +205,14 @@ def test_candidate_mcp_retry_can_isolate_project_and_state_volume() -> None:
             "source": "mcp-state",
             "target": "/var/lib/cardrag-mcp",
             "volume": {},
-        }
+        },
+        {
+            "type": "volume",
+            "source": "cardrag-serving",
+            "target": "/var/lib/cardrag-serving",
+            "read_only": True,
+            "volume": {},
+        },
     ]
 
 

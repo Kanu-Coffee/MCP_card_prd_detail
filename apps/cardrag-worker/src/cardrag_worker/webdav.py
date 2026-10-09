@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -551,6 +552,29 @@ class WebDAVClient:
         body = canonical_json_bytes(dict(payload))
         await self.put_bytes(path, body, content_type="application/json", immutable=True)
         return body
+
+    async def atomic_replace_bytes(
+        self,
+        path: str | PurePosixPath,
+        body: bytes,
+        *,
+        content_type: str = "application/json",
+    ) -> None:
+        dest_posix = PurePosixPath(path)
+        token = uuid.uuid4().hex
+        temp_path = PurePosixPath("v1", ".incoming", "backup", f"{token}.tmp")
+        if hasattr(self.core, "ensure_collection"):
+            await to_thread_fenced(self.core.ensure_collection, temp_path.parent)
+            await to_thread_fenced(self.core.ensure_collection, dest_posix.parent)
+        await self.put_bytes(temp_path, body, content_type=content_type, immutable=True)
+        if hasattr(self.core, "move"):
+            await to_thread_fenced(self.core.move, temp_path, dest_posix, overwrite=True)
+        elif hasattr(self, "move"):
+            await self.move(temp_path, dest_posix, overwrite=True)
+        if self.verification is not None:
+            self.verification.invalidate(validate_relative_path(dest_posix))
+        with suppress(Exception):
+            await self.delete(temp_path, missing_ok=True)
 
     async def put_cas(self, body: bytes, *, media_type: str = "application/octet-stream") -> tuple[str, str]:
         artifact = await to_thread_fenced(self.cas.publish_bytes, body, media_type=media_type)

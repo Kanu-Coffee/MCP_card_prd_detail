@@ -48,6 +48,17 @@ def _parse_bounded_integer(value: object) -> object:
 BoundedInteger = Annotated[int, BeforeValidator(_parse_bounded_integer)]
 
 
+def _normalize_optional_url(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+OptionalHttpUrl = Annotated[AnyHttpUrl | None, BeforeValidator(_normalize_optional_url)]
+
+
 def _read_secret(path: Path | None, *, label: str) -> str | None:
     if path is None:
         return None
@@ -92,6 +103,8 @@ class Settings(BaseSettings):
     )
 
     environment: Literal["development", "test", "production"] = "production"
+    publication_transport: Literal["local", "webdav"] = "local"
+    serving_dir: Path = Path("/var/lib/cardrag-serving")
     channel: str = Field(default="stable", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
     mcp_host: str = "127.0.0.1"
     mcp_port: BoundedInteger = Field(default=8000, ge=1, le=65535)
@@ -169,7 +182,7 @@ class Settings(BaseSettings):
         le=DEFAULT_RERANKER_AUDIT_MAX_ARTIFACT_BYTES,
     )
 
-    webdav_base_url: AnyHttpUrl | None = None
+    webdav_base_url: OptionalHttpUrl = None
     webdav_username: str | None = Field(default=None, max_length=512)
     webdav_username_file: Path | None = None
     webdav_password: SecretStr | None = None
@@ -326,8 +339,15 @@ class Settings(BaseSettings):
                     raise ValueError("webdav_base_url must not contain a query or fragment")
                 if self.environment == "production" and parsed.scheme != "https":
                     raise ValueError("production WebDAV requires HTTPS")
-        if self.webdav_base_url is not None:
+        if self.publication_transport == "webdav":
+            if self.webdav_base_url is None:
+                raise ValueError("WebDAV base URL is required when publication_transport is webdav")
             if not self.webdav_username_value() or not self.webdav_password_value():
+                raise ValueError("WebDAV username and password are required with webdav_base_url")
+        elif self.webdav_base_url is not None:
+            if (self.webdav_username_value() or self.webdav_password_value()) and not (
+                self.webdav_username_value() and self.webdav_password_value()
+            ):
                 raise ValueError("WebDAV username and password are required with webdav_base_url")
         if self.mcp_max_serving_database_bytes > self.mcp_max_generation_download_bytes:
             raise ValueError("serving database cap exceeds the generation download quota")
@@ -374,11 +394,25 @@ class Settings(BaseSettings):
         return _read_secret(self.openrouter_api_key_file, label="OpenRouter API key")
 
     def webdav_username_value(self) -> str | None:
-        return self.webdav_username or _read_secret(
-            self.webdav_username_file, label="WebDAV username"
-        )
+        if self.webdav_username:
+            return self.webdav_username
+        if self.webdav_username_file is not None and self.webdav_username_file.is_file():
+            try:
+                return _read_secret(self.webdav_username_file, label="WebDAV username")
+            except ValueError:
+                if self.publication_transport == "webdav":
+                    raise
+                return None
+        return None
 
     def webdav_password_value(self) -> str | None:
         if self.webdav_password is not None:
             return self.webdav_password.get_secret_value()
-        return _read_secret(self.webdav_password_file, label="WebDAV password")
+        if self.webdav_password_file is not None and self.webdav_password_file.is_file():
+            try:
+                return _read_secret(self.webdav_password_file, label="WebDAV password")
+            except ValueError:
+                if self.publication_transport == "webdav":
+                    raise
+                return None
+        return None

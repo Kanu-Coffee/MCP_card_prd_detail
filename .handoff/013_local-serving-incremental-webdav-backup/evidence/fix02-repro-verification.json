@@ -1,0 +1,46 @@
+{
+  "same_run_counted_twice": 1,
+  "old_host_backup": "succeeded",
+  "fresh_host_restore": {
+    "status": "succeeded",
+    "restored_count": 1,
+    "restored_bytes": 10
+  },
+  "missing_pending_source": {
+    "status": "failed",
+    "flushed_count": 0,
+    "uploaded_count": 0,
+    "uploaded_bytes": 0,
+    "requests": 0,
+    "remaining_pending": 1,
+    "error": "Source file missing for v1/objects/missing: /tmp/cardrag-review-013-ls62a2jr/state/vanishing.md"
+  },
+  "budget_result": {
+    "status": "failed",
+    "flushed_count": 0,
+    "uploaded_count": 0,
+    "uploaded_bytes": 0,
+    "requests": 0,
+    "remaining_pending": 2,
+    "error": "Operation timed out"
+  },
+  "budget_elapsed_seconds": 0.011,
+  "budget_requested_seconds": 0.01,
+  "hybrid_trigger_before_cli_style_flush": false,
+  "unforced_flush": {
+    "status": "deferred",
+    "flushed_count": 0,
+    "uploaded_count": 0,
+    "uploaded_bytes": 0,
+    "requests": 0,
+    "remaining_pending": 2,
+    "error": null
+  },
+  "serving_generations_after_three_publications": [
+    "gen-three",
+    "gen-two"
+  ],
+  "publisher_accepted_mismatched_database": false,
+  "publisher_rejected_mismatched_database": "staged database (db7538d5157522ed25e430a39d51b4827b64acd8e24f398c32419ec473203637, 22B) does not match manifest (522de745dd0b3b5d35d79539c5c1c98d09d2acb41ef4e677d0a56aa5dca27001, 22B)",
+  "compose_empty_webdav_url_rejected": false
+}

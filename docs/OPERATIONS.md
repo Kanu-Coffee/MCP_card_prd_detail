@@ -17,15 +17,18 @@ MCP에는 가능하면 읽기 전용 WebDAV 계정을 사용합니다. Worker의
 
 ## 관리 운영 호스트의 배포 식별자
 
-v1.0.34 전환 결과와 검증 내역은 [.handoff/012 배포 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)를 기준으로 확인합니다.
+현재 운영 검증은 [013 인수 마감](../.handoff/013_local-serving-incremental-webdav-backup/CLOSEOUT_v1.0.35.md)을 기준으로 확인합니다. v1.0.34 공개 이미지 발행·과거 MCP 전환 이력은 [012 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)에 보존합니다.
 
-- 설치 진입점: `/opt/cardrag/current`, 정상 전환 후 `/opt/cardrag/v1.0.34`를 가리킵니다.
+- 설치 진입점: `/opt/cardrag/current -> /opt/cardrag/013-50a0129`.
+- 인수된 운영 이미지: Worker/MCP 각각 `cardrag-worker:013-50a0129`, `cardrag-mcp:013-50a0129`. v1.0.35는 이를 구현한 소스와 운영 검증 기록의 GitHub 릴리스이며 새 Docker Hub 이미지 발행을 뜻하지 않습니다.
 - MCP 컨테이너/Compose project: `cardrag-mcp`, 네트워크: `cardrag-mcp_default`.
-- 운영 볼륨: `cardrag-mcp-state`, `cardrag-worker-state`, `cardrag-worker-auth`, `cardrag-worker-paddleocr-models`.
-- 이번 반영은 MCP를 공개 v1.0.34의 immutable digest로 교체합니다. Worker는 인수된 `cardrag-worker:009-b544a80` 및 OpenCode 설정을 유지합니다.
-- Worker 예약은 매일 03:00 Asia/Seoul이며 이번 반영에서 전량 배치를 추가 실행하지 않습니다.
-- host-local `compose.secrets.yaml`은 운영 이미지·secret 경로·external 볼륨을 지정합니다. 소스 갱신 후 이 overlay를 보존하고 렌더링된 설정을 다시 확인하십시오.
-- systemd 실행 계정 `cardrag`는 설치 경로를 탐색하고 Worker Compose/env 파일을 읽을 수 있어야 합니다. 비밀 파일의 내용이나 권한을 공개 설정에 복사하지 않습니다.
+- 운영 볼륨: `cardrag-mcp-state`, `cardrag-worker-state`, `cardrag-worker-auth`, `cardrag-worker-paddleocr-models`, `cardrag-serving`.
+- Worker는 로컬 서빙 볼륨에 게시하고 MCP는 이를 read-only로 읽습니다. WebDAV 장애는 MCP 게시 성공을 취소하지 않습니다.
+- WebDAV 백업은 `immediate`, Worker 성공 후 대기분이 있을 때 최대300초 처리합니다. 대기가 없으면 네트워크 백업을 생략합니다. `hybrid` 선택 시7회/30 OCR항목/1GiB/7일 중 하나를 충족하면 처리합니다.
+- 초기 관리대장 구축은2026-10-10 00:01에 전량 완료했습니다. 보조 `cardrag-backup`은 정지 상태이며 상시 반복 백업이 가동 중인 것은 아닙니다. 수동 bootstrap 컨테이너도 exit0으로 완료됐습니다.
+- Worker 예약은 매일03:00 Asia/Seoul입니다.10월10일03시 시도는 경로권한 오류로 시작 전에 실패했고 권한수정 및 수동 재실행을 완료했습니다. 다음 실제systemd기동 결과는 확인 대상입니다.
+- host-local `compose.secrets.yaml`의 이미지·secret 경로·external 볼륨을 보존하십시오.
+- systemd `cardrag` 사용자(UID10001)가 설치 root와 deploy 하위 디렉터리를 탐색하고 Compose/env를 읽을 수 있어야 합니다. 공개 코드 디렉터리는0755, 비밀 파일은 별도 제한 권한을 유지합니다. 수동lee계정의 성공만으로systemd접근을 판정하지 않습니다.
 
 아래 신규 설치용 기본 볼륨 이름은 기존 설치의 운영 볼륨을 자동 선택하는 이름이 아닙니다. 기존 호스트의 전환에서는 실제 external 볼륨을 유지합니다.
 
@@ -49,12 +52,18 @@ sudo chmod 0600 /etc/cardrag/worker.env /etc/cardrag/mcp.env
 
 | 설정 | Worker | MCP |
 |---|---|---|
-| `CARDRAG_WEBDAV_BASE_URL` | 사용할 HTTPS root | 같은 데이터 root |
-| `CARDRAG_WEBDAV_USERNAME_SECRET_FILE` / `PASSWORD_SECRET_FILE` | 게시 계정 파일 | 조회 계정 파일 |
+| `CARDRAG_PUBLICATION_TRANSPORT` | `local` (기본값) 또는 `webdav` | `local` (기본값) 또는 `webdav` |
+| `CARDRAG_SERVING_DIR` | 로컬 서빙 볼륨 마운트 경로 (`/var/lib/cardrag-serving`, rw) | 로컬 서빙 볼륨 마운트 경로 (`/var/lib/cardrag-serving`, ro) |
+| `CARDRAG_BACKUP_MODE` | `disabled`(기본), `immediate`, `hybrid`, `manual` | 사용하지 않음 |
+| `CARDRAG_WEBDAV_BASE_URL` | 선택 사항 (백업 시 HTTPS root) | 선택 사항 (`publication_transport=webdav` 시 사용) |
+| `CARDRAG_WEBDAV_USERNAME_SECRET_FILE` / `PASSWORD_SECRET_FILE` | 선택 사항 (백업용 계정 파일) | 선택 사항 (WebDAV 서빙용 조회 계정 파일) |
 | `CARDRAG_OPENROUTER_API_KEY_SECRET_FILE` | 문서 임베딩 | 질의 임베딩 |
 | `CARDRAG_MCP_BEARER_TOKEN_SECRET_FILE` | 사용하지 않음 | 접속 인증 파일 |
 | `CARDRAG_MCP_PUBLIC_BASE_URL` | 사용하지 않음 | 사용자가 접근하는 HTTPS origin |
 | `CARDRAG_ENABLED_ISSUERS` | 쉼표로 구분한 8개 canonical 코드 중 선택 | 사용하지 않음 |
+
+기본 운영 모드(`publication_transport: local`)에서는 Worker가 생성한 generation이 로컬 공유 볼륨(`cardrag-serving`)에 즉시 원자적으로 게시되고 MCP가 이를 읽어 서빙하므로, WebDAV 서버나 자격증명 없이도 독립적으로 완결됩니다.
+WebDAV는 선택적 증분 백업 용도로 분리되어 동작하며, 기본 백업 모드는 `disabled`입니다. 백업 활성화 시(`hybrid`, `immediate`) SQLite 원장(`backup-ledger.sqlite3`)을 통해 OCR 결과와 참조 CAS PDF만 증분 업로드됩니다.
 
 MCP의 조회 범위는 도구의 `issuer`·`issuers` 인자로 선택합니다. `mcp.env`의
 `CARDRAG_ENABLED_ISSUERS`로 서버의 노출 범위를 제한할 수는 없습니다.

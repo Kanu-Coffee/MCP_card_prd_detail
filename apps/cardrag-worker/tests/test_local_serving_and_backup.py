@@ -1,0 +1,618 @@
+from __future__ import annotations
+
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+from cardrag_core import (
+    ArtifactRef,
+    EmbeddingContract,
+    GenerationCounts,
+    GenerationDocument,
+    GenerationManifest,
+    GenerationPointer,
+    GenerationReady,
+    sha256_bytes,
+)
+from cardrag_mcp.transport import LocalArtifactReader
+
+from cardrag_worker.backup import BackupLedger
+from cardrag_worker.local_publisher import LocalServingTransport
+from cardrag_worker.settings import WorkerSettings
+
+
+def create_sample_generation(
+    gen_id: str,
+) -> tuple[GenerationManifest, GenerationReady, GenerationPointer, bytes, bytes]:
+    db_bytes = f"db content for {gen_id}".encode()
+    db_sha = sha256_bytes(db_bytes)
+    pdf_bytes = f"%PDF content for {gen_id}".encode()
+    pdf_sha = sha256_bytes(pdf_bytes)
+
+    doc = GenerationDocument(
+        document_id=f"doc-{gen_id}",
+        issuer="kb",
+        pdf=ArtifactRef(
+            sha256=pdf_sha,
+            size_bytes=len(pdf_bytes),
+            media_type="application/pdf",
+            path=f"v1/objects/sha256/{pdf_sha[:2]}/{pdf_sha}",
+        ),
+        page_count=1,
+    )
+
+    manifest = GenerationManifest(
+        generation_id=gen_id,
+        created_at=datetime.now(UTC),
+        serving_database=ArtifactRef(
+            sha256=db_sha,
+            size_bytes=len(db_bytes),
+            media_type="application/vnd.sqlite3",
+            path=f"v1/generations/{gen_id}/index.sqlite3",
+        ),
+        corpus_sha256="c" * 64,
+        contract_sha256="d" * 64,
+        embedding_contract=EmbeddingContract(
+            provider="test",
+            model="test",
+            dimension=1536,
+            count=1,
+        ),
+        issuer_codes=("kb",),
+        counts=GenerationCounts(documents=1, pdf_objects=1, ocr_objects=0, chunks=1),
+        documents=(doc,),
+    )
+
+    ready = GenerationReady(
+        generation_id=gen_id,
+        manifest_sha256=manifest.manifest_sha256,
+        serving_database_sha256=db_sha,
+        serving_database_size_bytes=len(db_bytes),
+    )
+
+    pointer = GenerationPointer(
+        generation_id=gen_id,
+        manifest_sha256=manifest.manifest_sha256,
+        ready_sha256=sha256_bytes(ready.canonical_bytes()),
+    )
+
+    return manifest, ready, pointer, db_bytes, pdf_bytes
+
+
+@pytest.mark.asyncio
+async def test_local_serving_transport_publish(tmp_path: Path) -> None:
+    serving_dir = tmp_path / "serving"
+    transport = LocalServingTransport(serving_dir, channel="stable")
+
+    assert await transport.validated_current_generation() is None
+    assert await transport.observed_pointer_bytes() is None
+
+    manifest1, ready1, pointer1, db1, pdf1 = create_sample_generation("gen-001")
+    pdf_sha1 = manifest1.documents[0].pdf.sha256
+
+    db_file = tmp_path / "index.sqlite3"
+    db_file.write_bytes(db1)
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(pdf1)
+
+    unique_objects = [
+        (pdf_file, "application/pdf", pdf_sha1, len(pdf1)),
+    ]
+
+    # Successful publication of gen-001
+    bundle = await transport.publish(
+        generation_id="gen-001",
+        database=db_file,
+        manifest=manifest1.model_dump(mode="json"),
+        vectors=None,
+        unique_objects=unique_objects,
+    )
+    assert bundle.generation_id == "gen-001"
+
+    cur1 = await transport.validated_current_generation()
+    assert cur1 is not None
+    assert cur1.generation_id == "gen-001"
+    obs_bytes = await transport.observed_pointer_bytes()
+    assert obs_bytes is not None
+
+    # Verify get_bytes and get_json
+    raw_manifest = await transport.get_json("v1/generations/gen-001/manifest.json")
+    assert raw_manifest["generation_id"] == "gen-001"
+
+    # Verify MCP LocalArtifactReader reads from this volume directly
+    reader = LocalArtifactReader(serving_dir, channel="stable")
+    mcp_remote = await reader.read_stable_generation()
+    assert mcp_remote is not None
+    assert mcp_remote.generation_id == "gen-001"
+
+    dest_db = tmp_path / "mcp_db.sqlite3"
+    await reader.download_database(mcp_remote, dest_db)
+    assert dest_db.read_bytes() == db1
+
+
+def test_worker_settings_local_mode_without_webdav(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    monkeypatch.setenv("CARDRAG_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("CARDRAG_PUBLICATION_TRANSPORT", "local")
+    monkeypatch.delenv("CARDRAG_WEBDAV_BASE_URL", raising=False)
+    monkeypatch.delenv("CARDRAG_WEBDAV_USERNAME", raising=False)
+    monkeypatch.delenv("CARDRAG_WEBDAV_PASSWORD", raising=False)
+
+    # WorkerSettings should load cleanly with publication_transport="local" and no WebDAV settings
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    assert settings.publication_transport == "local"
+    assert settings.backup_mode == "disabled"
+    assert settings.serving_dir == Path("/var/lib/cardrag-serving")
+
+
+@pytest.mark.asyncio
+async def test_backup_ledger_triggers_and_flush(tmp_path: Path) -> None:
+    db_path = tmp_path / "backup-ledger.sqlite3"
+    ledger = BackupLedger(db_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    ocr_cache_dir = state_dir / "cache" / "ocr"
+    ocr_cache_dir.mkdir(parents=True)
+
+    # Create dummy settings
+    settings = MagicMock()
+    settings.state_dir = state_dir
+    settings.backup_mode = "hybrid"
+    settings.backup_every_runs = 7
+    settings.backup_new_ocr_count = 30
+    settings.backup_new_bytes = 1024 * 1024 * 1024  # 1GiB
+    settings.backup_max_pending_age_hours = 168
+    settings.backup_derived_snapshot_enabled = False
+    settings.backup_inline_budget_seconds = 300.0
+    settings.webdav_base_url = "https://webdav.example.com"
+    settings.webdav_username = "test"
+    settings.webdav_password = "password"  # noqa: S105
+    settings.webdav_upload_chunk_mib = 8
+
+    # Initial state: 0 pending, should not trigger
+    status = ledger.get_status(settings)
+    assert status["pending_count"] == 0
+    assert not status["should_trigger"]
+
+    # Write 5 dummy OCR cache items
+    for i in range(5):
+        key = f"key_{i}"
+        item_dir = ocr_cache_dir / key
+        item_dir.mkdir(parents=True)
+        (item_dir / "ocr.json").write_text('{"text": "ocr content"}')
+
+    ledger.record_run_success("run-1", state_dir, settings)
+    status = ledger.get_status(settings)
+    assert status["pending_count"] == 5
+    assert status["runs_since_last_backup"] == 1
+    assert not status["should_trigger"]
+
+    # Hybrid trigger 1: runs >= 7
+    with ledger._get_connection() as conn:
+        conn.execute("UPDATE backup_meta SET value = '7' WHERE key = 'runs_since_backup'")
+    status = ledger.get_status(settings)
+    assert status["runs_since_last_backup"] == 7
+    assert status["should_trigger"] is True
+    assert any("runs_threshold_met" in r for r in status["trigger_reasons"])
+
+    # Reset runs
+    with ledger._get_connection() as conn:
+        conn.execute("UPDATE backup_meta SET value = '1' WHERE key = 'runs_since_backup'")
+
+    # Hybrid trigger 2: count >= 30
+    settings.backup_new_ocr_count = 5
+    status = ledger.get_status(settings)
+    assert status["should_trigger"] is True
+    assert any("ocr_count_threshold_met" in r for r in status["trigger_reasons"])
+    settings.backup_new_ocr_count = 30
+
+    # Hybrid trigger 3: age >= 168 hours
+    old_time = time.time() - (200 * 3600)
+    with ledger._get_connection() as conn:
+        conn.execute("UPDATE backup_pending SET created_at = ?", (old_time,))
+    status = ledger.get_status(settings)
+    assert status["should_trigger"] is True
+    assert any("age_threshold_met" in r for r in status["trigger_reasons"])
+
+    # Reset age
+    with ledger._get_connection() as conn:
+        conn.execute("UPDATE backup_pending SET created_at = ?", (time.time(),))
+
+    # Test flush with mocked WebDAV client
+    uploaded_paths: list[str] = []
+
+    class MockWebDAVClient:
+        def __init__(self) -> None:
+            self.storage: dict[str, bytes] = {}
+
+        async def put(self, path: str, content: bytes | Any) -> None:
+            uploaded_paths.append(path)
+            self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
+
+        async def get(self, path: str) -> bytes:
+            return self.storage.get(path, b"")
+
+        async def close(self) -> None:
+            pass
+
+    mock_client = MockWebDAVClient()
+    ledger._make_webdav_client = MagicMock(return_value=mock_client)  # type: ignore
+
+    flush_result = await ledger.flush(settings, force=True)
+    assert flush_result["status"] == "succeeded"
+    assert flush_result["flushed_count"] == 5
+    assert len([p for p in uploaded_paths if p != "v1/backup/index.json"]) == 5
+    assert "v1/backup/index.json" in uploaded_paths
+
+    # After flush, pending_count should be 0 and runs_since_last_backup reset to 0
+    status_after = ledger.get_status(settings)
+    assert status_after["pending_count"] == 0
+    assert status_after["runs_since_last_backup"] == 0
+    assert status_after["last_backup_at"] is not None
+
+    # Audit check
+    audit_res = await ledger.audit(settings)
+    assert audit_res["total_receipts"] == 5
+    assert audit_res["verified_receipts"] == 5
+    assert audit_res["missing_receipts"] == 0
+
+    # Restore check to a target dir
+    restore_target = tmp_path / "restored_ocr"
+    restore_res = await ledger.restore(settings, target_dir=restore_target)
+    assert restore_res["restored_count"] == 5
+    assert (restore_target / "v1" / "caches" / "ocr" / "key_0" / "ocr.json").exists()
+
+
+def test_backup_cli_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from cardrag_worker.cli import app
+
+    state_dir = tmp_path / "cli_state"
+    state_dir.mkdir()
+    monkeypatch.setenv("CARDRAG_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("CARDRAG_PUBLICATION_TRANSPORT", "local")
+    monkeypatch.delenv("CARDRAG_WEBDAV_BASE_URL", raising=False)
+    monkeypatch.delenv("CARDRAG_WEBDAV_USERNAME", raising=False)
+    monkeypatch.delenv("CARDRAG_WEBDAV_PASSWORD", raising=False)
+
+    runner = CliRunner()
+
+    # 1. status command
+    res_status = runner.invoke(app, ["backup", "status"])
+    assert res_status.exit_code == 0
+    assert "pending_count" in res_status.stdout
+
+    # 2. flush command
+    res_flush = runner.invoke(app, ["backup", "flush"])
+    assert res_flush.exit_code == 0
+
+    # 3. audit command
+    res_audit = runner.invoke(app, ["backup", "audit"])
+    assert res_audit.exit_code == 0
+
+    # 4. restore command
+    restore_dest = tmp_path / "cli_restore"
+    res_restore = runner.invoke(app, ["backup", "restore", "--target-dir", str(restore_dest)])
+    assert res_restore.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_local_serving_transport_mismatched_database_rejected(tmp_path: Path) -> None:
+    serving_dir = tmp_path / "serving"
+    transport = LocalServingTransport(serving_dir, channel="stable")
+    m, _, _, _db, pdf = create_sample_generation("gen-bad")
+    db_file = tmp_path / "index.sqlite3"
+    db_file.write_bytes(b"tampered database content")
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(pdf)
+
+    with pytest.raises(RuntimeError, match="does not match manifest"):
+        await transport.publish(
+            generation_id="gen-bad",
+            database=db_file,
+            manifest=m.model_dump(mode="json"),
+            unique_objects=[(pdf_file, "application/pdf", m.documents[0].pdf.sha256, len(pdf))],
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_serving_transport_retention_policy(tmp_path: Path) -> None:
+    serving_dir = tmp_path / "serving"
+    transport = LocalServingTransport(serving_dir, channel="stable")
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(b"%PDF content")
+    pdf_sha = sha256_bytes(b"%PDF content")
+
+    for gen in ("gen-one", "gen-two", "gen-three"):
+        m, _, _, db, _ = create_sample_generation(gen)
+        db_file = tmp_path / f"index_{gen}.sqlite3"
+        db_file.write_bytes(db)
+        await transport.publish(
+            generation_id=gen,
+            database=db_file,
+            manifest=m.model_dump(mode="json"),
+            unique_objects=[(pdf_file, "application/pdf", pdf_sha, len(b"%PDF content"))],
+        )
+
+    gens = sorted(p.name for p in (serving_dir / "v1" / "generations").iterdir())
+    assert sorted(gens) == ["gen-three", "gen-two"] or sorted(gens) == ["gen-two", "gen-three"]
+
+
+@pytest.mark.asyncio
+async def test_backup_ledger_deduplicate_and_missing_source(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    db_path = tmp_path / "backup-ledger.sqlite3"
+    ledger = BackupLedger(db_path)
+    state = tmp_path / "state"
+    state.mkdir()
+
+    s = SimpleNamespace(
+        backup_mode="hybrid",
+        backup_every_runs=7,
+        backup_new_ocr_count=30,
+        backup_new_bytes=1024**3,
+        backup_max_pending_age_hours=168,
+        state_dir=state,
+    )
+
+    ledger.record_run_success("same-run", state, s)  # type: ignore[arg-type]
+    ledger.record_run_success("same-run", state, s)  # type: ignore[arg-type]
+    assert ledger.get_status(s)["runs_since_last_backup"] == 1  # type: ignore[arg-type]
+
+    source = state / "vanish.md"
+    source.write_bytes(b"content")
+    b = source.read_bytes()
+    with ledger._get_connection() as c:
+        c.execute(
+            "INSERT INTO backup_pending VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                "v1/objects/vanish",
+                "ocr_cas",
+                sha256_bytes(b),
+                len(b),
+                str(source),
+                "v1/objects/vanish",
+                "text/markdown",
+                time.time(),
+                "pending",
+            ),
+        )
+    source.unlink()
+
+    class DummyClient:
+        async def put_bytes(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def get_bytes(self, *a: Any, **k: Any) -> bytes:
+            return b""
+
+        async def close(self) -> None:
+            pass
+
+    flush_res = await ledger.flush(s, DummyClient(), force=True)  # type: ignore[arg-type]
+    assert flush_res["status"] == "failed"
+    assert flush_res["remaining_pending"] == 1
+    assert "Source file missing" in flush_res["error"]
+
+
+def test_backup_cli_restore_default_target_dir_resolves_cache_hit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+    from dataclasses import replace
+
+    from test_ocr import PDF_SHA, FakeProvider, make_resolver, write_document_local_native
+    from typer.testing import CliRunner
+
+    from cardrag_worker.cli import app
+    from cardrag_worker.settings import WorkerSettings
+
+    # 1. Prepare original state with native OCR artifact and back it up
+    orig_state_dir = tmp_path / "orig_state"
+    orig_state_dir.mkdir()
+    fake_provider = FakeProvider()
+    orig_resolver, orig_state = make_resolver(orig_state_dir, fake_provider, None, cache_mode="read-write")
+    doc_dir = orig_state_dir / "runs" / "orig-run" / "documents" / "doc1" / "ocr"
+    write_document_local_native(orig_resolver, doc_dir)
+    orig_state.close()
+
+    orig_settings = replace(
+        WorkerSettings.from_env(require_providers=False, require_webdav=False),
+        state_dir=orig_state_dir,
+        backup_mode="immediate",
+        webdav_base_url="https://backup.invalid/",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+    orig_ledger = BackupLedger(orig_state_dir / "backup-ledger.sqlite3")
+    orig_ledger.record_run_success("orig-run", orig_state_dir, orig_settings)
+
+    class InMemWebDAV:
+        def __init__(self) -> None:
+            self.storage: dict[str, bytes] = {}
+
+        async def put(self, path: str, content: bytes | Any, *args: Any, **kwargs: Any) -> None:
+            self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
+
+        async def put_bytes(self, path: str, content: bytes | Any, *args: Any, **kwargs: Any) -> None:
+            self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
+
+        async def get(self, path: str, *args: Any, **kwargs: Any) -> bytes:
+            return self.storage.get(path, b"")
+
+        async def get_bytes(self, path: str, *args: Any, **kwargs: Any) -> bytes:
+            return self.storage.get(path, b"")
+
+        async def close(self) -> None:
+            pass
+
+    remote_storage = InMemWebDAV()
+    flush_res = asyncio.run(orig_ledger.flush(orig_settings, remote_storage, force=True))
+    assert flush_res["status"] == "succeeded"
+
+    # 2. Setup fresh Worker state root (clean directory)
+    fresh_state_dir = tmp_path / "fresh_state"
+    fresh_state_dir.mkdir()
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(fresh_state_dir))
+    monkeypatch.setenv("CARDRAG_STATE_DIR", str(fresh_state_dir))
+    monkeypatch.setenv("CARDRAG_WEBDAV_BASE_URL", "https://backup.invalid/")
+    monkeypatch.setenv("CARDRAG_WEBDAV_USERNAME", "user")
+    monkeypatch.setenv("CARDRAG_WEBDAV_PASSWORD", "pw")
+
+    # Patch BackupLedger._make_webdav_client to return remote_storage
+    monkeypatch.setattr(
+        BackupLedger, "_make_webdav_client", lambda self, settings: remote_storage, raising=False
+    )
+
+    # 3. Call Typer CLI `backup restore` WITHOUT --target-dir
+    runner = CliRunner()
+    res = runner.invoke(app, ["backup", "restore"])
+    assert res.exit_code == 0
+    assert "succeeded" in res.stdout
+
+    # 4. Verify OCRResolver with cache-only mode has a cache hit with 0 provider calls in fresh state
+    new_provider = FakeProvider()
+    new_resolver, new_state = make_resolver(fresh_state_dir, new_provider, None, cache_mode="read-only")
+    new_resolver._require_cache_hit = True
+    try:
+        run_id = new_state.start_run(run_id="fresh-run")
+        pdf_path = tmp_path / "dummy.pdf"
+        pdf_path.write_bytes(b"%PDF")
+        resolved = asyncio.run(
+            new_resolver.resolve(
+                run_id=run_id,
+                document_id="doc1",
+                pdf_path=pdf_path,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=fresh_state_dir / "runs" / run_id / "documents" / "doc1" / "ocr",
+            )
+        )
+        assert resolved.cache_reused is True
+        assert resolved.provider_called is False
+        assert len(new_provider.calls) == 0
+    finally:
+        new_state.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_backup_intent_recorded_and_isolated_on_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from test_pipeline_v5 import (
+        _OCR,
+        _FakeCandidateWebDAV,
+        _install_pdf_http,
+        _MultiAdapter,
+        _test_qwen_embeddings,
+        _test_source,
+        pdf_bytes,
+    )
+
+    from cardrag_worker.pipeline import WorkerPipeline, WorkerUnexpectedFailureError
+    from cardrag_worker.state import WorkerState
+
+    _install_pdf_http(monkeypatch, [pdf_bytes()], [])
+    source = _test_source("doc-001")
+
+    from test_ocr import FakeProvider, make_resolver, write_document_local_native
+
+    sample_res, sample_st = make_resolver(tmp_path / "sample_st", FakeProvider(), None)
+
+    class _RealWritingOCR(_OCR):
+        async def resolve(self, **_kwargs: Any) -> Any:
+            res = await super().resolve(**_kwargs)
+            out_dir = _kwargs.get("output_dir")
+            if out_dir is not None:
+                write_document_local_native(sample_res, out_dir)
+            return res
+
+    ocr = _RealWritingOCR()
+    webdav = _FakeCandidateWebDAV()
+
+    from dataclasses import replace
+
+    # Case 1: Backup enabled, OCR succeeds -> embedding fails. Intent/spool must remain in ledger.
+    embedding_requests: list[dict[str, Any]] = []
+    failing_embeddings = _test_qwen_embeddings(embedding_requests)
+
+    async def failing_embed(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("Injected embedding stage failure")
+
+    failing_embeddings.embed = failing_embed  # type: ignore
+
+    state_dir = tmp_path / "pipeline_state_1"
+    state_dir.mkdir()
+    settings = replace(
+        WorkerSettings.from_env(require_providers=False, require_webdav=False),
+        state_dir=state_dir,
+        backup_mode="immediate",
+        webdav_base_url="https://backup.invalid/",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+
+    with WorkerState(state_dir / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=state_dir,
+            adapters=[_MultiAdapter((source,))],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=failing_embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            settings=settings,
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        with pytest.raises(WorkerUnexpectedFailureError):
+            await pipeline.run()
+
+    ledger = BackupLedger(state_dir / "backup-ledger.sqlite3")
+    status = ledger.get_status(settings)
+    assert status["pending_count"] > 0
+    spool_files = list((state_dir / "backup" / "spool").glob("*"))
+    assert len(spool_files) > 0
+
+    # Case 2: Backup intent recording itself fails -> OCR and pipeline do NOT crash with systemic error.
+    state_dir_2 = tmp_path / "pipeline_state_2"
+    state_dir_2.mkdir()
+    settings_2 = replace(
+        WorkerSettings.from_env(require_providers=False, require_webdav=False),
+        state_dir=state_dir_2,
+        backup_mode="immediate",
+        webdav_base_url="https://backup.invalid/",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+
+    def broken_record(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Injected backup ledger crash")
+
+    monkeypatch.setattr(BackupLedger, "record_document_ocr", broken_record)
+
+    working_embeddings = _test_qwen_embeddings([])
+    ocr_2 = _RealWritingOCR()
+    webdav.fail_pointer_once = False
+    with WorkerState(state_dir_2 / "state.sqlite3") as state_2:
+        pipeline_2 = WorkerPipeline(
+            state=state_2,
+            state_dir=state_dir_2,
+            adapters=[_MultiAdapter((source,))],
+            ocr=ocr_2,  # type: ignore[arg-type]
+            embeddings=working_embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            settings=settings_2,
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        result = await pipeline_2.run()
+        assert result.published is True

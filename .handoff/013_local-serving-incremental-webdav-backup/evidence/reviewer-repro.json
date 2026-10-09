@@ -1,0 +1,46 @@
+{
+  "same_run_counted_twice": 2,
+  "old_host_backup": "succeeded",
+  "fresh_host_restore": {
+    "status": "empty",
+    "restored_count": 0
+  },
+  "missing_pending_source": {
+    "status": "succeeded",
+    "flushed_count": 0,
+    "uploaded_count": 0,
+    "uploaded_bytes": 0,
+    "requests": 0,
+    "remaining_pending": 0,
+    "error": null
+  },
+  "budget_result": {
+    "status": "succeeded",
+    "flushed_count": 1,
+    "uploaded_count": 1,
+    "uploaded_bytes": 15,
+    "requests": 2,
+    "remaining_pending": 0,
+    "error": null
+  },
+  "budget_elapsed_seconds": 0.122,
+  "budget_requested_seconds": 0.01,
+  "hybrid_trigger_before_cli_style_flush": false,
+  "unforced_flush": {
+    "status": "succeeded",
+    "flushed_count": 1,
+    "uploaded_count": 1,
+    "uploaded_bytes": 15,
+    "requests": 2,
+    "remaining_pending": 0,
+    "error": null
+  },
+  "serving_generations_after_three_publications": [
+    "gen-one",
+    "gen-three",
+    "gen-two"
+  ],
+  "publisher_accepted_mismatched_database": true,
+  "mcp_rejected_published_head": "local generation READY does not bind serving database",
+  "compose_empty_webdav_url_rejected": "ValidationError"
+}
