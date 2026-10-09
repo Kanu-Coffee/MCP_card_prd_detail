@@ -4,14 +4,16 @@
 
 Worker는 PDF 수집·OCR·임베딩·게시를 마치고 종료하며, MCP는 검증된 generation을
 계속 서비스합니다. 같은 호스트에 설치해도 상태 디렉터리와 Compose 프로젝트를 분리합니다.
-스케줄러, TLS 프록시, WebDAV 서버와 MCP 클라이언트는 운영자가 준비합니다.
+Worker는 공유 서빙 볼륨에 쓰고 MCP는 이를 읽기 전용으로 사용합니다.
+스케줄러, TLS 프록시와 MCP 클라이언트는 운영자가 준비합니다. WebDAV 서버는 백업이나
+WebDAV 게시 호환 모드를 사용할 때만 필요합니다.
 
 - Linux amd64, Docker Engine, Docker Compose 2.24.4 이상
-- `HEAD`, `GET`, `PUT`, `MKCOL`, `MOVE`, `PROPFIND` 등 게시 프로토콜을 지원하는 HTTPS WebDAV
-- OCR provider용 Codex 인증과 OpenRouter 임베딩 API 키
+- 선택한 OCR provider의 실행 환경·인증과 OpenRouter 임베딩 API 키
+- 백업 또는 WebDAV 게시 사용 시 `HEAD`, `GET`, `PUT`, `MKCOL`, `MOVE`, `PROPFIND`를 지원하는 HTTPS WebDAV
 - 고유 MCP Bearer token, 공개 접속 시 HTTPS 프록시
 
-MCP에는 가능하면 읽기 전용 WebDAV 계정을 사용합니다. Worker의 `webdav-check`는
+WebDAV 게시 모드에서는 MCP에 읽기 전용 계정을 사용합니다. Worker의 `webdav-check`는
 시험 객체를 쓰고 확인하는 외부 작업이므로 대상 저장소를 확인한 뒤 실행합니다.
 디스크에는 Worker와 MCP가 각각 보관하는 PDF·DB·vector 복사본과 임시 공간을 모두 계산합니다.
 
@@ -24,11 +26,11 @@ MCP에는 가능하면 읽기 전용 WebDAV 계정을 사용합니다. Worker의
 - MCP 컨테이너/Compose project: `cardrag-mcp`, 네트워크: `cardrag-mcp_default`.
 - 운영 볼륨: `cardrag-mcp-state`, `cardrag-worker-state`, `cardrag-worker-auth`, `cardrag-worker-paddleocr-models`, `cardrag-serving`.
 - Worker는 로컬 서빙 볼륨에 게시하고 MCP는 이를 read-only로 읽습니다. WebDAV 장애는 MCP 게시 성공을 취소하지 않습니다.
-- WebDAV 백업은 `immediate`, Worker 성공 후 대기분이 있을 때 최대300초 처리합니다. 대기가 없으면 네트워크 백업을 생략합니다. `hybrid` 선택 시7회/30 OCR항목/1GiB/7일 중 하나를 충족하면 처리합니다.
-- 초기 관리대장 구축은2026-10-10 00:01에 전량 완료했습니다. 보조 `cardrag-backup`은 정지 상태이며 상시 반복 백업이 가동 중인 것은 아닙니다. 수동 bootstrap 컨테이너도 exit0으로 완료됐습니다.
-- Worker 예약은 매일03:00 Asia/Seoul입니다.10월10일03시 시도는 경로권한 오류로 시작 전에 실패했고 권한수정 및 수동 재실행을 완료했습니다. 다음 실제systemd기동 결과는 확인 대상입니다.
+- WebDAV 백업은 `immediate`, Worker 성공 후 대기분이 있을 때 최대 300초 처리합니다. 대기가 없으면 네트워크 백업을 생략합니다. `hybrid` 선택 시 7회/대기 OCR 항목 30건/1 GiB/7일 중 하나를 충족하면 처리합니다.
+- 초기 관리대장 구축은 2026-10-10 00:01에 전량 완료했습니다. 보조 `cardrag-backup`은 정지 상태이며 상시 반복 백업이 가동 중인 것은 아닙니다. 수동 bootstrap 컨테이너도 exit 0으로 완료됐습니다.
+- Worker 예약은 매일 03:00 Asia/Seoul입니다. 10월 10일 03시 시도는 경로 권한 오류로 시작 전에 실패했고 권한 수정 및 수동 재실행을 완료했습니다. 다음 실제 systemd 기동 결과는 확인 대상입니다.
 - host-local `compose.secrets.yaml`의 이미지·secret 경로·external 볼륨을 보존하십시오.
-- systemd `cardrag` 사용자(UID10001)가 설치 root와 deploy 하위 디렉터리를 탐색하고 Compose/env를 읽을 수 있어야 합니다. 공개 코드 디렉터리는0755, 비밀 파일은 별도 제한 권한을 유지합니다. 수동lee계정의 성공만으로systemd접근을 판정하지 않습니다.
+- systemd `cardrag` 사용자(UID 10001)가 설치 root와 deploy 하위 디렉터리를 탐색하고 Compose/env를 읽을 수 있어야 합니다. 공개 코드 디렉터리는 0755, 비밀 파일은 별도 제한 권한을 유지합니다. 수동 lee 계정의 성공만으로 systemd 접근을 판정하지 않습니다.
 
 아래 신규 설치용 기본 볼륨 이름은 기존 설치의 운영 볼륨을 자동 선택하는 이름이 아닙니다. 기존 호스트의 전환에서는 실제 external 볼륨을 유지합니다.
 
@@ -73,8 +75,10 @@ Compose 설정의 `*_SECRET_FILE`은 **호스트 파일 경로**입니다. 비�
 때는 [`.env.example`](../.env.example)의 애플리케이션 설정을 참고하십시오. 이 파일은
 자동 로그인이나 실제 인증을 제공하지 않습니다.
 
-OCR 기본값은 `codex-exec`, `gpt-5.6-sol`, reasoning `high`입니다. Qwen 임베딩의 모델,
-4,096차원, tokenizer와 provider profile은 generation identity에 묶이므로 기존 vector와
+설정을 생략한 OCR 기본값은 `local-paddleocr` / `PaddleOCR-VL-1.6`입니다.
+`simple.env.example`은 Codex 예시 값을 명시하므로 사용할 provider에 맞춰 수정하십시오.
+현재 관리 운영 환경은 `opencode` / `alibaba-token-plan/qwen3.8-flash` / reasoning `medium`을 사용합니다.
+Qwen 임베딩의 모델·4,096차원·tokenizer와 provider profile은 generation identity에 묶이므로 기존 vector와
 다른 모델을 섞지 않습니다. API의 제공 모델·권한은 해당 계정에서 확인합니다.
 
 로컬 CPU OCR은 `local-paddleocr` provider와 별도 Compose overlay를 사용합니다. 이 경로는
@@ -97,6 +101,8 @@ docker compose --env-file /etc/cardrag/mcp.env \
   -f deploy/mcp/compose.yaml -f deploy/mcp/compose.secrets.yaml config --quiet
 ```
 
+백업 또는 WebDAV 게시를 사용하면 해당 역할의 `compose.secrets.webdav.yaml`을 추가합니다.
+로컬 서빙만 사용하는 MCP에는 WebDAV 계정 overlay를 추가하지 않습니다.
 사설 WebDAV CA가 있으면 역할별 `compose.ca.yaml`을 마지막 overlay로 추가하고
 `CARDRAG_WEBDAV_CA_SECRET_FILE`에 호스트 인증서 경로를 지정합니다. TLS 검증을 끄지 않습니다.
 
@@ -128,7 +134,7 @@ docker compose --env-file /etc/cardrag/worker.env \
 완전 오프라인 실행 전에는 온라인 환경에서 위 prefetch를 성공시키고 같은 volume을 옮긴 뒤,
 `--network none`에서도 로컬 PDF에 대한 OCR smoke test가 통과하는지 확인합니다.
 
-처음 사용하는 **새 Codex 인증 볼륨**에서 로그인합니다.
+`codex-exec`을 선택한 경우에만 처음 사용하는 **새 Codex 인증 볼륨**에서 로그인합니다.
 
 ```bash
 docker compose --env-file /etc/cardrag/worker.env -f deploy/worker/compose.yaml \
@@ -236,6 +242,8 @@ SIGTERM 이후 Worker는 진행 중인 변경을 정리하고 게시 정합성�
 운영자 점검 기준입니다. 용량 부족 시 작업을 거부하며 여유 공간을 자동으로 확보하지 않습니다.
 MCP의 지속 quota 정책을 바꾸거나 남은 reservation을 정리할 때는 [RECOVERY](RECOVERY.md)를 따릅니다.
 
+백업의 주기·시간 예산·대기 항목 처리는 [증분 백업 안내](RECOVERY.md#증분-webdav-백업-운영)를 따릅니다.
+아래 원격 generation 검증 정책은 `CARDRAG_PUBLICATION_TRANSPORT=webdav`를 선택한 호환 모드에 적용됩니다.
 WebDAV는 검증 이력이 있는 기존 객체를 재사용하고 성공 실행 14회·7일·신규 CAS 10 GiB 중
 먼저 도달한 조건에서 전체 검증합니다. 신규 DB·vector는 최종 경로에서 크기·해시를
 검증합니다. `CARDRAG_WEBDAV_FORCE_FULL_VERIFY=true`는 강제 검증,
@@ -279,7 +287,8 @@ PDF 다운로드는 기존 전역 8개/카드사별 2개 제한과 요청 간격
 run은 `succeeded` 또는 `no_change`, 종료 코드 0을 반환합니다.
 이 결과는 실패 카드사의 최신화 성공을 의미하지 않습니다.
 모든 카드사가 실패하면 nonzero로 종료하고 OCR이나 게시를 수행하지 않습니다.
-공용 WebDAV/SQLite/디스크 및 산출물 무결성 실패도 계속 전체 실패로 처리합니다.
+SQLite·디스크 및 서빙 산출물의 무결성 실패는 전체 실행 실패로 처리합니다.
+WebDAV 게시 모드의 게시 오류도 실패하지만, 로컬 게시 모드의 선택적 백업 오류는 별도 백업 상태로 기록합니다.
 
 기존 OCR content 캐시는 모델 변경 후에도 재사용합니다. 실패 카드사 대상
 수동 재OCR 요청은 대기 상태로 유지하며 완료 영수증을 만들지 않습니다.

@@ -147,6 +147,8 @@ generation/query identity가 바뀌면 명시적으로 실패하며, 이전 결�
 출시일·요약 metadata cache도 generation, revision과 parser version에 결속하고 용량을 제한합니다.
 
 Worker는 immutable CAS와 generation DB/vector를 검증한 후 manifest, READY, channel pointer
-순서로 게시합니다. pointer가 마지막 commit 경계입니다. MCP는 staging에 내려받아 hash·schema를
+순서로 게시합니다. 기본 대상은 공유 로컬 서빙 볼륨이며 pointer가 마지막 commit 경계입니다.
+WebDAV는 별도의 PDF·OCR 증분 백업이고 generation 서빙에 필수적이지 않습니다.
+MCP는 선택한 로컬 또는 WebDAV transport에서 staging으로 읽어 hash·schema를
 검증하고 fsync 후 원자적으로 활성 handle을 교체합니다. 검증 실패 시 이미 준비된 이전 세대를 유지합니다.
 백업과 복구 중에도 이 불변성은 유지해야 합니다. [복구 안내](RECOVERY.md)를 참고하세요.

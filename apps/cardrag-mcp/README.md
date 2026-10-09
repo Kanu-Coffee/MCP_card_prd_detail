@@ -1,7 +1,7 @@
 # cardrag-mcp
 
-WebDAV generation을 검증하고 읽기 전용으로 서비스하는 FastAPI·Streamable HTTP MCP
-서버입니다. 기본 MCP 도구 12개와 원문 PDF·페이지·근거 리소스를 제공합니다.
+공유 로컬 서빙 볼륨의 generation을 검증하고 읽기 전용으로 서비스하는
+FastAPI·Streamable HTTP MCP 서버입니다. WebDAV에서 generation을 읽는 호환 모드도 지원합니다. 기본 MCP 도구 12개와 원문 PDF·페이지·근거 리소스를 제공합니다.
 
 Updater는 DB, vector sidecar, source CAS의 identity와 크기를 검증한 뒤 로컬 generation을
 원자적으로 교체합니다. 각 요청은 하나의 generation을 pin하고, 업데이트 실패 시 마지막
