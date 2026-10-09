@@ -305,6 +305,15 @@ class WorkerSettings:
     webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
     external_ocr_allowed: bool = False
     pdf_cache_force_revalidate: bool = False
+    publication_transport: Literal["local", "webdav"] = "local"
+    serving_dir: Path = Path("/var/lib/cardrag-serving")
+    backup_mode: Literal["disabled", "immediate", "hybrid", "manual"] = "disabled"
+    backup_every_runs: int = 7
+    backup_new_ocr_count: int = 30
+    backup_new_bytes: int = 1073741824
+    backup_max_pending_age_hours: int = 168
+    backup_inline_budget_seconds: float = 300.0
+    backup_derived_snapshot_enabled: bool = False
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
@@ -332,8 +341,28 @@ class WorkerSettings:
             else state_dir / "contracts" / f"qwen3-embedding-8b-tokenizer-{QWEN_TOKENIZER_SHA256}.json"
         )
         aggregation_path, aggregation_sha256 = _aggregation_profile_from_env()
+        raw_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "local").strip().casefold()
+        if raw_transport not in {"local", "webdav"}:
+            raise ValueError("CARDRAG_PUBLICATION_TRANSPORT must be local or webdav")
+        publication_transport = cast(Literal["local", "webdav"], raw_transport)
+        serving_dir_raw = os.environ.get("CARDRAG_SERVING_DIR", "/var/lib/cardrag-serving").strip()
+        serving_dir = Path(os.path.abspath(serving_dir_raw))
+
+        raw_backup_mode = os.environ.get("CARDRAG_BACKUP_MODE", "disabled").strip().casefold()
+        if raw_backup_mode not in {"disabled", "immediate", "hybrid", "manual"}:
+            raise ValueError("CARDRAG_BACKUP_MODE must be disabled, immediate, hybrid, or manual")
+        backup_mode = cast(Literal["disabled", "immediate", "hybrid", "manual"], raw_backup_mode)
+
+        backup_every_runs = _positive_int("CARDRAG_BACKUP_EVERY_RUNS", 7)
+        backup_new_ocr_count = _positive_int("CARDRAG_BACKUP_NEW_OCR_COUNT", 30)
+        backup_new_bytes = _positive_int("CARDRAG_BACKUP_NEW_BYTES", 1073741824)
+        backup_max_pending_age_hours = _positive_int("CARDRAG_BACKUP_MAX_PENDING_AGE_HOURS", 168)
+        backup_inline_budget_seconds = _positive_float("CARDRAG_BACKUP_INLINE_BUDGET_SECONDS", 300.0)
+        backup_derived_snapshot_enabled = _boolean("CARDRAG_BACKUP_DERIVED_SNAPSHOT_ENABLED", False)
+
         webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL")
-        if require_webdav and not webdav_base:
+        actual_require_webdav = require_webdav and (publication_transport == "webdav")
+        if actual_require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
         ocr_provider = os.environ.get("CARDRAG_OCR_PROVIDER", "local-paddleocr").strip().casefold()
         if ocr_provider in {"paddleocr", "paddleocr-vl"}:
@@ -542,8 +571,8 @@ class WorkerSettings:
             ocr_cache_publication_approved=ocr_cache_publication_approved,
             remote_gc_approved=remote_gc_approved,
             webdav_base_url=webdav_base.rstrip("/") if webdav_base else None,
-            webdav_username=_read_secret("CARDRAG_WEBDAV_USERNAME", required=require_webdav),
-            webdav_password=_read_secret("CARDRAG_WEBDAV_PASSWORD", required=require_webdav),
+            webdav_username=_read_secret("CARDRAG_WEBDAV_USERNAME", required=actual_require_webdav),
+            webdav_password=_read_secret("CARDRAG_WEBDAV_PASSWORD", required=actual_require_webdav),
             webdav_ca_file=Path(ca_file).resolve() if ca_file else None,
             webdav_connect_timeout_seconds=_positive_float("CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS", 10),
             webdav_transfer_timeout_seconds=_positive_float("CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS", 600),
@@ -678,6 +707,15 @@ class WorkerSettings:
             webdav_verification=WebDAVVerificationSettings.from_env(),
             external_ocr_allowed=external_ocr_allowed,
             pdf_cache_force_revalidate=_boolean("CARDRAG_PDF_CACHE_FORCE_REVALIDATE", False),
+            publication_transport=publication_transport,
+            serving_dir=serving_dir,
+            backup_mode=backup_mode,
+            backup_every_runs=backup_every_runs,
+            backup_new_ocr_count=backup_new_ocr_count,
+            backup_new_bytes=backup_new_bytes,
+            backup_max_pending_age_hours=backup_max_pending_age_hours,
+            backup_inline_budget_seconds=backup_inline_budget_seconds,
+            backup_derived_snapshot_enabled=backup_derived_snapshot_enabled,
         )
 
     @property

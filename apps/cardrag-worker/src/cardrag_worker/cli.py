@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import signal
 import stat
@@ -30,6 +31,7 @@ from .adoption import (
     write_reports,
 )
 from .aggregation_profile_v5 import load_verified_aggregation_profile_v5
+from .backup import BackupLedger
 from .cache_seed import (
     CacheSeedError,
     apply_cache_seed,
@@ -65,6 +67,7 @@ from .embedding_v5 import (
 )
 from .gc import GCPartialFailure, _generation_chain, collect_garbage
 from .issuers import enabled_adapters
+from .local_publisher import LocalServingTransport
 from .ocr import FailoverOCRResolver, OCRResolver, discover_compatible_contracts
 from .ocr_recovery import OCRRecoveryError, restore_ocr_seed_from_generation
 from .ocr_requests import OCRReprocessRequest, plan_reprocess_requests, queue_reprocess_requests
@@ -94,6 +97,8 @@ from .webdav import WebDAVClient
 app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/embedding worker")
 ocr_cache_app = typer.Typer(no_args_is_help=True, help="OCR cache inspection and explicit maintenance")
 app.add_typer(ocr_cache_app, name="ocr-cache")
+backup_app = typer.Typer(no_args_is_help=True, help="Incremental WebDAV backup operations")
+app.add_typer(backup_app, name="backup")
 
 _WORKER_SHUTDOWN_SIGNALS: tuple[int, int] = (int(signal.SIGTERM), int(signal.SIGINT))
 
@@ -714,15 +719,24 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 with worker_lock(lock_file):
                     raise
             raise
-    webdav = WebDAVClient.from_env(
-        stable_publication_approved=settings.stable_publication_approved,
-        upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
-    )
+    publication_transport = getattr(settings, "publication_transport", None)
+    if publication_transport is None:
+        publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav")
+    if publication_transport == "local":
+        transport: Any = LocalServingTransport(
+            getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving")),
+            channel=getattr(settings, "channel", "stable"),
+        )
+    else:
+        transport = WebDAVClient.from_env(
+            stable_publication_approved=settings.stable_publication_approved,
+            upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+        )
     try:
         if document_aggregation is not None:
             # No provider/tokenizer call or candidate-state mutation is allowed
             # until GET-only proof identifies the evaluated M0 or its sealed M1.
-            await validate_document_aggregation_head(webdav, document_aggregation)
+            await validate_document_aggregation_head(transport, document_aggregation)
             settings.state_dir.mkdir(parents=True, exist_ok=True)
         # A lock-rejected process must never open a live writer's SQLite database.
         # The 2026-10-03 production state-loss incident happened because the daily
@@ -732,7 +746,10 @@ async def _run(resume: str | None) -> dict[str, Any]:
         # worker lock here, immediately before SQLite touches the path, so a busy
         # second process exits before opening anything.  The authoritative
         # acquisition stays in WorkerPipeline._run_locked, so the winner is unchanged.
-        with worker_lock(settings.lock_file):
+        worker_lock_file = getattr(
+            settings, "lock_file", getattr(settings, "state_dir", Path(".")) / "worker.lock"
+        )
+        with worker_lock(worker_lock_file):
             # Narrow the descriptor-walk-to-use window for both M0 and M1 under lock.
             startup_capacity = revalidate_worker_start_capacity(startup_capacity)
             with WorkerState(
@@ -740,9 +757,11 @@ async def _run(resume: str | None) -> dict[str, Any]:
                 sqlite_cache_mib=settings.sqlite_cache_mib,
                 sqlite_mmap_mib=settings.sqlite_mmap_mib,
             ) as state:
-                if isinstance(webdav, WebDAVClient):
-                    webdav.configure_verification(state, settings.webdav_verification)
-                resolver = _ocr_resolver(settings, state, webdav)
+                if isinstance(transport, WebDAVClient):
+                    transport.configure_verification(state, settings.webdav_verification)
+                resolver = _ocr_resolver(
+                    settings, state, transport if isinstance(transport, WebDAVClient) else None
+                )
                 logging.getLogger("cardrag_worker.cli").info(
                     "Remote OCR cache access mode=%s require_hit=%s",
                     settings.ocr_cache_mode,
@@ -758,7 +777,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     adapters=enabled_adapters(),
                     ocr=resolver,  # type: ignore[arg-type]
                     embeddings=embeddings,
-                    webdav=webdav,
+                    webdav=transport,
                     issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
                     issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
                     pdf_concurrency=settings.pdf_concurrency,
@@ -787,9 +806,51 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     ),
                     lock_held=True,
                 ).run(resume_run_id=resume)
-                return _pipeline_result_payload(result)
+
+                backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+                backup_info: dict[str, Any] = {
+                    "backup_status": "disabled",
+                    "backup_bytes_uploaded": 0,
+                    "backup_requests": 0,
+                }
+                backup_mode = getattr(settings, "backup_mode", "disabled")
+                if result.status in {"succeeded", "no_change"} and backup_mode != "disabled":
+                    backup_ledger.record_run_success(result.run_id, settings.state_dir, settings)
+                    status_before = backup_ledger.get_status(settings)
+                    if status_before["should_trigger"]:
+                        flush_res = await backup_ledger.flush(
+                            settings,
+                            timeout_seconds=getattr(settings, "backup_inline_budget_seconds", 300.0),
+                        )
+                        backup_info["backup_status"] = flush_res.get("status", "failed")
+                        backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
+                        backup_info["backup_requests"] = flush_res.get("requests", 0)
+                    else:
+                        backup_info["backup_status"] = "deferred"
+                status_dict = backup_ledger.get_status(settings)
+                backup_info.update(
+                    {
+                        "pending_ocr_count": status_dict["pending_count"],
+                        "pending_bytes": status_dict["pending_bytes"],
+                        "oldest_pending_at": status_dict["oldest_pending_at"],
+                        "last_backup_at": status_dict["last_backup_at"],
+                        "runs_since_last_backup": status_dict["runs_since_last_backup"],
+                    }
+                )
+
+                payload = _pipeline_result_payload(result)
+                payload.update(
+                    {
+                        "publication_transport": publication_transport,
+                        "local_generation_published": (
+                            result.published if publication_transport == "local" else False
+                        ),
+                        **backup_info,
+                    }
+                )
+                return payload
     finally:
-        await webdav.close()
+        await transport.close()
         logging.getLogger("cardrag_worker.cli").info(
             "Worker execution finished elapsed_seconds=%.3f", time.monotonic() - started
         )
@@ -1807,6 +1868,44 @@ def gc_command(
     except Exception:
         _echo_gc_failure()
         raise typer.Exit(code=1) from None
+
+
+@backup_app.command("status")
+def backup_status_command() -> None:
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+    _echo(ledger.get_status(settings))
+
+
+@backup_app.command("flush")
+def backup_flush_command(
+    force: bool = typer.Option(False, "--force", help="Force flush ignoring threshold conditions"),
+) -> None:
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+    res = asyncio.run(ledger.flush(settings, force=force))
+    _echo(res)
+
+
+@backup_app.command("audit")
+def backup_audit_command(
+    full: bool = typer.Option(False, "--full", help="Perform full audit rather than sample"),
+) -> None:
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+    res = asyncio.run(ledger.audit(settings, full=full))
+    _echo(res)
+
+
+@backup_app.command("restore")
+def backup_restore_command(
+    target_dir: str | None = typer.Option(None, "--target-dir", help="Target directory to restore OCR cache"),
+) -> None:
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    dest = Path(target_dir) if target_dir else settings.state_dir / "cache" / "ocr"
+    ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+    res = asyncio.run(ledger.restore(settings, target_dir=dest))
+    _echo(res)
 
 
 def main() -> None:

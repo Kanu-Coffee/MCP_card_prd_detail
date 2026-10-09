@@ -19,7 +19,7 @@ from cardrag_mcp.observability import Metrics, configure_logging
 from cardrag_mcp.repository import ServingRepository
 from cardrag_mcp.reranker import OpenRouterReranker, RerankerShadowLane, RerankerShadowStore
 from cardrag_mcp.store import GenerationStore
-from cardrag_mcp.transport import build_core_reader
+from cardrag_mcp.transport import build_core_reader, build_local_reader
 from cardrag_mcp.updater import WebDAVUpdater
 
 
@@ -122,10 +122,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     metrics = Metrics.create()
     updater = None
-    if settings.webdav_base_url is not None:
-        reader = build_core_reader(settings)
+    if settings.publication_transport == "local":
+        local_reader = build_local_reader(settings)
         updater = WebDAVUpdater(
-            reader,
+            local_reader,
+            store,
+            metrics,
+            poll_seconds=settings.mcp_update_interval_seconds,
+            maximum_pdf_bytes=settings.maximum_pdf_bytes,
+            maximum_database_bytes=settings.mcp_max_serving_database_bytes,
+            maximum_generation_download_bytes=settings.mcp_max_generation_download_bytes,
+        )
+    elif settings.webdav_base_url is not None:
+        remote_reader = build_core_reader(settings)
+        updater = WebDAVUpdater(
+            remote_reader,
             store,
             metrics,
             poll_seconds=settings.mcp_update_interval_seconds,

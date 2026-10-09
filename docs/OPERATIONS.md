@@ -49,12 +49,18 @@ sudo chmod 0600 /etc/cardrag/worker.env /etc/cardrag/mcp.env
 
 | 설정 | Worker | MCP |
 |---|---|---|
-| `CARDRAG_WEBDAV_BASE_URL` | 사용할 HTTPS root | 같은 데이터 root |
-| `CARDRAG_WEBDAV_USERNAME_SECRET_FILE` / `PASSWORD_SECRET_FILE` | 게시 계정 파일 | 조회 계정 파일 |
+| `CARDRAG_PUBLICATION_TRANSPORT` | `local` (기본값) 또는 `webdav` | `local` (기본값) 또는 `webdav` |
+| `CARDRAG_SERVING_DIR` | 로컬 서빙 볼륨 마운트 경로 (`/var/lib/cardrag-serving`, rw) | 로컬 서빙 볼륨 마운트 경로 (`/var/lib/cardrag-serving`, ro) |
+| `CARDRAG_BACKUP_MODE` | `disabled`(기본), `immediate`, `hybrid`, `manual` | 사용하지 않음 |
+| `CARDRAG_WEBDAV_BASE_URL` | 선택 사항 (백업 시 HTTPS root) | 선택 사항 (`publication_transport=webdav` 시 사용) |
+| `CARDRAG_WEBDAV_USERNAME_SECRET_FILE` / `PASSWORD_SECRET_FILE` | 선택 사항 (백업용 계정 파일) | 선택 사항 (WebDAV 서빙용 조회 계정 파일) |
 | `CARDRAG_OPENROUTER_API_KEY_SECRET_FILE` | 문서 임베딩 | 질의 임베딩 |
 | `CARDRAG_MCP_BEARER_TOKEN_SECRET_FILE` | 사용하지 않음 | 접속 인증 파일 |
 | `CARDRAG_MCP_PUBLIC_BASE_URL` | 사용하지 않음 | 사용자가 접근하는 HTTPS origin |
 | `CARDRAG_ENABLED_ISSUERS` | 쉼표로 구분한 8개 canonical 코드 중 선택 | 사용하지 않음 |
+
+기본 운영 모드(`publication_transport: local`)에서는 Worker가 생성한 generation이 로컬 공유 볼륨(`cardrag-serving`)에 즉시 원자적으로 게시되고 MCP가 이를 읽어 서빙하므로, WebDAV 서버나 자격증명 없이도 독립적으로 완결됩니다.
+WebDAV는 선택적 증분 백업 용도로 분리되어 동작하며, 기본 백업 모드는 `disabled`입니다. 백업 활성화 시(`hybrid`, `immediate`) SQLite 원장(`backup-ledger.sqlite3`)을 통해 OCR 결과와 참조 CAS PDF만 증분 업로드됩니다.
 
 MCP의 조회 범위는 도구의 `issuer`·`issuers` 인자로 선택합니다. `mcp.env`의
 `CARDRAG_ENABLED_ISSUERS`로 서버의 노출 범위를 제한할 수는 없습니다.

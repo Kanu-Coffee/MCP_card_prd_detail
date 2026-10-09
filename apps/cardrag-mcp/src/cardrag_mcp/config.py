@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     )
 
     environment: Literal["development", "test", "production"] = "production"
+    publication_transport: Literal["local", "webdav"] = "local"
+    serving_dir: Path = Path("/var/lib/cardrag-serving")
     channel: str = Field(default="stable", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
     mcp_host: str = "127.0.0.1"
     mcp_port: BoundedInteger = Field(default=8000, ge=1, le=65535)
@@ -326,8 +328,15 @@ class Settings(BaseSettings):
                     raise ValueError("webdav_base_url must not contain a query or fragment")
                 if self.environment == "production" and parsed.scheme != "https":
                     raise ValueError("production WebDAV requires HTTPS")
-        if self.webdav_base_url is not None:
+        if self.publication_transport == "webdav":
+            if self.webdav_base_url is None:
+                raise ValueError("WebDAV base URL is required when publication_transport is webdav")
             if not self.webdav_username_value() or not self.webdav_password_value():
+                raise ValueError("WebDAV username and password are required with webdav_base_url")
+        elif self.webdav_base_url is not None:
+            if (self.webdav_username_value() or self.webdav_password_value()) and not (
+                self.webdav_username_value() and self.webdav_password_value()
+            ):
                 raise ValueError("WebDAV username and password are required with webdav_base_url")
         if self.mcp_max_serving_database_bytes > self.mcp_max_generation_download_bytes:
             raise ValueError("serving database cap exceeds the generation download quota")

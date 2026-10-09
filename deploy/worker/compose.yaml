@@ -24,7 +24,15 @@ services:
       - CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES=${CARDRAG_WORKER_MAX_SERVING_DATABASE_BYTES:-34359738368}
       - CARDRAG_WORKER_MINIMUM_START_FREE_BYTES=${CARDRAG_WORKER_MINIMUM_START_FREE_BYTES:-2147483648}
       - CARDRAG_ENABLED_ISSUERS=${CARDRAG_ENABLED_ISSUERS:-woori,kb,shinhan,samsung,hyundai,hana,lotte,bc}
-      - CARDRAG_WEBDAV_BASE_URL=${CARDRAG_WEBDAV_BASE_URL:?CARDRAG_WEBDAV_BASE_URL is required}
+      - CARDRAG_PUBLICATION_TRANSPORT=${CARDRAG_PUBLICATION_TRANSPORT:-local}
+      - CARDRAG_SERVING_DIR=/var/lib/cardrag-serving
+      - CARDRAG_BACKUP_MODE=${CARDRAG_BACKUP_MODE:-disabled}
+      - CARDRAG_BACKUP_EVERY_RUNS=${CARDRAG_BACKUP_EVERY_RUNS:-7}
+      - CARDRAG_BACKUP_NEW_OCR_COUNT=${CARDRAG_BACKUP_NEW_OCR_COUNT:-30}
+      - CARDRAG_BACKUP_NEW_BYTES=${CARDRAG_BACKUP_NEW_BYTES:-1073741824}
+      - CARDRAG_BACKUP_MAX_PENDING_AGE_HOURS=${CARDRAG_BACKUP_MAX_PENDING_AGE_HOURS:-168}
+      - CARDRAG_BACKUP_INLINE_BUDGET_SECONDS=${CARDRAG_BACKUP_INLINE_BUDGET_SECONDS:-300}
+      - CARDRAG_WEBDAV_BASE_URL=${CARDRAG_WEBDAV_BASE_URL:-}
       - CARDRAG_WEBDAV_USERNAME
       - CARDRAG_WEBDAV_USERNAME_FILE
       - CARDRAG_WEBDAV_PASSWORD
@@ -108,6 +116,7 @@ services:
       - worker-state:/var/lib/cardrag-worker
       - codex-home:/var/lib/cardrag-codex-home
       - paddle-models:/var/lib/cardrag-paddle
+      - cardrag-serving:/var/lib/cardrag-serving:rw
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g
@@ -130,3 +139,5 @@ volumes:
     name: ${CARDRAG_WORKER_CODEX_HOME_VOLUME:-cardrag-worker-v122-codex-home}
   paddle-models:
     name: ${CARDRAG_PADDLEOCR_MODEL_VOLUME:-cardrag-worker-paddleocr-models}
+  cardrag-serving:
+    name: ${CARDRAG_SERVING_VOLUME:-cardrag-serving}

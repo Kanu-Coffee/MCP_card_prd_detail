@@ -148,6 +148,7 @@ from .exporter_v5 import (
 )
 from .issuer_collection import IssuerCollectionError, IssuerCollectionOutcome, origin_failure
 from .issuer_http import create_issuer_client
+from .local_publisher import LocalServingTransport
 from .ocr import (
     OCRCachePublicationError,
     OCRResolver,
@@ -7538,6 +7539,20 @@ class WorkerPipeline:
         generation_id = validated.manifest.generation_id
 
         # No remote mutation occurs until every seal/database/object check above succeeds.
+        if isinstance(self.webdav, LocalServingTransport):
+            unique_objects_local: dict[tuple[str, int], tuple[Path, str, str, int]] = {}
+            for row in validated.objects:
+                unique_objects_local.setdefault((row[2], row[3]), row)
+            published = await self.webdav.publish(
+                generation_id=generation_id,
+                database=validated.database_path,
+                manifest=sealed["manifest"],
+                vectors=validated.vector_path,
+                unique_objects=unique_objects_local.values(),
+                before_pointer_replace=self._guard_partial_stable_source,
+            )
+            return published, validated
+
         if isinstance(self.webdav, WebDAVClient):
             self.webdav.bind_publication_seal(validated.seal_sha256, generation_id)
         unique_objects: dict[tuple[str, int], tuple[Path, str, str, int]] = {}
