@@ -802,8 +802,17 @@ class BackupLedger:
                         "requests": 0,
                     }
 
-            uploaded_count = 0
-            uploaded_bytes = 0
+            COMMIT_RESERVE_SECONDS = 45.0
+            data_budget_seconds = (
+                max(10.0, timeout_seconds - COMMIT_RESERVE_SECONDS)
+                if timeout_seconds > (COMMIT_RESERVE_SECONDS + 10.0)
+                else max(0.01, timeout_seconds * 0.5)
+            )
+
+            actual_uploaded_count = 0
+            actual_uploaded_bytes = 0
+            receipts_reused_count = 0
+            receipts_reused_bytes = 0
             requests = 0
             started = time.monotonic()
             last_error: str | None = None
@@ -822,9 +831,12 @@ class BackupLedger:
             try:
                 for row in pending:
                     elapsed = time.monotonic() - started
-                    remaining_time = timeout_seconds - elapsed
-                    if remaining_time <= 0:
-                        logger.warning("Backup inline budget reached; deferring remaining items")
+                    remaining_data_time = data_budget_seconds - elapsed
+                    if remaining_data_time <= 0:
+                        logger.info(
+                            "Backup data processing budget reached (%.1fs); reserving budget for index commit",
+                            elapsed,
+                        )
                         break
 
                     item_id = row["item_id"]
@@ -840,7 +852,10 @@ class BackupLedger:
                         expected_size,
                     ):
                         verified_in_this_batch.append(row)
+                        receipts_reused_count += 1
+                        receipts_reused_bytes += expected_size
                         continue
+
 
                     if not local_path.is_file():
                         spool_candidate = spool_dir / expected_sha
@@ -903,7 +918,8 @@ class BackupLedger:
                                 ):
                                     raise RuntimeError(f"Remote verification failed for {r_path}")
 
-                        await asyncio.wait_for(_transfer_and_verify(), timeout=remaining_time)
+                        item_timeout = min(30.0, max(1.0, remaining_data_time))
+                        await asyncio.wait_for(_transfer_and_verify(), timeout=item_timeout)
 
                         with self._get_connection() as conn:
                             conn.execute(
@@ -921,8 +937,8 @@ class BackupLedger:
                             )
 
                         verified_in_this_batch.append(row)
-                        uploaded_count += 1
-                        uploaded_bytes += expected_size
+                        actual_uploaded_count += 1
+                        actual_uploaded_bytes += expected_size
                     except TimeoutError:
                         last_error = "Operation timed out"
                         logger.warning("Backup timeout budget exceeded during %s", remote_path)
@@ -936,7 +952,8 @@ class BackupLedger:
                 if verified_in_this_batch:
                     try:
                         elapsed = time.monotonic() - started
-                        rem_time = max(1.0, timeout_seconds - elapsed)
+                        rem_time = max(15.0, timeout_seconds - elapsed)
+
 
                         async def _publish_index_and_pointer() -> None:
                             nonlocal requests
@@ -1047,24 +1064,35 @@ class BackupLedger:
                     ).fetchone()[0]
                 total_remaining = rem_pending + rem_lost
 
+                processed_count = len(verified_in_this_batch)
+                processed_bytes = actual_uploaded_bytes + receipts_reused_bytes
+
                 if rem_pending == 0 and rem_lost == 0 and last_error is None:
                     status_str = "succeeded"
                 elif index_committed:
                     status_str = "degraded"
-                elif uploaded_count > 0:
+                elif processed_count > 0:
                     status_str = "pending_commit"
                 else:
                     status_str = "failed"
 
                 return {
                     "status": status_str,
-                    "flushed_count": uploaded_count if index_committed else 0,
-                    "uploaded_count": uploaded_count,
-                    "uploaded_bytes": uploaded_bytes,
+                    "flushed_count": processed_count if index_committed else 0,
+                    "processed_count": processed_count,
+                    "processed_bytes": processed_bytes,
+                    "uploaded_count": actual_uploaded_count,
+                    "uploaded_bytes": actual_uploaded_bytes,
+                    "actual_uploaded_count": actual_uploaded_count,
+                    "actual_uploaded_bytes": actual_uploaded_bytes,
+                    "verified_existing_count": receipts_reused_count,
+                    "verified_existing_bytes": receipts_reused_bytes,
+                    "receipts_reused_count": receipts_reused_count,
                     "requests": requests,
                     "remaining_pending": total_remaining,
                     "error": last_error,
                 }
+
             finally:
                 if owns_client and client is not None:
                     await client.close()

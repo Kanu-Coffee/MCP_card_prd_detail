@@ -8,16 +8,21 @@ OCR-byte verification before it can be used.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import secrets
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from cardrag_core import (
+    ArtifactRef,
     ContentOCRArtifactManifest,
+    ContentOCRImportedProvenance,
     ContentOCRReady,
     OCRInput,
     VerifiedOCR,
@@ -66,7 +71,7 @@ def _indexed_variant_path(entry: PurePosixPath) -> tuple[str, PurePosixPath]:
 
 
 class ContentOCRVariantStore:
-    def __init__(self, *, webdav: WebDAVClient, state_root: Path) -> None:
+    def __init__(self, *, webdav: WebDAVClient | None = None, state_root: Path) -> None:
         self.webdav = webdav
         self.state_root = state_root
         self._snapshots: dict[str, dict[str, tuple[PurePosixPath, ...]]] = {}
@@ -120,12 +125,37 @@ class ContentOCRVariantStore:
             if len(entries) != len(payload["entries"]):
                 raise ContentCacheValidationError("content index snapshot entry is invalid")
         else:
-            try:
-                entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
-            except WebDAVHTTPError as exc:
-                if exc.status_code != 404:
-                    raise
-                entries = ()
+            if self.webdav is not None:
+                try:
+                    entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
+                except WebDAVHTTPError as exc:
+                    if exc.status_code != 404:
+                        raise
+                    entries = ()
+            else:
+                retained_body: bytes | None = None
+                runs_dir = self.state_root / "runs"
+                if runs_dir.is_dir():
+                    for other_run in sorted(runs_dir.iterdir(), reverse=True):
+                        if other_run.name == safe_id or not other_run.is_dir():
+                            continue
+                        cand = other_run / "content-ocr-index-snapshot.json"
+                        if cand.is_file() and not cand.is_symlink():
+                            with suppress(Exception):
+                                cand_bytes = cand.read_bytes()
+                                p_cand = json.loads(cand_bytes)
+                                if (
+                                    isinstance(p_cand, dict)
+                                    and p_cand.get("schema_version") == "cardrag.ocr-content-index-snapshot.v1"
+                                    and isinstance(p_cand.get("entries"), list)
+                                ):
+                                    retained_body = cand_bytes
+                                    break
+                if retained_body is not None:
+                    p_loaded = json.loads(retained_body)
+                    entries = tuple(PurePosixPath(v) for v in p_loaded["entries"] if isinstance(v, str))
+                else:
+                    entries = ()
             if len(entries) > _MAX_INDEX_ENTRIES:
                 raise ContentCacheValidationError("content index exceeds the run limit")
             entries = tuple(sorted(entries, key=lambda item: item.as_posix()))
@@ -147,6 +177,11 @@ class ContentOCRVariantStore:
             by_key.setdefault(key, []).append(entry)
         self._snapshots[safe_id] = {key: tuple(paths) for key, paths in by_key.items()}
 
+    def _require_webdav(self) -> WebDAVClient:
+        if self.webdav is None:
+            raise ContentCacheValidationError("remote WebDAV client is not available in local mode")
+        return self.webdav
+
     async def _read_variant(
         self,
         entry: PurePosixPath,
@@ -157,11 +192,12 @@ class ContentOCRVariantStore:
         key, root = _indexed_variant_path(entry)
         if key != reuse_key:
             raise ContentCacheValidationError("content index key does not match PDF")
-        index_body = await self.webdav.get_bytes(entry, max_bytes=CONTROL_OBJECT_MAX_BYTES)
-        manifest_body = await self.webdav.get_bytes(
+        webdav = self._require_webdav()
+        index_body = await webdav.get_bytes(entry, max_bytes=CONTROL_OBJECT_MAX_BYTES)
+        manifest_body = await webdav.get_bytes(
             root / "manifest.json", max_bytes=CONTROL_OBJECT_MAX_BYTES
         )
-        ready_body = await self.webdav.get_bytes(root / "READY.json", max_bytes=CONTROL_OBJECT_MAX_BYTES)
+        ready_body = await webdav.get_bytes(root / "READY.json", max_bytes=CONTROL_OBJECT_MAX_BYTES)
         if index_body is None or manifest_body is None or ready_body is None:
             raise ContentCacheValidationError("content variant control file is missing")
         try:
@@ -187,7 +223,7 @@ class ContentOCRVariantStore:
             or index["variant_label"] != manifest.variant_label
         ):
             raise ContentCacheValidationError("content variant identity is invalid")
-        body = await self.webdav.get_bytes(manifest.output.path, max_bytes=manifest.output.size_bytes)
+        body = await webdav.get_bytes(manifest.output.path, max_bytes=manifest.output.size_bytes)
         if body is None:
             raise ContentCacheValidationError("content variant CAS object is missing")
         reject_credential_bearing_ocr(body)
@@ -204,6 +240,132 @@ class ContentOCRVariantStore:
             raise ContentCacheValidationError("content variant OCR bytes are invalid") from exc
         return ContentOCRVariantHit(manifest=manifest, body=body, verified=verified)
 
+    async def _lookup_local(
+        self,
+        *,
+        run_id: str,
+        document_id: str | None,
+        source: OCRInput,
+        key: str,
+        expected_ocr_identity: tuple[str, int] | None = None,
+    ) -> ContentOCRVariantHit | None:
+        runs_dir = self.state_root / "runs"
+        if not runs_dir.is_dir():
+            return None
+
+        for cand_run in sorted(runs_dir.iterdir(), reverse=True):
+            if cand_run.name == run_id or not cand_run.is_dir():
+                continue
+            publish_path = cand_run / "sealed" / "publish.json"
+            if not publish_path.is_file() or publish_path.is_symlink():
+                continue
+            documents: list[dict[str, Any]] = []
+            manifest_data: dict[str, Any] = {}
+            with suppress(Exception):
+                seal_data = json.loads(publish_path.read_text(encoding="utf-8"))
+                manifest_data = seal_data.get("manifest", {})
+                documents = manifest_data.get("documents", [])
+
+            if document_id is not None:
+                documents = sorted(documents, key=lambda d: 0 if d.get("document_id") == document_id else 1)
+
+            for doc in documents:
+                if doc.get("availability") != "available":
+                    continue
+                # Match either by content reuse key or identical PDF source
+                is_content_key_match = (
+                    doc.get("ocr_cache_kind") == "content" and doc.get("ocr_reuse_key") == key
+                )
+                pdf_info = doc.get("pdf", {})
+                pdf_matches = (
+                    pdf_info.get("sha256") == source.pdf_sha256
+                    and int(pdf_info.get("size_bytes", 0)) == source.pdf_size_bytes
+                    and int(doc.get("page_count", 0)) == source.page_count
+                )
+                if not (is_content_key_match or pdf_matches):
+                    continue
+
+                ocr_info = doc.get("ocr", {})
+                ocr_sha = ocr_info.get("sha256")
+                ocr_size = int(ocr_info.get("size_bytes", 0))
+                if not ocr_sha or ocr_size <= 0:
+                    continue
+                if expected_ocr_identity is not None and (ocr_sha, ocr_size) != expected_ocr_identity:
+                    continue
+                cand_doc_id = doc.get("document_id")
+                if not cand_doc_id:
+                    continue
+                ocr_file = cand_run / "documents" / cand_doc_id / "ocr" / "ocr.md"
+                if not ocr_file.is_file() or ocr_file.is_symlink() or ocr_file.stat().st_size != ocr_size:
+                    continue
+                body = ocr_file.read_bytes()
+                if hashlib.sha256(body).hexdigest() != ocr_sha:
+                    continue
+                reject_credential_bearing_ocr(body)
+                verified_opt: VerifiedOCR | None = None
+                with suppress(Exception):
+                    verified_opt = verify_ocr_bytes(
+                        body,
+                        expected_page_count=source.page_count,
+                        expected_sha256=ocr_sha,
+                        expected_size_bytes=ocr_size,
+                    )
+                if verified_opt is None:
+                    continue
+                verified = verified_opt
+
+                created_at_val: datetime
+                if isinstance(doc.get("created_at"), str):
+                    try:
+                        created_at_val = datetime.fromisoformat(doc["created_at"])
+                    except ValueError:
+                        created_at_val = datetime.now(UTC)
+                elif isinstance(manifest_data.get("created_at"), str):
+                    try:
+                        created_at_val = datetime.fromisoformat(manifest_data["created_at"])
+                    except ValueError:
+                        created_at_val = datetime.now(UTC)
+                else:
+                    created_at_val = datetime.now(UTC)
+
+                manifest = ContentOCRArtifactManifest.create(
+                    source=source,
+                    cache_epoch=0,
+                    output=ArtifactRef.for_cas(
+                        sha256=ocr_sha,
+                        size_bytes=ocr_size,
+                        media_type="text/markdown; charset=utf-8",
+                    ),
+                    ocr_chars=verified.char_count,
+                    page_output_sha256=verified.page_sha256,
+                    created_at=created_at_val,
+                    provenance=ContentOCRImportedProvenance(
+                        source_kind="generation-only",
+                        provider="generation-only",
+                        model="unrecorded",
+                        generation_id=cand_run.name,
+                        document_id=cand_doc_id,
+                    ),
+                    reprocess_request_id=None,
+                )
+
+                if document_id is not None:
+                    sel_path = self._selection_path(run_id, document_id)
+                    self._atomic_write(
+                        sel_path,
+                        canonical_json_bytes(
+                            {
+                                "schema_version": "cardrag.ocr-content-selection.v1",
+                                "reuse_key": key,
+                                "entry": f"local-sealed/{cand_run.name}/{cand_doc_id}",
+                                "variant_id": manifest.variant_id,
+                            }
+                        ),
+                    )
+
+                return ContentOCRVariantHit(manifest=manifest, body=body, verified=verified)
+        return None
+
     async def lookup(
         self,
         *,
@@ -213,8 +375,16 @@ class ContentOCRVariantStore:
         expected_ocr_identity: tuple[str, int] | None = None,
         document_id: str | None = None,
     ) -> ContentOCRVariantHit | None:
-        await self.freeze(run_id)
         key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
+        if self.webdav is None:
+            return await self._lookup_local(
+                run_id=run_id,
+                document_id=document_id,
+                source=source,
+                key=key,
+                expected_ocr_identity=expected_ocr_identity,
+            )
+        await self.freeze(run_id)
         selection_path = self._selection_path(run_id, document_id) if document_id is not None else None
         if selection_path is not None and selection_path.exists():
             if selection_path.is_symlink() or not selection_path.is_file():
@@ -274,7 +444,13 @@ class ContentOCRVariantStore:
             verified.append(hit)
             entries[hit.manifest.variant_id] = entry
         if not verified:
-            return None
+            return await self._lookup_local(
+                run_id=run_id,
+                document_id=document_id,
+                source=source,
+                key=key,
+                expected_ocr_identity=expected_ocr_identity,
+            )
         selected = max(verified, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256))
         if selection_path is not None:
             self._atomic_write(
@@ -295,6 +471,8 @@ class ContentOCRVariantStore:
     ) -> ContentOCRVariantHit | None:
         """Find a previous attempt's committed variant, including after same-run resume."""
 
+        if self.webdav is None:
+            return None
         validate_identifier(request_id, label="reprocess_request_id")
         key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
         try:
@@ -325,6 +503,8 @@ class ContentOCRVariantStore:
     ) -> tuple[ContentOCRVariantHit, ...]:
         """List only fully verified variants for an explicit PDF."""
 
+        if self.webdav is None:
+            return ()
         key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
         try:
             entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
@@ -346,6 +526,8 @@ class ContentOCRVariantStore:
     ) -> bool:
         """Detect a new variant since the served generation without reading old variants."""
 
+        if self.webdav is None:
+            return False
         await self.freeze(run_id)
         key = content_addressed_ocr_reuse_key(source, cache_epoch=cache_epoch)
         for entry in self._snapshots[run_id].get(key, ()):
@@ -393,6 +575,8 @@ class ContentOCRVariantStore:
     async def verify_all(self) -> tuple[ContentOCRArtifactManifest, ...]:
         """Read and verify every discoverable variant without changing remote state."""
 
+        if self.webdav is None:
+            return ()
         try:
             entries = await self.webdav.list_children(CONTENT_INDEX_ROOT)
         except WebDAVHTTPError as exc:
@@ -403,10 +587,12 @@ class ContentOCRVariantStore:
             raise ContentCacheValidationError("content index exceeds the verification limit")
         semaphore = asyncio.Semaphore(16)
 
+        webdav = self._require_webdav()
+
         async def verify_one(entry: PurePosixPath) -> ContentOCRArtifactManifest:
             async with semaphore:
                 key, root = _indexed_variant_path(entry)
-                manifest_body = await self.webdav.get_bytes(
+                manifest_body = await webdav.get_bytes(
                     root / "manifest.json", max_bytes=CONTROL_OBJECT_MAX_BYTES
                 )
                 if manifest_body is None:
@@ -423,6 +609,8 @@ class ContentOCRVariantStore:
     async def publish(self, manifest: ContentOCRArtifactManifest, body: bytes) -> None:
         """Commit CAS, manifest, READY, then the discoverable index marker."""
 
+        if self.webdav is None:
+            return
         reject_credential_bearing_ocr(body)
         verify_ocr_bytes(
             body,
@@ -440,6 +628,8 @@ class ContentOCRVariantStore:
     async def publish_existing(self, manifest: ContentOCRArtifactManifest) -> None:
         """Migrate a verified existing CAS without uploading its OCR bytes again."""
 
+        if self.webdav is None:
+            return
         body = await self.webdav.get_bytes(manifest.output.path, max_bytes=manifest.output.size_bytes)
         if body is None:
             raise ContentCacheValidationError("migration OCR CAS object is missing")
@@ -455,12 +645,13 @@ class ContentOCRVariantStore:
         await self._publish_controls(manifest)
 
     async def _publish_controls(self, manifest: ContentOCRArtifactManifest) -> None:
+        webdav = self._require_webdav()
         root = manifest.variant_root
-        await self.webdav.put_bytes(
+        await webdav.put_bytes(
             root / "manifest.json", manifest.canonical_bytes(), content_type="application/json"
         )
         ready = ContentOCRReady.for_manifest(manifest)
-        await self.webdav.put_bytes(
+        await webdav.put_bytes(
             root / "READY.json", ready.canonical_bytes(), content_type="application/json"
         )
         index = {
@@ -470,6 +661,6 @@ class ContentOCRVariantStore:
             "manifest_sha256": manifest.manifest_sha256,
             "variant_label": manifest.variant_label,
         }
-        await self.webdav.put_bytes(
+        await webdav.put_bytes(
             content_index_path(manifest), canonical_json_bytes(index), content_type="application/json"
         )

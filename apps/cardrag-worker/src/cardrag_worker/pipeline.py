@@ -4633,6 +4633,9 @@ class WorkerPipeline:
                     page_count=document.page_count,
                     ocr_sha256=document.ocr.sha256,
                     ocr_size_bytes=document.ocr.size_bytes,
+                    cache_kind=document.ocr_cache_kind,
+                    reuse_key=document.ocr_reuse_key,
+                    variant_id=document.ocr_variant_id,
                 )
 
         # Cross-run local OCR cache lookup:
@@ -4719,13 +4722,8 @@ class WorkerPipeline:
                         continue
 
                     prior_ocr_path = runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "ocr.md"
-                    prior_manifest_path = (
-                        runs_root / candidate_run_id / "documents" / doc_id / "ocr" / "native-manifest.json"
-                    )
                     if (
-                        not prior_manifest_path.is_file()
-                        or prior_manifest_path.is_symlink()
-                        or not prior_ocr_path.is_file()
+                        not prior_ocr_path.is_file()
                         or prior_ocr_path.is_symlink()
                     ):
                         continue
@@ -4750,6 +4748,9 @@ class WorkerPipeline:
                         page_count=c_doc.page_count,
                         ocr_sha256=c_doc.ocr.sha256,
                         ocr_size_bytes=c_doc.ocr.size_bytes,
+                        cache_kind=c_doc.ocr_cache_kind,
+                        reuse_key=c_doc.ocr_reuse_key,
+                        variant_id=c_doc.ocr_variant_id,
                     )
                     unbound_doc_ids.remove(doc_id)
                     matched_in_this_run += 1
@@ -4780,18 +4781,8 @@ class WorkerPipeline:
                     prior_ocr_path = (
                         runs_root / candidate_run_id / "documents" / prior_doc_id / "ocr" / "ocr.md"
                     )
-                    prior_manifest_path = (
-                        runs_root
-                        / candidate_run_id
-                        / "documents"
-                        / prior_doc_id
-                        / "ocr"
-                        / "native-manifest.json"
-                    )
                     if (
-                        not prior_manifest_path.is_file()
-                        or prior_manifest_path.is_symlink()
-                        or not prior_ocr_path.is_file()
+                        not prior_ocr_path.is_file()
                         or prior_ocr_path.is_symlink()
                     ):
                         continue
@@ -4813,6 +4804,9 @@ class WorkerPipeline:
                         page_count=c_doc.page_count,
                         ocr_sha256=c_doc.ocr.sha256,
                         ocr_size_bytes=c_doc.ocr.size_bytes,
+                        cache_kind=c_doc.ocr_cache_kind,
+                        reuse_key=c_doc.ocr_reuse_key,
+                        variant_id=c_doc.ocr_variant_id,
                     )
                     unbound_doc_ids.remove(doc_id)
                     matched_in_this_run += 1
