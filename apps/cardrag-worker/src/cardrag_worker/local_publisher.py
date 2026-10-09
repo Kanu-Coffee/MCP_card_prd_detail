@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextlib import suppress
@@ -201,6 +202,20 @@ class LocalServingTransport:
         unique_objects: tuple[tuple[Path, str, str, int], ...],
         before_pointer_replace: Callable[[], Awaitable[None]] | None = None,
     ) -> PublishedBundle:
+        self.serving_dir.mkdir(parents=True, exist_ok=True)
+        # 0. Preflight disk usage check
+        needed_bytes = (
+            sum(size for _, _, _, size in unique_objects)
+            + database.stat().st_size * 2
+            + (vectors.stat().st_size * 2 if vectors is not None else 0)
+            + 10 * 1024 * 1024
+        )
+        usage = shutil.disk_usage(self.serving_dir)
+        if usage.free < needed_bytes:
+            raise RuntimeError(
+                f"insufficient disk space on serving volume: {usage.free} bytes free, {needed_bytes} required"
+            )
+
         # 1. Publish referenced CAS objects (PDFs, etc.)
         for local_path, _media_type, declared_sha, declared_size in unique_objects:
             rel = object_path(declared_sha)
@@ -251,6 +266,24 @@ class LocalServingTransport:
             validated_manifest = GenerationManifest.model_validate_json(manifest_body)
             if validated_manifest.generation_id != generation_id:
                 raise ValueError("manifest generation_id does not match target")
+
+            # Validate database matches manifest before proceeding
+            if (
+                db_sha != validated_manifest.serving_database.sha256
+                or db_size != validated_manifest.serving_database.size_bytes
+            ):
+                raise RuntimeError(
+                    f"staged database ({db_sha}, {db_size}B) does not match manifest "
+                    f"({validated_manifest.serving_database.sha256}, {validated_manifest.serving_database.size_bytes}B)"
+                )
+
+            # Validate vector sidecar matches manifest if specified
+            if validated_manifest.vector_sidecar is not None:
+                expected_vec_sha = validated_manifest.vector_sidecar.artifact.sha256
+                expected_vec_size = validated_manifest.vector_sidecar.artifact.size_bytes
+                if vector_sha != expected_vec_sha or vector_size != expected_vec_size:
+                    raise RuntimeError("staged vector sidecar does not match manifest")
+
             manifest_sha = hashlib.sha256(manifest_body).hexdigest()
             staged_manifest = staging_dir / "manifest.json"
             staged_manifest.write_bytes(manifest_body)
@@ -273,13 +306,28 @@ class LocalServingTransport:
 
             _fsync_directory(staging_dir)
 
-            # 3. Atomically move staged generation to final directory
+            # 3. Atomically move staged generation to final directory (idempotent if identical)
             final_gen_dir = self._resolve_safe_path(generation_root_path(generation_id))
             final_gen_dir.parent.mkdir(parents=True, exist_ok=True)
             if final_gen_dir.exists():
-                shutil.rmtree(final_gen_dir)
-            staging_dir.replace(final_gen_dir)
-            _fsync_directory(final_gen_dir.parent)
+                existing_ready = final_gen_dir / "READY.json"
+                if existing_ready.is_file() and existing_ready.read_bytes() == ready_body:
+                    # Idempotent reuse: identical generation already finalized
+                    pass
+                else:
+                    raise RuntimeError(
+                        f"generation directory {generation_id} already exists with conflicting contents; refusing to overwrite"
+                    )
+            else:
+                staging_dir.replace(final_gen_dir)
+                _fsync_directory(final_gen_dir.parent)
+
+            # Record previous generation ID for retention policy
+            prev_gen_id: str | None = None
+            if self._full_pointer_path.exists():
+                with suppress(Exception):
+                    cur_ptr = GenerationPointer.model_validate_json(self._full_pointer_path.read_bytes())
+                    prev_gen_id = cur_ptr.generation_id
 
             # 4. Predecessor fence
             if before_pointer_replace is not None:
@@ -312,6 +360,28 @@ class LocalServingTransport:
                 if temp_pointer.exists():
                     with suppress(OSError):
                         temp_pointer.unlink()
+
+            # 6. Serving volume retention: retain current + 1 previous generation
+            generations_root = self.serving_dir / "v1" / "generations"
+            if generations_root.is_dir():
+                retain_gens = {generation_id}
+                if prev_gen_id is not None:
+                    retain_gens.add(prev_gen_id)
+                for gen_path in generations_root.iterdir():
+                    if gen_path.is_dir() and gen_path.name not in retain_gens:
+                        with suppress(OSError):
+                            shutil.rmtree(gen_path)
+
+            # Clean up stale staging directories older than 10 minutes
+            if staging_root.is_dir():
+                now_ts = time.time()
+                for old_stage in staging_root.iterdir():
+                    if old_stage.is_dir() and old_stage != staging_dir:
+                        try:
+                            if now_ts - old_stage.stat().st_mtime > 600:
+                                shutil.rmtree(old_stage)
+                        except OSError:
+                            pass
 
             return PublishedBundle(generation_id, db_sha, manifest_sha)
         finally:

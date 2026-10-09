@@ -48,6 +48,17 @@ def _parse_bounded_integer(value: object) -> object:
 BoundedInteger = Annotated[int, BeforeValidator(_parse_bounded_integer)]
 
 
+def _normalize_optional_url(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+OptionalHttpUrl = Annotated[AnyHttpUrl | None, BeforeValidator(_normalize_optional_url)]
+
+
 def _read_secret(path: Path | None, *, label: str) -> str | None:
     if path is None:
         return None
@@ -171,7 +182,7 @@ class Settings(BaseSettings):
         le=DEFAULT_RERANKER_AUDIT_MAX_ARTIFACT_BYTES,
     )
 
-    webdav_base_url: AnyHttpUrl | None = None
+    webdav_base_url: OptionalHttpUrl = None
     webdav_username: str | None = Field(default=None, max_length=512)
     webdav_username_file: Path | None = None
     webdav_password: SecretStr | None = None
@@ -383,11 +394,25 @@ class Settings(BaseSettings):
         return _read_secret(self.openrouter_api_key_file, label="OpenRouter API key")
 
     def webdav_username_value(self) -> str | None:
-        return self.webdav_username or _read_secret(
-            self.webdav_username_file, label="WebDAV username"
-        )
+        if self.webdav_username:
+            return self.webdav_username
+        if self.webdav_username_file is not None and self.webdav_username_file.is_file():
+            try:
+                return _read_secret(self.webdav_username_file, label="WebDAV username")
+            except ValueError:
+                if self.publication_transport == "webdav":
+                    raise
+                return None
+        return None
 
     def webdav_password_value(self) -> str | None:
         if self.webdav_password is not None:
             return self.webdav_password.get_secret_value()
-        return _read_secret(self.webdav_password_file, label="WebDAV password")
+        if self.webdav_password_file is not None and self.webdav_password_file.is_file():
+            try:
+                return _read_secret(self.webdav_password_file, label="WebDAV password")
+            except ValueError:
+                if self.publication_transport == "webdav":
+                    raise
+                return None
+        return None

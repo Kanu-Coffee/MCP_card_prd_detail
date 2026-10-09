@@ -184,12 +184,16 @@ class PublicationResumeSettings:
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
     webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
+    publication_transport: str = "webdav"
+    serving_dir: Path = Path("/var/lib/cardrag-serving")
 
     @classmethod
     def from_env(cls) -> PublicationResumeSettings:
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
         aggregation_path, aggregation_sha256 = _aggregation_profile_from_env()
+        publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav").strip().lower()
+        serving_dir_str = os.environ.get("CARDRAG_SERVING_DIR", "/var/lib/cardrag-serving").strip()
         return cls(
             state_dir=_worker_state_dir_from_env(),
             minimum_start_free_bytes=_bounded_int(
@@ -206,6 +210,8 @@ class PublicationResumeSettings:
             sqlite_mmap_mib=_bounded_int("CARDRAG_STATE_SQLITE_MMAP_MIB", 2048, minimum=0, maximum=4096),
             webdav_upload_chunk_mib=_bounded_int("CARDRAG_WEBDAV_UPLOAD_CHUNK_MIB", 8, minimum=1, maximum=16),
             webdav_verification=WebDAVVerificationSettings.from_env(),
+            publication_transport=publication_transport,
+            serving_dir=Path(serving_dir_str),
         )
 
     @property
@@ -360,7 +366,8 @@ class WorkerSettings:
         backup_inline_budget_seconds = _positive_float("CARDRAG_BACKUP_INLINE_BUDGET_SECONDS", 300.0)
         backup_derived_snapshot_enabled = _boolean("CARDRAG_BACKUP_DERIVED_SNAPSHOT_ENABLED", False)
 
-        webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL")
+        raw_webdav_base = os.environ.get("CARDRAG_WEBDAV_BASE_URL", "").strip()
+        webdav_base = raw_webdav_base if raw_webdav_base else None
         actual_require_webdav = require_webdav and (publication_transport == "webdav")
         if actual_require_webdav and not webdav_base:
             raise ValueError("CARDRAG_WEBDAV_BASE_URL is required")
@@ -571,8 +578,24 @@ class WorkerSettings:
             ocr_cache_publication_approved=ocr_cache_publication_approved,
             remote_gc_approved=remote_gc_approved,
             webdav_base_url=webdav_base.rstrip("/") if webdav_base else None,
-            webdav_username=_read_secret("CARDRAG_WEBDAV_USERNAME", required=actual_require_webdav),
-            webdav_password=_read_secret("CARDRAG_WEBDAV_PASSWORD", required=actual_require_webdav),
+            webdav_username=(
+                _read_secret("CARDRAG_WEBDAV_USERNAME", required=actual_require_webdav)
+                if (
+                    actual_require_webdav
+                    or "CARDRAG_WEBDAV_USERNAME" in os.environ
+                    or "CARDRAG_WEBDAV_USERNAME_FILE" in os.environ
+                )
+                else None
+            ),
+            webdav_password=(
+                _read_secret("CARDRAG_WEBDAV_PASSWORD", required=actual_require_webdav)
+                if (
+                    actual_require_webdav
+                    or "CARDRAG_WEBDAV_PASSWORD" in os.environ
+                    or "CARDRAG_WEBDAV_PASSWORD_FILE" in os.environ
+                )
+                else None
+            ),
             webdav_ca_file=Path(ca_file).resolve() if ca_file else None,
             webdav_connect_timeout_seconds=_positive_float("CARDRAG_WEBDAV_CONNECT_TIMEOUT_SECONDS", 10),
             webdav_transfer_timeout_seconds=_positive_float("CARDRAG_WEBDAV_TRANSFER_TIMEOUT_SECONDS", 600),

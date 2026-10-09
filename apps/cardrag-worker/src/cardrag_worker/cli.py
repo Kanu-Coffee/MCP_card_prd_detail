@@ -807,36 +807,50 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     lock_held=True,
                 ).run(resume_run_id=resume)
 
-                backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
                 backup_info: dict[str, Any] = {
                     "backup_status": "disabled",
                     "backup_bytes_uploaded": 0,
                     "backup_requests": 0,
+                    "pending_ocr_count": 0,
+                    "pending_bytes": 0,
+                    "oldest_pending_at": None,
+                    "last_backup_at": None,
+                    "runs_since_last_backup": 0,
                 }
                 backup_mode = getattr(settings, "backup_mode", "disabled")
-                if result.status in {"succeeded", "no_change"} and backup_mode != "disabled":
-                    backup_ledger.record_run_success(result.run_id, settings.state_dir, settings)
-                    status_before = backup_ledger.get_status(settings)
-                    if status_before["should_trigger"]:
-                        flush_res = await backup_ledger.flush(
-                            settings,
-                            timeout_seconds=getattr(settings, "backup_inline_budget_seconds", 300.0),
+                if backup_mode != "disabled":
+                    try:
+                        backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+                        if result.status in {"succeeded", "no_change"}:
+                            backup_ledger.record_run_success(result.run_id, settings.state_dir, settings)
+                            status_before = backup_ledger.get_status(settings)
+                            if status_before["should_trigger"]:
+                                flush_res = await backup_ledger.flush(
+                                    settings,
+                                    timeout_seconds=getattr(settings, "backup_inline_budget_seconds", 300.0),
+                                )
+                                backup_info["backup_status"] = flush_res.get("status", "failed")
+                                backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
+                                backup_info["backup_requests"] = flush_res.get("requests", 0)
+                            else:
+                                backup_info["backup_status"] = "deferred"
+                        status_dict = backup_ledger.get_status(settings)
+                        backup_info.update(
+                            {
+                                "pending_ocr_count": status_dict.get(
+                                    "pending_ocr_count", status_dict["pending_count"]
+                                ),
+                                "pending_bytes": status_dict["pending_bytes"],
+                                "oldest_pending_at": status_dict["oldest_pending_at"],
+                                "last_backup_at": status_dict["last_backup_at"],
+                                "runs_since_last_backup": status_dict["runs_since_last_backup"],
+                            }
                         )
-                        backup_info["backup_status"] = flush_res.get("status", "failed")
-                        backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
-                        backup_info["backup_requests"] = flush_res.get("requests", 0)
-                    else:
-                        backup_info["backup_status"] = "deferred"
-                status_dict = backup_ledger.get_status(settings)
-                backup_info.update(
-                    {
-                        "pending_ocr_count": status_dict["pending_count"],
-                        "pending_bytes": status_dict["pending_bytes"],
-                        "oldest_pending_at": status_dict["oldest_pending_at"],
-                        "last_backup_at": status_dict["last_backup_at"],
-                        "runs_since_last_backup": status_dict["runs_since_last_backup"],
-                    }
-                )
+                    except Exception as backup_exc:
+                        logging.getLogger("cardrag_worker.cli").warning(
+                            "Backup ledger operation failed (isolated from run success): %s", backup_exc
+                        )
+                        backup_info["backup_status"] = "error"
 
                 payload = _pipeline_result_payload(result)
                 payload.update(
@@ -1147,18 +1161,24 @@ async def _resume_publication(run_id: str) -> dict[str, Any]:
             settings.document_aggregation_profile_path,
             expected_artifact_sha256=expected_artifact_sha256,
         )
-    webdav = WebDAVClient.from_env(
-        stable_publication_approved=settings.stable_publication_approved,
-        upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
-    )
+    if getattr(settings, "publication_transport", "webdav") == "local":
+        transport: Any = LocalServingTransport(
+            getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving")),
+            channel=settings.channel,
+        )
+    else:
+        transport = WebDAVClient.from_env(
+            stable_publication_approved=settings.stable_publication_approved,
+            upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+        )
     try:
         revalidate_worker_start_capacity(startup_capacity)
-        if isinstance(webdav, WebDAVClient):
-            webdav.verification_settings = settings.webdav_verification
+        if isinstance(transport, WebDAVClient):
+            transport.verification_settings = settings.webdav_verification
         result = await resume_sealed_publication(
             run_id=run_id,
             state_dir=settings.state_dir,
-            webdav=webdav,
+            webdav=transport,
             sqlite_cache_mib=settings.sqlite_cache_mib,
             sqlite_mmap_mib=settings.sqlite_mmap_mib,
             stable_publication_approved=settings.stable_publication_approved,
@@ -1166,7 +1186,7 @@ async def _resume_publication(run_id: str) -> dict[str, Any]:
         )
         return _pipeline_result_payload(result)
     finally:
-        await webdav.close()
+        await transport.close()
 
 
 async def _resume_publication_with_signal_shutdown(run_id: str) -> dict[str, Any]:

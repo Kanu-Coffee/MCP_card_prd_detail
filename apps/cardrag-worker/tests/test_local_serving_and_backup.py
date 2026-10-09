@@ -245,7 +245,8 @@ async def test_backup_ledger_triggers_and_flush(tmp_path: Path) -> None:
     flush_result = await ledger.flush(settings, force=True)
     assert flush_result["status"] == "succeeded"
     assert flush_result["flushed_count"] == 5
-    assert len(uploaded_paths) == 5
+    assert len([p for p in uploaded_paths if p != "v1/backup/index.json"]) == 5
+    assert "v1/backup/index.json" in uploaded_paths
 
     # After flush, pending_count should be 0 and runs_since_last_backup reset to 0
     status_after = ledger.get_status(settings)
@@ -298,3 +299,103 @@ def test_backup_cli_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     restore_dest = tmp_path / "cli_restore"
     res_restore = runner.invoke(app, ["backup", "restore", "--target-dir", str(restore_dest)])
     assert res_restore.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_local_serving_transport_mismatched_database_rejected(tmp_path: Path) -> None:
+    serving_dir = tmp_path / "serving"
+    transport = LocalServingTransport(serving_dir, channel="stable")
+    m, _, _, _db, pdf = create_sample_generation("gen-bad")
+    db_file = tmp_path / "index.sqlite3"
+    db_file.write_bytes(b"tampered database content")
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(pdf)
+
+    with pytest.raises(RuntimeError, match="does not match manifest"):
+        await transport.publish(
+            generation_id="gen-bad",
+            database=db_file,
+            manifest=m.model_dump(mode="json"),
+            unique_objects=[(pdf_file, "application/pdf", m.documents[0].pdf.sha256, len(pdf))],
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_serving_transport_retention_policy(tmp_path: Path) -> None:
+    serving_dir = tmp_path / "serving"
+    transport = LocalServingTransport(serving_dir, channel="stable")
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(b"%PDF content")
+    pdf_sha = sha256_bytes(b"%PDF content")
+
+    for gen in ("gen-one", "gen-two", "gen-three"):
+        m, _, _, db, _ = create_sample_generation(gen)
+        db_file = tmp_path / f"index_{gen}.sqlite3"
+        db_file.write_bytes(db)
+        await transport.publish(
+            generation_id=gen,
+            database=db_file,
+            manifest=m.model_dump(mode="json"),
+            unique_objects=[(pdf_file, "application/pdf", pdf_sha, len(b"%PDF content"))],
+        )
+
+    gens = sorted(p.name for p in (serving_dir / "v1" / "generations").iterdir())
+    assert sorted(gens) == ["gen-three", "gen-two"] or sorted(gens) == ["gen-two", "gen-three"]
+
+
+@pytest.mark.asyncio
+async def test_backup_ledger_deduplicate_and_missing_source(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    db_path = tmp_path / "backup-ledger.sqlite3"
+    ledger = BackupLedger(db_path)
+    state = tmp_path / "state"
+    state.mkdir()
+
+    s = SimpleNamespace(
+        backup_mode="hybrid",
+        backup_every_runs=7,
+        backup_new_ocr_count=30,
+        backup_new_bytes=1024**3,
+        backup_max_pending_age_hours=168,
+        state_dir=state,
+    )
+
+    ledger.record_run_success("same-run", state, s)  # type: ignore[arg-type]
+    ledger.record_run_success("same-run", state, s)  # type: ignore[arg-type]
+    assert ledger.get_status(s)["runs_since_last_backup"] == 1  # type: ignore[arg-type]
+
+    source = state / "vanish.md"
+    source.write_bytes(b"content")
+    b = source.read_bytes()
+    with ledger._get_connection() as c:
+        c.execute(
+            "INSERT INTO backup_pending VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                "v1/objects/vanish",
+                "ocr_cas",
+                sha256_bytes(b),
+                len(b),
+                str(source),
+                "v1/objects/vanish",
+                "text/markdown",
+                time.time(),
+                "pending",
+            ),
+        )
+    source.unlink()
+
+    class DummyClient:
+        async def put_bytes(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def get_bytes(self, *a: Any, **k: Any) -> bytes:
+            return b""
+
+        async def close(self) -> None:
+            pass
+
+    flush_res = await ledger.flush(s, DummyClient(), force=True)  # type: ignore[arg-type]
+    assert flush_res["status"] == "failed"
+    assert flush_res["remaining_pending"] == 1
+    assert "Source file missing" in flush_res["error"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .partial_execution import (
@@ -18,6 +19,7 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
     from .cli import _ocr_resolver, _pipeline_result_payload, _qwen_embedding_provider
     from .embedding_v5 import OpenRouterQwenEmbeddingProviderV5, QwenEmbeddingProfileV5
     from .issuers import enabled_adapters
+    from .local_publisher import LocalServingTransport
     from .ocr_requests import load_next_reprocess_request
     from .pipeline import WorkerPipeline, validate_document_aggregation_head
     from .settings import WorkerSettings
@@ -74,6 +76,11 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
         webdav: Any
         if plan.skips("webdav"):
             webdav = LocalWebDAV()
+        elif getattr(settings, "publication_transport", "webdav") == "local":
+            webdav = LocalServingTransport(
+                getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving")),
+                channel=plan.channel,
+            )
         else:
             configured = WebDAVClient.from_env(
                 stable_publication_approved=settings.stable_publication_approved
