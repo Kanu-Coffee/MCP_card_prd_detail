@@ -173,6 +173,7 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
                     ocr=ocr,  # type: ignore[arg-type]
                     embeddings=embeddings,
                     webdav=webdav,
+                    settings=settings,
                     lock_held=True,
                     execution_plan=plan,
                     reuse_source=source,

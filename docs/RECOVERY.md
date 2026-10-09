@@ -248,7 +248,7 @@ cardrag-worker backup flush --force
 # 3. WebDAV 백업 수신증(receipts) 표본 무결성 검증
 cardrag-worker backup audit [--full]
 
-# 4. WebDAV로부터 백업된 OCR 캐시를 로컬 디렉터리로 복원
-cardrag-worker backup restore [--target-dir /var/lib/cardrag-worker/cache/ocr]
+# 4. WebDAV로부터 백업된 OCR 캐시를 Worker state root 디렉터리로 복원 (기본값: $CARDRAG_STATE_DIR)
+cardrag-worker backup restore [--target-dir /var/lib/cardrag-worker]
 ```
 

@@ -199,6 +199,7 @@ from .revision_history_v5 import (
     plan_revision_history_v5,
     unresolved_revision_ledger_sha256_v5,
 )
+from .settings import WorkerSettings
 from .state import WorkerState, WorkerStateWALCapacityError, retry_delay, worker_lock
 from .state_seed_v122 import StateSeedLedger, load_state_seed_ledger
 from .structure import (
@@ -1901,6 +1902,7 @@ class WorkerPipeline:
     # Publication-only resume deliberately constructs a provider-free pipeline.
     execution_plan: ExecutionPlan | None = None
     reuse_source: ReuseSource | None = None
+    settings: WorkerSettings | None = None
 
     def __init__(
         self,
@@ -1911,6 +1913,7 @@ class WorkerPipeline:
         ocr: OCRResolver,
         embeddings: EmbeddingProvider | OpenRouterQwenEmbeddingProviderV5,
         webdav: WebDAVClient,
+        settings: WorkerSettings | None = None,
         maximum_attempts: int = 4,
         retry_cap_seconds: float = 30,
         pdf_cache_refresh_hours: float = 168,
@@ -1958,6 +1961,7 @@ class WorkerPipeline:
         self.lock_held = lock_held
         self.execution_plan = execution_plan
         self.reuse_source = reuse_source
+        self.settings = settings
         self.pdf_concurrency = pdf_concurrency
         self.pdf_concurrency_per_issuer = pdf_concurrency_per_issuer
         self.local_processing_workers = local_processing_workers
@@ -4954,13 +4958,22 @@ class WorkerPipeline:
                     raise RuntimeError("OCR reprocess result was not durably published as a content variant")
                 if current_document_id in reprocess_document_ids:
                     self._record_reprocess_success(run_id, current_document_id, result)
-                if getattr(self.settings, "backup_mode", "disabled") != "disabled":
-                    with suppress(Exception):
+                if (
+                    self.settings is not None
+                    and getattr(self.settings, "backup_mode", "disabled") != "disabled"
+                ):
+                    try:
                         from .backup import BackupLedger
 
                         b_ledger = BackupLedger(self.state_dir / "backup-ledger.sqlite3")
                         b_ledger.record_document_ocr(
                             run_id, current_document_id, self.state_dir, self.settings
+                        )
+                    except Exception as b_exc:
+                        LOGGER.warning(
+                            "Failed to record document OCR backup intent for %s: %s",
+                            current_document_id,
+                            b_exc,
                         )
                 prior_local_native = prior_local_native_sources.get(current_document_id)
                 if (

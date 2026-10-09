@@ -778,6 +778,7 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     ocr=resolver,  # type: ignore[arg-type]
                     embeddings=embeddings,
                     webdav=transport,
+                    settings=settings,
                     issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
                     issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
                     pdf_concurrency=settings.pdf_concurrency,
@@ -1919,10 +1920,14 @@ def backup_audit_command(
 
 @backup_app.command("restore")
 def backup_restore_command(
-    target_dir: str | None = typer.Option(None, "--target-dir", help="Target directory to restore OCR cache"),
+    target_dir: str | None = typer.Option(
+        None,
+        "--target-dir",
+        help="Target Worker state root directory to restore OCR cache and seeds",
+    ),
 ) -> None:
     settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
-    dest = Path(target_dir) if target_dir else settings.state_dir / "cache" / "ocr"
+    dest = Path(target_dir) if target_dir else settings.state_dir
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
     res = asyncio.run(ledger.restore(settings, target_dir=dest))
     _echo(res)

@@ -399,3 +399,220 @@ async def test_backup_ledger_deduplicate_and_missing_source(tmp_path: Path) -> N
     assert flush_res["status"] == "failed"
     assert flush_res["remaining_pending"] == 1
     assert "Source file missing" in flush_res["error"]
+
+
+def test_backup_cli_restore_default_target_dir_resolves_cache_hit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+    from dataclasses import replace
+
+    from test_ocr import PDF_SHA, FakeProvider, make_resolver, write_document_local_native
+    from typer.testing import CliRunner
+
+    from cardrag_worker.cli import app
+    from cardrag_worker.settings import WorkerSettings
+
+    # 1. Prepare original state with native OCR artifact and back it up
+    orig_state_dir = tmp_path / "orig_state"
+    orig_state_dir.mkdir()
+    fake_provider = FakeProvider()
+    orig_resolver, orig_state = make_resolver(orig_state_dir, fake_provider, None, cache_mode="read-write")
+    doc_dir = orig_state_dir / "runs" / "orig-run" / "documents" / "doc1" / "ocr"
+    write_document_local_native(orig_resolver, doc_dir)
+    orig_state.close()
+
+    orig_settings = replace(
+        WorkerSettings.from_env(require_providers=False, require_webdav=False),
+        state_dir=orig_state_dir,
+        backup_mode="immediate",
+        webdav_base_url="https://backup.invalid/",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+    orig_ledger = BackupLedger(orig_state_dir / "backup-ledger.sqlite3")
+    orig_ledger.record_run_success("orig-run", orig_state_dir, orig_settings)
+
+    class InMemWebDAV:
+        def __init__(self) -> None:
+            self.storage: dict[str, bytes] = {}
+
+        async def put(self, path: str, content: bytes | Any, *args: Any, **kwargs: Any) -> None:
+            self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
+
+        async def put_bytes(self, path: str, content: bytes | Any, *args: Any, **kwargs: Any) -> None:
+            self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
+
+        async def get(self, path: str, *args: Any, **kwargs: Any) -> bytes:
+            return self.storage.get(path, b"")
+
+        async def get_bytes(self, path: str, *args: Any, **kwargs: Any) -> bytes:
+            return self.storage.get(path, b"")
+
+        async def close(self) -> None:
+            pass
+
+    remote_storage = InMemWebDAV()
+    flush_res = asyncio.run(orig_ledger.flush(orig_settings, remote_storage, force=True))
+    assert flush_res["status"] == "succeeded"
+
+    # 2. Setup fresh Worker state root (clean directory)
+    fresh_state_dir = tmp_path / "fresh_state"
+    fresh_state_dir.mkdir()
+    monkeypatch.setenv("CARDRAG_WORKER_STATE_DIR", str(fresh_state_dir))
+    monkeypatch.setenv("CARDRAG_STATE_DIR", str(fresh_state_dir))
+    monkeypatch.setenv("CARDRAG_WEBDAV_BASE_URL", "https://backup.invalid/")
+    monkeypatch.setenv("CARDRAG_WEBDAV_USERNAME", "user")
+    monkeypatch.setenv("CARDRAG_WEBDAV_PASSWORD", "pw")
+
+    # Patch BackupLedger._make_webdav_client to return remote_storage
+    monkeypatch.setattr(
+        BackupLedger, "_make_webdav_client", lambda self, settings: remote_storage, raising=False
+    )
+
+    # 3. Call Typer CLI `backup restore` WITHOUT --target-dir
+    runner = CliRunner()
+    res = runner.invoke(app, ["backup", "restore"])
+    assert res.exit_code == 0
+    assert "succeeded" in res.stdout
+
+    # 4. Verify OCRResolver with cache-only mode has a cache hit with 0 provider calls in fresh state
+    new_provider = FakeProvider()
+    new_resolver, new_state = make_resolver(fresh_state_dir, new_provider, None, cache_mode="read-only")
+    new_resolver._require_cache_hit = True
+    try:
+        run_id = new_state.start_run(run_id="fresh-run")
+        pdf_path = tmp_path / "dummy.pdf"
+        pdf_path.write_bytes(b"%PDF")
+        resolved = asyncio.run(
+            new_resolver.resolve(
+                run_id=run_id,
+                document_id="doc1",
+                pdf_path=pdf_path,
+                pdf_sha256=PDF_SHA,
+                pdf_size_bytes=3,
+                page_count=1,
+                output_dir=fresh_state_dir / "runs" / run_id / "documents" / "doc1" / "ocr",
+            )
+        )
+        assert resolved.cache_reused is True
+        assert resolved.provider_called is False
+        assert len(new_provider.calls) == 0
+    finally:
+        new_state.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_backup_intent_recorded_and_isolated_on_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from test_pipeline_v5 import (
+        _OCR,
+        _FakeCandidateWebDAV,
+        _install_pdf_http,
+        _MultiAdapter,
+        _test_qwen_embeddings,
+        _test_source,
+        pdf_bytes,
+    )
+
+    from cardrag_worker.pipeline import WorkerPipeline, WorkerUnexpectedFailureError
+    from cardrag_worker.state import WorkerState
+
+    _install_pdf_http(monkeypatch, [pdf_bytes()], [])
+    source = _test_source("doc-001")
+
+    from test_ocr import FakeProvider, make_resolver, write_document_local_native
+
+    sample_res, sample_st = make_resolver(tmp_path / "sample_st", FakeProvider(), None)
+
+    class _RealWritingOCR(_OCR):
+        async def resolve(self, **_kwargs: Any) -> Any:
+            res = await super().resolve(**_kwargs)
+            out_dir = _kwargs.get("output_dir")
+            if out_dir is not None:
+                write_document_local_native(sample_res, out_dir)
+            return res
+
+    ocr = _RealWritingOCR()
+    webdav = _FakeCandidateWebDAV()
+
+    from dataclasses import replace
+
+    # Case 1: Backup enabled, OCR succeeds -> embedding fails. Intent/spool must remain in ledger.
+    embedding_requests: list[dict[str, Any]] = []
+    failing_embeddings = _test_qwen_embeddings(embedding_requests)
+
+    async def failing_embed(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("Injected embedding stage failure")
+
+    failing_embeddings.embed = failing_embed  # type: ignore
+
+    state_dir = tmp_path / "pipeline_state_1"
+    state_dir.mkdir()
+    settings = replace(
+        WorkerSettings.from_env(require_providers=False, require_webdav=False),
+        state_dir=state_dir,
+        backup_mode="immediate",
+        webdav_base_url="https://backup.invalid/",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+
+    with WorkerState(state_dir / "state.sqlite3") as state:
+        pipeline = WorkerPipeline(
+            state=state,
+            state_dir=state_dir,
+            adapters=[_MultiAdapter((source,))],
+            ocr=ocr,  # type: ignore[arg-type]
+            embeddings=failing_embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            settings=settings,
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        with pytest.raises(WorkerUnexpectedFailureError):
+            await pipeline.run()
+
+    ledger = BackupLedger(state_dir / "backup-ledger.sqlite3")
+    status = ledger.get_status(settings)
+    assert status["pending_count"] > 0
+    spool_files = list((state_dir / "backup" / "spool").glob("*"))
+    assert len(spool_files) > 0
+
+    # Case 2: Backup intent recording itself fails -> OCR and pipeline do NOT crash with systemic error.
+    state_dir_2 = tmp_path / "pipeline_state_2"
+    state_dir_2.mkdir()
+    settings_2 = replace(
+        WorkerSettings.from_env(require_providers=False, require_webdav=False),
+        state_dir=state_dir_2,
+        backup_mode="immediate",
+        webdav_base_url="https://backup.invalid/",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+
+    def broken_record(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Injected backup ledger crash")
+
+    monkeypatch.setattr(BackupLedger, "record_document_ocr", broken_record)
+
+    working_embeddings = _test_qwen_embeddings([])
+    ocr_2 = _RealWritingOCR()
+    webdav.fail_pointer_once = False
+    with WorkerState(state_dir_2 / "state.sqlite3") as state_2:
+        pipeline_2 = WorkerPipeline(
+            state=state_2,
+            state_dir=state_dir_2,
+            adapters=[_MultiAdapter((source,))],
+            ocr=ocr_2,  # type: ignore[arg-type]
+            embeddings=working_embeddings,
+            webdav=webdav,  # type: ignore[arg-type]
+            settings=settings_2,
+            collect_remote_garbage=False,
+            maximum_attempts=1,
+            retry_cap_seconds=0,
+        )
+        result = await pipeline_2.run()
+        assert result.published is True
