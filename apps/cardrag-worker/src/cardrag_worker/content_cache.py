@@ -24,6 +24,8 @@ from cardrag_core import (
     ContentOCRArtifactManifest,
     ContentOCRImportedProvenance,
     ContentOCRReady,
+    NativeOCRContract,
+    OCRArtifactManifest,
     OCRInput,
     VerifiedOCR,
     WebDAVHTTPError,
@@ -247,6 +249,7 @@ class ContentOCRVariantStore:
         document_id: str | None,
         source: OCRInput,
         key: str,
+        cache_epoch: int,
         expected_ocr_identity: tuple[str, int] | None = None,
     ) -> ContentOCRVariantHit | None:
         runs_dir = self.state_root / "runs"
@@ -272,18 +275,27 @@ class ContentOCRVariantStore:
             for doc in documents:
                 if doc.get("availability") != "available":
                     continue
-                # Match either by content reuse key or identical PDF source
-                is_content_key_match = (
-                    doc.get("ocr_cache_kind") == "content" and doc.get("ocr_reuse_key") == key
-                )
+                # Strict PDF source match is mandatory
                 pdf_info = doc.get("pdf", {})
                 pdf_matches = (
                     pdf_info.get("sha256") == source.pdf_sha256
                     and int(pdf_info.get("size_bytes", 0)) == source.pdf_size_bytes
                     and int(doc.get("page_count", 0)) == source.page_count
                 )
-                if not (is_content_key_match or pdf_matches):
+                if not pdf_matches:
                     continue
+
+                # Cache epoch boundary / reuse key check
+                doc_cache_kind = doc.get("ocr_cache_kind")
+                doc_reuse_key = doc.get("ocr_reuse_key")
+                if doc_cache_kind == "content":
+                    # Content cache must strictly match the expected reuse key for this epoch
+                    if doc_reuse_key != key:
+                        continue
+                else:
+                    # Native or adopted document fallback to content cache is only permitted at epoch 0
+                    if cache_epoch != 0:
+                        continue
 
                 ocr_info = doc.get("ocr", {})
                 ocr_sha = ocr_info.get("sha256")
@@ -319,35 +331,65 @@ class ContentOCRVariantStore:
                     try:
                         created_at_val = datetime.fromisoformat(doc["created_at"])
                     except ValueError:
-                        created_at_val = datetime.now(UTC)
+                        created_at_val = datetime.fromtimestamp(publish_path.stat().st_mtime, tz=UTC)
                 elif isinstance(manifest_data.get("created_at"), str):
                     try:
                         created_at_val = datetime.fromisoformat(manifest_data["created_at"])
                     except ValueError:
-                        created_at_val = datetime.now(UTC)
+                        created_at_val = datetime.fromtimestamp(publish_path.stat().st_mtime, tz=UTC)
                 else:
-                    created_at_val = datetime.now(UTC)
+                    created_at_val = datetime.fromtimestamp(publish_path.stat().st_mtime, tz=UTC)
 
-                manifest = ContentOCRArtifactManifest.create(
-                    source=source,
-                    cache_epoch=0,
-                    output=ArtifactRef.for_cas(
-                        sha256=ocr_sha,
-                        size_bytes=ocr_size,
-                        media_type="text/markdown; charset=utf-8",
-                    ),
-                    ocr_chars=verified.char_count,
-                    page_output_sha256=verified.page_sha256,
-                    created_at=created_at_val,
-                    provenance=ContentOCRImportedProvenance(
+                cand_gen_id = str(manifest_data.get("generation_id") or cand_run.name)
+                provenance: NativeOCRContract | ContentOCRImportedProvenance = (
+                    ContentOCRImportedProvenance(
                         source_kind="generation-only",
                         provider="generation-only",
                         model="unrecorded",
-                        generation_id=cand_run.name,
+                        generation_id=cand_gen_id,
                         document_id=cand_doc_id,
-                    ),
-                    reprocess_request_id=None,
+                    )
                 )
+
+                native_man_path = cand_run / "documents" / cand_doc_id / "ocr" / "native-manifest.json"
+                if native_man_path.is_file() and not native_man_path.is_symlink():
+                    with suppress(Exception):
+                        n_man = OCRArtifactManifest.model_validate_json(native_man_path.read_bytes())
+                        provenance = n_man.contract
+
+                cand_variant_id = doc.get("ocr_variant_id")
+                if isinstance(cand_variant_id, str) and re.fullmatch(r"[0-9a-f]{64}", cand_variant_id):
+                    manifest = ContentOCRArtifactManifest(
+                        schema_version="cardrag.ocr-content-artifact.v1",
+                        reuse_key=key,
+                        cache_epoch=cache_epoch,
+                        source=source,
+                        output=ArtifactRef.for_cas(
+                            sha256=ocr_sha,
+                            size_bytes=ocr_size,
+                            media_type="text/markdown; charset=utf-8",
+                        ),
+                        ocr_chars=verified.char_count,
+                        page_output_sha256=verified.page_sha256,
+                        created_at=created_at_val,
+                        provenance=provenance,
+                        variant_id=cand_variant_id,
+                    )
+                else:
+                    manifest = ContentOCRArtifactManifest.create(
+                        source=source,
+                        cache_epoch=cache_epoch,
+                        output=ArtifactRef.for_cas(
+                            sha256=ocr_sha,
+                            size_bytes=ocr_size,
+                            media_type="text/markdown; charset=utf-8",
+                        ),
+                        ocr_chars=verified.char_count,
+                        page_output_sha256=verified.page_sha256,
+                        created_at=created_at_val,
+                        provenance=provenance,
+                        reprocess_request_id=None,
+                    )
 
                 if document_id is not None:
                     sel_path = self._selection_path(run_id, document_id)
@@ -382,6 +424,7 @@ class ContentOCRVariantStore:
                 document_id=document_id,
                 source=source,
                 key=key,
+                cache_epoch=cache_epoch,
                 expected_ocr_identity=expected_ocr_identity,
             )
         await self.freeze(run_id)
@@ -449,6 +492,7 @@ class ContentOCRVariantStore:
                 document_id=document_id,
                 source=source,
                 key=key,
+                cache_epoch=cache_epoch,
                 expected_ocr_identity=expected_ocr_identity,
             )
         selected = max(verified, key=lambda hit: (hit.manifest.created_at, hit.manifest.manifest_sha256))

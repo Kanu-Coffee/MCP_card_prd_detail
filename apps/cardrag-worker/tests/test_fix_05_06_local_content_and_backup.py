@@ -34,7 +34,7 @@ async def test_sealed_prior_content_without_native_manifest_resolves_provider_ze
 
     source = OCRInput(pdf_sha256=PDF_SHA, pdf_size_bytes=1000, page_count=1)
     reuse_key = content_addressed_ocr_reuse_key(source, cache_epoch=0)
-    variant_id = "variant_12345"
+    variant_id = "c" * 64
 
     # Create sealed publish.json for prior run
     sealed_dir = runs_root / prior_run_id / "sealed"
@@ -272,17 +272,20 @@ async def test_backup_budget_reserve_commits_partial_batch_and_retry_zero_reques
         webdav_password="pw",  # noqa: S106
     )
 
-    call_counts = {"put_bytes": 0, "get_bytes": 0}
+    call_counts = {"body_puts": 0, "control_puts": 0, "get_bytes": 0}
 
     class SlowMockWebDAV:
         def __init__(self) -> None:
             self.storage: dict[str, bytes] = {}
 
         async def put_bytes(self, path: str, body: bytes, *, content_type: str = "application/octet-stream") -> None:
-            call_counts["put_bytes"] += 1
+            if path.startswith("v1/backup/"):
+                call_counts["control_puts"] += 1
+            else:
+                call_counts["body_puts"] += 1
             self.storage[path] = body
             # Simulate slow upload on second item to consume data budget
-            if "item_1" in path or call_counts["put_bytes"] == 2:
+            if "item_1" in path or call_counts["body_puts"] == 2:
                 await asyncio.sleep(0.05)
 
         async def get_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes | None:
@@ -311,10 +314,108 @@ async def test_backup_budget_reserve_commits_partial_batch_and_retry_zero_reques
     assert rem_pending == 4 - flushed_first_round
 
     # Flush 2: Retry with remaining items
-    puts_before = call_counts["put_bytes"]
+    body_puts_before = call_counts["body_puts"]
+    control_puts_before = call_counts["control_puts"]
     res2 = await ledger.flush(settings, mock_client, timeout_seconds=60.0, force=True)  # type: ignore[arg-type]
     assert res2["status"] == "succeeded"
     assert res2["remaining_pending"] == 0
     # Items already committed in round 1 were not re-uploaded!
     assert res2["flushed_count"] == 4 - flushed_first_round
-    assert call_counts["put_bytes"] == puts_before + (4 - flushed_first_round)
+    assert call_counts["body_puts"] == body_puts_before + (4 - flushed_first_round)
+    assert call_counts["control_puts"] == control_puts_before + 1
+
+
+@pytest.mark.asyncio
+async def test_backup_index_commit_failure_preserves_pending_and_retry_zero_body_transfers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX_07: When index commit fails, pending items are preserved, and subsequent retry reuses verified receipts with 0 body transfers."""
+    from dataclasses import replace
+
+    db_path = tmp_path / "backup-ledger.sqlite3"
+    ledger = BackupLedger(db_path)
+    spool_dir = tmp_path / "backup" / "spool"
+    spool_dir.mkdir(parents=True)
+
+    # Seed 3 items
+    now = "2026-10-09T00:00:00+00:00"
+    for i in range(3):
+        data = f"data_payload_{i}".encode()
+        h = hashlib.sha256(data).hexdigest()
+        p = tmp_path / f"payload_{i}.txt"
+        p.write_bytes(data)
+        with ledger._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO backup_pending
+                (item_id, item_type, sha256, size_bytes, local_path, remote_path, media_type, created_at, status)
+                VALUES (?, 'ocr', ?, ?, ?, ?, 'text/plain', ?, 'pending')
+                """,
+                (f"fail_item_{i}", h, len(data), str(p), f"v1/files/{h}.txt", now),
+            )
+
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    settings = replace(
+        settings,
+        state_dir=tmp_path,
+        webdav_base_url="https://webdav.example.com",
+        webdav_username="user",
+        webdav_password="pw",  # noqa: S106
+    )
+
+    call_stats = {"body_puts": 0, "control_puts": 0, "get_bytes": 0}
+
+    class FailingIndexWebDAV:
+        def __init__(self, *, fail_index: bool = True) -> None:
+            self.storage: dict[str, bytes] = {}
+            self.fail_index = fail_index
+
+        async def put_bytes(self, path: str, body: bytes, *, content_type: str = "application/octet-stream") -> None:
+            if path.startswith("v1/backup/"):
+                call_stats["control_puts"] += 1
+            else:
+                call_stats["body_puts"] += 1
+            self.storage[path] = body
+
+        async def get_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes | None:
+            call_stats["get_bytes"] += 1
+            return self.storage.get(path)
+
+        async def atomic_replace_bytes(self, path: str, body: bytes, *, content_type: str = "application/json") -> None:
+            if self.fail_index:
+                raise RuntimeError("simulated index pointer commit failure")
+            self.storage[path] = body
+
+        async def close(self) -> None:
+            pass
+
+    client1 = FailingIndexWebDAV(fail_index=True)
+    res1 = await ledger.flush(settings, client1, timeout_seconds=30.0, force=True)  # type: ignore[arg-type]
+
+    # Status must be pending_commit or failed, flushed_count is 0 because index commit failed
+    assert res1["status"] in {"pending_commit", "failed"}
+    assert res1["flushed_count"] == 0
+    assert "simulated index pointer commit failure" in str(res1["error"])
+
+    # Pending items must be preserved!
+    with ledger._get_connection() as conn:
+        rem_pending = conn.execute("SELECT COUNT(*) FROM backup_pending WHERE status = 'pending'").fetchone()[0]
+        receipt_count = conn.execute("SELECT COUNT(*) FROM backup_receipts").fetchone()[0]
+    assert rem_pending == 3
+    assert receipt_count == 3
+    assert call_stats["body_puts"] == 3
+
+    # Flush 2: Retry with healthy client.
+    # Because receipts are already verified in backup_receipts, body GET/PUT must be 0!
+    body_puts_before = call_stats["body_puts"]
+    client2 = FailingIndexWebDAV(fail_index=False)
+    client2.storage = dict(client1.storage)
+
+    res2 = await ledger.flush(settings, client2, timeout_seconds=30.0, force=True)  # type: ignore[arg-type]
+    assert res2["status"] == "succeeded"
+    assert res2["flushed_count"] == 3
+    assert res2["remaining_pending"] == 0
+    assert res2["receipts_reused_count"] == 3
+    assert res2["body_requests"] == 0
+    # ZERO body PUTs in retry round!
+    assert call_stats["body_puts"] == body_puts_before

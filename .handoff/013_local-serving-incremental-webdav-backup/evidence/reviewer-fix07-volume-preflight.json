@@ -1,0 +1,133 @@
+{
+  "status": "success",
+  "volume_run_id": "025ce35739944d8facfdda4c99961f0c",
+  "total_documents": 5519,
+  "native_documents_count": 5,
+  "native_documents_provenance": [
+    {
+      "document_id": "doc_0e4b7f9e9f9f5d26269563bd9ed9846445946be7c8d2fac928004c71f111900e",
+      "provider": "opencode",
+      "model": "alibaba-token-plan/qwen3.8-flash",
+      "variant_id": "2f788ab85e8bef149a3d2f87f4660c34fef3526f395efada9007f800cfb228e7",
+      "reuse_key": "7b23441dbce06c0b80e97a7d2bdb25029ec0c4c44bd709e10c665f34a3dd090f"
+    },
+    {
+      "document_id": "doc_36ccc79a452843549c896126b620d293fdcee1ced9c19d0eb5848a7b29a8a56c",
+      "provider": "opencode",
+      "model": "alibaba-token-plan/qwen3.8-flash",
+      "variant_id": "27ee0c26745e95589639fce4b00e487db39af4ae06f3ec3c049c4b63e08b59e5",
+      "reuse_key": "153fce621e31a61f2abaa11ec6c555feaf827623791aaaafe4c27439b714c39e"
+    },
+    {
+      "document_id": "doc_55086e8736bd18279b84736878c27863731a3f3853fbf5236f77aeb7241ebd49",
+      "provider": "opencode",
+      "model": "alibaba-token-plan/qwen3.8-flash",
+      "variant_id": "4369948875c641287cd51dc3df91536c485ee8e25e445e9169bb97638be2f232",
+      "reuse_key": "a4274c45067c0f853dcb5c69482af0613719162f877ce56139771ae34ddab4d1"
+    },
+    {
+      "document_id": "doc_55f60361cf7cda5cbfcca403e66191ddb09c2843f8a1035c008f30a76909554f",
+      "provider": "opencode",
+      "model": "alibaba-token-plan/qwen3.8-flash",
+      "variant_id": "1f2c597654cffa34bd0f720fd04a772198f6675a4ff282e8623412ad478afbc9",
+      "reuse_key": "4774228792a90184c61851a466f97c02152ff840f3889eb2c3a27612ffebd86f"
+    },
+    {
+      "document_id": "doc_eb9a7a10463c2e72501d8e8d7d028cd7c94c7a63c05e29d4d1c3500b3de8c733",
+      "provider": "opencode",
+      "model": "alibaba-token-plan/qwen3.8-flash",
+      "variant_id": "e95994441d70b97377c7c8273e313f87ad7193ad1b7cab4c4b3d5c12f925dad8",
+      "reuse_key": "387db64b6ff467abc49a5d0e29a5bd188ea839df0c38cf973c4ffe4a43dfa11c"
+    }
+  ],
+  "content_tested_count": 323,
+  "zero_provider_calls_count": 323,
+  "zero_provider_calls_rate": 1.0,
+  "provider_calls_total": 0,
+  "epoch1_miss_count": 323,
+  "epoch1_miss_rate": 1.0,
+  "variant_stable_count": 323,
+  "variant_stable_rate": 1.0,
+  "content_sample": [
+    {
+      "document_id": "doc_002a14b9d2ba613e7fd139ae36f2ef464ded5b6e61ee0fd465214029e3ef23dc",
+      "cache_reused": true,
+      "variant_id": "236750a6da11b484e8a58c56dd32a9d3fa807293b1d10c38736025ddd4920719",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_00321ff823fbce7f79d44a20ee53e18632ee87d2b24ad0818469c407b57f8194",
+      "cache_reused": true,
+      "variant_id": "24fe00c0b56cc76518bf9920a5c3e2237004c5938cda24078b22078deb8d0f6e",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_0033a249c80b17d11beb1574bbcdcbc9a8ac07b7b5960b65635b624be67809ea",
+      "cache_reused": true,
+      "variant_id": "fe127e97df9ff13ea80afda5e6e6b07acc25b11373f2bfe9571c885aa2bfe8e0",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_00340b2717d723acc6003677354ca838ab1a1a277b3ffa379604cd7599eb643d",
+      "cache_reused": true,
+      "variant_id": "4a6936bbe8fb843cad01cf027b0af54febfeb4e6fa763f899efa48272ab9260c",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_00396e5f2f0714d8ae5f16416512031c9d03bab9eaf410165bd04c6e820b1fba",
+      "cache_reused": true,
+      "variant_id": "48920f7f888006d76b6002dd1af1b9b8f6089b6ae0c969dfc5532df7d1cc29ee",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_003ccc10def7e0f28acca9d7e90e035e9bfea631076c80e0d019132ba7c2181d",
+      "cache_reused": true,
+      "variant_id": "a82ad634aba43bc3b7366b268f03bbe43da262a40846526c9f139f7e1d6874d2",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_004d0c0f814ee63d810017eae4338d3f9a72e0be7db530dbc958a716f45a3b36",
+      "cache_reused": true,
+      "variant_id": "df78472a60d57e0abb9587f8f68af68236d5192316cd389845651040083169e2",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_00560cc5a6917e811ccf274e69952370f760a05541cc8ddd9a8a9c169e26c946",
+      "cache_reused": true,
+      "variant_id": "bbc79f8af555e48e6636c538fda9d728e80deaf3f61d70774e1818d0ed350fa2",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_005b2d76f10a97d4b549d1d7938a3bf251ea18d5e4294764d886076f925ffe94",
+      "cache_reused": true,
+      "variant_id": "105496d4b1cc940216c6feed6cde1ad24147b249ba215b44292f6f87343d91ce",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    },
+    {
+      "document_id": "doc_006b523c13a2cb6d675dbbddd22c48ee98ccf29b0e59f39e90cf12edcf256121",
+      "cache_reused": true,
+      "variant_id": "c9fe61996f8bae26425ebde570acbea059fe06b1df87966ce68b13def16be2f4",
+      "preserved_variant": true,
+      "epoch1_miss": true,
+      "stable": true
+    }
+  ]
+}

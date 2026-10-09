@@ -814,6 +814,8 @@ class BackupLedger:
             receipts_reused_count = 0
             receipts_reused_bytes = 0
             requests = 0
+            body_requests = 0
+            control_requests = 0
             started = time.monotonic()
             last_error: str | None = None
             verified_in_this_batch: list[sqlite3.Row] = []
@@ -882,7 +884,7 @@ class BackupLedger:
                             e_sha: str = expected_sha,
                             l_path: Path = local_path,
                         ) -> None:
-                            nonlocal requests
+                            nonlocal requests, body_requests
                             if hasattr(client, "put_bytes"):
                                 await client.put_bytes(
                                     r_path,
@@ -899,6 +901,7 @@ class BackupLedger:
                                     expected_size_bytes=e_size,
                                 )
                             requests += 1
+                            body_requests += 1
 
                             # If client did not self-verify in put_bytes, verify via get
                             if not hasattr(client, "put_bytes") and not hasattr(client, "put_cas_file"):
@@ -911,6 +914,7 @@ class BackupLedger:
                                 else:
                                     content = f_content
                                 requests += 1
+                                body_requests += 1
                                 if (
                                     content is None
                                     or len(content) != e_size
@@ -918,7 +922,7 @@ class BackupLedger:
                                 ):
                                     raise RuntimeError(f"Remote verification failed for {r_path}")
 
-                        item_timeout = min(30.0, max(1.0, remaining_data_time))
+                        item_timeout = min(30.0, max(0.01, remaining_data_time))
                         await asyncio.wait_for(_transfer_and_verify(), timeout=item_timeout)
 
                         with self._get_connection() as conn:
@@ -952,11 +956,11 @@ class BackupLedger:
                 if verified_in_this_batch:
                     try:
                         elapsed = time.monotonic() - started
-                        rem_time = max(15.0, timeout_seconds - elapsed)
+                        rem_time = max(10.0, timeout_seconds - elapsed)
 
 
                         async def _publish_index_and_pointer() -> None:
-                            nonlocal requests
+                            nonlocal requests, control_requests
                             with self._get_connection() as conn:
                                 receipt_rows = conn.execute(
                                     "SELECT remote_path, sha256, size_bytes FROM backup_receipts WHERE remote_root = ?",
@@ -968,10 +972,16 @@ class BackupLedger:
                             with suppress(Exception):
                                 if hasattr(client, "get_bytes"):
                                     raw_idx = await client.get_bytes("v1/backup/index.json")
+                                    requests += 1
+                                    control_requests += 1
                                 elif hasattr(client, "get"):
                                     raw_idx = await client.get("v1/backup/index.json")
+                                    requests += 1
+                                    control_requests += 1
                                 elif hasattr(client, "core"):
                                     raw_idx = client.core.get("v1/backup/index.json").content
+                                    requests += 1
+                                    control_requests += 1
                                 if raw_idx:
                                     existing_idx = json.loads(
                                         raw_idx.decode("utf-8") if isinstance(raw_idx, bytes) else raw_idx
@@ -1019,10 +1029,12 @@ class BackupLedger:
                             if hasattr(client, "put_bytes"):
                                 await client.put_bytes(batch_path, idx_body, content_type="application/json")
                                 requests += 1
+                                control_requests += 1
 
                             # 2. Atomically update current index pointer (v1/backup/index.json)
                             await _atomic_replace_backup_index(client, "v1/backup/index.json", idx_body)
                             requests += 1
+                            control_requests += 1
 
                         await asyncio.wait_for(_publish_index_and_pointer(), timeout=rem_time)
                         index_committed = True
@@ -1081,14 +1093,16 @@ class BackupLedger:
                     "flushed_count": processed_count if index_committed else 0,
                     "processed_count": processed_count,
                     "processed_bytes": processed_bytes,
-                    "uploaded_count": actual_uploaded_count,
-                    "uploaded_bytes": actual_uploaded_bytes,
-                    "actual_uploaded_count": actual_uploaded_count,
-                    "actual_uploaded_bytes": actual_uploaded_bytes,
+                    "uploaded_count": processed_count if index_committed else 0,
+                    "uploaded_bytes": processed_bytes if index_committed else 0,
+                    "actual_uploaded_count": getattr(client, "actual_uploaded_count", None),
+                    "actual_uploaded_bytes": getattr(client, "actual_uploaded_bytes", None),
                     "verified_existing_count": receipts_reused_count,
                     "verified_existing_bytes": receipts_reused_bytes,
                     "receipts_reused_count": receipts_reused_count,
                     "requests": requests,
+                    "body_requests": body_requests,
+                    "control_requests": control_requests,
                     "remaining_pending": total_remaining,
                     "error": last_error,
                 }

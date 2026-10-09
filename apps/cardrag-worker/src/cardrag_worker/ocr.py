@@ -2017,9 +2017,33 @@ class OCRResolver:
             if prior.cache_kind in {"native", "adopted", "content"}
             else "content"
         )
-        reuse_key = prior.reuse_key or content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
+        if cache_kind == "content":
+            expected_content_key = content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
+            if prior.reuse_key is not None and prior.reuse_key != expected_content_key:
+                return None
+            reuse_key = expected_content_key
+        else:
+            if self.cache_epoch != 0:
+                return None
+            reuse_key = prior.reuse_key or content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
 
-        variant_id = prior.variant_id or prior.ocr_sha256
+        provider = prior.provider
+        model = prior.model
+        if provider is None and prior_manifest_path.is_file() and not prior_manifest_path.is_symlink():
+            with suppress(Exception):
+                p_man = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
+                prov = p_man.get("provenance", {})
+                if isinstance(prov, dict):
+                    if prov.get("provider"):
+                        provider = str(prov["provider"])
+                    if prov.get("model"):
+                        model = str(prov["model"])
+
+        variant_id = (
+            prior.variant_id
+            if (prior.variant_id and re.fullmatch(r"[0-9a-f]{64}", prior.variant_id))
+            else prior.ocr_sha256
+        )
         return OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -2027,8 +2051,8 @@ class OCRResolver:
             ocr_sha256=verified.sha256,
             size_bytes=verified.size_bytes,
             provenance="sealed-prior-generation",
-            provider=prior.provider or "generation-only",
-            model=prior.model or "unrecorded",
+            provider=provider or "generation-only",
+            model=model or "unrecorded",
             reuse_key=reuse_key,
             cache_kind=cache_kind,
             cache_reuse_key=reuse_key,
@@ -2428,7 +2452,7 @@ class OCRResolver:
                     stacklevel=2,
                 )
 
-        if self._content_store is not None and reprocess_request_id is None:
+        if self._content_store is not None and prior_local_native is None and reprocess_request_id is None:
             content_hit = await self._content_store.lookup(
                 run_id=run_id,
                 document_id=document_id,

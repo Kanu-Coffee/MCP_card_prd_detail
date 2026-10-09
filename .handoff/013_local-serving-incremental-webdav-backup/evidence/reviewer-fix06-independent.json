@@ -1,0 +1,25 @@
+{
+  "commit": "6004526",
+  "targeted_pytest": {
+    "passed": 50,
+    "failed": 1,
+    "failed_test": "test_backup_budget_reserve_commits_partial_batch_and_retry_zero_requests",
+    "actual_assertion": "6 == 3 + (4 - 2)"
+  },
+  "mypy": "Success: no issues found in 4 source files",
+  "ocr_repro": {
+    "provider_calls": 0,
+    "cache_hit": true,
+    "expected_variant": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "returned_variant": "34d4d5eabb2a8165f9fc78842d7b990fa7e88cf4b72252d2456b5a63d60709ab",
+    "expected_provider": "local-paddleocr",
+    "returned_provider": "generation-only",
+    "expected_model": "PaddleOCR-VL-1.6",
+    "returned_model": "unrecorded",
+    "same_input_variant_stable": false,
+    "epoch1_hit_of_epoch0": true,
+    "epoch1_returned_key": "0d759b4b8967dd1f047032335f55e159206f953fc5fa27adc1bd1d4d17ce3894",
+    "epoch1_expected_key": "9195f9a06744ac63326491fac4f4b9069cc4c8862333f2cc20c098085eeba3b8"
+  },
+  "production_changed": false
+}
