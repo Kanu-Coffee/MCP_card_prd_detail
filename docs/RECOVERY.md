@@ -1,7 +1,7 @@
 # 백업과 복구
 
-복구의 목적은 원본을 보존하면서 검증 가능한 새 상태를 만드는 것입니다. 아래 도구는 저장소의
-오프라인 운영 도구이며 Worker/MCP 이미지에 포함되지 않습니다. 일반 시작·설정은
+복구의 목적은 원본을 보존하면서 검증 가능한 새 상태를 만드는 것입니다. `tools/`의 검증 도구는
+저장소에서 별도로 실행하며, `cardrag-worker` 복구 명령은 Worker 이미지에도 포함됩니다. 일반 시작·설정은
 [운영 안내](OPERATIONS.md), 이미지 전환은 [릴리스 안내](RELEASING.md)를 참고하세요.
 
 ## 먼저 보존할 것
@@ -98,7 +98,10 @@ readiness와 generation을 확인한 뒤 전환합니다. Worker state는 이 �
 정책·lock·예약은 `audit-reports/.state-quota/` 아래에 보존되며, 이미 쓰인 부분 파일은
 예약을 정리한 뒤에도 전체 state 사용량에 포함됩니다.
 
-## WebDAV 검증과 미게시 파일
+## WebDAV 게시 호환 모드의 검증과 미게시 파일
+
+이 절은 `CARDRAG_PUBLICATION_TRANSPORT=webdav`의 generation 게시 정책입니다.
+현재 로컬 서빙 모드의 PDF·OCR 백업 주기는 아래 [증분 백업](#증분-webdav-백업-운영)을 따릅니다.
 
 주기 검증의 기본 만기는 전체 검사 후 성공 실행 14회, 7일, 고유 신규 CAS 10 GiB 중 먼저
 도달한 조건입니다. `no_change`는 성공 회수에 포함하고 실패는 포함하지 않습니다.
@@ -175,66 +178,53 @@ control 파일·SQLite inventory·master/OCR metadata·PDF·OCR와 전체 export
 `adoption-audit`는 봉인 export에 대응하는 remote READY/manifest/OCR CAS를 전체 hash·size로
 확인하는 읽기 전용 검사입니다. 예상 수량은 해당 export에서 가져오며 특정 환경의 수를 고정하지 않습니다.
 
-## 재해 복구: WebDAV generation 기반 OCR 직접 복원 (`restore-ocr-seed`)
+## 재해 복구: OCR 자료 재사용
 
-호스트가 완전히 폐기되거나 로컬 state volume이 모두 유실되었을 때, 전체 복구에서 가장 많은
-시간이 소요되는 작업은 기존 5,207건의 OCR 재처리입니다. 환경변수, WebDAV 인증, PDF discovery,
-source lineage, 임베딩 및 MCP 색인은 새 호스트에서 재구성·재계산할 수 있습니다.
+복구의 우선 목표는 오래 걸리는 OCR 결과를 보존하는 것입니다. 새 호스트에서 코드와
+provider 인증·설정을 다시 준비하고, PDF 목록·임베딩·MCP 색인은 필요에 따라 재구성합니다.
+백업되지 않은 OCR이나 PDF·모델 계약이 달라진 자료는 다시 처리해야 할 수 있습니다.
 
-Worker의 `restore-ocr-seed` 명령은 WebDAV의 최신 generation manifest(또는 지정된 generation ID)로부터
-문서별 OCR contract 및 CAS 객체를 직접 읽어 빈 state volume에 즉시 재사용 가능한 OCR seed를 구성합니다.
+현재 증분 백업은 아래 `backup restore` 경로로 복원합니다. 로컬 원장이 없는 새 호스트에서는
+WebDAV의 `v1/backup/index.json`을 읽어 항목을 찾고, 다운로드한 객체의 크기·SHA-256을 검증합니다.
+복원 결과의 `status`, 실패 항목과 OCR 캐시 재사용 여부를 확인한 뒤 운영 배치를 시작하십시오.
+전체 OCR의 provider 호출 0건이나 고정된 복원 시간을 보장하지는 않습니다.
 
-### 1. 복구 계약과 안전 보장
-
-- **OCR 공급자 호출 0건 보장**: 복원 적용 후 Worker가 실행되면 `OCRResolver`가 seed ledger를 통해
-  기존 문서를 100% 캐시 히트로 해석하며, 외부 OCR provider 호출이 발생하지 않습니다.
-- **PaddleOCR 및 모델 계약 보존**: 로컬 PaddleOCR로 처리된 15건(`model="PaddleOCR-VL-1.6"`)과
-  기존 클라우드 모델 처리본의 문서별 결속을 그대로 보존합니다.
-- **CAS 다운로드 중복 제거**: 최신 세대 5,207건의 문서는 4,922개의 고유 OCR CAS를 참조하며,
-  동일 CAS 객체는 1회만 다운로드하여 전송량을 최소화합니다(약 71.2 MB).
-- **무결성 전수 검증**: 다운로드 시 SHA-256 및 크기 검증, 마크다운 페이지 구조(`## Page N`) 확인,
-  자격증명 및 비정규 포맷 유출 차단을 수행하며, 각 파일은 `ocr-seed/<document_id>/ocr.md`에
-  `0600` 권한으로 격리 생성됩니다.
-- **원장 봉인**: 복원 완료 시 `audit-reports/state-seed/<ledger_sha256>.json`에
-  `cardrag.ocr-recovery-ledger.v1` 규격의 감사 원장을 영속화합니다.
-
-### 2. 복구 실행 절차
+과거 **WebDAV generation 게시 모드**의 백업이 있을 때만 `restore-ocr-seed`를 사용합니다.
+이 명령은 generation manifest와 OCR CAS를 읽으므로 현재 증분 백업 index와는 입력 형식이 다릅니다.
 
 ```bash
-# 1. 신규 또는 빈 Worker state 디렉터리 준비
-export CARDRAG_WORKER_STATE_DIR=/var/lib/cardrag-worker
-
-# 2. 사전 dry-run 검증 (쓰기 없이 WebDAV 매니페스트 및 CAS 객체 무결성 전수 점검)
+# 과거 generation 백업의 검증 및 복원
 cardrag-worker restore-ocr-seed --dry-run
-
-# 3. 실제 복원 실행 (concurrency 8~16 권장)
 cardrag-worker restore-ocr-seed --apply --concurrency 8
 ```
 
-### 3. 소요 시간 및 용량
+복원 건수·용량·소요 시간은 대상 백업과 네트워크 상태에 따라 달라집니다.
 
-- **전송량**: 약 71.2 MB (4,922개 고유 CAS 객체)
-- **복원 소요 시간**: 네트워크 상태에 따라 약 1~2분 소요
-- **주의사항**: 이 복구 경로는 OCR 데이터의 온전한 보존과 재사용만을 보장하며,
-  임베딩 재계산 및 전체 배치 완주 시간은 호스트 사양과 GPU/CPU 자원에 따라 달라집니다.
-
-## 증분 WebDAV 백업 운영 (013 아키텍처)
+## 증분 WebDAV 백업 운영
 
 Worker는 로컬 볼륨(`/var/lib/cardrag-serving`)에 generation을 원자적으로 직접 게시하여 MCP가 서빙하도록 하며, WebDAV는 선택적 증분 백업 채널로 동작합니다.
 SQLite 원장(`$CARDRAG_WORKER_STATE_DIR/backup-ledger.sqlite3`)이 미전송 OCR 결과 및 참조 CAS 객체를 추적합니다.
 
-### 1. 백업 정책 설정 (`CARDRAG_BACKUP_MODE`)
+### 백업 정책 (`CARDRAG_BACKUP_MODE`)
 
 - `disabled` (기본값): WebDAV 백업 비활성화. 원장에 미전송 항목을 누적하지 않아 디스크를 절약합니다.
-- `immediate`: 각 Worker 배치 성공 후 대기 항목을 즉시 WebDAV에 업로드합니다.
+- `immediate`: 각 Worker 배치 성공 후 대기 항목이 있으면 백업을 시도합니다.
 - `hybrid`: 다음 네 가지 조건 중 하나라도 만족되면 인라인 백업을 실행합니다:
   - 7회 배치 누적 (`CARDRAG_BACKUP_EVERY_RUNS=7`)
-  - 신규 OCR 결과 30건 누적 (`CARDRAG_BACKUP_NEW_OCR_COUNT=30`)
-  - 신규 데이터 1 GiB 누적 (`CARDRAG_BACKUP_NEW_BYTES=1073741824`)
+  - 대기 OCR 항목 30건 누적 (`CARDRAG_BACKUP_NEW_OCR_COUNT=30`)
+  - 대기 데이터 1 GiB 누적 (`CARDRAG_BACKUP_NEW_BYTES=1073741824`)
   - 미전송 항목 경과 7일(`CARDRAG_BACKUP_MAX_PENDING_AGE_HOURS=168`)
-- `manual`: 주기적 자동 업로드를 하지 않고 CLI 명령(`backup flush`)으로만 실행합니다.
+- `manual`: 항목을 누적하되 자동 업로드하지 않습니다. `backup flush --force`로 실행합니다.
 
-### 2. 백업 CLI 명령어
+인라인 시간 예산은 `CARDRAG_BACKUP_INLINE_BUDGET_SECONDS`이며 기본 300초입니다.
+시간 예산이 끝나면 완료분을 기록하고 남은 항목을 다음 실행으로 넘깁니다. 자동으로 대기·재시도를
+반복하는 별도 컨테이너가 생성되는 것은 아닙니다. 신규 항목은 기존 대기 목록에 추가됩니다.
+대기 항목이 없으면 자동 백업의 원격 요청은 생략합니다.
+
+`pending_count`·`pending_bytes`는 아직 완료되지 않은 백업 항목과 논리적 크기이며,
+새 OCR 문서 수나 실제 HTTP 업로드량과 같지 않습니다. 백업 실패·부분 완료는 로컬 게시와 MCP 서빙을 차단하지 않습니다.
+
+### 백업 명령
 
 Worker 컨테이너 내에서 `backup` 하위 명령어 그룹을 지원합니다:
 
@@ -245,10 +235,10 @@ cardrag-worker backup status
 # 2. 대기 중인 증분 백업 항목 강제 업로드
 cardrag-worker backup flush --force
 
-# 3. WebDAV 백업 수신증(receipts) 표본 무결성 검증
-cardrag-worker backup audit [--full]
+# 3. 확인 기록(receipts)의 표본 검증 (전체 검증은 --full 추가)
+cardrag-worker backup audit
 
-# 4. WebDAV로부터 백업된 OCR 캐시를 Worker state root 디렉터리로 복원 (기본값: $CARDRAG_STATE_DIR)
-cardrag-worker backup restore [--target-dir /var/lib/cardrag-worker]
+# 4. 별도의 새 Worker state로 복원 (생략 시 CARDRAG_WORKER_STATE_DIR 사용)
+cardrag-worker backup restore --target-dir /recovery/new-worker-state
 ```
 

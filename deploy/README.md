@@ -8,7 +8,9 @@
 | `simple.env.example` | Compose용 호스트 설정 예시 |
 | `worker/compose.yaml` | 한 번 실행하는 수집·OCR Worker |
 | `mcp/compose.yaml` | 읽기 전용 상시 MCP 서버 |
-| 각 `compose.secrets.yaml` | 호스트 비밀 파일의 읽기 전용 주입 |
+| 각 `compose.secrets.yaml` | OpenRouter·MCP 인증 파일의 읽기 전용 주입 |
+| 각 `compose.secrets.webdav.yaml` | 백업 또는 WebDAV 게시 모드의 선택적 계정 주입 |
+| `worker/compose.opencode.yaml` / `compose.paddleocr.yaml` | OCR provider 선택 |
 | 각 `compose.ca.yaml` | 사용자 지정 WebDAV CA 인증서 |
 | 각 `compose.candidate.yaml` | digest로 고정한 격리 후보 검증 |
 | `worker/compose.cache-seed.yaml` | 종료된 호환 Worker 상태의 읽기 전용 seed |
@@ -25,5 +27,6 @@
 
 처음 설치할 때와 기존 설치를 전환할 때의 볼륨 선택은 다릅니다. 기존 운영의 볼륨 이름을
 확인하지 않은 채 새 기본값을 적용하지 마십시오. Worker 상태와 MCP 상태, Codex 인증은
-서로 별도 경로입니다. 복사는 writer가 종료된 뒤에만 수행하며 상세 조건은
+서로 별도 경로입니다. 게시 데이터는 `cardrag-serving` 볼륨에 Worker가 쓰고 MCP가 읽기 전용으로 접근합니다.
+기본 로컬 모드에는 WebDAV 계정이 필요하지 않습니다. 복사는 writer가 종료된 뒤에만 수행하며 상세 조건은
 [복구](../docs/RECOVERY.md)와 [stable 전환](../docs/RELEASING.md)을 따릅니다.

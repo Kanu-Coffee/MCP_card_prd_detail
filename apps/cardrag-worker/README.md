@@ -4,8 +4,13 @@
 단발성 Worker입니다. 스케줄러와 MCP 서버는 이 패키지에 포함되지 않습니다.
 
 ```text
-수집 → PDF 검증 → OCR → 계약 구조화 → 임베딩 → 로컬 봉인 → WebDAV 게시
+수집 → PDF 검증 → OCR → 계약 구조화 → 임베딩 → 로컬 봉인 → 로컬 서빙 게시
+                                                          └→ 선택적 WebDAV 증분 백업
 ```
+
+기본 게시 경로는 공유 로컬 볼륨입니다. WebDAV 게시 호환 모드는 별도로 선택할 수 있으며,
+로컬 모드의 백업 실패는 MCP 게시 성공을 취소하지 않습니다. 백업 상태·실행·복원 명령은
+[복구 안내](../../docs/RECOVERY.md#증분-webdav-백업-운영)에 정리했습니다.
 
 문서별 OCR 실패는 명시적으로 기록합니다. 현재 수집 대상에서 각 카드사의 성공률이 95% 이상일 때 성공한
 문서를 게시할 수 있으며, 실패 상품은 `ocr_failed`로 남습니다. 이력 개정의 OCR 실패는
@@ -76,7 +81,8 @@ PDF 스킵은 기존 목록의 재처리입니다. 카드사 discovery/다운로
 
 부분 실행의 기본 게시 채널은 `candidate-009`입니다. `--publish-channel stable`은
 기존 stable 승인과 현재 stable generation에 대응하는 source를 요구합니다.
-`--skip-stage webdav`는 OCR cache 업로드와 GC까지 모든 원격 쓰기를 차단합니다.
+`webdav`는 기존 CLI의 게시 단계 이름으로 유지됩니다. 로컬 게시 모드에서도
+`--skip-stage webdav`는 서빙 게시를 생략하며, OCR cache 업로드와 GC 등 원격 쓰기도 차단합니다.
 결과는 `status=local_only`, `published=false`, `local_artifacts`로 반환하며,
 기존 DB enum의 `interrupted` 상태와 별도 완료 receipt로 로컬 완료를 구분합니다.
 원격 게시 성공이나 `ready_publish`로 기록하지 않습니다. 게시 대상 변경은 새 run으로
