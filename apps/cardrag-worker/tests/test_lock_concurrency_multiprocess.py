@@ -21,6 +21,7 @@ def _worker_process_target(
     state_dir_str: str,
     barrier: mp.Barrier,
     result_queue: mp.Queue,
+    competitor_done: mp.Event,
 ) -> None:
     # Running inside an isolated process
     os.environ["CARDRAG_WORKER_STATE_DIR"] = state_dir_str
@@ -31,9 +32,8 @@ def _worker_process_target(
     os.environ["CARDRAG_OPENROUTER_API_KEY"] = "fake-key"
     os.environ["CARDRAG_DOCUMENT_AGGREGATION"] = ""
     os.environ["CARDRAG_WORKER_MINIMUM_START_FREE_BYTES"] = "0"
-
-    # Wait at the barrier for simultaneous start
-    barrier.wait()
+    os.environ["CARDRAG_PUBLICATION_TRANSPORT"] = "webdav"
+    os.environ["CARDRAG_BACKUP_MODE"] = "disabled"
 
     import sqlite3
     import traceback
@@ -50,6 +50,22 @@ def _worker_process_target(
 
     from cardrag_worker import cli as cli_module
 
+    # Capacity traversal has separate tests. Freeze its evidence before the
+    # race so creation of the winner's lock/SQLite files cannot derail this
+    # lock-only test before either process attempts the actual lock.
+    capacity = cli_module.preflight_worker_start_capacity(Path(state_dir_str), minimum_free_bytes=0)
+    cli_module.preflight_worker_start_capacity = lambda *args, **kwargs: capacity
+    cli_module.revalidate_worker_start_capacity = lambda snapshot: snapshot
+
+    async def hold_lock_without_provider(settings: object) -> object:
+        # Keep the real CLI lock held until the competing CLI exits. Never
+        # reach the external embedding provider with the fake API key.
+        if not competitor_done.wait(timeout=10):
+            raise AssertionError("Competing Worker did not exit while lock was held")
+        raise RuntimeError("lock-holder fixture completed without provider calls")
+
+    cli_module._qwen_embedding_provider = hold_lock_without_provider  # type: ignore[assignment]
+
     orig_unexpected = cli_module._echo_worker_unexpected_failure
     last_traceback = None
 
@@ -60,10 +76,13 @@ def _worker_process_target(
 
     cli_module._echo_worker_unexpected_failure = captured_unexpected  # type: ignore[assignment]
 
+    # Both child processes are fully configured before competing for the lock.
+    barrier.wait(timeout=15)
     runner = CliRunner()
     start_time = time.monotonic()
     result = runner.invoke(cli_module.app, ["run"])
     elapsed = time.monotonic() - start_time
+    competitor_done.set()
 
     sqlite3.connect = orig_connect  # type: ignore[assignment]
 
@@ -105,14 +124,15 @@ def test_independent_two_process_lock_barrier(tmp_path: Path) -> None:
     ctx = mp.get_context("spawn")
     barrier = ctx.Barrier(2)
     result_queue = ctx.Queue()
+    competitor_done = ctx.Event()
 
     p1 = ctx.Process(
         target=_worker_process_target,
-        args=(str(state_dir), barrier, result_queue),
+        args=(str(state_dir), barrier, result_queue, competitor_done),
     )
     p2 = ctx.Process(
         target=_worker_process_target,
-        args=(str(state_dir), barrier, result_queue),
+        args=(str(state_dir), barrier, result_queue, competitor_done),
     )
 
     p1.start()
@@ -124,16 +144,17 @@ def test_independent_two_process_lock_barrier(tmp_path: Path) -> None:
     assert not p1.is_alive(), "Process 1 timed out"
     assert not p2.is_alive(), "Process 2 timed out"
 
-    results = []
-    while not result_queue.empty():
-        results.append(result_queue.get())
+    results = [result_queue.get(timeout=5) for _ in range(2)]
 
     assert len(results) == 2, f"Expected 2 results, got {len(results)}"
 
     # Find the process that lost the lock race
     busy_results = [r for r in results if r["reason_code"] == "worker_busy"]
-    assert len(busy_results) >= 1, f"At least one process should lose the lock: {results}"
+    assert len(busy_results) == 1, f"Exactly one process should lose the lock: {results}"
 
     loser = busy_results[0]
     assert loser["exit_code"] == 0
     assert not loser["db_opened"], "Loser process must never open or touch the database"
+    winner = next(r for r in results if r["reason_code"] != "worker_busy")
+    assert winner["db_opened"], "The lock holder must reach the protected database open"
+    assert "lock-holder fixture completed without provider calls" in winner["traceback"]
