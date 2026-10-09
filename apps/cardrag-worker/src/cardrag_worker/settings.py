@@ -184,7 +184,7 @@ class PublicationResumeSettings:
     sqlite_mmap_mib: int
     webdav_upload_chunk_mib: int
     webdav_verification: WebDAVVerificationSettings = WebDAVVerificationSettings()
-    publication_transport: str = "webdav"
+    publication_transport: str = "local"
     serving_dir: Path = Path("/var/lib/cardrag-serving")
 
     @classmethod
@@ -192,7 +192,7 @@ class PublicationResumeSettings:
         channel = os.environ.get("CARDRAG_CHANNEL", "stable")
         channel_pointer_path(channel)
         aggregation_path, aggregation_sha256 = _aggregation_profile_from_env()
-        publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav").strip().lower()
+        publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "local").strip().lower()
         serving_dir_str = os.environ.get("CARDRAG_SERVING_DIR", "/var/lib/cardrag-serving").strip()
         return cls(
             state_dir=_worker_state_dir_from_env(),

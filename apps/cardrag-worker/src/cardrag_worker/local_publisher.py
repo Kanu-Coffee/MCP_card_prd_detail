@@ -29,6 +29,7 @@ from cardrag_core import (
     validate_relative_path,
 )
 
+from .async_utils import to_thread_fenced
 from .webdav import PublishedBundle, RemoteGenerationIdentity
 
 
@@ -74,7 +75,7 @@ class LocalServingTransport:
     async def validated_current_generation(
         self, *, force_refresh: bool = False
     ) -> RemoteGenerationIdentity | None:
-        return await asyncio.to_thread(self._validated_current_generation_sync)
+        return await to_thread_fenced(self._validated_current_generation_sync)
 
     def _validated_current_generation_sync(self) -> RemoteGenerationIdentity | None:
         if not self._full_pointer_path.exists():
@@ -182,7 +183,7 @@ class LocalServingTransport:
         unique_objects: Iterable[tuple[Path, str, str, int]] = (),
         before_pointer_replace: Callable[[], Awaitable[None]] | None = None,
     ) -> PublishedBundle:
-        return await asyncio.to_thread(
+        return await to_thread_fenced(
             self._publish_sync,
             generation_id=generation_id,
             database=database,
@@ -361,12 +362,21 @@ class LocalServingTransport:
                     with suppress(OSError):
                         temp_pointer.unlink()
 
-            # 6. Serving volume retention: retain current + 1 previous generation
+            # 6. Serving volume retention: retain current + previous generation(s)
             generations_root = self.serving_dir / "v1" / "generations"
             if generations_root.is_dir():
                 retain_gens = {generation_id}
-                if prev_gen_id is not None:
+                if prev_gen_id is not None and prev_gen_id != generation_id:
                     retain_gens.add(prev_gen_id)
+                else:
+                    # When republishing the same current generation, preserve the newest other generation
+                    other_gens = sorted(
+                        [p for p in generations_root.iterdir() if p.is_dir() and p.name != generation_id],
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if other_gens:
+                        retain_gens.add(other_gens[0].name)
                 for gen_path in generations_root.iterdir():
                     if gen_path.is_dir() and gen_path.name not in retain_gens:
                         with suppress(OSError):

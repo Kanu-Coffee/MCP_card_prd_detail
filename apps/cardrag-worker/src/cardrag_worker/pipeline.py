@@ -4954,6 +4954,14 @@ class WorkerPipeline:
                     raise RuntimeError("OCR reprocess result was not durably published as a content variant")
                 if current_document_id in reprocess_document_ids:
                     self._record_reprocess_success(run_id, current_document_id, result)
+                if getattr(self.settings, "backup_mode", "disabled") != "disabled":
+                    with suppress(Exception):
+                        from .backup import BackupLedger
+
+                        b_ledger = BackupLedger(self.state_dir / "backup-ledger.sqlite3")
+                        b_ledger.record_document_ocr(
+                            run_id, current_document_id, self.state_dir, self.settings
+                        )
                 prior_local_native = prior_local_native_sources.get(current_document_id)
                 if (
                     current_document_id not in reprocess_document_ids
