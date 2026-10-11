@@ -109,8 +109,8 @@ def test_worker_keeps_exact_wolfi_sandbox_and_codex_contract() -> None:
     assert "bubblewrap" in worker
     assert "libcap-utils" in worker
     assert "--ignore-unfixed" not in DOCKERFILE
-    assert "ARG CODEX_VERSION=0.151.0" in DOCKERFILE
-    assert ("ARG CODEX_SHA256=605b4b183f22c645f5def63a5b7191767407fb66a6feaec4eaf10b5b7e0058f6") in DOCKERFILE
+    assert "ARG CODEX_VERSION=0.162.1" in DOCKERFILE
+    assert ("ARG CODEX_SHA256=86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057") in DOCKERFILE
     assert "sha256sum -c /tmp/codex.sha256" in worker
     assert "ln -s codex /usr/local/bin/codex-linux-sandbox" in worker
     assert "codex --version" in worker
