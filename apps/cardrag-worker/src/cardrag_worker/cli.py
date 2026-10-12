@@ -65,7 +65,6 @@ from .embedding_seed_v122 import (
 )
 from .embedding_v5 import (
     EmbeddingV5Error,
-    EmbeddingV5PermanentRequestError,
     EmbeddingV5RequestError,
     EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
@@ -448,7 +447,7 @@ def _probe_codex_version(executable: str | None) -> str | None:
     """Probe CLI version without touching auth or initiating inference."""
     if not executable:
         return None
-    try:
+    with suppress(OSError, subprocess.SubprocessError):
         proc = subprocess.run(  # noqa: S603
             [executable, "--version"],
             capture_output=True,
@@ -463,8 +462,6 @@ def _probe_codex_version(executable: str | None) -> str | None:
             version_match = re.search(r"\b([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[a-zA-Z0-9\.]*)?)\b", first_line)
             if version_match:
                 return f"codex {version_match.group(1)}"
-    except Exception:
-        pass
     return None
 
 
@@ -832,7 +829,7 @@ def _ocr_resolver(
     return resolver
 
 
-async def _run(resume: str | None) -> dict[str, Any]:
+async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
@@ -943,6 +940,22 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     settings.ocr_cache_require_hit,
                 )
                 embeddings = await _qwen_embedding_provider(settings)
+                if startup_only:
+                    logging.getLogger("cardrag_worker.cli").info(
+                        "Worker startup check completed elapsed_seconds=%.3f", time.monotonic() - started
+                    )
+                    return {
+                        "codex_version": codex_ver,
+                        "embedding_model": settings.embedding_model,
+                        "embedding_provider": settings.embedding_provider_id,
+                        "ocr_fallback_model": settings.ocr_fallback_model,
+                        "ocr_fallback_provider": settings.ocr_fallback_provider,
+                        "ocr_model": settings.ocr_model,
+                        "ocr_provider": settings.ocr_provider,
+                        "stage": "completed",
+                        "status": "ready",
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                    }
                 stage = "pipeline_entry"
                 t_stage = time.monotonic()
                 logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
@@ -1050,117 +1063,6 @@ async def _run(resume: str | None) -> dict[str, Any]:
         logging.getLogger("cardrag_worker.cli").info(
             "Worker execution finished elapsed_seconds=%.3f", time.monotonic() - started
         )
-
-
-async def _run_startup_check() -> dict[str, Any]:
-    started = time.monotonic()
-    _configure_worker_logging()
-    settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
-    _guard_v114_publication_channel(settings)
-    startup_capacity = preflight_worker_start_capacity(
-        settings.state_dir,
-        minimum_free_bytes=settings.minimum_start_free_bytes,
-    )
-    logging.getLogger("cardrag_worker.cli").info(
-        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d",
-        startup_capacity.filesystem_free_bytes,
-        startup_capacity.minimum_free_bytes,
-    )
-    document_aggregation = None
-    if settings.document_aggregation_profile_path is not None:
-        expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
-        if expected_artifact_sha256 is None:
-            raise ValueError("document aggregation profile artifact SHA-256 is absent")
-        document_aggregation = load_verified_aggregation_profile_v5(
-            settings.document_aggregation_profile_path,
-            expected_artifact_sha256=expected_artifact_sha256,
-        )
-    if document_aggregation is None:
-        settings.state_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            startup_capacity = revalidate_worker_start_capacity(startup_capacity)
-        except V5CapacityError:
-            lock_file = getattr(settings, "lock_file", None)
-            if lock_file is not None:
-                with worker_lock(lock_file):
-                    raise
-            raise
-    publication_transport = getattr(settings, "publication_transport", None)
-    if publication_transport is None:
-        publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav")
-    if publication_transport == "local":
-        transport: Any = LocalServingTransport(
-            getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving")),
-            channel=getattr(settings, "channel", "stable"),
-        )
-    else:
-        transport = WebDAVClient.from_env(
-            stable_publication_approved=settings.stable_publication_approved,
-            upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
-        )
-    try:
-        if document_aggregation is not None:
-            await validate_document_aggregation_head(transport, document_aggregation)
-            settings.state_dir.mkdir(parents=True, exist_ok=True)
-        worker_lock_file = getattr(
-            settings, "lock_file", getattr(settings, "state_dir", Path(".")) / "worker.lock"
-        )
-        with worker_lock(worker_lock_file):
-            startup_capacity = revalidate_worker_start_capacity(startup_capacity)
-            with WorkerState(
-                settings.state_database,
-                sqlite_cache_mib=settings.sqlite_cache_mib,
-                sqlite_mmap_mib=settings.sqlite_mmap_mib,
-            ) as state:
-                if isinstance(transport, WebDAVClient):
-                    transport.configure_verification(state, settings.webdav_verification)
-                stage = "ocr_resolver"
-                t_stage = time.monotonic()
-                logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
-                try:
-                    _resolver = _ocr_resolver(
-                        settings, state, transport if isinstance(transport, WebDAVClient) else None
-                    )
-                except Exception as exc:
-                    elapsed = time.monotonic() - t_stage
-                    _log_startup_stage_failure(stage, exc, elapsed)
-                    raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-                codex_ver = (
-                    _probe_codex_version(settings.codex_executable)
-                    if settings.ocr_provider in {"codex", "codex-exec"}
-                    else None
-                )
-                logging.getLogger("cardrag_worker.cli").info(
-                    "Startup stage passed stage=%s elapsed_seconds=%.3f codex_version=%s",
-                    stage,
-                    time.monotonic() - t_stage,
-                    codex_ver or "not_applicable",
-                )
-                logging.getLogger("cardrag_worker.cli").info(
-                    "Remote OCR cache access mode=%s require_hit=%s",
-                    settings.ocr_cache_mode,
-                    settings.ocr_cache_require_hit,
-                )
-                _embeddings = await _qwen_embedding_provider(settings)
-                logging.getLogger("cardrag_worker.cli").info(
-                    "Worker startup check completed elapsed_seconds=%.3f", time.monotonic() - started
-                )
-                return {
-                    "codex_version": codex_ver,
-                    "embedding_model": settings.embedding_model,
-                    "embedding_provider": settings.embedding_provider_id,
-                    "ocr_fallback_model": settings.ocr_fallback_model,
-                    "ocr_fallback_provider": settings.ocr_fallback_provider,
-                    "ocr_model": settings.ocr_model,
-                    "ocr_provider": settings.ocr_provider,
-                    "stage": "completed",
-                    "status": "ready",
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                }
-    finally:
-        closer = getattr(transport, "close", None)
-        if callable(closer):
-            await closer()
 
 
 async def _operation_with_signal_shutdown(
@@ -1376,7 +1278,7 @@ def startup_check_command() -> None:
     """Run production startup checks (capacity, providers, embeddings) and exit before WorkerPipeline."""
 
     try:
-        summary = asyncio.run(_run_startup_check())
+        summary = asyncio.run(_run(None, startup_only=True))
         _echo(summary)
     except AlreadyRunning:
         _echo_worker_busy()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import fcntl
 import hashlib
 import json
@@ -1025,7 +1026,7 @@ def test_cli_pre_pipeline_failure_uses_fixed_safe_payload(
 def test_cli_startup_tokenizer_failure_classified_safely(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret_sentinel = "SECRET_TOKENIZER_DOWNLOAD_URL_BEARING_TOKEN"
+    secret_sentinel = _repeated_test_token("SECRET_TOKENIZER_URL_", "TKN", 4)
     from cardrag_worker.tokenizer_v5 import QwenTokenizerError
 
     async def failed_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
@@ -1040,7 +1041,7 @@ def test_cli_startup_tokenizer_failure_classified_safely(
     assert exc_info.value.stage == "tokenizer_validation"
     assert isinstance(exc_info.value.cause, QwenTokenizerError)
 
-    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
         raise exc_info.value
 
     monkeypatch.setattr(cli_module, "_run", run_failing_startup)
@@ -1058,7 +1059,7 @@ def test_cli_startup_tokenizer_failure_classified_safely(
 def test_cli_startup_openrouter_transient_exhaustion_classified_safely(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret_sentinel = "OPENROUTER_SECRET_KEY_EXHAUSTED"
+    secret_sentinel = _repeated_test_token("OPENROUTER_SECRET_", "KEY", 4)
     from cardrag_worker.embedding_v5 import EmbeddingV5TransientError
 
     async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
@@ -1081,7 +1082,7 @@ def test_cli_startup_openrouter_transient_exhaustion_classified_safely(
 
     assert exc_info.value.stage == "qwen_endpoint_preflight"
 
-    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
         raise exc_info.value
 
     monkeypatch.setattr(cli_module, "_run", run_failing_startup)
@@ -1105,14 +1106,14 @@ def test_cli_startup_openrouter_transient_exhaustion_classified_safely(
 def test_cli_startup_openrouter_permanent_failure_classified_safely(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret_sentinel = "OPENROUTER_AUTH_REJECTED_SECRET"
-    from cardrag_worker.embedding_v5 import EmbeddingV5PermanentRequestError
+    secret_sentinel = _repeated_test_token("OPENROUTER_AUTH_", "REJECT", 4)
+    from cardrag_worker.embedding_v5 import EmbeddingV5RequestError
 
     async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
         return SimpleNamespace(asset_sha256="fake_sha")
 
     async def failed_preflight(*_args: Any, **_kwargs: Any) -> Any:
-        raise EmbeddingV5PermanentRequestError(
+        raise EmbeddingV5RequestError(
             secret_sentinel,
             kind="authentication",
             status_code=401,
@@ -1128,7 +1129,7 @@ def test_cli_startup_openrouter_permanent_failure_classified_safely(
 
     assert exc_info.value.stage == "qwen_endpoint_preflight"
 
-    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
         raise exc_info.value
 
     monkeypatch.setattr(cli_module, "_run", run_failing_startup)
@@ -1150,7 +1151,6 @@ def test_cli_startup_configured_provider_missing_classified_safely(
         return SimpleNamespace(asset_sha256="fake_sha")
 
     async def fake_preflight(*_args: Any, **_kwargs: Any) -> Any:
-        # Comparison with providers list that does not include configured provider
         other_profile = SimpleNamespace(provider_id="other_unconfigured_provider")
         report = SimpleNamespace(profile=other_profile)
         return SimpleNamespace(providers=[report], minimum_cross_provider_cosine=0.999)
@@ -1165,7 +1165,7 @@ def test_cli_startup_configured_provider_missing_classified_safely(
     assert exc_info.value.stage == "embedding_verification"
     assert isinstance(exc_info.value.cause, ValueError)
 
-    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
         raise exc_info.value
 
     monkeypatch.setattr(cli_module, "_run", run_failing_startup)
@@ -1177,30 +1177,203 @@ def test_cli_startup_configured_provider_missing_classified_safely(
     assert payload["reason_code"] == "worker_unexpected_failure"
 
 
-def test_cli_startup_check_command_execution(
+def test_cli_startup_check_success_bypasses_pipeline_and_backup(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def mock_startup_check() -> dict[str, Any]:
-        return {
-            "codex_version": "codex 0.162.1",
-            "embedding_model": "qwen/qwen3-embedding-8b",
-            "embedding_provider": "deepinfra",
-            "ocr_fallback_model": "PaddleOCR-VL-1.6",
-            "ocr_fallback_provider": "local-paddleocr",
-            "ocr_model": "gpt-6.1-sol",
-            "ocr_provider": "codex-exec",
-            "stage": "completed",
-            "status": "ready",
-            "elapsed_seconds": 1.234,
-        }
+    state_root = tmp_path / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(cli_module, "_run_startup_check", mock_startup_check)
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        state_dir=state_root,
+        channel="candidate-v1.0.11",
+        minimum_start_free_bytes=0,
+        publication_transport="local",
+        serving_dir=tmp_path / "serving",
+        ocr_cache_mode="read-write",
+        ocr_cache_require_hit=False,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-6.1-sol",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+    )
+
+    class FakeTokenizer:
+        asset_sha256 = "fake_sha"
+
+        def __call__(self, text: str) -> int:
+            return 1
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return FakeTokenizer()
+
+    async def fake_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        profile = SimpleNamespace(
+            provider_id="deepinfra",
+            maximum_tokens=32768,
+            model="qwen/qwen3-embedding-8b",
+            dimension=4096,
+        )
+        report = SimpleNamespace(
+            profile=profile,
+            sample_count=2,
+            minimum_repeat_cosine=1.0,
+        )
+        return SimpleNamespace(providers=[report], minimum_cross_provider_cosine=0.999)
+
+    def must_not_instantiate_pipeline(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("WorkerPipeline must not be instantiated during startup-check")
+
+    def must_not_run_backup(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("BackupLedger must not be accessed during startup-check")
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_worker_start_capacity",
+        lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "revalidate_worker_start_capacity",
+        lambda cap: cap,
+    )
+    monkeypatch.setattr(cli_module, "_ocr_resolver", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", fake_preflight)
+    monkeypatch.setattr(cli_module, "_probe_codex_version", lambda _exe: "codex 0.162.1")
+    monkeypatch.setattr(cli_module, "WorkerPipeline", must_not_instantiate_pipeline)
+    monkeypatch.setattr(cli_module, "BackupLedger", must_not_run_backup)
+
     result = CliRunner().invoke(cli_module.app, ["startup-check"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["status"] == "ready"
     assert payload["stage"] == "completed"
     assert payload["codex_version"] == "codex 0.162.1"
+    assert payload["embedding_provider"] == "deepinfra"
+    assert "elapsed_seconds" in payload
+
+
+def test_cli_startup_check_lock_rejection_preserves_worker_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        state_dir=state_root,
+        channel="candidate-v1.0.11",
+        minimum_start_free_bytes=0,
+        publication_transport="local",
+        serving_dir=tmp_path / "serving",
+    )
+
+    def must_not_open_state(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("WorkerState must not be opened when lock is rejected")
+
+    def must_not_resolve_ocr(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("OCR resolver must not be constructed when lock is rejected")
+
+    # Lock held by contender
+    lock_descriptor = os.open(state_root / "worker.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+        monkeypatch.setattr(
+            cli_module,
+            "preflight_worker_start_capacity",
+            lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "revalidate_worker_start_capacity",
+            lambda cap: cap,
+        )
+        monkeypatch.setattr(cli_module, "WorkerState", must_not_open_state)
+        monkeypatch.setattr(cli_module, "_ocr_resolver", must_not_resolve_ocr)
+
+        result = CliRunner().invoke(cli_module.app, ["startup-check"])
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload == {
+            "reason": "Worker did not start because the worker lock is held.",
+            "reason_code": "worker_busy",
+            "status": "already_running",
+        }
+    finally:
+        os.close(lock_descriptor)
+
+
+def test_cli_startup_check_failure_exits_one_with_safe_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        state_dir=state_root,
+        channel="candidate-v1.0.11",
+        minimum_start_free_bytes=0,
+        publication_transport="local",
+        serving_dir=tmp_path / "serving",
+        ocr_cache_mode="read-write",
+        ocr_cache_require_hit=False,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-6.1-sol",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+    )
+
+    secret_sentinel = _repeated_test_token("FAIL_TOKENIZER_", "SEC", 4)
+    from cardrag_worker.tokenizer_v5 import QwenTokenizerError
+
+    async def failing_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        raise QwenTokenizerError(secret_sentinel)
+
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_worker_start_capacity",
+        lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "revalidate_worker_start_capacity",
+        lambda cap: cap,
+    )
+    monkeypatch.setattr(cli_module, "_ocr_resolver", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", failing_tokenizer)
+
+    result = CliRunner().invoke(cli_module.app, ["startup-check"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "worker_unexpected_failure"
+    assert payload["error_class_category"] == "tokenizer"
+    assert payload["phase"] == "tokenizer_validation"
+    assert payload["status"] == "failed"
+    assert secret_sentinel not in result.stdout
 
 
 def test_cli_probe_codex_version_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
