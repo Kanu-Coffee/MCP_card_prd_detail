@@ -19,10 +19,10 @@ WebDAV 게시 모드에서는 MCP에 읽기 전용 계정을 사용합니다. Wo
 
 ## 관리 운영 호스트의 배포 식별자
 
-현재 운영 검증은 [013 인수 마감](../.handoff/013_local-serving-incremental-webdav-backup/CLOSEOUT_v1.0.35.md)을 기준으로 확인합니다. v1.0.34 공개 이미지 발행·과거 MCP 전환 이력은 [012 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)에 보존합니다.
+현재 Worker 초기화 구현 검증은 [014 인수](../.handoff/014_worker-startup-failure-codex-validation/ACCEPTANCE_FIX_01.md)를 기준으로 확인합니다. 로컬 서빙·백업 기준은 [013 인수 마감](../.handoff/013_local-serving-incremental-webdav-backup/CLOSEOUT_v1.0.35.md)에 보존합니다. v1.0.34 공개 이미지 발행·과거 MCP 전환 이력은 [012 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)에 보존합니다.
 
 - 설치 진입점: `/opt/cardrag/current -> /opt/cardrag/013-50a0129`.
-- 인수된 운영 이미지: Worker/MCP 각각 `cardrag-worker:013-50a0129`, `cardrag-mcp:013-50a0129`. v1.0.35는 이를 구현한 소스와 운영 검증 기록의 GitHub 릴리스이며 새 Docker Hub 이미지 발행을 뜻하지 않습니다.
+- v1.0.36 운영 적용 대상: Worker `cardrag-worker:014-v1.0.36`, MCP `cardrag-mcp:013-50a0129`. Worker는 Codex CLI 0.162.1과 초기화 진단·공통 검사 경로를 포함합니다. 정확한 소스 commit과 로컬 image ID는 배포 기록으로 확인합니다. v1.0.36은 GitHub 소스 릴리스이며 새 Docker Hub 이미지 발행을 뜻하지 않습니다.
 - MCP 컨테이너/Compose project: `cardrag-mcp`, 네트워크: `cardrag-mcp_default`.
 - 운영 볼륨: `cardrag-mcp-state`, `cardrag-worker-state`, `cardrag-worker-auth`, `cardrag-worker-paddleocr-models`, `cardrag-serving`.
 - Worker는 로컬 서빙 볼륨에 게시하고 MCP는 이를 read-only로 읽습니다. WebDAV 장애는 MCP 게시 성공을 취소하지 않습니다.
@@ -77,7 +77,7 @@ Compose 설정의 `*_SECRET_FILE`은 **호스트 파일 경로**입니다. 비�
 
 설정을 생략한 OCR 기본값은 `local-paddleocr` / `PaddleOCR-VL-1.6`입니다.
 `simple.env.example`은 Codex 예시 값을 명시하므로 사용할 provider에 맞춰 수정하십시오.
-현재 관리 운영 환경은 `opencode` / `alibaba-token-plan/qwen3.8-flash` / reasoning `medium`을 사용합니다.
+현재 관리 운영 환경은 `codex-exec` / `gpt-6.1-sol` / reasoning `medium`을 사용하며, fallback은 `local-paddleocr` / `PaddleOCR-VL-1.6`입니다.
 Qwen 임베딩의 모델·4,096차원·tokenizer와 provider profile은 generation identity에 묶이므로 기존 vector와
 다른 모델을 섞지 않습니다. API의 제공 모델·권한은 해당 계정에서 확인합니다.
 
