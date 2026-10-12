@@ -1,0 +1,59 @@
+{
+  "verified_at": "2026-10-12T03:54:05.269810+00:00",
+  "release": {
+    "isDraft": false,
+    "isPrerelease": false,
+    "publishedAt": "2026-10-12T03:52:53Z",
+    "tagName": "v1.0.36",
+    "url": "https://github.com/Kanu-Coffee/MCP_card_prd_detail/releases/tag/v1.0.36"
+  },
+  "pull_request": {
+    "html_url": "https://github.com/Kanu-Coffee/MCP_card_prd_detail/pull/47",
+    "merge_commit_sha": "6f09c28521848afbf72c92f0bb26c09b9c3eb98c",
+    "merged": true,
+    "number": 47
+  },
+  "ci": {
+    "conclusion": "success",
+    "headSha": "2e4a19451e72d9c8218e90e940bdb9fe393782a4",
+    "status": "completed",
+    "url": "https://github.com/Kanu-Coffee/MCP_card_prd_detail/actions/runs/38201128295"
+  },
+  "tag_commit": "6f09c28521848afbf72c92f0bb26c09b9c3eb98c",
+  "annotated_tag_object": "1a22f5270fef454dd5e97f46ceba948a0f77b7d5",
+  "build_source_commit": "2e4a19451e72d9c8218e90e940bdb9fe393782a4",
+  "build_and_release_tree": "b40c8bd6104389a997f499a809ff7ea3edc85c27",
+  "image": "cardrag-worker:014-v1.0.36",
+  "image_id": "sha256:3a8c74ffdc2ebc35261cb78b169903addc5b1618c350d18e8f044f0fb4d47294",
+  "installed_cli_sha256": "ead16158c1106e1099102295e53f66e7ca9198f91257b5bdbd2cd1d89e6c88fe",
+  "startup_container": "cardrag-worker-014-v1036-startup",
+  "startup_state": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-12T03:49:58.878680461Z",
+    "FinishedAt": "2026-10-12T03:50:49.950903267Z"
+  },
+  "startup_elapsed_seconds": 50.258,
+  "compose_change": "worker image only; full rendered config otherwise equal",
+  "mcp_health": "healthy",
+  "mcp_pointer": {
+    "generation_id": "g-cb12f9988100445eb7ecd873-035c4632e085",
+    "schema_version": "cardrag.mcp-local-pointer.v1"
+  },
+  "timer_status": "active",
+  "local_validation": {
+    "pytest": "2505 passed, 10 warnings in 81.92s",
+    "ruff": "passed",
+    "format": "225 files already formatted before test-isolation change; changed test file format rechecked",
+    "mypy": "108 source files passed",
+    "gitleaks": "250 commits scanned; no leaks found"
+  },
+  "scope": "GitHub source release and local Worker deployment; no public registry images; no repeated full production batch"
+}
