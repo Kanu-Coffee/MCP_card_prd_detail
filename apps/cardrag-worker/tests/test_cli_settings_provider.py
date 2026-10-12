@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,24 @@ def _repeated_test_token(prefix: str, fragment: str, count: int) -> str:
     """Build detector fixtures at runtime so scanners never see a token literal."""
 
     return prefix + "".join(fragment for _ in range(count))
+
+
+@pytest.fixture
+def preserve_worker_logging() -> Iterator[None]:
+    logger = logging.getLogger("cardrag_worker")
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    original_propagate = logger.propagate
+    try:
+        yield
+    finally:
+        for handler in list(logger.handlers):
+            if handler not in original_handlers:
+                logger.removeHandler(handler)
+                handler.close()
+        logger.handlers[:] = original_handlers
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
 
 
 @pytest.mark.asyncio
@@ -1180,6 +1199,7 @@ def test_cli_startup_configured_provider_missing_classified_safely(
 def test_cli_startup_check_success_bypasses_pipeline_and_backup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    preserve_worker_logging: None,
 ) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True, exist_ok=True)
@@ -1266,6 +1286,7 @@ def test_cli_startup_check_success_bypasses_pipeline_and_backup(
 def test_cli_startup_check_lock_rejection_preserves_worker_busy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    preserve_worker_logging: None,
 ) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True, exist_ok=True)
@@ -1320,6 +1341,7 @@ def test_cli_startup_check_lock_rejection_preserves_worker_busy(
 def test_cli_startup_check_failure_exits_one_with_safe_classification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    preserve_worker_logging: None,
 ) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir(parents=True, exist_ok=True)
