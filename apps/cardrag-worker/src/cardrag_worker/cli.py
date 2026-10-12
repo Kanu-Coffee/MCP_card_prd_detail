@@ -9,12 +9,14 @@ import os
 import re
 import signal
 import stat
+import subprocess
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from cardrag_core import STABLE_POINTER_PATH, OCRInput, content_addressed_ocr_reuse_key
 
@@ -62,6 +64,10 @@ from .embedding_seed_v122 import (
     build_embedding_cache_seed_v122_plan,
 )
 from .embedding_v5 import (
+    EmbeddingV5Error,
+    EmbeddingV5PermanentRequestError,
+    EmbeddingV5RequestError,
+    EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
     preflight_openrouter_qwen_providers,
 )
@@ -78,6 +84,7 @@ from .pipeline import (
     PipelineResult,
     WorkerPipeline,
     WorkerUnexpectedFailureError,
+    _classify_worker_failure,
     resume_sealed_publication,
     sweep_stale_paddle_input_symlinks,
     validate_document_aggregation_head,
@@ -91,7 +98,7 @@ from .state_seed_v122 import (
     apply_state_seed_v122,
     build_state_seed_v122_plan,
 )
-from .tokenizer_v5 import ensure_qwen_tokenizer
+from .tokenizer_v5 import QwenTokenizerError, ensure_qwen_tokenizer
 from .webdav import WebDAVClient
 
 app = typer.Typer(no_args_is_help=True, help="CardRAG finite acquisition/OCR/embedding worker")
@@ -111,6 +118,22 @@ class WorkerSignalShutdown(RuntimeError):
             raise ValueError("unsupported worker shutdown signal")
         self.signal_number = signal_number
         super().__init__("Worker signal shutdown completed")
+
+
+class WorkerStartupFailure(RuntimeError):
+    """Structured failure during startup before WorkerPipeline execution."""
+
+    def __init__(
+        self,
+        stage: str,
+        cause: Exception,
+        *,
+        elapsed_seconds: float,
+    ) -> None:
+        self.stage = stage
+        self.cause = cause
+        self.elapsed_seconds = elapsed_seconds
+        super().__init__(f"Worker startup failed in stage '{stage}'")
 
 
 def _configure_worker_logging() -> None:
@@ -421,13 +444,86 @@ def _echo_ocr_systemic_failure(exc: OCRSystemicFailureError) -> None:
     _echo(payload)
 
 
-def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = None) -> None:
+def _probe_codex_version(executable: str | None) -> str | None:
+    """Probe CLI version without touching auth or initiating inference."""
+    if not executable:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            first_line = proc.stdout.strip().splitlines()[0]
+            if re.match(r"^codex\s+[0-9a-zA-Z\.\-]+$", first_line):
+                return first_line
+            version_match = re.search(r"\b([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[a-zA-Z0-9\.]*)?)\b", first_line)
+            if version_match:
+                return f"codex {version_match.group(1)}"
+    except Exception:
+        pass
+    return None
+
+
+def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
+    """Sanitize and classify startup failures without leaking secret payloads."""
+    if isinstance(exc, QwenTokenizerError):
+        return {"error_class_category": "tokenizer"}
+    if isinstance(exc, EmbeddingV5RequestError):
+        payload: dict[str, Any] = {
+            "error_class_category": "openrouter_request",
+            "retryable": isinstance(exc, EmbeddingV5TransientError),
+        }
+        if exc.status_code is not None and 100 <= exc.status_code <= 599:
+            payload["status_code"] = exc.status_code
+        if exc.attempts is not None and exc.attempts >= 1:
+            payload["attempts"] = exc.attempts
+        return payload
+    if isinstance(exc, EmbeddingV5Error):
+        return {"error_class_category": "contract"}
+    if isinstance(exc, V5CapacityError):
+        return {"error_class_category": "capacity"}
+    category, status_code, errno = _classify_worker_failure(exc)
+    classified: dict[str, Any] = {"error_class_category": category}
+    if status_code is not None:
+        classified["status_code"] = status_code
+    if errno is not None:
+        classified["errno"] = errno
+    if isinstance(exc, httpx.HTTPStatusError):
+        classified["retryable"] = exc.response.status_code in {408, 425, 429, 500, 502, 503, 504}
+    elif isinstance(exc, httpx.RequestError):
+        classified["retryable"] = True
+    return classified
+
+
+def _log_startup_stage_failure(stage: str, exc: Exception, elapsed_seconds: float) -> None:
+    classified = _classify_startup_exception(exc)
+    logging.getLogger("cardrag_worker.cli").error(
+        "Startup stage failed stage=%s category=%s status_code=%s retryable=%s attempts=%s elapsed_seconds=%.3f",
+        stage,
+        classified["error_class_category"],
+        classified.get("status_code"),
+        classified.get("retryable"),
+        classified.get("attempts"),
+        elapsed_seconds,
+    )
+
+
+def _echo_worker_unexpected_failure(
+    exc: WorkerUnexpectedFailureError | Exception | None = None,
+    *,
+    phase: str | None = None,
+    elapsed_seconds: float | None = None,
+) -> None:
     payload: dict[str, Any] = {
         "reason": "Worker pipeline failed unexpectedly.",
         "reason_code": "worker_unexpected_failure",
         "status": "failed",
     }
-    if exc is not None:
+    if isinstance(exc, WorkerUnexpectedFailureError):
         payload.update(
             {
                 "error_class_category": exc.failure.error_class_category,
@@ -441,6 +537,22 @@ def _echo_worker_unexpected_failure(exc: WorkerUnexpectedFailureError | None = N
             payload["status_code"] = exc.failure.status_code
         if exc.failure.errno is not None:
             payload["errno"] = exc.failure.errno
+    elif isinstance(exc, Exception):
+        details = _classify_startup_exception(exc)
+        payload["error_class_category"] = details["error_class_category"]
+        resolved_phase = phase or details.get("phase")
+        if resolved_phase is not None:
+            payload["phase"] = resolved_phase
+        if details.get("status_code") is not None:
+            payload["status_code"] = details["status_code"]
+        if details.get("attempts") is not None:
+            payload["attempts"] = details["attempts"]
+        if details.get("retryable") is not None:
+            payload["retryable"] = details["retryable"]
+        if details.get("errno") is not None:
+            payload["errno"] = details["errno"]
+        if elapsed_seconds is not None:
+            payload["elapsed_seconds"] = round(elapsed_seconds, 3)
     _echo(payload)
 
 
@@ -543,31 +655,75 @@ async def _qwen_embedding_provider(
     """Run the credentialed provider/tokenizer preflight before touching a corpus."""
 
     api_key = settings.openrouter_api_key or ""
-    tokenizer = await ensure_qwen_tokenizer(
-        settings.embedding_tokenizer_path,
-        timeout_seconds=settings.embedding_timeout_seconds,
+
+    stage = "tokenizer_validation"
+    t0 = time.monotonic()
+    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    try:
+        tokenizer = await ensure_qwen_tokenizer(
+            settings.embedding_tokenizer_path,
+            timeout_seconds=settings.embedding_timeout_seconds,
+        )
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        _log_startup_stage_failure(stage, exc, elapsed)
+        raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
+    logging.getLogger("cardrag_worker.cli").info(
+        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t0
     )
-    comparison = await preflight_openrouter_qwen_providers(
-        api_key=api_key,
-        token_counter=tokenizer,
-        base_url=settings.openrouter_base_url,
-        timeout_seconds=settings.embedding_timeout_seconds,
-        embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
-        metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
-        request_max_attempts=settings.embedding_request_max_attempts,
-        retry_base_seconds=settings.embedding_retry_base_seconds,
-        retry_cap_seconds=settings.embedding_retry_cap_seconds,
+
+    stage = "qwen_endpoint_preflight"
+    t1 = time.monotonic()
+    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    try:
+        comparison = await preflight_openrouter_qwen_providers(
+            api_key=api_key,
+            token_counter=tokenizer,
+            base_url=settings.openrouter_base_url,
+            timeout_seconds=settings.embedding_timeout_seconds,
+            embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
+            metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
+            request_max_attempts=settings.embedding_request_max_attempts,
+            retry_base_seconds=settings.embedding_retry_base_seconds,
+            retry_cap_seconds=settings.embedding_retry_cap_seconds,
+        )
+    except Exception as exc:
+        elapsed = time.monotonic() - t1
+        _log_startup_stage_failure(stage, exc, elapsed)
+        raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
+    logging.getLogger("cardrag_worker.cli").info(
+        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t1
     )
-    selected = next(
-        report
-        for report in comparison.providers
-        if report.profile.provider_id == settings.embedding_provider_id
+
+    stage = "embedding_verification"
+    t2 = time.monotonic()
+    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    try:
+        matching = [
+            report
+            for report in comparison.providers
+            if report.profile.provider_id == settings.embedding_provider_id
+        ]
+        if not matching:
+            available = [report.profile.provider_id for report in comparison.providers]
+            raise ValueError(
+                f"configured embedding provider {settings.embedding_provider_id!r} not found in live metadata "
+                f"(available: {', '.join(available)})"
+            )
+        selected = matching[0]
+        profile = selected.profile
+        if profile.maximum_tokens != settings.embedding_maximum_tokens:
+            raise ValueError("CARDRAG_EMBEDDING_MAXIMUM_TOKENS differs from live pinned-provider metadata")
+        if profile.model != settings.embedding_model or profile.dimension != settings.embedding_dimension:
+            raise ValueError("configured embedding model/dimension differs from the verified Qwen profile")
+    except Exception as exc:
+        elapsed = time.monotonic() - t2
+        _log_startup_stage_failure(stage, exc, elapsed)
+        raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
+    logging.getLogger("cardrag_worker.cli").info(
+        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t2
     )
-    profile = selected.profile
-    if profile.maximum_tokens != settings.embedding_maximum_tokens:
-        raise ValueError("CARDRAG_EMBEDDING_MAXIMUM_TOKENS differs from live pinned-provider metadata")
-    if profile.model != settings.embedding_model or profile.dimension != settings.embedding_dimension:
-        raise ValueError("configured embedding model/dimension differs from the verified Qwen profile")
+
     logging.getLogger("cardrag_worker.cli").info(
         "Qwen provider preflight passed provider=%s samples=%d minimum_repeat_cosine=%.6f "
         "minimum_cross_provider_cosine=%.6f tokenizer_sha256=%s",
@@ -759,8 +915,27 @@ async def _run(resume: str | None) -> dict[str, Any]:
             ) as state:
                 if isinstance(transport, WebDAVClient):
                     transport.configure_verification(state, settings.webdav_verification)
-                resolver = _ocr_resolver(
-                    settings, state, transport if isinstance(transport, WebDAVClient) else None
+                stage = "ocr_resolver"
+                t_stage = time.monotonic()
+                logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+                try:
+                    resolver = _ocr_resolver(
+                        settings, state, transport if isinstance(transport, WebDAVClient) else None
+                    )
+                except Exception as exc:
+                    elapsed = time.monotonic() - t_stage
+                    _log_startup_stage_failure(stage, exc, elapsed)
+                    raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
+                codex_ver = (
+                    _probe_codex_version(settings.codex_executable)
+                    if settings.ocr_provider in {"codex", "codex-exec"}
+                    else None
+                )
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Startup stage passed stage=%s elapsed_seconds=%.3f codex_version=%s",
+                    stage,
+                    time.monotonic() - t_stage,
+                    codex_ver or "not_applicable",
                 )
                 logging.getLogger("cardrag_worker.cli").info(
                     "Remote OCR cache access mode=%s require_hit=%s",
@@ -768,8 +943,14 @@ async def _run(resume: str | None) -> dict[str, Any]:
                     settings.ocr_cache_require_hit,
                 )
                 embeddings = await _qwen_embedding_provider(settings)
+                stage = "pipeline_entry"
+                t_stage = time.monotonic()
+                logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
                 logging.getLogger("cardrag_worker.cli").info(
                     "Worker startup completed elapsed_seconds=%.3f", time.monotonic() - started
+                )
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t_stage
                 )
                 result = await WorkerPipeline(
                     state=state,
@@ -869,6 +1050,117 @@ async def _run(resume: str | None) -> dict[str, Any]:
         logging.getLogger("cardrag_worker.cli").info(
             "Worker execution finished elapsed_seconds=%.3f", time.monotonic() - started
         )
+
+
+async def _run_startup_check() -> dict[str, Any]:
+    started = time.monotonic()
+    _configure_worker_logging()
+    settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
+    _guard_v114_publication_channel(settings)
+    startup_capacity = preflight_worker_start_capacity(
+        settings.state_dir,
+        minimum_free_bytes=settings.minimum_start_free_bytes,
+    )
+    logging.getLogger("cardrag_worker.cli").info(
+        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d",
+        startup_capacity.filesystem_free_bytes,
+        startup_capacity.minimum_free_bytes,
+    )
+    document_aggregation = None
+    if settings.document_aggregation_profile_path is not None:
+        expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
+        if expected_artifact_sha256 is None:
+            raise ValueError("document aggregation profile artifact SHA-256 is absent")
+        document_aggregation = load_verified_aggregation_profile_v5(
+            settings.document_aggregation_profile_path,
+            expected_artifact_sha256=expected_artifact_sha256,
+        )
+    if document_aggregation is None:
+        settings.state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            startup_capacity = revalidate_worker_start_capacity(startup_capacity)
+        except V5CapacityError:
+            lock_file = getattr(settings, "lock_file", None)
+            if lock_file is not None:
+                with worker_lock(lock_file):
+                    raise
+            raise
+    publication_transport = getattr(settings, "publication_transport", None)
+    if publication_transport is None:
+        publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav")
+    if publication_transport == "local":
+        transport: Any = LocalServingTransport(
+            getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving")),
+            channel=getattr(settings, "channel", "stable"),
+        )
+    else:
+        transport = WebDAVClient.from_env(
+            stable_publication_approved=settings.stable_publication_approved,
+            upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+        )
+    try:
+        if document_aggregation is not None:
+            await validate_document_aggregation_head(transport, document_aggregation)
+            settings.state_dir.mkdir(parents=True, exist_ok=True)
+        worker_lock_file = getattr(
+            settings, "lock_file", getattr(settings, "state_dir", Path(".")) / "worker.lock"
+        )
+        with worker_lock(worker_lock_file):
+            startup_capacity = revalidate_worker_start_capacity(startup_capacity)
+            with WorkerState(
+                settings.state_database,
+                sqlite_cache_mib=settings.sqlite_cache_mib,
+                sqlite_mmap_mib=settings.sqlite_mmap_mib,
+            ) as state:
+                if isinstance(transport, WebDAVClient):
+                    transport.configure_verification(state, settings.webdav_verification)
+                stage = "ocr_resolver"
+                t_stage = time.monotonic()
+                logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+                try:
+                    _resolver = _ocr_resolver(
+                        settings, state, transport if isinstance(transport, WebDAVClient) else None
+                    )
+                except Exception as exc:
+                    elapsed = time.monotonic() - t_stage
+                    _log_startup_stage_failure(stage, exc, elapsed)
+                    raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
+                codex_ver = (
+                    _probe_codex_version(settings.codex_executable)
+                    if settings.ocr_provider in {"codex", "codex-exec"}
+                    else None
+                )
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Startup stage passed stage=%s elapsed_seconds=%.3f codex_version=%s",
+                    stage,
+                    time.monotonic() - t_stage,
+                    codex_ver or "not_applicable",
+                )
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Remote OCR cache access mode=%s require_hit=%s",
+                    settings.ocr_cache_mode,
+                    settings.ocr_cache_require_hit,
+                )
+                _embeddings = await _qwen_embedding_provider(settings)
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Worker startup check completed elapsed_seconds=%.3f", time.monotonic() - started
+                )
+                return {
+                    "codex_version": codex_ver,
+                    "embedding_model": settings.embedding_model,
+                    "embedding_provider": settings.embedding_provider_id,
+                    "ocr_fallback_model": settings.ocr_fallback_model,
+                    "ocr_fallback_provider": settings.ocr_fallback_provider,
+                    "ocr_model": settings.ocr_model,
+                    "ocr_provider": settings.ocr_provider,
+                    "stage": "completed",
+                    "status": "ready",
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                }
+    finally:
+        closer = getattr(transport, "close", None)
+        if callable(closer):
+            await closer()
 
 
 async def _operation_with_signal_shutdown(
@@ -1067,8 +1359,36 @@ def run_command(
     except WorkerUnexpectedFailureError as exc:
         _echo_worker_unexpected_failure(exc)
         raise typer.Exit(code=1) from None
-    except Exception:
-        _echo_worker_unexpected_failure()
+    except WorkerStartupFailure as exc:
+        _echo_worker_unexpected_failure(
+            exc.cause,
+            phase=exc.stage,
+            elapsed_seconds=exc.elapsed_seconds,
+        )
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        _echo_worker_unexpected_failure(exc)
+        raise typer.Exit(code=1) from None
+
+
+@app.command("startup-check")
+def startup_check_command() -> None:
+    """Run production startup checks (capacity, providers, embeddings) and exit before WorkerPipeline."""
+
+    try:
+        summary = asyncio.run(_run_startup_check())
+        _echo(summary)
+    except AlreadyRunning:
+        _echo_worker_busy()
+    except WorkerStartupFailure as exc:
+        _echo_worker_unexpected_failure(
+            exc.cause,
+            phase=exc.stage,
+            elapsed_seconds=exc.elapsed_seconds,
+        )
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        _echo_worker_unexpected_failure(exc)
         raise typer.Exit(code=1) from None
 
 

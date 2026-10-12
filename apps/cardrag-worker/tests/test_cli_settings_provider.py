@@ -1014,11 +1014,203 @@ def test_cli_pre_pipeline_failure_uses_fixed_safe_payload(
     result = CliRunner().invoke(cli_module.app, ["run"])
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {
+        "error_class_category": "contract",
         "reason": "Worker pipeline failed unexpectedly.",
         "reason_code": "worker_unexpected_failure",
         "status": "failed",
     }
     assert raw_sentinel not in result.stdout
+
+
+def test_cli_startup_tokenizer_failure_classified_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_sentinel = "SECRET_TOKENIZER_DOWNLOAD_URL_BEARING_TOKEN"
+    from cardrag_worker.tokenizer_v5 import QwenTokenizerError
+
+    async def failed_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        raise QwenTokenizerError(secret_sentinel)
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", failed_tokenizer)
+    settings = WorkerSettings.from_env()
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings))
+
+    assert exc_info.value.stage == "tokenizer_validation"
+    assert isinstance(exc_info.value.cause, QwenTokenizerError)
+
+    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+        raise exc_info.value
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["reason_code"] == "worker_unexpected_failure"
+    assert payload["error_class_category"] == "tokenizer"
+    assert payload["phase"] == "tokenizer_validation"
+    assert payload["status"] == "failed"
+    assert "elapsed_seconds" in payload
+    assert secret_sentinel not in result.stdout
+
+
+def test_cli_startup_openrouter_transient_exhaustion_classified_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_sentinel = "OPENROUTER_SECRET_KEY_EXHAUSTED"
+    from cardrag_worker.embedding_v5 import EmbeddingV5TransientError
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def failed_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        raise EmbeddingV5TransientError(
+            secret_sentinel,
+            kind="rate_limit",
+            status_code=429,
+            attempts=12,
+        )
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", failed_preflight)
+    settings = WorkerSettings.from_env()
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings))
+
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+
+    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+        raise exc_info.value
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "attempts": 12,
+        "elapsed_seconds": payload["elapsed_seconds"],
+        "error_class_category": "openrouter_request",
+        "phase": "qwen_endpoint_preflight",
+        "reason": "Worker pipeline failed unexpectedly.",
+        "reason_code": "worker_unexpected_failure",
+        "retryable": True,
+        "status": "failed",
+        "status_code": 429,
+    }
+    assert secret_sentinel not in result.stdout
+
+
+def test_cli_startup_openrouter_permanent_failure_classified_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_sentinel = "OPENROUTER_AUTH_REJECTED_SECRET"
+    from cardrag_worker.embedding_v5 import EmbeddingV5PermanentRequestError
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def failed_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        raise EmbeddingV5PermanentRequestError(
+            secret_sentinel,
+            kind="authentication",
+            status_code=401,
+            attempts=1,
+        )
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", failed_preflight)
+    settings = WorkerSettings.from_env()
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings))
+
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+
+    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+        raise exc_info.value
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error_class_category"] == "openrouter_request"
+    assert payload["phase"] == "qwen_endpoint_preflight"
+    assert payload["status_code"] == 401
+    assert payload["retryable"] is False
+    assert payload["attempts"] == 1
+    assert secret_sentinel not in result.stdout
+
+
+def test_cli_startup_configured_provider_missing_classified_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def fake_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        # Comparison with providers list that does not include configured provider
+        other_profile = SimpleNamespace(provider_id="other_unconfigured_provider")
+        report = SimpleNamespace(profile=other_profile)
+        return SimpleNamespace(providers=[report], minimum_cross_provider_cosine=0.999)
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", fake_preflight)
+    settings = WorkerSettings.from_env()
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings))
+
+    assert exc_info.value.stage == "embedding_verification"
+    assert isinstance(exc_info.value.cause, ValueError)
+
+    async def run_failing_startup(_resume: str | None) -> dict[str, Any]:
+        raise exc_info.value
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error_class_category"] == "contract"
+    assert payload["phase"] == "embedding_verification"
+    assert payload["reason_code"] == "worker_unexpected_failure"
+
+
+def test_cli_startup_check_command_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def mock_startup_check() -> dict[str, Any]:
+        return {
+            "codex_version": "codex 0.162.1",
+            "embedding_model": "qwen/qwen3-embedding-8b",
+            "embedding_provider": "deepinfra",
+            "ocr_fallback_model": "PaddleOCR-VL-1.6",
+            "ocr_fallback_provider": "local-paddleocr",
+            "ocr_model": "gpt-6.1-sol",
+            "ocr_provider": "codex-exec",
+            "stage": "completed",
+            "status": "ready",
+            "elapsed_seconds": 1.234,
+        }
+
+    monkeypatch.setattr(cli_module, "_run_startup_check", mock_startup_check)
+    result = CliRunner().invoke(cli_module.app, ["startup-check"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["stage"] == "completed"
+    assert payload["codex_version"] == "codex 0.162.1"
+
+
+def test_cli_probe_codex_version_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert cli_module._probe_codex_version(None) is None
+
+    def fake_run(args: list[str], **_kwargs: Any) -> Any:
+        return SimpleNamespace(returncode=0, stdout="codex 0.162.1\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert cli_module._probe_codex_version("/usr/local/bin/codex") == "codex 0.162.1"
 
 
 def test_adoption_guard_cli_fails_closed_without_echoing_remote_content(
