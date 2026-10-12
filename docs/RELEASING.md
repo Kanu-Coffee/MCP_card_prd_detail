@@ -1,13 +1,16 @@
 # 릴리스와 stable 전환
 
-## v1.0.35 GitHub 소스 릴리스
+## v1.0.36 GitHub 소스 릴리스
 
-v1.0.35는 로컬 서빙·선택적 증분 백업 구현과 운영 인수 결과를 담은 GitHub 소스 릴리스입니다.
-운영 이미지는 검증된 `013-50a0129`를 사용하며, 이번 발행에 새 공개 registry 이미지는 포함하지 않습니다.
-[발행 완료 보고서](../.handoff/013_local-serving-incremental-webdav-backup/RELEASE_REPORT_v1.0.35.md)를 참고하십시오.
+v1.0.36은 Worker 초기화 진단, 공통 startup-check 경로 및 Codex CLI 0.162.1 업데이트를 담은
+GitHub 소스 릴리스입니다. [변경 사항](RELEASE_NOTES_v1.0.36.md)과
+[014 구현 인수](../.handoff/014_worker-startup-failure-codex-validation/ACCEPTANCE_FIX_01.md)를 참고하십시오.
+운영 Worker는 인수된 소스로 로컬 빌드하여 적용하며 기존 MCP와 데이터·인증 볼륨을 유지합니다.
+이번 발행에는 새 공개 registry 이미지가 포함되지 않습니다.
 
-현재 발행: [v1.0.35 변경 사항](RELEASE_NOTES_v1.0.35.md). **아래는 v1.0.34 공개 이미지 발행 절차입니다.**
-기존 workflow의 버전 게이트와 후보 증빙은 새 버전에 그대로 재사용할 수 없습니다.
+v1.0.35 발행 이력은 [완료 보고서](../.handoff/013_local-serving-incremental-webdav-backup/RELEASE_REPORT_v1.0.35.md)에 보존합니다.
+**아래는 v1.0.34 공개 이미지 발행 절차입니다.** 기존 workflow의 버전 게이트와 후보 증빙은
+새 버전에 그대로 재사용할 수 없습니다.
 
 소스 준비, 공개 이미지 발행, 운영 전환은 각각 다른 단계입니다. 브랜치 업데이트나 CI 통과만으로
 실행 중인 Worker가 새 버전으로 바뀌지 않습니다. 릴리스 workflow도 호스트의 설치 경로,

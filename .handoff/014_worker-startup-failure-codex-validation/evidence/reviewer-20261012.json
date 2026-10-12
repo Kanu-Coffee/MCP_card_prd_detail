@@ -1,0 +1,141 @@
+{
+  "reviewed_at": "2026-10-12T03:00:55.830331+00:00",
+  "commit": "7d07b1ddfe2bed5310d771a1e18b6b717703e7c6",
+  "container": "/cardrag-worker-014-recovery",
+  "state": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-12T00:10:52.328729111Z",
+    "FinishedAt": "2026-10-12T01:48:55.200511795Z"
+  },
+  "actual_image_id": "sha256:c2b50f46e73cf5633948a8a567d421d20ee935ce7c81121df1a0874e42793bee",
+  "reported_image_id": "sha256:c2b50f46e73cf5633948a8a567d421d20ee28c460f948f2fa4818442fae38e6a",
+  "installed_cli_sha256": "d654286609b3e9993e19649f8ee20827b5a157eca68051d06b336560d681360e",
+  "repository_cli_sha256": "d654286609b3e9993e19649f8ee20827b5a157eca68051d06b336560d681360e",
+  "effective_allowlisted_settings": {
+    "CARDRAG_OCR_FALLBACK_MODEL": "PaddleOCR-VL-1.6",
+    "CARDRAG_PUBLICATION_TRANSPORT": "local",
+    "CARDRAG_BACKUP_MODE": "immediate",
+    "CARDRAG_CODEX_MODEL_PROVIDER_ENV_KEY": "",
+    "CARDRAG_CODEX_MODEL_PROVIDER_BASE_URL": "",
+    "CARDRAG_OCR_FALLBACK_PROVIDER": "local-paddleocr",
+    "CARDRAG_BACKUP_INLINE_BUDGET_SECONDS": "300",
+    "CARDRAG_OCR_PROVIDER": "codex-exec",
+    "CARDRAG_OCR_REASONING_EFFORT": "medium",
+    "CARDRAG_CODEX_MODEL_CATALOG_JSON": "",
+    "CARDRAG_CODEX_MODEL_PROVIDER": "",
+    "CARDRAG_OCR_MODEL": "gpt-6.1-sol"
+  },
+  "worker_summary": {
+    "backup_bytes_uploaded": 1742,
+    "backup_requests": 5,
+    "backup_status": "succeeded",
+    "collection_status": "degraded",
+    "contract_sha256": "83881b183ecfdf99eeef31796f80c4603455f8fa1a8cf1a29369dd0106f5d43b",
+    "corpus_sha256": "035c4632e0859ed3eb9b32b0e9115308683a33e4a3bb24b448c504963e597d70",
+    "documents": 5520,
+    "evidence": 616407,
+    "execution": null,
+    "failed_issuers": [
+      "shinhan"
+    ],
+    "gc_deleted": 0,
+    "gc_error": null,
+    "gc_status": null,
+    "generation_id": "g-cb12f9988100445eb7ecd873-035c4632e085",
+    "last_backup_at": "2026-10-12T01:48:50.064632+00:00",
+    "local_artifacts": null,
+    "local_generation_published": true,
+    "ocr_cache_publication_deferred": 0,
+    "oldest_pending_at": null,
+    "pdf_cache_hits": 4177,
+    "pdf_cache_misses": 8,
+    "pdf_cache_not_modified": 0,
+    "pdf_cache_prune_error": null,
+    "pdf_cache_prune_status": "succeeded",
+    "pdf_cache_pruned_bytes": 0,
+    "pdf_cache_pruned_objects": 0,
+    "pdf_cache_revalidations": 909,
+    "pdf_downloads": 909,
+    "pdf_revisions": 0,
+    "pending_bytes": 0,
+    "pending_ocr_count": 0,
+    "publication_transport": "local",
+    "published": true,
+    "retired_count": 0,
+    "retirement_candidate_count": 0,
+    "run_id": "cb12f9988100445eb7ecd87395abed6d",
+    "runs_since_last_backup": 0,
+    "status": "succeeded",
+    "unsupported_documents": 8,
+    "v5_metrics": {
+      "ocr_cache_reused_count": 5520,
+      "ocr_provider_called_count": 0,
+      "embedding_provider_call_count": 0,
+      "structure_failed_document_count": 0,
+      "structure_fallback_document_count": 2,
+      "parser_profile_document_counts": {
+        "cardrag.issuer-profile.bc.generic.v1": 122,
+        "cardrag.issuer-profile.hana.generic.v1": 733,
+        "cardrag.issuer-profile.hyundai.generic.v1": 596,
+        "cardrag.issuer-profile.kb.v1": 751,
+        "cardrag.issuer-profile.lotte.generic.v1": 647,
+        "cardrag.issuer-profile.samsung.v1": 765,
+        "cardrag.issuer-profile.shinhan.v1": 931,
+        "cardrag.issuer-profile.woori.v1": 975
+      }
+    }
+  },
+  "startup_events": [
+    "2026-10-12 09:10:55,922 INFO cardrag_worker.cli Startup stage starting stage=ocr_resolver",
+    "2026-10-12 09:10:56,533 INFO cardrag_worker.cli Startup stage passed stage=ocr_resolver elapsed_seconds=0.610 codex_version=codex 0.162.1",
+    "2026-10-12 09:10:56,533 INFO cardrag_worker.cli Startup stage starting stage=tokenizer_validation",
+    "2026-10-12 09:10:56,888 INFO cardrag_worker.cli Startup stage passed stage=tokenizer_validation elapsed_seconds=0.355",
+    "2026-10-12 09:10:56,888 INFO cardrag_worker.cli Startup stage starting stage=qwen_endpoint_preflight",
+    "2026-10-12 09:11:24,511 INFO cardrag_worker.cli Startup stage passed stage=qwen_endpoint_preflight elapsed_seconds=27.623",
+    "2026-10-12 09:11:24,511 INFO cardrag_worker.cli Startup stage starting stage=embedding_verification",
+    "2026-10-12 09:11:24,511 INFO cardrag_worker.cli Startup stage passed stage=embedding_verification elapsed_seconds=0.000",
+    "2026-10-12 09:11:24,511 INFO cardrag_worker.cli Startup stage starting stage=pipeline_entry",
+    "2026-10-12 09:11:24,511 INFO cardrag_worker.cli Worker startup completed elapsed_seconds=31.617",
+    "2026-10-12 09:11:24,511 INFO cardrag_worker.cli Startup stage passed stage=pipeline_entry elapsed_seconds=0.000",
+    "2026-10-12 10:48:53,069 INFO cardrag_worker.cli Worker execution finished elapsed_seconds=5880.174"
+  ],
+  "mcp_health": "healthy",
+  "mcp_active_pointer": {
+    "generation_id": "g-cb12f9988100445eb7ecd873-035c4632e085",
+    "schema_version": "cardrag.mcp-local-pointer.v1"
+  },
+  "published_pointer": {
+    "generation_id": "g-cb12f9988100445eb7ecd873-035c4632e085",
+    "manifest_sha256": "d0a97dc2f3aa9a4cadbfaece81595462755d4bc7d28757106752b0213ce8342a",
+    "ready_sha256": "2b1564e4bf11c057494059401f2f391da7a70dc89325f321f57ffe83cd310dda",
+    "schema_version": "cardrag.generation-pointer.v1"
+  },
+  "generation_match": true,
+  "backup_ledger_status_counts": {},
+  "backup_lost_count": 0,
+  "checks": {
+    "targeted_pytest": "161 passed in 2.58s",
+    "ruff_check": "failed: F401 x1, S110 x1, S105 x3",
+    "ruff_format": "2 files already formatted",
+    "mypy_cli": "Success: no issues found in 1 source file"
+  },
+  "prior_codex_smoke": {
+    "status": "passed",
+    "recognized_text": "## Page 1\nCARD OCR TEST\nDISCOUNT 1.2%\n",
+    "used_actual_worker_provider": true
+  },
+  "limitations": [
+    "No new paid OCR/embedding preflight was invoked.",
+    "Prior actual Codex image OCR evidence is from Oct 11; recovery reused OCR cache exclusively.",
+    "Original 03:00 exception was not retained and root cause remains unknown.",
+    "Full Executor suite was not rerun; targeted suite independently passed."
+  ]
+}
