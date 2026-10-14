@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 import shutil
 import time
@@ -31,6 +32,40 @@ from cardrag_core import (
 
 from .async_utils import to_thread_fenced
 from .webdav import PublishedBundle, RemoteGenerationIdentity
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _remove_tree_with_accounting(path: Path, *, kind: str) -> int:
+    """Delete a tree and return reclaimed bytes.
+
+    A failed delete is logged with its errno and contributes zero reclaimed
+    bytes so a cleanup pass can never report suppressed failures as success.
+    """
+
+    size = _tree_bytes(path)
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        LOGGER.warning(
+            "reason_code=local_retention_cleanup_failed kind=%s attempted_bytes=%d errno=%s",
+            kind,
+            size,
+            exc.errno,
+        )
+        return 0
+    return size
 
 
 def _fsync_file(path: Path) -> None:
@@ -364,6 +399,8 @@ class LocalServingTransport:
 
             # 6. Serving volume retention: retain current + previous generation(s)
             generations_root = self.serving_dir / "v1" / "generations"
+            removed_generations = 0
+            reclaimed_generation_bytes = 0
             if generations_root.is_dir():
                 retain_gens = {generation_id}
                 if prev_gen_id is not None and prev_gen_id != generation_id:
@@ -379,19 +416,44 @@ class LocalServingTransport:
                         retain_gens.add(other_gens[0].name)
                 for gen_path in generations_root.iterdir():
                     if gen_path.is_dir() and gen_path.name not in retain_gens:
-                        with suppress(OSError):
-                            shutil.rmtree(gen_path)
+                        reclaimed = _remove_tree_with_accounting(gen_path, kind="generation")
+                        if reclaimed or not gen_path.exists():
+                            removed_generations += 1
+                        reclaimed_generation_bytes += reclaimed
+                LOGGER.info(
+                    "Local serving retention cleanup retained=%d removed=%d reclaimed_bytes=%d "
+                    "serving_dir_present=true",
+                    len(retain_gens),
+                    removed_generations,
+                    reclaimed_generation_bytes,
+                )
 
             # Clean up stale staging directories older than 10 minutes
+            removed_staging = 0
+            reclaimed_staging_bytes = 0
             if staging_root.is_dir():
                 now_ts = time.time()
                 for old_stage in staging_root.iterdir():
                     if old_stage.is_dir() and old_stage != staging_dir:
                         try:
-                            if now_ts - old_stage.stat().st_mtime > 600:
-                                shutil.rmtree(old_stage)
-                        except OSError:
-                            pass
+                            stale = now_ts - old_stage.stat().st_mtime > 600
+                        except OSError as exc:
+                            LOGGER.warning(
+                                "reason_code=local_retention_cleanup_failed kind=staging-stat "
+                                "attempted_bytes=0 errno=%s",
+                                exc.errno,
+                            )
+                            stale = False
+                        if stale:
+                            reclaimed = _remove_tree_with_accounting(old_stage, kind="staging")
+                            removed_staging += 1
+                            reclaimed_staging_bytes += reclaimed
+                if removed_staging or reclaimed_staging_bytes:
+                    LOGGER.info(
+                        "Local staging cleanup removed=%d reclaimed_bytes=%d",
+                        removed_staging,
+                        reclaimed_staging_bytes,
+                    )
 
             return PublishedBundle(generation_id, db_sha, manifest_sha)
         finally:

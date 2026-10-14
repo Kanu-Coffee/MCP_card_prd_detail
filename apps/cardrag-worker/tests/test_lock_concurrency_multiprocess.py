@@ -57,7 +57,12 @@ def _worker_process_target(
     cli_module.preflight_worker_start_capacity = lambda *args, **kwargs: capacity
     cli_module.revalidate_worker_start_capacity = lambda snapshot: snapshot
 
-    async def hold_lock_without_provider(settings: object) -> object:
+    async def hold_lock_without_provider(
+        settings: object,
+        *,
+        correlation_id: str | None = None,
+        recorder: object | None = None,
+    ) -> object:
         # Keep the real CLI lock held until the competing CLI exits. Never
         # reach the external embedding provider with the fake API key.
         if not competitor_done.wait(timeout=10):

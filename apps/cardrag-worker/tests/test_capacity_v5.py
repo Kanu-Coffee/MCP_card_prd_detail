@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -936,3 +936,137 @@ def test_descriptor_tree_scan_rejects_new_entry_after_enumeration(
 
     with pytest.raises(V5CapacityError, match="changed during traversal"):
         safe_state_usage(tmp_path)
+
+
+def test_capacity_error_sanitizes_reason_codes_and_detail_values() -> None:
+    hostile_details: dict[str, object] = {
+        "available_bytes": 10,
+        "deficit_bytes": None,
+        "drop me": 3,
+        "float_bytes": 1.5,
+        "text_field": "secret/path",
+        "huge_bytes": 2**63,
+    }
+    error = V5CapacityError(
+        "gate rejected",
+        reason_code="Valid Code; With Secrets",
+        details=cast("dict[str, int | None]", hostile_details),
+    )
+    assert error.reason_code == "capacity_unclassified"
+    assert error.details == {"available_bytes": 10, "deficit_bytes": None}
+    valid = V5CapacityError("gate", reason_code="capacity_free_space", details=None)
+    assert valid.reason_code == "capacity_free_space"
+    assert valid.details == {}
+
+
+def test_sidecar_and_database_gate_rejections_name_the_gate_with_numbers(
+    tmp_path: Path,
+) -> None:
+    prediction = _prediction()
+    with pytest.raises(V5CapacityError) as sidecar:
+        preflight_v5_capacity(
+            tmp_path / "missing",
+            prediction,
+            policy=V5CapacityPolicy(maximum_vector_sidecar_bytes=prediction.vector_sidecar_bytes - 1),
+        )
+    assert sidecar.value.reason_code == "capacity_sidecar_limit"
+    assert sidecar.value.details == {
+        "predicted_sidecar_bytes": prediction.vector_sidecar_bytes,
+        "limit_bytes": prediction.vector_sidecar_bytes - 1,
+        "deficit_bytes": 1,
+    }
+
+    with pytest.raises(V5CapacityError) as database:
+        preflight_v5_capacity(
+            tmp_path / "missing",
+            prediction,
+            policy=V5CapacityPolicy(maximum_serving_database_bytes=prediction.serving_database_bytes - 7),
+        )
+    assert database.value.reason_code == "capacity_database_limit"
+    assert database.value.details["deficit_bytes"] == 7
+
+
+def test_state_quota_and_free_space_rejections_report_deficit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = tmp_path / "existing.bin"
+    sentinel.write_bytes(b"preserve-me")
+    prediction = _prediction()
+    with pytest.raises(V5CapacityError) as quota:
+        preflight_v5_capacity(
+            tmp_path,
+            prediction,
+            policy=V5CapacityPolicy(
+                maximum_state_bytes=len(b"preserve-me") + prediction.logical_growth_bytes - 1,
+                reserved_free_space_bytes=0,
+            ),
+        )
+    assert quota.value.reason_code == "capacity_state_quota"
+    assert quota.value.details == {
+        "state_usage_bytes": len(b"preserve-me"),
+        "logical_growth_bytes": prediction.logical_growth_bytes,
+        "limit_bytes": len(b"preserve-me") + prediction.logical_growth_bytes - 1,
+        "deficit_bytes": 1,
+    }
+
+    insufficient = prediction.peak_growth_bytes + 77 - 1
+    monkeypatch.setattr(capacity_module, "_filesystem_free_bytes", lambda _fd: insufficient)
+    with pytest.raises(V5CapacityError) as free:
+        preflight_v5_capacity(
+            tmp_path,
+            prediction,
+            policy=V5CapacityPolicy(maximum_state_bytes=MAX_SAFE_BYTES, reserved_free_space_bytes=77),
+        )
+    assert free.value.reason_code == "capacity_free_space"
+    assert free.value.details == {
+        "peak_growth_bytes": prediction.peak_growth_bytes,
+        "reserved_free_bytes": 77,
+        "required_free_bytes": prediction.peak_growth_bytes + 77,
+        "available_bytes": insufficient,
+        "deficit_bytes": 1,
+    }
+
+
+def test_remaining_and_startup_free_gates_report_deficit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prediction = _prediction()
+    monkeypatch.setattr(capacity_module, "_filesystem_free_bytes", lambda _fd: 0)
+    with pytest.raises(V5CapacityError) as remaining:
+        preflight_v5_remaining_free_capacity(
+            tmp_path,
+            prediction,
+            remaining_embedding_cache_miss_count=1,
+        )
+    assert remaining.value.reason_code == "capacity_remaining_free_space"
+    assert remaining.value.details["available_bytes"] == 0
+    assert remaining.value.details["remaining_misses"] == 1
+    assert remaining.value.details["deficit_bytes"] == remaining.value.details["required_free_bytes"]
+
+    with pytest.raises(V5CapacityError) as startup:
+        preflight_worker_start_capacity(tmp_path, minimum_free_bytes=MAX_SAFE_BYTES)
+    assert startup.value.reason_code == "capacity_startup_free_space"
+    assert startup.value.details["minimum_free_bytes"] == MAX_SAFE_BYTES
+    assert startup.value.details["deficit_bytes"] == (
+        MAX_SAFE_BYTES - startup.value.details["available_bytes"]
+    )
+
+
+def test_successful_preflight_snapshot_exposes_gate_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prediction = _prediction()
+    policy = V5CapacityPolicy(reserved_free_space_bytes=123)
+    monkeypatch.setattr(
+        capacity_module,
+        "_filesystem_free_bytes",
+        lambda _fd: prediction.peak_growth_bytes + 123,
+    )
+    snapshot = preflight_v5_capacity(tmp_path, prediction, policy=policy)
+    assert snapshot.required_free_bytes == prediction.peak_growth_bytes + 123
+    assert snapshot.policy is not None
+    assert snapshot.policy.reserved_free_space_bytes == 123
+    assert snapshot.probe_path == tmp_path

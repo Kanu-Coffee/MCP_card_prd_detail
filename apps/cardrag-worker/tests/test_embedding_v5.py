@@ -698,3 +698,98 @@ async def test_credential_injected_preflight_compares_20_plus_korean_samples() -
     assert all(row.sample_count == len(KOREAN_PREFLIGHT_SAMPLES) for row in report.providers)
     assert all(row.minimum_repeat_cosine == pytest.approx(1.0) for row in report.providers)
     assert report.minimum_cross_provider_cosine == pytest.approx(0.8)
+
+
+def test_metadata_contract_failures_carry_typed_reason_codes() -> None:
+    with pytest.raises(EmbeddingV5Error) as wrong_model:
+        parse_openrouter_endpoint_metadata({"data": {"id": "other/model", "endpoints": []}})
+    assert wrong_model.value.reason_code == "metadata_model_id_mismatch"
+
+    with pytest.raises(EmbeddingV5Error) as bad_shape:
+        parse_openrouter_endpoint_metadata({"data": "not-an-object"})
+    assert bad_shape.value.reason_code == "metadata_shape_invalid"
+
+    with pytest.raises(EmbeddingV5Error) as no_allowlisted:
+        parse_openrouter_endpoint_metadata(
+            _metadata_payload(
+                {
+                    "name": "Other: Qwen3 Embedding",
+                    "provider_name": "Other",
+                    "tag": "otherprovider",
+                    "model_id": QWEN3_EMBEDDING_MODEL,
+                    "quantization": "bf16",
+                    "context_length": 8192,
+                    "max_prompt_tokens": 8192,
+                    "supported_parameters": ["encoding_format"],
+                }
+            )
+        )
+    assert no_allowlisted.value.reason_code == "metadata_no_allowlisted_endpoint"
+
+    endpoints = parse_openrouter_endpoint_metadata(
+        _metadata_payload(_endpoint("deepinfra", quantization="fp8"))
+    )
+    with pytest.raises(EmbeddingV5Error) as missing:
+        select_quality_endpoint(endpoints, provider_id="nebius")
+    assert missing.value.reason_code == "provider_endpoint_missing"
+    assert missing.value.provider_id == "nebius"
+
+    with pytest.raises(EmbeddingV5Error) as fp8:
+        select_quality_endpoint(endpoints, provider_id="deepinfra")
+    assert fp8.value.reason_code == "provider_endpoint_fp8"
+    assert fp8.value.provider_id == "deepinfra"
+
+
+def test_embedding_v5_error_sanitizes_untrusted_reason_and_identity() -> None:
+    plain = EmbeddingV5Error("anything")
+    assert plain.reason_code == "embedding_contract_unclassified"
+    assert plain.provider_id is None
+
+    hostile = EmbeddingV5Error("x", reason_code="Not A Code", provider_id="evil/../../")
+    assert hostile.reason_code == "embedding_contract_unclassified"
+    assert hostile.provider_id is None
+
+    transient = EmbeddingV5TransientError("rate limited", kind="rate_limit", status_code=429)
+    assert transient.reason_code == "request_rate_limit"
+
+
+@pytest.mark.asyncio
+async def test_response_contract_failures_expose_typed_reason_codes() -> None:
+    def not_json(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"definitely not json", request=request)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        transport=httpx.MockTransport(not_json),
+    )
+    with pytest.raises(EmbeddingV5Error) as captured:
+        await provider.embed_documents(["text"])
+    assert captured.value.reason_code == "response_not_json"
+
+    def wrong_dimension(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "model": QWEN3_EMBEDDING_MODEL,
+                    "provider": "deepinfra",
+                    "data": [{"index": 0, "embedding": [1.0] * (QWEN3_EMBEDDING_DIMENSION - 1)}],
+                }
+            ).encode(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    dimension_provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        transport=httpx.MockTransport(wrong_dimension),
+    )
+    with pytest.raises(EmbeddingV5Error) as dimension:
+        await dimension_provider.embed_documents(["text"])
+    assert dimension.value.reason_code == "response_dimension_mismatch"

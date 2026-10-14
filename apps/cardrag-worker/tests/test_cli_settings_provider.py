@@ -1112,6 +1112,7 @@ def test_cli_startup_openrouter_transient_exhaustion_classified_safely(
         "attempts": 12,
         "elapsed_seconds": payload["elapsed_seconds"],
         "error_class_category": "openrouter_request",
+        "failure_reason_code": "request_rate_limit",
         "phase": "qwen_endpoint_preflight",
         "reason": "Worker pipeline failed unexpectedly.",
         "reason_code": "worker_unexpected_failure",
@@ -1194,6 +1195,223 @@ def test_cli_startup_configured_provider_missing_classified_safely(
     assert payload["error_class_category"] == "contract"
     assert payload["phase"] == "embedding_verification"
     assert payload["reason_code"] == "worker_unexpected_failure"
+
+
+def _startup_retry_settings(**overrides: Any) -> Any:
+    base_settings = WorkerSettings.from_env()
+    defaults = {
+        "startup_check_max_attempts": 2,
+        "startup_check_deadline_seconds": 600,
+        "openrouter_api_key": "injected-test-credential",
+    }
+    defaults.update(overrides)
+    return dataclasses.replace(base_settings, **defaults)
+
+
+def _fake_provider_report() -> Any:
+    profile = SimpleNamespace(
+        provider_id="deepinfra",
+        maximum_tokens=WorkerSettings.from_env().embedding_maximum_tokens,
+        model=WorkerSettings.from_env().embedding_model,
+        dimension=WorkerSettings.from_env().embedding_dimension,
+    )
+    report = SimpleNamespace(profile=profile, sample_count=24, minimum_repeat_cosine=0.9999)
+    return SimpleNamespace(providers=[report], minimum_cross_provider_cosine=0.9)
+
+
+def test_cli_endpoint_preflight_retries_typed_metadata_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cardrag_worker.embedding_v5 import EmbeddingV5Error
+
+    calls: list[int] = []
+
+    def count_tokens(_text: str) -> int:
+        return 1
+
+    count_tokens.asset_sha256 = "fake_sha"  # type: ignore[attr-defined]
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return count_tokens
+
+    async def flaky_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(len(calls))
+        if len(calls) == 1:
+            raise EmbeddingV5Error("metadata glitch", reason_code="metadata_not_json")
+        return _fake_provider_report()
+
+    recorder = cli_module.StartupAttemptRecorder(tmp_path, "correlation123")
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", flaky_preflight)
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 0.0)
+    settings = _startup_retry_settings(startup_check_max_attempts=2, startup_check_deadline_seconds=600)
+
+    provider = asyncio.run(
+        cli_module._qwen_embedding_provider(settings, correlation_id="c", recorder=recorder)
+    )
+    assert provider is not None
+    assert calls == [0, 1]
+    lines = [
+        json.loads(line) for line in (tmp_path / "startup-attempt-history.jsonl").read_text().splitlines()
+    ]
+    retrying = [row for row in lines if row.get("decision") == "retry"]
+    assert len(retrying) == 1
+    assert retrying[0]["reason_code"] == "metadata_not_json"
+    assert retrying[0]["attempt"] == 1
+    assert retrying[0]["attempt_max"] == 2
+    assert retrying[0]["correlation_id"] == "correlation123"
+    passed = [row for row in lines if row["stage"] == "qwen_endpoint_preflight" and row["status"] == "passed"]
+    assert passed and passed[0]["attempt"] == 2
+
+
+def test_cli_endpoint_preflight_does_not_retry_deterministic_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cardrag_worker.embedding_v5 import EmbeddingV5Error
+
+    calls: list[int] = []
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def failing_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(len(calls))
+        raise EmbeddingV5Error("FP8 endpoint", reason_code="profile_fp8_forbidden", provider_id="deepinfra")
+
+    recorder = cli_module.StartupAttemptRecorder(tmp_path, "correlation456")
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", failing_preflight)
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 0.0)
+    settings = _startup_retry_settings(startup_check_max_attempts=3, startup_check_deadline_seconds=600)
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings, correlation_id="c", recorder=recorder))
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+    assert len(calls) == 1
+
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
+        raise exc_info.value
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error_class_category"] == "contract"
+    assert payload["failure_reason_code"] == "profile_fp8_forbidden"
+    assert payload["provider_id"] == "deepinfra"
+    lines = [
+        json.loads(line) for line in (tmp_path / "startup-attempt-history.jsonl").read_text().splitlines()
+    ]
+    assert not [row for row in lines if row.get("decision") == "retry"]
+    terminal = [
+        row for row in lines if row["stage"] == "qwen_endpoint_preflight" and row["status"] == "terminal"
+    ][-1]
+    assert terminal["reason_code"] == "profile_fp8_forbidden"
+
+
+def test_cli_endpoint_preflight_retry_is_bounded_by_attempts_and_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cardrag_worker.embedding_v5 import EmbeddingV5Error
+
+    calls: list[int] = []
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def failing_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(len(calls))
+        raise EmbeddingV5Error("glitch", reason_code="provider_endpoint_missing")
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", failing_preflight)
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 0.0)
+
+    attempt_settings = _startup_retry_settings(
+        startup_check_max_attempts=2, startup_check_deadline_seconds=600
+    )
+    with pytest.raises(cli_module.WorkerStartupFailure):
+        asyncio.run(cli_module._qwen_embedding_provider(attempt_settings))
+    assert len(calls) == 2
+
+    calls.clear()
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 1000.0)
+    deadline_settings = _startup_retry_settings(
+        startup_check_max_attempts=3, startup_check_deadline_seconds=60
+    )
+    with pytest.raises(cli_module.WorkerStartupFailure):
+        asyncio.run(cli_module._qwen_embedding_provider(deadline_settings))
+    assert len(calls) == 1
+
+
+def test_startup_attempt_recorder_falls_back_without_state_directory(
+    tmp_path: Path,
+) -> None:
+    recorder = cli_module.StartupAttemptRecorder(tmp_path / "not-created-yet", "abc")
+    recorder.record("stage", "passed")  # must not raise
+
+    assert not (tmp_path / "not-created-yet").exists()
+
+
+def test_startup_attempt_recorder_rotates_oversized_history(tmp_path: Path) -> None:
+    recorder = cli_module.StartupAttemptRecorder(tmp_path, "abc")
+    recorder.path.write_bytes(b"x" * (cli_module._WORKER_STARTUP_HISTORY_MAX_BYTES + 1))
+    recorder.record("stage", "passed")
+    assert recorder.path.stat().st_size < cli_module._WORKER_STARTUP_HISTORY_MAX_BYTES
+    rotated = recorder.path.with_suffix(".jsonl.1")
+    assert rotated.is_file()
+
+
+def test_cli_capacity_startup_rejection_echoes_typed_gate_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = V5CapacityError(
+        "Worker reserved free-space gate rejected v5 artifacts",
+        reason_code="capacity_free_space",
+        details={
+            "peak_growth_bytes": 71468736160,
+            "reserved_free_bytes": 2147483648,
+            "required_free_bytes": 73616219808,
+            "available_bytes": 68409933824,
+            "deficit_bytes": 5206285984,
+        },
+    )
+
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
+        raise failure
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error_class_category"] == "capacity"
+    assert payload["failure_reason_code"] == "capacity_free_space"
+    assert payload["capacity_details"]["deficit_bytes"] == 5206285984
+
+
+def test_read_capacity_observation_validation(tmp_path: Path) -> None:
+    assert cli_module._read_capacity_observation(tmp_path) is None
+    bad = tmp_path / "capacity-observation.json"
+    bad.write_bytes(b"{not json")
+    assert cli_module._read_capacity_observation(tmp_path) is None
+    bad.write_bytes(b'{"required_free_bytes": "oops"}')
+    assert cli_module._read_capacity_observation(tmp_path) is None
+    good = tmp_path / "capacity-observation.json"
+    good.write_bytes(
+        json.dumps(
+            {
+                "schema_version": "cardrag.capacity-observation.v1",
+                "run_id": "run-1",
+                "required_free_bytes": 73616219808,
+            }
+        ).encode()
+    )
+    observation = cli_module._read_capacity_observation(tmp_path)
+    assert observation is not None
+    assert observation["required_free_bytes"] == 73616219808
 
 
 def test_cli_startup_check_success_bypasses_pipeline_and_backup(

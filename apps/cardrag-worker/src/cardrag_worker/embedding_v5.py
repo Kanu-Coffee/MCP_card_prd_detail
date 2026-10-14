@@ -58,8 +58,37 @@ _RETRYABLE_EMBEDDING_HTTP_STATUSES = frozenset({408, 425, 429})
 LOGGER = logging.getLogger(__name__)
 
 
+_REASON_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
+
+# Contract failures stay deterministic and fail-closed; only the reason code
+# and allowlisted identity fields survive to the journal and CLI payload.
+# Free-form provider messages are never propagated.
+DEFAULT_EMBEDDING_CONTRACT_REASON: str = "embedding_contract_unclassified"
+
+
 class EmbeddingV5Error(RuntimeError):
-    """A fail-closed Qwen profile, routing, or response contract error."""
+    """A fail-closed Qwen profile, routing, or response contract error.
+
+    ``reason_code`` is a snake-case typed identifier for the exact contract
+    boundary that rejected the response or metadata.  ``provider_id`` is only
+    accepted when it is one of the allowlisted Qwen embedding providers.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str | None = None,
+        provider_id: str | None = None,
+    ) -> None:
+        code = reason_code if isinstance(reason_code, str) else None
+        self.reason_code: str = (
+            code
+            if code is not None and _REASON_CODE_PATTERN.fullmatch(code)
+            else "embedding_contract_unclassified"
+        )
+        self.provider_id: str | None = provider_id if provider_id in QWEN3_EMBEDDING_PROVIDER_IDS else None
+        super().__init__(message)
 
 
 class EmbeddingV5RequestError(EmbeddingV5Error):
@@ -76,7 +105,7 @@ class EmbeddingV5RequestError(EmbeddingV5Error):
         self.kind = kind if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", kind) else "unknown"
         self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
         self.attempts = attempts if type(attempts) is int and attempts >= 1 else 1
-        super().__init__(message)
+        super().__init__(message, reason_code=f"request_{self.kind}")
 
 
 class EmbeddingV5TransientError(EmbeddingV5RequestError):
@@ -219,11 +248,17 @@ def _validate_response_limit(value: int, *, maximum: int, label: str) -> int:
 async def _bounded_response_bytes(response: httpx.Response, maximum_bytes: int) -> bytes:
     raw_length = response.headers.get("content-length")
     if raw_length is not None and (not raw_length.isdigit() or int(raw_length) > maximum_bytes):
-        raise EmbeddingV5Error("OpenRouter response Content-Length is invalid")
+        raise EmbeddingV5Error(
+            "OpenRouter response Content-Length is invalid",
+            reason_code="response_content_length_invalid",
+        )
     body = bytearray()
     async for chunk in response.aiter_bytes():
         if len(chunk) > maximum_bytes - len(body):
-            raise EmbeddingV5Error("OpenRouter response exceeds its configured byte cap")
+            raise EmbeddingV5Error(
+                "OpenRouter response exceeds its configured byte cap",
+                reason_code="response_byte_cap_exceeded",
+            )
         body.extend(chunk)
     return bytes(body)
 
@@ -285,9 +320,17 @@ class QwenEmbeddingProfileV5:
     @classmethod
     def from_endpoint(cls, endpoint: OpenRouterEndpointMetadata) -> QwenEmbeddingProfileV5:
         if endpoint.model != QWEN3_EMBEDDING_MODEL:
-            raise EmbeddingV5Error("endpoint metadata is for a different model")
+            raise EmbeddingV5Error(
+                "endpoint metadata is for a different model",
+                reason_code="profile_endpoint_model_mismatch",
+                provider_id=endpoint.provider_id,
+            )
         if endpoint.is_fp8:
-            raise EmbeddingV5Error("FP8 endpoints are forbidden by the quality profile")
+            raise EmbeddingV5Error(
+                "FP8 endpoints are forbidden by the quality profile",
+                reason_code="profile_fp8_forbidden",
+                provider_id=endpoint.provider_id,
+            )
         return cls(
             profile_id=qwen3_embedding_profile_id(
                 endpoint.provider_id,
@@ -373,15 +416,25 @@ KOREAN_PREFLIGHT_SAMPLES: tuple[str, ...] = (
 )
 
 
-def _required_mapping(value: object, *, field: str) -> Mapping[str, Any]:
+def _required_mapping(
+    value: object,
+    *,
+    field: str,
+    reason_code: str,
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an object")
+        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an object", reason_code=reason_code)
     return cast(Mapping[str, Any], value)
 
 
-def _required_sequence(value: object, *, field: str) -> Sequence[object]:
+def _required_sequence(
+    value: object,
+    *,
+    field: str,
+    reason_code: str,
+) -> Sequence[object]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an array")
+        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an array", reason_code=reason_code)
     return cast(Sequence[object], value)
 
 
@@ -404,14 +457,19 @@ def parse_openrouter_endpoint_metadata(
 ) -> tuple[OpenRouterEndpointMetadata, ...]:
     """Parse the public model endpoint response without trusting loose fields."""
 
-    root = _required_mapping(payload, field="response")
-    data = _required_mapping(root.get("data"), field="data")
+    root = _required_mapping(payload, field="response", reason_code="metadata_shape_invalid")
+    data = _required_mapping(root.get("data"), field="data", reason_code="metadata_shape_invalid")
     if data.get("id") != model:
-        raise EmbeddingV5Error("OpenRouter metadata returned a different model id")
-    endpoints = _required_sequence(data.get("endpoints"), field="data.endpoints")
+        raise EmbeddingV5Error(
+            "OpenRouter metadata returned a different model id",
+            reason_code="metadata_model_id_mismatch",
+        )
+    endpoints = _required_sequence(
+        data.get("endpoints"), field="data.endpoints", reason_code="metadata_shape_invalid"
+    )
     parsed: list[OpenRouterEndpointMetadata] = []
     for value in endpoints:
-        row = _required_mapping(value, field="data.endpoints[]")
+        row = _required_mapping(value, field="data.endpoints[]", reason_code="metadata_shape_invalid")
         provider_id = _provider_id(row)
         if provider_id is None:
             continue
@@ -419,10 +477,18 @@ def parse_openrouter_endpoint_metadata(
         endpoint_name = row.get("name")
         quantization = row.get("quantization")
         if not all(isinstance(item, str) and item for item in (provider_name, endpoint_name, quantization)):
-            raise EmbeddingV5Error("allowlisted endpoint has incomplete provider/precision metadata")
+            raise EmbeddingV5Error(
+                "allowlisted endpoint has incomplete provider/precision metadata",
+                reason_code="metadata_endpoint_incomplete",
+                provider_id=provider_id,
+            )
         endpoint_model = row.get("model_id", model)
         if endpoint_model != model:
-            raise EmbeddingV5Error("endpoint row is bound to a different model")
+            raise EmbeddingV5Error(
+                "endpoint row is bound to a different model",
+                reason_code="metadata_endpoint_model_mismatch",
+                provider_id=provider_id,
+            )
         # OpenRouter currently emits ``max_prompt_tokens: null`` alongside a
         # valid integer ``context_length`` for both allowlisted Qwen routes.
         # A present null must not shadow the validated context fallback.
@@ -430,13 +496,22 @@ def parse_openrouter_endpoint_metadata(
         if maximum_tokens is None:
             maximum_tokens = row.get("context_length")
         if isinstance(maximum_tokens, bool) or not isinstance(maximum_tokens, int) or maximum_tokens <= 0:
-            raise EmbeddingV5Error("endpoint maximum input tokens are missing or invalid")
+            raise EmbeddingV5Error(
+                "endpoint maximum input tokens are missing or invalid",
+                reason_code="metadata_maximum_tokens_invalid",
+                provider_id=provider_id,
+            )
         supported_raw = _required_sequence(
             row.get("supported_parameters"),
             field="endpoint.supported_parameters",
+            reason_code="metadata_shape_invalid",
         )
         if not all(isinstance(item, str) and item for item in supported_raw):
-            raise EmbeddingV5Error("endpoint supported_parameters contains an invalid value")
+            raise EmbeddingV5Error(
+                "endpoint supported_parameters contains an invalid value",
+                reason_code="metadata_supported_parameters_invalid",
+                provider_id=provider_id,
+            )
         supported = tuple(sorted(set(cast(Sequence[str], supported_raw))))
         parsed.append(
             OpenRouterEndpointMetadata(
@@ -451,7 +526,10 @@ def parse_openrouter_endpoint_metadata(
             )
         )
     if not parsed:
-        raise EmbeddingV5Error("metadata contains no allowlisted Qwen embedding endpoint")
+        raise EmbeddingV5Error(
+            "metadata contains no allowlisted Qwen embedding endpoint",
+            reason_code="metadata_no_allowlisted_endpoint",
+        )
     priority = {provider: index for index, provider in enumerate(QWEN3_EMBEDDING_PROVIDER_IDS)}
     return tuple(sorted(parsed, key=lambda row: (priority[row.provider_id], row.endpoint_name)))
 
@@ -465,11 +543,23 @@ def select_quality_endpoint(
 
     matches = tuple(row for row in endpoints if row.provider_id == provider_id)
     if not matches:
-        raise EmbeddingV5Error(f"no endpoint metadata found for {provider_id}")
+        raise EmbeddingV5Error(
+            f"no endpoint metadata found for {provider_id}",
+            reason_code="provider_endpoint_missing",
+            provider_id=provider_id,
+        )
     if any(row.is_fp8 for row in matches):
-        raise EmbeddingV5Error(f"{provider_id} advertises an FP8 endpoint")
+        raise EmbeddingV5Error(
+            f"{provider_id} advertises an FP8 endpoint",
+            reason_code="provider_endpoint_fp8",
+            provider_id=provider_id,
+        )
     if len(matches) != 1:
-        raise EmbeddingV5Error(f"{provider_id} endpoint route is ambiguous")
+        raise EmbeddingV5Error(
+            f"{provider_id} endpoint route is ambiguous",
+            reason_code="provider_endpoint_ambiguous",
+            provider_id=provider_id,
+        )
     endpoint = matches[0]
     return endpoint
 
@@ -504,26 +594,37 @@ def embedding_cache_key(
 
 def _normalize_vector(values: object, *, index: int) -> list[float]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
-        raise EmbeddingV5Error(f"embedding {index} is not an array")
+        raise EmbeddingV5Error(
+            f"embedding {index} is not an array", reason_code="response_embedding_not_array"
+        )
     if len(values) != QWEN3_EMBEDDING_DIMENSION:
         raise EmbeddingV5Error(
-            f"embedding {index} dimension {len(values)} is not {QWEN3_EMBEDDING_DIMENSION}"
+            f"embedding {index} dimension {len(values)} is not {QWEN3_EMBEDDING_DIMENSION}",
+            reason_code="response_dimension_mismatch",
         )
     if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
-        raise EmbeddingV5Error(f"embedding {index} contains a non-numeric value")
+        raise EmbeddingV5Error(
+            f"embedding {index} contains a non-numeric value", reason_code="response_non_numeric_value"
+        )
     try:
         vector = [float(value) for value in values]
     except (TypeError, ValueError):
-        raise EmbeddingV5Error(f"embedding {index} contains a non-numeric value") from None
+        raise EmbeddingV5Error(
+            f"embedding {index} contains a non-numeric value", reason_code="response_non_numeric_value"
+        ) from None
     if not all(math.isfinite(value) for value in vector):
-        raise EmbeddingV5Error(f"embedding {index} contains a non-finite value")
+        raise EmbeddingV5Error(
+            f"embedding {index} contains a non-finite value", reason_code="response_non_finite_value"
+        )
     norm = math.sqrt(sum(value * value for value in vector))
     if not math.isfinite(norm) or norm <= 1e-12:
-        raise EmbeddingV5Error(f"embedding {index} has an invalid norm")
+        raise EmbeddingV5Error(f"embedding {index} has an invalid norm", reason_code="response_norm_invalid")
     normalized = [value / norm for value in vector]
     normalized_norm = sum(value * value for value in normalized)
     if not math.isclose(normalized_norm, 1.0, rel_tol=_NORM_TOLERANCE, abs_tol=_NORM_TOLERANCE):
-        raise EmbeddingV5Error(f"embedding {index} failed L2 normalization")
+        raise EmbeddingV5Error(
+            f"embedding {index} failed L2 normalization", reason_code="response_normalization_failed"
+        )
     return normalized
 
 
@@ -613,10 +714,14 @@ class OpenRouterQwenEmbeddingProviderV5:
         for index, value in enumerate(values):
             count = self.token_counter(value)
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                raise EmbeddingV5Error("token counter returned an invalid value")
+                raise EmbeddingV5Error(
+                    "token counter returned an invalid value", reason_code="token_counter_invalid"
+                )
             if count > self.profile.maximum_tokens:
                 raise EmbeddingV5Error(
-                    f"embedding input {index} exceeds sealed maximum_tokens; truncation is forbidden"
+                    f"embedding input {index} exceeds sealed maximum_tokens; truncation is forbidden",
+                    reason_code="token_limit_exceeded",
+                    provider_id=self.profile.provider_id,
                 )
 
     @staticmethod
@@ -744,30 +849,51 @@ class OpenRouterQwenEmbeddingProviderV5:
         try:
             payload = json.loads(response_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            raise EmbeddingV5Error("OpenRouter embedding response is not JSON") from None
-        root = _required_mapping(payload, field="embedding response")
+            raise EmbeddingV5Error(
+                "OpenRouter embedding response is not JSON", reason_code="response_not_json"
+            ) from None
+        root = _required_mapping(payload, field="embedding response", reason_code="response_shape_invalid")
         # OpenRouter accepts the lower-case registry slug in requests but its
         # live Qwen response canonicalizes the same slug as
         # ``Qwen/Qwen3-Embedding-8B``.  Bind every path component and spelling
         # while allowing only this case normalization.
         actual_model = root.get("model")
         if not isinstance(actual_model, str) or actual_model.casefold() != self.profile.model.casefold():
-            raise EmbeddingV5Error("OpenRouter response model does not match the sealed profile")
+            raise EmbeddingV5Error(
+                "OpenRouter response model does not match the sealed profile",
+                reason_code="response_model_mismatch",
+                provider_id=self.profile.provider_id,
+            )
         actual_provider = _response_provider(root, response_provider)
         if actual_provider is None or not _provider_matches(actual_provider, self.profile.provider_id):
-            raise EmbeddingV5Error("OpenRouter response provider does not match the pinned route")
-        data = _required_sequence(root.get("data"), field="embedding response.data")
+            raise EmbeddingV5Error(
+                "OpenRouter response provider does not match the pinned route",
+                reason_code="response_provider_mismatch",
+                provider_id=self.profile.provider_id,
+            )
+        data = _required_sequence(
+            root.get("data"), field="embedding response.data", reason_code="response_shape_invalid"
+        )
         if len(data) != len(values):
-            raise EmbeddingV5Error("OpenRouter embedding response count mismatch")
+            raise EmbeddingV5Error(
+                "OpenRouter embedding response count mismatch", reason_code="response_count_mismatch"
+            )
         indexed: dict[int, list[float]] = {}
         for value in data:
-            row = _required_mapping(value, field="embedding response.data[]")
+            row = _required_mapping(
+                value, field="embedding response.data[]", reason_code="response_shape_invalid"
+            )
             index = row.get("index")
             if isinstance(index, bool) or not isinstance(index, int) or index in indexed:
-                raise EmbeddingV5Error("OpenRouter embedding response index is invalid")
+                raise EmbeddingV5Error(
+                    "OpenRouter embedding response index is invalid", reason_code="response_index_invalid"
+                )
             indexed[index] = _normalize_vector(row.get("embedding"), index=index)
         if set(indexed) != set(range(len(values))):
-            raise EmbeddingV5Error("OpenRouter embedding response indices are not contiguous")
+            raise EmbeddingV5Error(
+                "OpenRouter embedding response indices are not contiguous",
+                reason_code="response_indices_not_contiguous",
+            )
         return [indexed[index] for index in range(len(values))]
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
@@ -896,16 +1022,20 @@ async def fetch_openrouter_qwen_endpoints(
     try:
         payload = json.loads(response_body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        raise EmbeddingV5Error("OpenRouter endpoint metadata response is not JSON") from None
+        raise EmbeddingV5Error(
+            "OpenRouter endpoint metadata response is not JSON", reason_code="metadata_not_json"
+        ) from None
     return parse_openrouter_endpoint_metadata(payload)
 
 
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     if len(left) != len(right) or not left:
-        raise EmbeddingV5Error("cannot compare incompatible embedding vectors")
+        raise EmbeddingV5Error(
+            "cannot compare incompatible embedding vectors", reason_code="cosine_vectors_incompatible"
+        )
     score = sum(a * b for a, b in zip(left, right, strict=True))
     if not math.isfinite(score):
-        raise EmbeddingV5Error("embedding cosine is non-finite")
+        raise EmbeddingV5Error("embedding cosine is non-finite", reason_code="cosine_non_finite")
     return max(-1.0, min(1.0, score))
 
 
@@ -961,7 +1091,11 @@ async def preflight_openrouter_qwen_providers(
         repeated = await provider.embed_documents(samples)
         cosines = tuple(_cosine(left, right) for left, right in zip(first, repeated, strict=True))
         if min(cosines) < minimum_repeat_cosine:
-            raise EmbeddingV5Error(f"{provider_id} repeated-input cosine is below the gate")
+            raise EmbeddingV5Error(
+                f"{provider_id} repeated-input cosine is below the gate",
+                reason_code="repeat_cosine_below_gate",
+                provider_id=provider_id,
+            )
         sample_rows = tuple(
             SampleRepeatResult(
                 input_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),

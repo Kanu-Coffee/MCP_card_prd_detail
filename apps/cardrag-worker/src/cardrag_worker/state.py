@@ -1250,6 +1250,29 @@ class WorkerState:
         row = self._last_successful_collection(issuer)
         return None if row is None else str(row["observed_at"])
 
+    def issuer_consecutive_failures(self, issuer: str, *, limit: int = 30) -> int:
+        """Count most-recent completed collections that failed, newest first.
+
+        Only recorded issuer outcomes count; a run that never reached the
+        issuer bookkeeping boundary is skipped rather than treated as a
+        failure, and an unbounded history is never scanned.
+        """
+
+        if limit < 1 or limit > 100:
+            raise ValueError("issuer failure history limit must be between 1 and 100")
+        rows = self.connection.execute(
+            """SELECT c.succeeded FROM issuer_collection c JOIN run r ON r.run_id=c.run_id
+               WHERE c.issuer=? AND r.status IN ('succeeded','failed','no_change')
+               ORDER BY COALESCE(r.finished_at,r.started_at) DESC LIMIT ?""",
+            (issuer, limit),
+        ).fetchall()
+        consecutive = 0
+        for row in rows:
+            if int(row["succeeded"]) == 1:
+                break
+            consecutive += 1
+        return consecutive
+
     def retained_publication_run_ids(self, *, limit: int = 2) -> tuple[str, ...]:
         if limit < 1:
             raise ValueError("publication retention limit must be positive")

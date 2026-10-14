@@ -73,8 +73,14 @@ from .async_utils import to_thread_fenced
 from .bounded import bounded_ordered_map
 from .cache_seed_v109 import load_v109_seed_pins
 from .capacity_v5 import (
+    CAPACITY_POLICY_LOST,
+    CAPACITY_WAL_BASELINE_UNSEALED,
+    CAPACITY_WAL_BOUND_EXCEEDED,
+    CAPACITY_WAL_RESEAL_FAILED,
+    V5ArtifactPrediction,
     V5CapacityError,
     V5CapacityPolicy,
+    V5CapacitySnapshot,
     build_v5_database_ledger,
     predict_serving_database_bytes,
     predict_v5_local_artifacts,
@@ -1537,9 +1543,35 @@ def _retryable_download_revalidation_kind(exc: Exception) -> str | None:
     return None
 
 
+def _capacity_failure_fields(exc: V5CapacityError) -> str:
+    """Render only the gate's bounded integers/nulls; never raw exception text."""
+
+    parts = [f"capacity_reason={exc.reason_code}"]
+    for key in sorted(exc.details):
+        value = exc.details[key]
+        parts.append(f"{key}={'null' if value is None else value}")
+    return " ".join(parts)
+
+
+def _capacity_gate_fields(
+    prediction: V5ArtifactPrediction,
+    policy: V5CapacityPolicy,
+) -> str:
+    return (
+        f"sidecar_limit_bytes={policy.maximum_vector_sidecar_bytes} "
+        f"database_limit_bytes={policy.maximum_serving_database_bytes} "
+        f"state_limit_bytes={policy.maximum_state_bytes} "
+        f"reserve_bytes={policy.reserved_free_space_bytes} "
+        f"required_free_bytes={prediction.peak_growth_bytes + policy.reserved_free_space_bytes}"
+    )
+
+
 def _safe_v5_embedding_terminal_error(exc: Exception) -> str:
     if isinstance(exc, V5CapacityError):
-        return "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+        return (
+            "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts "
+            f"({_capacity_failure_fields(exc)})"
+        )
     if isinstance(exc, EmbeddingV5PermanentRequestError):
         fields = [f"kind={exc.kind}"]
         if exc.status_code is not None:
@@ -3128,8 +3160,51 @@ class WorkerPipeline:
             for target in self._active_ocr_request.targets
         )
 
+    def _record_capacity_observation(
+        self,
+        *,
+        run_id: str,
+        prediction: V5ArtifactPrediction,
+        policy: V5CapacityPolicy,
+        snapshot: V5CapacitySnapshot,
+    ) -> None:
+        """Persist the latest gate-proven batch requirement for startup warnings.
+
+        The file is a single bounded observation used only to raise an early
+        operator warning before the cheap 2 GiB startup gate; it never acts as
+        a hard gate and a storage failure here never fails the run.
+        """
+
+        try:
+            _atomic_write(
+                self.state_dir / "capacity-observation.json",
+                canonical_json_bytes(
+                    {
+                        "schema_version": "cardrag.capacity-observation.v1",
+                        "run_id": run_id,
+                        "observed_at": datetime.now(UTC).isoformat(),
+                        "predicted_peak_growth_bytes": prediction.peak_growth_bytes,
+                        "reserved_free_bytes": policy.reserved_free_space_bytes,
+                        "required_free_bytes": (
+                            prediction.peak_growth_bytes + policy.reserved_free_space_bytes
+                        ),
+                        "filesystem_free_bytes": snapshot.filesystem_free_bytes,
+                        "state_usage_bytes": snapshot.state_usage_bytes,
+                    }
+                ),
+            )
+        except Exception:
+            LOGGER.warning("reason_code=capacity_observation_write_failed run_id=%s", run_id)
+
     def _write_issuer_collection(self, run_id: str) -> None:
         outcomes = tuple(self._issuer_outcomes.values())
+        for outcome in outcomes:
+            try:
+                outcome.consecutive_failed_runs = self.state.issuer_consecutive_failures(outcome.issuer)
+            except Exception:
+                # Freshness history is observability only; the collection record
+                # must still seal with null rather than fail the run.
+                outcome.consecutive_failed_runs = None
         failed = sum(item.failed for item in outcomes)
         successful = sum(item.download_status == "succeeded" for item in outcomes)
         status = "failed" if failed == len(outcomes) else "degraded" if failed else "complete"
@@ -6396,7 +6471,8 @@ class WorkerPipeline:
                     wal_baseline = self.state.observe_embedding_cache_v5_wal()
                 except WorkerStateWALCapacityError as exc:
                     raise V5CapacityError(
-                        "Worker v5 embedding cache WAL baseline could not be sealed"
+                        "Worker v5 embedding cache WAL baseline could not be sealed",
+                        reason_code=CAPACITY_WAL_BASELINE_UNSEALED,
                     ) from exc
                 prediction = predict_v5_local_artifacts(
                     derived_view_count=len(ordered_view_pairs),
@@ -6417,14 +6493,21 @@ class WorkerPipeline:
                                 - prediction.embedding_cache_wal_baseline_bytes
                             ),
                         )
-                    except WorkerStateWALCapacityError as exc:
+                    except WorkerStateWALCapacityError:
                         LOGGER.error(
-                            "reason_code=v5_embedding_cache_wal_capacity_failed boundary=%s",
+                            "reason_code=v5_embedding_cache_wal_capacity_failed boundary=%s "
+                            "capacity_reason=%s",
                             boundary,
+                            CAPACITY_WAL_BOUND_EXCEEDED,
                         )
                         raise V5CapacityError(
-                            "Worker v5 embedding cache WAL exceeded its predicted capacity bound"
-                        ) from exc
+                            "Worker v5 embedding cache WAL exceeded its predicted capacity bound",
+                            reason_code=CAPACITY_WAL_BOUND_EXCEEDED,
+                            details={
+                                "wal_baseline_bytes": wal_baseline.size_bytes,
+                                "predicted_transaction_bytes": prediction.embedding_cache_transaction_bytes,
+                            },
+                        ) from None
                     LOGGER.info(
                         "V5 embedding cache WAL capacity boundary=%s baseline_bytes=%d "
                         "wal_size_bytes=%d wal_limit_bytes=%d",
@@ -6436,28 +6519,34 @@ class WorkerPipeline:
 
                 capacity_policy = self.capacity_policy_v5
                 if capacity_policy is None:
-                    raise V5CapacityError("v5 generation lost its local capacity policy")
+                    raise V5CapacityError(
+                        "v5 generation lost its local capacity policy",
+                        reason_code=CAPACITY_POLICY_LOST,
+                    )
                 capacity_snapshot = await to_thread_fenced(
                     preflight_v5_capacity,
                     self.state_dir,
                     prediction,
                     policy=capacity_policy,
                 )
-            except V5CapacityError:
+            except V5CapacityError as exc:
                 LOGGER.error(
                     "reason_code=v5_capacity_preflight_failed derived_views=%d "
-                    "unique_cache_misses=%d database_payload_bytes=%d database_rows=%d",
+                    "unique_cache_misses=%d database_payload_bytes=%d database_rows=%d %s "
+                    "probe_path=%s",
                     len(ordered_view_pairs),
                     len(unique_misses),
                     database_ledger.payload_bytes,
                     database_ledger.row_count,
+                    _capacity_failure_fields(exc),
+                    self.state_dir,
                 )
                 raise
             LOGGER.info(
                 "V5 capacity preflight passed derived_views=%d unique_cache_misses=%d "
                 "wal_baseline_bytes=%d sidecar_bytes=%d database_bytes=%d "
                 "logical_growth_bytes=%d peak_growth_bytes=%d "
-                "state_usage_bytes=%d filesystem_free_bytes=%d",
+                "state_usage_bytes=%d filesystem_free_bytes=%d %s probe_path=%s",
                 len(ordered_view_pairs),
                 len(unique_misses),
                 prediction.embedding_cache_wal_baseline_bytes,
@@ -6467,6 +6556,14 @@ class WorkerPipeline:
                 prediction.peak_growth_bytes,
                 capacity_snapshot.state_usage_bytes,
                 capacity_snapshot.filesystem_free_bytes,
+                _capacity_gate_fields(prediction, capacity_policy),
+                self.state_dir,
+            )
+            self._record_capacity_observation(
+                run_id=run_id,
+                prediction=prediction,
+                policy=capacity_policy,
+                snapshot=capacity_snapshot,
             )
             miss_batches = _embedding_miss_batches(
                 unique_misses,
@@ -6484,10 +6581,13 @@ class WorkerPipeline:
                         remaining_embedding_cache_miss_count=remaining_unique_misses,
                         policy=capacity_policy,
                     )
-                except V5CapacityError:
+                except V5CapacityError as exc:
                     LOGGER.error(
-                        "reason_code=v5_remaining_capacity_failed remaining_unique_cache_misses=%d",
+                        "reason_code=v5_remaining_capacity_failed "
+                        "remaining_unique_cache_misses=%d %s probe_path=%s",
                         remaining_unique_misses,
+                        _capacity_failure_fields(exc),
+                        self.state_dir,
                     )
                     raise
                 generated = await provider.embed_documents(
@@ -6541,7 +6641,10 @@ class WorkerPipeline:
         try:
             final_wal_baseline = self.state.observe_embedding_cache_v5_wal()
         except WorkerStateWALCapacityError as exc:
-            raise V5CapacityError("Worker v5 embedding cache WAL baseline could not be resealed") from exc
+            raise V5CapacityError(
+                "Worker v5 embedding cache WAL baseline could not be resealed",
+                reason_code=CAPACITY_WAL_RESEAL_FAILED,
+            ) from exc
         final_prediction = predict_v5_local_artifacts(
             derived_view_count=len(ordered_view_pairs),
             database_payload_bytes=database_ledger.payload_bytes,
@@ -6553,7 +6656,10 @@ class WorkerPipeline:
         )
         capacity_policy = self.capacity_policy_v5
         if capacity_policy is None:
-            raise V5CapacityError("v5 generation lost its local capacity policy")
+            raise V5CapacityError(
+                "v5 generation lost its local capacity policy",
+                reason_code=CAPACITY_POLICY_LOST,
+            )
         try:
             final_capacity_snapshot = await to_thread_fenced(
                 preflight_v5_capacity,
@@ -6561,18 +6667,28 @@ class WorkerPipeline:
                 final_prediction,
                 policy=capacity_policy,
             )
-        except V5CapacityError:
+        except V5CapacityError as exc:
             LOGGER.error(
-                "reason_code=v5_preexport_capacity_failed derived_views=%d",
+                "reason_code=v5_preexport_capacity_failed derived_views=%d %s probe_path=%s",
                 len(ordered_view_pairs),
+                _capacity_failure_fields(exc),
+                self.state_dir,
             )
             raise
         LOGGER.info(
             "V5 pre-export capacity recheck passed state_usage_bytes=%d "
-            "filesystem_free_bytes=%d peak_growth_bytes=%d",
+            "filesystem_free_bytes=%d peak_growth_bytes=%d %s probe_path=%s",
             final_capacity_snapshot.state_usage_bytes,
             final_capacity_snapshot.filesystem_free_bytes,
             final_prediction.peak_growth_bytes,
+            _capacity_gate_fields(final_prediction, capacity_policy),
+            self.state_dir,
+        )
+        self._record_capacity_observation(
+            run_id=run_id,
+            prediction=final_prediction,
+            policy=capacity_policy,
+            snapshot=final_capacity_snapshot,
         )
 
         def lazy_cache_vector(

@@ -50,6 +50,7 @@ class IssuerCollectionOutcome:
     last_successful_collection_at: str | None = None
     origin_freshness_at: str | None = None
     carry_generation_id: str | None = None
+    consecutive_failed_runs: int | None = None
 
     @property
     def failed(self) -> bool:

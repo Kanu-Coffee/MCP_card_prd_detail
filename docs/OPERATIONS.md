@@ -210,6 +210,21 @@ systemctl status cardrag-worker.service cardrag-worker.timer
 journalctl -u cardrag-worker.service -n 100 --no-pager
 ```
 
+배치 전 운영 점검은 실제 mount의 여유량·inode·Docker 회수 가능량 확인과 초기검증으로 구성합니다.
+
+```bash
+df -B1 / ; df -i /
+docker system df
+/opt/cardrag/current/operations/worker-compose.sh run --rm --no-deps worker startup-check
+```
+
+`startup-check`는 production 초기화 경로(lock, capacity preflight, OCR resolver, Qwen
+provider/tokenizer preflight)만 실행하고 corpus·게시·백업 없이 종료합니다. 실패 시
+`Startup stage failed ... reason_code=...`와 최종 JSON payload의 분류를 먼저 확인하고,
+무조건 반복 실행하지 않습니다. 개발 잔재 정리는 CardRAG가 생성한 미참조 빌드 캐시·임시
+이미지부터 수행하며 `docker system prune -a --volumes`, 전체 image/volume 삭제, 운영
+volume 정리는 사용 금지입니다(보존 대상 판정은 각 실행의 rollback/reader/backup 증빙 후 개별 수행).
+
 외부 모니터가 live `worker-state.sqlite3`를 열면 안 됩니다. Worker는 단일 writer lock을
 보유합니다. 기존 실행이 진행 중일 때 추가 실행의 예약 실패는 기존 writer의 실패를
 뜻하지 않습니다. 로그와 실제 컨테이너 상태를 함께 확인하십시오.
@@ -241,6 +256,39 @@ SIGTERM 이후 Worker는 진행 중인 변경을 정리하고 게시 정합성�
 호스트 여유 공간(`< 80 GB`) 도달 시 수행하는 유지보수 점검은 런타임 거부 preflight 오류와 구분되는
 운영자 점검 기준입니다. 용량 부족 시 작업을 거부하며 여유 공간을 자동으로 확보하지 않습니다.
 MCP의 지속 quota 정책을 바꾸거나 남은 reservation을 정리할 때는 [RECOVERY](RECOVERY.md)를 따릅니다.
+
+### 초기검증·용량 실패 진단과 제한된 재시도
+
+시작 시점의 2 GiB gate는 **최소 기동 조건(minimum_start_gate_only)**일 뿐이며 배치 전체의
+hard gate는 파생 뷰·cache miss가 확정된 직후 embedding 이전의 dynamic
+`peak_growth + reserve` preflight입니다. 실패 분류와 diagnostic은 다음과 같이 남습니다.
+
+- 용량 거절 reason code: `capacity_sidecar_limit`, `capacity_database_limit`,
+  `capacity_state_quota`, `capacity_free_space`, `capacity_remaining_free_space`,
+  `capacity_startup_free_space`, `capacity_wal_bound_exceeded`, `capacity_wal_baseline_unsealed`,
+  `capacity_wal_reseal_failed`, `capacity_probe_unavailable`, `capacity_path_invalid`,
+  `capacity_state_root_changed`, `capacity_available_unmeasured`, `capacity_policy_lost`,
+  `capacity_prediction_contract_invalid`, `capacity_bytes_range_exceeded`.
+  실패·성공 모두 `capacity_reason=`, prediction·limit·usage/free/required/deficit과
+  `probe_path`가 journal에 기록되고, 최종 JSON payload의 `capacity_details`에도 보존됩니다.
+- 계약(quality/route/response) 실패 reason code: `metadata_not_json`, `metadata_shape_invalid`,
+  `metadata_model_id_mismatch`, `metadata_no_allowlisted_endpoint`,
+  `provider_endpoint_missing|fp8|ambiguous`, `profile_fp8_forbidden`, `profile_endpoint_model_mismatch`,
+  `response_*`, `token_counter_invalid`, `token_limit_exceeded`, `repeat_cosine_below_gate` 등.
+  원문 exception 텍스트는 남지 않으며 allowlist provider와 수치 필드만 기록됩니다.
+- 재시작된 startup attempt는 run 생성 전 `correlation_id`로 journal에 남고, state dir의
+  `startup-attempt-history.jsonl`(256 KiB 초과 시 1세대 rotate)에도 제한된 JSONL 이력이
+  남습니다. 저장 실패는 journal로만 대체되고 Worker를 실패시키지 않습니다.
+- 초기검증 stage 재시도는 `CARDRAG_WORKER_STARTUP_CHECK_MAX_ATTEMPTS`(기본 2, 1~3)와
+  `CARDRAG_WORKER_STARTUP_CHECK_DEADLINE_SECONDS`(기본 600)로 bound됩니다.
+  재시도 대상은 metadata 재조회로 회복 가능한 typed reason
+  (`metadata_not_json`, `metadata_shape_invalid`, `metadata_no_allowlisted_endpoint`,
+  `provider_endpoint_missing`)뿐이며, HTTP transport/transient status의 12회 request 재시도와는
+  중첩되지 않게 stage attempt 전에 deadline을 확인합니다. FP8·dimension·norm·cosine·model 등
+  결정적 계약 위반과 capacity 거절은 자동 재시도하지 않습니다. systemd unit에는 `Restart=`를
+  주지 않습니다.
+- 직전 성공 배치의 요구량을 초과하는 여유 공간 감소는 `capacity-observation.json`을 기준으로
+  시작 직후 **warning only**로 출력하며 실행을 차단하지 않습니다.
 
 백업의 주기·시간 예산·대기 항목 처리는 [증분 백업 안내](RECOVERY.md#증분-webdav-백업-운영)를 따릅니다.
 아래 원격 generation 검증 정책은 `CARDRAG_PUBLICATION_TRANSPORT=webdav`를 선택한 호환 모드에 적용됩니다.

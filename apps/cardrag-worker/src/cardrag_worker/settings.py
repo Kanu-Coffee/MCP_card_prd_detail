@@ -253,6 +253,8 @@ class WorkerSettings:
     embedding_request_max_attempts: int
     embedding_retry_base_seconds: float
     embedding_retry_cap_seconds: float
+    startup_check_max_attempts: int
+    startup_check_deadline_seconds: int
     document_aggregation_profile_path: Path | None
     document_aggregation_profile_artifact_sha256: str | None
     ocr_provider: str
@@ -634,6 +636,18 @@ class WorkerSettings:
             embedding_retry_cap_seconds=_positive_float(
                 "CARDRAG_EMBEDDING_RETRY_CAP_SECONDS",
                 DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
+            ),
+            startup_check_max_attempts=_bounded_int(
+                "CARDRAG_WORKER_STARTUP_CHECK_MAX_ATTEMPTS",
+                2,
+                minimum=1,
+                maximum=3,
+            ),
+            startup_check_deadline_seconds=_bounded_int(
+                "CARDRAG_WORKER_STARTUP_CHECK_DEADLINE_SECONDS",
+                600,
+                minimum=60,
+                maximum=3600,
             ),
             document_aggregation_profile_path=aggregation_path,
             document_aggregation_profile_artifact_sha256=aggregation_sha256,

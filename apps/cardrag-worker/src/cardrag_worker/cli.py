@@ -13,12 +13,18 @@ import subprocess
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import typer
-from cardrag_core import STABLE_POINTER_PATH, OCRInput, content_addressed_ocr_reuse_key
+from cardrag_core import (
+    STABLE_POINTER_PATH,
+    OCRInput,
+    canonical_json_bytes,
+    content_addressed_ocr_reuse_key,
+)
 
 from .adoption import (
     ADOPTION_POLICY_VERSION,
@@ -51,6 +57,7 @@ from .cache_seed_v109 import (
 from .capacity_v5 import (
     V5CapacityError,
     V5CapacityPolicy,
+    WorkerStartCapacitySnapshot,
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
 )
@@ -68,6 +75,7 @@ from .embedding_v5 import (
     EmbeddingV5RequestError,
     EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
+    ProviderComparisonReport,
     preflight_openrouter_qwen_providers,
 )
 from .gc import GCPartialFailure, _generation_chain, collect_garbage
@@ -465,13 +473,118 @@ def _probe_codex_version(executable: str | None) -> str | None:
     return None
 
 
+_WORKER_STARTUP_HISTORY_FILENAME = "startup-attempt-history.jsonl"
+_WORKER_STARTUP_HISTORY_MAX_BYTES = 262144
+# Metadata content-availability failures are re-fetched by a fresh stage
+# attempt (the HTTP layer already retried transport/status transients).
+# Deterministic contract violations are never in this set.
+WORKER_STARTUP_RETRYABLE_REASON_CODES = frozenset(
+    {
+        "metadata_not_json",
+        "metadata_shape_invalid",
+        "metadata_no_allowlisted_endpoint",
+        "provider_endpoint_missing",
+    }
+)
+_WORKER_STARTUP_RETRY_DELAY_SECONDS = 30.0
+
+
+class StartupAttemptRecorder:
+    """Bounded persistent journal for pre-run startup attempts.
+
+    The systemd journal is the primary store; this JSONL sidecar survives
+    short-lived containers and is capped in size and record count.  A storage
+    failure here must never mask the real startup outcome, so the recorder
+    degrades to the journal instead of raising.
+    """
+
+    def __init__(self, state_dir: Path, correlation_id: str) -> None:
+        self.state_dir = state_dir
+        self.correlation_id = correlation_id
+        self.path = state_dir / _WORKER_STARTUP_HISTORY_FILENAME
+        self._enabled = state_dir.is_dir()
+
+    def record(
+        self,
+        stage: str,
+        status: str,
+        *,
+        reason_code: str | None = None,
+        provider_id: str | None = None,
+        attempt: int = 1,
+        attempt_max: int = 1,
+        elapsed_seconds: float | None = None,
+        decision: str | None = None,
+        next_retry_seconds: float | None = None,
+    ) -> None:
+        if not self._enabled:
+            return
+        record = {
+            "schema_version": "cardrag.worker-startup-attempt.v1",
+            "correlation_id": self.correlation_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "stage": stage,
+            "status": status,
+            "attempt": attempt,
+            "attempt_max": attempt_max,
+        }
+        if reason_code is not None:
+            record["reason_code"] = reason_code
+        if provider_id is not None:
+            record["provider_id"] = provider_id
+        if elapsed_seconds is not None:
+            record["elapsed_seconds"] = round(elapsed_seconds, 3)
+        if decision is not None:
+            record["decision"] = decision
+        if next_retry_seconds is not None:
+            record["next_retry_seconds"] = next_retry_seconds
+        try:
+            if self.path.exists() and self.path.stat().st_size > _WORKER_STARTUP_HISTORY_MAX_BYTES:
+                os.replace(self.path, self.path.with_suffix(".jsonl.1"))
+            line = canonical_json_bytes(record)
+            descriptor = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            try:
+                os.write(descriptor, line + b"\n")
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Startup attempt history unavailable reason=storage errno=%s correlation_id=%s",
+                exc.errno,
+                self.correlation_id,
+            )
+
+
+def _read_capacity_observation(state_dir: Path) -> dict[str, Any] | None:
+    """Best-effort read of the last successful batch capacity requirement."""
+
+    path = state_dir / "capacity-observation.json"
+    try:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    required = payload.get("required_free_bytes")
+    if type(required) is not int or required < 0:
+        return None
+    return payload
+
+
 def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
     """Sanitize and classify startup failures without leaking secret payloads."""
     if isinstance(exc, QwenTokenizerError):
-        return {"error_class_category": "tokenizer"}
+        return {"error_class_category": "tokenizer", "reason_code": "tokenizer_asset_invalid"}
     if isinstance(exc, EmbeddingV5RequestError):
         payload: dict[str, Any] = {
             "error_class_category": "openrouter_request",
+            "reason_code": exc.reason_code,
             "retryable": isinstance(exc, EmbeddingV5TransientError),
         }
         if exc.status_code is not None and 100 <= exc.status_code <= 599:
@@ -480,9 +593,21 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
             payload["attempts"] = exc.attempts
         return payload
     if isinstance(exc, EmbeddingV5Error):
-        return {"error_class_category": "contract"}
+        classified_contract: dict[str, Any] = {
+            "error_class_category": "contract",
+            "reason_code": exc.reason_code,
+        }
+        if exc.provider_id is not None:
+            classified_contract["provider_id"] = exc.provider_id
+        return classified_contract
     if isinstance(exc, V5CapacityError):
-        return {"error_class_category": "capacity"}
+        classified_capacity: dict[str, Any] = {
+            "error_class_category": "capacity",
+            "reason_code": exc.reason_code,
+        }
+        if exc.details:
+            classified_capacity["capacity_details"] = dict(exc.details)
+        return classified_capacity
     category, status_code, errno = _classify_worker_failure(exc)
     classified: dict[str, Any] = {"error_class_category": category}
     if status_code is not None:
@@ -496,16 +621,48 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
     return classified
 
 
-def _log_startup_stage_failure(stage: str, exc: Exception, elapsed_seconds: float) -> None:
+def _classified_failure_fields(classified: dict[str, Any]) -> str:
+    """Render the allowlisted reason/numeric fields of a classification."""
+
+    parts: list[str] = []
+    reason_code = classified.get("reason_code")
+    if isinstance(reason_code, str):
+        parts.append(f"reason_code={reason_code}")
+    provider_id = classified.get("provider_id")
+    if isinstance(provider_id, str):
+        parts.append(f"provider_id={provider_id}")
+    details = classified.get("capacity_details")
+    if isinstance(details, dict):
+        for key in sorted(details):
+            value = details[key]
+            parts.append(f"{key}={'null' if value is None else value}")
+    return " ".join(parts)
+
+
+def _log_startup_stage_failure(
+    stage: str,
+    exc: Exception,
+    elapsed_seconds: float,
+    *,
+    correlation_id: str | None = None,
+    attempt: int = 1,
+    attempt_max: int = 1,
+) -> None:
     classified = _classify_startup_exception(exc)
+    fields = _classified_failure_fields(classified)
     logging.getLogger("cardrag_worker.cli").error(
-        "Startup stage failed stage=%s category=%s status_code=%s retryable=%s attempts=%s elapsed_seconds=%.3f",
+        "Startup stage failed stage=%s category=%s %s status_code=%s retryable=%s "
+        "attempts=%s elapsed_seconds=%.3f correlation_id=%s attempt=%d/%d",
         stage,
         classified["error_class_category"],
+        fields or "reason_code=unclassified",
         classified.get("status_code"),
         classified.get("retryable"),
         classified.get("attempts"),
         elapsed_seconds,
+        correlation_id or "none",
+        attempt,
+        attempt_max,
     )
 
 
@@ -537,6 +694,12 @@ def _echo_worker_unexpected_failure(
     elif isinstance(exc, Exception):
         details = _classify_startup_exception(exc)
         payload["error_class_category"] = details["error_class_category"]
+        if isinstance(details.get("reason_code"), str):
+            payload["failure_reason_code"] = details["reason_code"]
+        if isinstance(details.get("provider_id"), str):
+            payload["provider_id"] = details["provider_id"]
+        if isinstance(details.get("capacity_details"), dict):
+            payload["capacity_details"] = details["capacity_details"]
         resolved_phase = phase or details.get("phase")
         if resolved_phase is not None:
             payload["phase"] = resolved_phase
@@ -648,14 +811,18 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
 
 async def _qwen_embedding_provider(
     settings: WorkerSettings,
+    *,
+    correlation_id: str | None = None,
+    recorder: StartupAttemptRecorder | None = None,
 ) -> OpenRouterQwenEmbeddingProviderV5:
     """Run the credentialed provider/tokenizer preflight before touching a corpus."""
 
     api_key = settings.openrouter_api_key or ""
+    log = logging.getLogger("cardrag_worker.cli")
 
     stage = "tokenizer_validation"
     t0 = time.monotonic()
-    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    log.info("Startup stage starting stage=%s correlation_id=%s", stage, correlation_id or "none")
     try:
         tokenizer = await ensure_qwen_tokenizer(
             settings.embedding_tokenizer_path,
@@ -663,38 +830,157 @@ async def _qwen_embedding_provider(
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
-        _log_startup_stage_failure(stage, exc, elapsed)
+        _log_startup_stage_failure(
+            stage,
+            exc,
+            elapsed,
+            correlation_id=correlation_id,
+            attempt_max=settings.startup_check_max_attempts,
+        )
+        if recorder is not None:
+            recorder.record(
+                stage,
+                "terminal",
+                reason_code=_classify_startup_exception(exc).get("reason_code"),
+                elapsed_seconds=elapsed,
+                decision="terminal",
+            )
         raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-    logging.getLogger("cardrag_worker.cli").info(
-        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t0
-    )
+    log.info("Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t0)
+    if recorder is not None:
+        recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t0)
 
     stage = "qwen_endpoint_preflight"
+    attempt_max = settings.startup_check_max_attempts
+    deadline_seconds = settings.startup_check_deadline_seconds
     t1 = time.monotonic()
-    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
-    try:
-        comparison = await preflight_openrouter_qwen_providers(
-            api_key=api_key,
-            token_counter=tokenizer,
-            base_url=settings.openrouter_base_url,
-            timeout_seconds=settings.embedding_timeout_seconds,
-            embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
-            metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
-            request_max_attempts=settings.embedding_request_max_attempts,
-            retry_base_seconds=settings.embedding_retry_base_seconds,
-            retry_cap_seconds=settings.embedding_retry_cap_seconds,
-        )
-    except Exception as exc:
-        elapsed = time.monotonic() - t1
-        _log_startup_stage_failure(stage, exc, elapsed)
-        raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-    logging.getLogger("cardrag_worker.cli").info(
-        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t1
+    attempt = 0
+    log.info(
+        "Startup stage starting stage=%s correlation_id=%s attempt_max=%d deadline_seconds=%d",
+        stage,
+        correlation_id or "none",
+        attempt_max,
+        deadline_seconds,
     )
+    comparison: ProviderComparisonReport | None = None
+    while True:
+        attempt += 1
+        t_attempt = time.monotonic()
+        try:
+            comparison = await preflight_openrouter_qwen_providers(
+                api_key=api_key,
+                token_counter=tokenizer,
+                base_url=settings.openrouter_base_url,
+                timeout_seconds=settings.embedding_timeout_seconds,
+                embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
+                metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
+                request_max_attempts=settings.embedding_request_max_attempts,
+                retry_base_seconds=settings.embedding_retry_base_seconds,
+                retry_cap_seconds=settings.embedding_retry_cap_seconds,
+            )
+            break
+        except Exception as exc:
+            attempt_elapsed = time.monotonic() - t_attempt
+            cumulative_elapsed = time.monotonic() - t1
+            classified = _classify_startup_exception(exc)
+            reason = classified.get("reason_code")
+            recoverable = (
+                isinstance(reason, str)
+                and reason in WORKER_STARTUP_RETRYABLE_REASON_CODES
+                and isinstance(exc, EmbeddingV5Error)
+                and not isinstance(exc, EmbeddingV5RequestError)
+            )
+            retry_allowed = (
+                attempt < attempt_max
+                and recoverable
+                and cumulative_elapsed + _WORKER_STARTUP_RETRY_DELAY_SECONDS < deadline_seconds
+            )
+            provider_id = classified.get("provider_id")
+            if retry_allowed:
+                log.warning(
+                    "Startup stage retry stage=%s correlation_id=%s reason_code=%s "
+                    "attempt=%d/%d cumulative_seconds=%.3f next_retry_seconds=%.1f decision=retry",
+                    stage,
+                    correlation_id or "none",
+                    reason,
+                    attempt,
+                    attempt_max,
+                    cumulative_elapsed,
+                    _WORKER_STARTUP_RETRY_DELAY_SECONDS,
+                )
+                if recorder is not None:
+                    recorder.record(
+                        stage,
+                        "retrying",
+                        reason_code=reason if isinstance(reason, str) else None,
+                        provider_id=provider_id if isinstance(provider_id, str) else None,
+                        attempt=attempt,
+                        attempt_max=attempt_max,
+                        elapsed_seconds=attempt_elapsed,
+                        decision="retry",
+                        next_retry_seconds=_WORKER_STARTUP_RETRY_DELAY_SECONDS,
+                    )
+                await asyncio.sleep(_WORKER_STARTUP_RETRY_DELAY_SECONDS)
+                continue
+            if recoverable and attempt >= attempt_max:
+                log.warning(
+                    "Startup stage retry budget exhausted stage=%s correlation_id=%s "
+                    "reason_code=%s attempt_max=%d decision=terminal",
+                    stage,
+                    correlation_id or "none",
+                    reason,
+                    attempt_max,
+                )
+            elif recoverable:
+                log.warning(
+                    "Startup stage retry deadline reached stage=%s correlation_id=%s "
+                    "reason_code=%s cumulative_seconds=%.3f deadline_seconds=%d decision=terminal",
+                    stage,
+                    correlation_id or "none",
+                    reason,
+                    cumulative_elapsed,
+                    deadline_seconds,
+                )
+            _log_startup_stage_failure(
+                stage,
+                exc,
+                cumulative_elapsed,
+                correlation_id=correlation_id,
+                attempt=attempt,
+                attempt_max=attempt_max,
+            )
+            if recorder is not None:
+                recorder.record(
+                    stage,
+                    "terminal",
+                    reason_code=reason if isinstance(reason, str) else None,
+                    provider_id=provider_id if isinstance(provider_id, str) else None,
+                    attempt=attempt,
+                    attempt_max=attempt_max,
+                    elapsed_seconds=attempt_elapsed,
+                    decision="terminal",
+                )
+            raise WorkerStartupFailure(stage, exc, elapsed_seconds=cumulative_elapsed) from exc
+    assert comparison is not None
+    log.info(
+        "Startup stage passed stage=%s elapsed_seconds=%.3f attempts=%d/%d",
+        stage,
+        time.monotonic() - t1,
+        attempt,
+        attempt_max,
+    )
+    if recorder is not None:
+        recorder.record(
+            stage,
+            "passed",
+            attempt=attempt,
+            attempt_max=attempt_max,
+            elapsed_seconds=time.monotonic() - t1,
+        )
 
     stage = "embedding_verification"
     t2 = time.monotonic()
-    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    log.info("Startup stage starting stage=%s correlation_id=%s", stage, correlation_id or "none")
     try:
         matching = [
             report
@@ -715,13 +1001,21 @@ async def _qwen_embedding_provider(
             raise ValueError("configured embedding model/dimension differs from the verified Qwen profile")
     except Exception as exc:
         elapsed = time.monotonic() - t2
-        _log_startup_stage_failure(stage, exc, elapsed)
+        _log_startup_stage_failure(
+            stage,
+            exc,
+            elapsed,
+            correlation_id=correlation_id,
+            attempt_max=settings.startup_check_max_attempts,
+        )
+        if recorder is not None:
+            recorder.record(stage, "terminal", elapsed_seconds=elapsed, decision="terminal")
         raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-    logging.getLogger("cardrag_worker.cli").info(
-        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t2
-    )
+    log.info("Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t2)
+    if recorder is not None:
+        recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t2)
 
-    logging.getLogger("cardrag_worker.cli").info(
+    log.info(
         "Qwen provider preflight passed provider=%s samples=%d minimum_repeat_cosine=%.6f "
         "minimum_cross_provider_cosine=%.6f tokenizer_sha256=%s",
         profile.provider_id,
@@ -839,15 +1133,49 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
         # must not permanently block resuming it through the capacity
         # preflight's symlink refusal.
         sweep_stale_paddle_input_symlinks(settings.state_dir, resume)
-    startup_capacity = preflight_worker_start_capacity(
-        settings.state_dir,
-        minimum_free_bytes=settings.minimum_start_free_bytes,
-    )
+    startup_capacity: WorkerStartCapacitySnapshot
+    correlation_id = os.urandom(16).hex()
+    startup_recorder = StartupAttemptRecorder(settings.state_dir, correlation_id)
+    try:
+        startup_capacity = preflight_worker_start_capacity(
+            settings.state_dir,
+            minimum_free_bytes=settings.minimum_start_free_bytes,
+        )
+    except V5CapacityError as exc:
+        logging.getLogger("cardrag_worker.cli").error(
+            "Worker startup capacity preflight failed %s probe_path=%s correlation_id=%s",
+            _classified_failure_fields(_classify_startup_exception(exc)),
+            settings.state_dir,
+            correlation_id,
+        )
+        startup_recorder.record(
+            "startup_capacity_preflight",
+            "terminal",
+            reason_code=exc.reason_code,
+            decision="terminal",
+        )
+        raise
     logging.getLogger("cardrag_worker.cli").info(
-        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d",
+        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d "
+        "note=minimum_start_gate_only correlation_id=%s",
         startup_capacity.filesystem_free_bytes,
         startup_capacity.minimum_free_bytes,
+        correlation_id,
     )
+    startup_recorder.record("startup_capacity_preflight", "passed")
+    last_capacity_observation = _read_capacity_observation(settings.state_dir)
+    if last_capacity_observation is not None:
+        last_required = last_capacity_observation["required_free_bytes"]
+        if startup_capacity.filesystem_free_bytes < last_required:
+            last_run = last_capacity_observation.get("run_id")
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Worker startup free space is below the last successful batch requirement "
+                "filesystem_free_bytes=%d required_free_bytes=%d source_run_id=%s "
+                "warning_only=true hard_gate=capacity_preflight_before_embedding",
+                startup_capacity.filesystem_free_bytes,
+                last_required,
+                last_run if isinstance(last_run, str) else "none",
+            )
     document_aggregation = None
     if settings.document_aggregation_profile_path is not None:
         expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
@@ -914,14 +1242,25 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                     transport.configure_verification(state, settings.webdav_verification)
                 stage = "ocr_resolver"
                 t_stage = time.monotonic()
-                logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Startup stage starting stage=%s correlation_id=%s", stage, correlation_id
+                )
                 try:
                     resolver = _ocr_resolver(
                         settings, state, transport if isinstance(transport, WebDAVClient) else None
                     )
                 except Exception as exc:
                     elapsed = time.monotonic() - t_stage
-                    _log_startup_stage_failure(stage, exc, elapsed)
+                    _log_startup_stage_failure(stage, exc, elapsed, correlation_id=correlation_id)
+                    classified_ocr = _classify_startup_exception(exc)
+                    ocr_reason = classified_ocr.get("reason_code")
+                    startup_recorder.record(
+                        stage,
+                        "terminal",
+                        reason_code=ocr_reason if isinstance(ocr_reason, str) else None,
+                        elapsed_seconds=elapsed,
+                        decision="terminal",
+                    )
                     raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
                 codex_ver = (
                     _probe_codex_version(settings.codex_executable)
@@ -934,12 +1273,17 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                     time.monotonic() - t_stage,
                     codex_ver or "not_applicable",
                 )
+                startup_recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t_stage)
                 logging.getLogger("cardrag_worker.cli").info(
                     "Remote OCR cache access mode=%s require_hit=%s",
                     settings.ocr_cache_mode,
                     settings.ocr_cache_require_hit,
                 )
-                embeddings = await _qwen_embedding_provider(settings)
+                embeddings = await _qwen_embedding_provider(
+                    settings,
+                    correlation_id=correlation_id,
+                    recorder=startup_recorder,
+                )
                 if startup_only:
                     logging.getLogger("cardrag_worker.cli").info(
                         "Worker startup check completed elapsed_seconds=%.3f", time.monotonic() - started
