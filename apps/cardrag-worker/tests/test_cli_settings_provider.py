@@ -1314,6 +1314,7 @@ def test_cli_endpoint_preflight_does_not_retry_deterministic_contract(
 def test_cli_quality_gate_terminal_preserves_measurements_without_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from cardrag_worker.embedding_v5 import EmbeddingV5Error
 
@@ -1325,7 +1326,7 @@ def test_cli_quality_gate_terminal_preserves_measurements_without_retry(
 
     async def failing_preflight(*_args: Any, **_kwargs: Any) -> Any:
         calls.append(len(calls))
-        raise EmbeddingV5Error(
+        error = EmbeddingV5Error(
             f"{secret_sentinel} repeated cosine mismatch",
             reason_code="repeat_cosine_below_gate",
             provider_id="deepinfra",
@@ -1338,8 +1339,14 @@ def test_cli_quality_gate_terminal_preserves_measurements_without_retry(
                 "first_failed_index": 5,
                 "lowest_failed_index": 17,
                 "first_failed_input_sha256": "b" * 64,
+                "request_id": "sk-test-PRIVATE-DIAGNOSTIC-TOKEN",
+                "nested": {"deep": "secret/path"},
+                "bogus_nan": float("nan"),
             },
         )
+        # Post-construction mutation must not survive any output boundary.
+        error.details["provider_response"] = f"Bearer {secret_sentinel}"
+        raise error
 
     recorder = cli_module.StartupAttemptRecorder(tmp_path, "correlation789")
     monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
@@ -1365,7 +1372,20 @@ def test_cli_quality_gate_terminal_preserves_measurements_without_retry(
     assert payload["quality_details"]["gate_threshold"] == 0.999
     assert payload["quality_details"]["minimum_cosine"] == 0.9812
     assert payload["quality_details"]["failed_sample_count"] == 3
+    assert payload["quality_details"]["first_failed_index"] == 5
+    assert set(payload["quality_details"]) <= {
+        "gate_threshold",
+        "minimum_cosine",
+        "mean_cosine",
+        "failed_sample_count",
+        "sample_count",
+        "first_failed_index",
+        "lowest_failed_index",
+        "first_failed_input_sha256",
+        "profile_endpoint_metadata_sha256",
+    }
     assert secret_sentinel not in result.stdout
+    assert secret_sentinel not in caplog.text
 
     lines = [
         json.loads(line) for line in (tmp_path / "startup-attempt-history.jsonl").read_text().splitlines()
@@ -1379,6 +1399,9 @@ def test_cli_quality_gate_terminal_preserves_measurements_without_retry(
     assert terminal["provider_id"] == "deepinfra"
     assert terminal["quality_details"]["first_failed_index"] == 5
     assert terminal["quality_details"]["lowest_failed_index"] == 17
+    assert "provider_response" not in terminal["quality_details"]
+    assert "request_id" not in terminal["quality_details"]
+    assert secret_sentinel not in (tmp_path / "startup-attempt-history.jsonl").read_text()
     assert not [row for row in lines if row.get("decision") == "retry"]
 
 

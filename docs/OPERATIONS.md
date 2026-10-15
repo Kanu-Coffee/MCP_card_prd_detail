@@ -224,6 +224,13 @@ provider/tokenizer preflight)만 실행하고 corpus·게시·백업 없이 종�
 무조건 반복 실행하지 않습니다. 개발 잔재 정리는 CardRAG가 생성한 미참조 빌드 캐시·임시
 이미지부터 수행하며 `docker system prune -a --volumes`, 전체 image/volume 삭제, 운영
 volume 정리는 사용 금지입니다(보존 대상 판정은 각 실행의 rollback/reader/backup 증빙 후 개별 수행).
+run 디렉터리 정리 전 read-only로 `SELECT run_id FROM publish WHERE status='ready'
+ORDER BY published_at DESC`(retained publication)와 각 run의 `execution-plan.json`
+transitive `source_run_id`·백업 pending을 확인합니다. retention 기본값이 보호하는
+current/previous publication run과 최신 incomplete run은 공간 회수 목적으로 수동 삭제하지
+않습니다. 정리 대상이 되는 명명 컨테이너는 삭제 전에 반드시 `docker logs`와
+`docker inspect`를 private evidence로 저장한 뒤 제거합니다(저장 생략 시 stdout 원문이
+소실됩니다).
 
 외부 모니터가 live `worker-state.sqlite3`를 열면 안 됩니다. Worker는 단일 writer lock을
 보유합니다. 기존 실행이 진행 중일 때 추가 실행의 예약 실패는 기존 writer의 실패를
@@ -304,7 +311,9 @@ hard gate는 파생 뷰·cache miss가 확정된 직후 embedding 이전의 dyna
   동일하게 보존됩니다. 품질 거절에서 `status_code`/`attempts`가 null인 것은 HTTP 재시도 계층이
   적용되지 않았다는 뜻이며, 소진이나 미실행과 구별됩니다.
 - 운영 대응 순서: (1) writer 없음 확인, (2) production `startup-check` **1회** 재검증
-  (24 sample×2회×2 provider의 유비용 고정 예산 검사; corpus/게시/백업 없음), (3) 통과하면
+  (24 sample×2회×2 provider = **96개 sample embedding**; 정상 통과 기준 HTTP는 metadata GET 1회 +
+  provider·회차별 batch POST 4회이며, transient 발생 시 provider 내부 request retry(최대 12회)로
+  실제 요청 수가 늘어납니다. corpus/게시/백업 없음), (3) 통과하면
   "현재 재검증 통과, 과거 수치·원인 미확정"으로 기록 후 배치 진행, (4) 재실패하면
   `quality_details`의 index/sha 분포와 metadata hash를 근거로 provider 변동·route 교체 여부를
   판단하고, 같은 sample 반복 미달 시 가설·추가 1회 한도·시간/호출 예산을 명시한 probe 1회만

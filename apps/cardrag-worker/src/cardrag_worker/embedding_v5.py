@@ -61,54 +61,71 @@ LOGGER = logging.getLogger(__name__)
 _REASON_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
 
 # Contract failures stay deterministic and fail-closed; only the reason code,
-# allowlisted identity fields, and bounded structured measurements survive to
-# the journal and CLI payload.  Free-form provider text is never propagated.
+# allowlisted identity fields, and schema-declared measurements survive to the
+# journal, CLI payload, and startup history. Free-form provider text, request
+# identifiers, and arbitrary strings are never propagated, and every output
+# boundary re-validates the (mutable) exception payload instead of trusting it.
 DEFAULT_EMBEDDING_CONTRACT_REASON: str = "embedding_contract_unclassified"
-_DETAIL_KEY_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
 _DETAIL_HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
-_DETAIL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
-_MAX_DETAIL_ITEMS = 16
-_MAX_DETAIL_STRINGS = 8
-_MAX_DETAIL_INT = (1 << 63) - 1
-_MAX_DETAIL_FLOAT = 1.0e18
+_MAX_DETAIL_INT = (1 << 32) - 1
+
+# Per-reason field allowlists.  A key not declared here cannot appear in any
+# output regardless of who populated the exception's details mapping, and only
+# these keys are looked up so a huge hostile mapping is never expanded.
+QUALITY_DETAIL_SCHEMAS: dict[str, dict[str, str]] = {
+    "repeat_cosine_below_gate": {
+        "gate_threshold": "threshold",
+        "minimum_cosine": "cosine",
+        "mean_cosine": "cosine",
+        "failed_sample_count": "count",
+        "sample_count": "count",
+        "first_failed_index": "count",
+        "lowest_failed_index": "count",
+        "first_failed_input_sha256": "hex64",
+        "lowest_failed_input_sha256": "hex64",
+        "profile_endpoint_metadata_sha256": "hex64",
+    },
+}
+
+QualityValue = int | float | str
 
 
-def _sanitize_quality_details(
-    details: Mapping[str, object] | None,
-) -> dict[str, int | float | str | None]:
-    """Keep only bounded, finite, allowlist-shaped evidence fields."""
+def validated_quality_details(
+    reason_code: str | None,
+    details: object,
+) -> dict[str, QualityValue | None]:
+    """Project ``details`` through the reason's field schema at an output edge.
 
-    sanitized: dict[str, int | float | str | None] = {}
+    Unknown keys, wrong types, NaN/infinity, out-of-range numbers, and any
+    non-hex64 string are dropped.  The function is the single trust boundary
+    for construction and for every later emission (journal, CLI payload,
+    startup history), so mutating an exception's details after construction
+    cannot smuggle content past it.
+    """
+
+    schema = QUALITY_DETAIL_SCHEMAS.get(reason_code or "", {})
+    out: dict[str, QualityValue | None] = {}
     if not isinstance(details, Mapping):
-        return sanitized
-    string_count = 0
-    for raw_key, raw_value in list(details.items())[: _MAX_DETAIL_ITEMS * 2]:
-        if len(sanitized) >= _MAX_DETAIL_ITEMS:
-            break
-        if not isinstance(raw_key, str) or not _DETAIL_KEY_PATTERN.fullmatch(raw_key):
+        return out
+    for key, kind in schema.items():
+        try:
+            present = key in details
+        except TypeError:
+            return out
+        if not present:
             continue
-        if raw_key in sanitized:
-            continue
-        if raw_value is None:
-            sanitized[raw_key] = None
-        elif (
-            type(raw_value) is int
-            and abs(raw_value) <= _MAX_DETAIL_INT
-            or type(raw_value) is float
-            and math.isfinite(raw_value)
-            and abs(raw_value) <= _MAX_DETAIL_FLOAT
-        ):
-            sanitized[raw_key] = raw_value
-        elif (
-            type(raw_value) is str
-            and string_count < _MAX_DETAIL_STRINGS
-            and (
-                _DETAIL_HEX64_PATTERN.fullmatch(raw_value) or _DETAIL_IDENTIFIER_PATTERN.fullmatch(raw_value)
-            )
-        ):
-            sanitized[raw_key] = raw_value
-            string_count += 1
-    return sanitized
+        value = details.get(key)
+        if kind in ("cosine", "threshold"):
+            low, high = (-1.0, 1.0) if kind == "cosine" else (0.0, 1.0)
+            if type(value) is float and math.isfinite(value) and low <= value <= high:
+                out[key] = value
+        elif kind == "count":
+            if type(value) is int and 0 <= value <= _MAX_DETAIL_INT:
+                out[key] = value
+        elif kind == "hex64":
+            if type(value) is str and _DETAIL_HEX64_PATTERN.fullmatch(value):
+                out[key] = value
+    return out
 
 
 class EmbeddingV5Error(RuntimeError):
@@ -117,9 +134,9 @@ class EmbeddingV5Error(RuntimeError):
     ``reason_code`` is a snake-case typed identifier for the exact contract
     boundary that rejected the response or metadata.  ``provider_id`` is only
     accepted when it is one of the allowlisted Qwen embedding providers.
-    ``details`` keeps bounded measurements (finite numbers, nulls, and
-    allowlist-shaped hashes/identifiers only) so a quality rejection can be
-    diagnosed by magnitude without exposing provider text or secrets.
+    ``details`` keeps only the schema-declared bounded measurements for that
+    reason code; consumers must call :func:`validated_quality_details` again
+    before emitting because the mapping stays mutable after construction.
     """
 
     def __init__(
@@ -137,7 +154,10 @@ class EmbeddingV5Error(RuntimeError):
             else "embedding_contract_unclassified"
         )
         self.provider_id: str | None = provider_id if provider_id in QWEN3_EMBEDDING_PROVIDER_IDS else None
-        self.details: dict[str, int | float | str | None] = _sanitize_quality_details(details)
+        self.details: dict[str, QualityValue | None] = validated_quality_details(
+            self.reason_code,
+            details,
+        )
         super().__init__(message)
 
 

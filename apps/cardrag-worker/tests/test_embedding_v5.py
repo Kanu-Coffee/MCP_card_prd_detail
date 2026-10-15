@@ -17,6 +17,7 @@ from cardrag_core.embedding import (
 
 from cardrag_worker.embedding_v5 import (
     KOREAN_PREFLIGHT_SAMPLES,
+    QUALITY_DETAIL_SCHEMAS,
     EmbeddingV5Error,
     EmbeddingV5PermanentRequestError,
     EmbeddingV5TransientError,
@@ -28,6 +29,7 @@ from cardrag_worker.embedding_v5 import (
     parse_openrouter_endpoint_metadata,
     preflight_openrouter_qwen_providers,
     select_quality_endpoint,
+    validated_quality_details,
 )
 
 BASE_URL = "https://mock.openrouter.test/api/v1"
@@ -887,6 +889,7 @@ def test_quality_details_sanitization_boundaries() -> None:
         "huge_bytes": 2**70,
         "first_failed_input_sha256": hex64,
         "provider_route": "route-1.2_3",
+        "request_id": "sk-test-PRIVATE-DIAGNOSTIC-TOKEN",
         "secret_like": "Bearer sk-supersecret-value",
         "too_long": "x" * 65,
         "nested": {"a": 1},
@@ -898,13 +901,31 @@ def test_quality_details_sanitization_boundaries() -> None:
     assert error.details["gate_threshold"] == 0.999
     assert error.details["sample_count"] == 24
     assert error.details["first_failed_input_sha256"] == hex64
-    assert error.details["provider_route"] == "route-1.2_3"
-    assert error.details["ok_null"] is None
-    assert "minimum_cosine" not in error.details
-    assert "mean_cosine" not in error.details
-    assert "huge_bytes" not in error.details
-    assert "secret_like" not in error.details
-    assert "too_long" not in error.details
-    assert "nested" not in error.details
-    assert len(error.details) <= 16
+    assert set(error.details) <= set(QUALITY_DETAIL_SCHEMAS["repeat_cosine_below_gate"])
+    for banned in ("minimum_cosine", "mean_cosine", "huge_bytes", "secret_like", "too_long", "nested"):
+        assert banned not in error.details
+    assert "provider_route" not in error.details
+    assert "request_id" not in error.details
+    assert "ok_null" not in error.details
+    assert "sk-test-PRIVATE-DIAGNOSTIC-TOKEN" not in repr(error.details)
     assert "sk-supersecret" not in repr(error.details)
+
+    # Post-construction mutation must not survive any output boundary.
+    error.details["provider_response"] = "Bearer sk-test-PRIVATE-DIAGNOSTIC-TOKEN"
+    error.details["gate_threshold"] = "sk-test-PRIVATE-DIAGNOSTIC-TOKEN"
+    boundary = validated_quality_details(error.reason_code, error.details)
+    assert boundary["sample_count"] == 24
+    assert "gate_threshold" not in boundary
+    assert "provider_response" not in boundary
+    assert "sk-test-PRIVATE-DIAGNOSTIC-TOKEN" not in repr(boundary)
+
+    # Unreasoned and hostile payloads collapse to empty without expanding.
+    assert validated_quality_details("metadata_not_json", {"any": 1}) == {}
+
+    class ExplodingMapping(dict):  # type: ignore[type-arg]
+        def items(self) -> Any:  # type: ignore[override]
+            raise AssertionError("hostile mapping must not be expanded")
+
+    hostile = ExplodingMapping()
+    hostile["gate_threshold"] = "x"  # direct item bypasses the failing items()
+    assert validated_quality_details("repeat_cosine_below_gate", hostile) == {}

@@ -78,6 +78,7 @@ from .embedding_v5 import (
     ProviderComparisonReport,
     StartupDeadlineExceededError,
     preflight_openrouter_qwen_providers,
+    validated_quality_details,
 )
 from .gc import GCPartialFailure, _generation_chain, collect_garbage
 from .issuers import enabled_adapters
@@ -544,7 +545,9 @@ class StartupAttemptRecorder:
         if retry_eligible is not None:
             record["retry_eligible"] = retry_eligible
         if quality_details:
-            record["quality_details"] = dict(quality_details)
+            boundary = validated_quality_details(reason_code, quality_details)
+            if boundary:
+                record["quality_details"] = boundary
         dir_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
@@ -669,8 +672,12 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
         }
         if exc.provider_id is not None:
             classified_contract["provider_id"] = exc.provider_id
-        if exc.details:
-            classified_contract["quality_details"] = dict(exc.details)
+        # The details mapping stays mutable after construction; never emit the
+        # live object.  Re-project it through the reason's schema here so the
+        # journal, CLI payload, and startup history share one trust boundary.
+        quality = validated_quality_details(exc.reason_code, exc.details)
+        if quality:
+            classified_contract["quality_details"] = quality
         return classified_contract
     if isinstance(exc, V5CapacityError):
         classified_capacity: dict[str, Any] = {
