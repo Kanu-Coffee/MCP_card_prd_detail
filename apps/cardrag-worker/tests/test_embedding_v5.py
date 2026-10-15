@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
+import re
 from typing import Any
 
 import httpx
@@ -793,3 +796,115 @@ async def test_response_contract_failures_expose_typed_reason_codes() -> None:
     with pytest.raises(EmbeddingV5Error) as dimension:
         await dimension_provider.embed_documents(["text"])
     assert dimension.value.reason_code == "response_dimension_mismatch"
+
+
+def _repeat_variation_handler(fail_index: int, cosine: float) -> Any:
+    post_calls = {"deepinfra": 0, "nebius": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json=_metadata_payload(_endpoint("deepinfra"), _endpoint("nebius")),
+                request=request,
+            )
+        body = json.loads(request.content)
+        provider_id = body["provider"]["order"][0]
+        post_calls[provider_id] = int(post_calls[provider_id]) + 1
+        vectors = []
+        for index in range(len(body["input"])):
+            if provider_id == "deepinfra" and post_calls["deepinfra"] == 2 and index == fail_index:
+                vector = [0.0] * QWEN3_EMBEDDING_DIMENSION
+                vector[0] = cosine
+                vector[1] = math.sqrt(max(0.0, 1.0 - cosine * cosine))
+                vectors.append(vector)
+            else:
+                vectors.append(_unit_vector(provider_id))
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": provider_id,
+                "data": [{"index": index, "embedding": vector} for index, vector in enumerate(vectors)],
+            },
+            request=request,
+        )
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_repeat_cosine_gate_failure_exposes_structured_measurements() -> None:
+    fail_index = 3
+    transport = _repeat_variation_handler(fail_index, 0.9985)
+    with pytest.raises(EmbeddingV5Error) as captured:
+        await preflight_openrouter_qwen_providers(
+            api_key="injected-test-credential",
+            token_counter=lambda _text: 1,
+            transport=transport,
+        )
+    error = captured.value
+    assert error.reason_code == "repeat_cosine_below_gate"
+    assert error.provider_id == "deepinfra"
+    expected_sha = hashlib.sha256(KOREAN_PREFLIGHT_SAMPLES[fail_index].encode("utf-8")).hexdigest()
+    assert error.details["gate_threshold"] == pytest.approx(0.999)
+    assert error.details["minimum_cosine"] == pytest.approx(0.9985)
+    assert error.details["failed_sample_count"] == 1
+    assert error.details["sample_count"] == len(KOREAN_PREFLIGHT_SAMPLES)
+    assert error.details["first_failed_index"] == fail_index
+    assert error.details["lowest_failed_index"] == fail_index
+    assert error.details["first_failed_input_sha256"] == expected_sha
+    assert error.details["lowest_failed_input_sha256"] == expected_sha
+    assert re.fullmatch(r"[0-9a-f]{64}", str(error.details["profile_endpoint_metadata_sha256"]))
+
+
+@pytest.mark.asyncio
+async def test_repeat_cosine_gate_slight_variation_above_threshold_passes_both_providers() -> None:
+    transport = _repeat_variation_handler(3, 0.9995)
+    report = await preflight_openrouter_qwen_providers(
+        api_key="injected-test-credential",
+        token_counter=lambda _text: 1,
+        transport=transport,
+    )
+    assert [row.profile.provider_id for row in report.providers] == ["deepinfra", "nebius"]
+    assert report.providers[0].minimum_repeat_cosine == pytest.approx(0.9995)
+
+
+def test_repeat_gate_boundary_allows_exact_threshold_and_rejects_below() -> None:
+    from cardrag_worker.embedding_v5 import _repeat_gate_failures
+
+    assert _repeat_gate_failures([0.999, 1.0, 0.9990001], 0.999) == []
+    assert _repeat_gate_failures([1.0, 0.9989999999999998], 0.999) == [(1, 0.9989999999999998)]
+
+
+def test_quality_details_sanitization_boundaries() -> None:
+    hex64 = "a" * 64
+    details: dict[str, object] = {
+        "gate_threshold": 0.999,
+        "minimum_cosine": float("nan"),
+        "mean_cosine": float("inf"),
+        "sample_count": 24,
+        "huge_bytes": 2**70,
+        "first_failed_input_sha256": hex64,
+        "provider_route": "route-1.2_3",
+        "secret_like": "Bearer sk-supersecret-value",
+        "too_long": "x" * 65,
+        "nested": {"a": 1},
+        "ok_null": None,
+    }
+    for index in range(40):
+        details[f"extra_key_{index}"] = index
+    error = EmbeddingV5Error("quality", reason_code="repeat_cosine_below_gate", details=details)
+    assert error.details["gate_threshold"] == 0.999
+    assert error.details["sample_count"] == 24
+    assert error.details["first_failed_input_sha256"] == hex64
+    assert error.details["provider_route"] == "route-1.2_3"
+    assert error.details["ok_null"] is None
+    assert "minimum_cosine" not in error.details
+    assert "mean_cosine" not in error.details
+    assert "huge_bytes" not in error.details
+    assert "secret_like" not in error.details
+    assert "too_long" not in error.details
+    assert "nested" not in error.details
+    assert len(error.details) <= 16
+    assert "sk-supersecret" not in repr(error.details)

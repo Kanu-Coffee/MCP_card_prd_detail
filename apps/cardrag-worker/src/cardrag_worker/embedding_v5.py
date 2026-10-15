@@ -60,10 +60,55 @@ LOGGER = logging.getLogger(__name__)
 
 _REASON_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
 
-# Contract failures stay deterministic and fail-closed; only the reason code
-# and allowlisted identity fields survive to the journal and CLI payload.
-# Free-form provider messages are never propagated.
+# Contract failures stay deterministic and fail-closed; only the reason code,
+# allowlisted identity fields, and bounded structured measurements survive to
+# the journal and CLI payload.  Free-form provider text is never propagated.
 DEFAULT_EMBEDDING_CONTRACT_REASON: str = "embedding_contract_unclassified"
+_DETAIL_KEY_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
+_DETAIL_HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
+_DETAIL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+_MAX_DETAIL_ITEMS = 16
+_MAX_DETAIL_STRINGS = 8
+_MAX_DETAIL_INT = (1 << 63) - 1
+_MAX_DETAIL_FLOAT = 1.0e18
+
+
+def _sanitize_quality_details(
+    details: Mapping[str, object] | None,
+) -> dict[str, int | float | str | None]:
+    """Keep only bounded, finite, allowlist-shaped evidence fields."""
+
+    sanitized: dict[str, int | float | str | None] = {}
+    if not isinstance(details, Mapping):
+        return sanitized
+    string_count = 0
+    for raw_key, raw_value in list(details.items())[: _MAX_DETAIL_ITEMS * 2]:
+        if len(sanitized) >= _MAX_DETAIL_ITEMS:
+            break
+        if not isinstance(raw_key, str) or not _DETAIL_KEY_PATTERN.fullmatch(raw_key):
+            continue
+        if raw_key in sanitized:
+            continue
+        if raw_value is None:
+            sanitized[raw_key] = None
+        elif (
+            type(raw_value) is int
+            and abs(raw_value) <= _MAX_DETAIL_INT
+            or type(raw_value) is float
+            and math.isfinite(raw_value)
+            and abs(raw_value) <= _MAX_DETAIL_FLOAT
+        ):
+            sanitized[raw_key] = raw_value
+        elif (
+            type(raw_value) is str
+            and string_count < _MAX_DETAIL_STRINGS
+            and (
+                _DETAIL_HEX64_PATTERN.fullmatch(raw_value) or _DETAIL_IDENTIFIER_PATTERN.fullmatch(raw_value)
+            )
+        ):
+            sanitized[raw_key] = raw_value
+            string_count += 1
+    return sanitized
 
 
 class EmbeddingV5Error(RuntimeError):
@@ -72,6 +117,9 @@ class EmbeddingV5Error(RuntimeError):
     ``reason_code`` is a snake-case typed identifier for the exact contract
     boundary that rejected the response or metadata.  ``provider_id`` is only
     accepted when it is one of the allowlisted Qwen embedding providers.
+    ``details`` keeps bounded measurements (finite numbers, nulls, and
+    allowlist-shaped hashes/identifiers only) so a quality rejection can be
+    diagnosed by magnitude without exposing provider text or secrets.
     """
 
     def __init__(
@@ -80,6 +128,7 @@ class EmbeddingV5Error(RuntimeError):
         *,
         reason_code: str | None = None,
         provider_id: str | None = None,
+        details: Mapping[str, object] | None = None,
     ) -> None:
         code = reason_code if isinstance(reason_code, str) else None
         self.reason_code: str = (
@@ -88,6 +137,7 @@ class EmbeddingV5Error(RuntimeError):
             else "embedding_contract_unclassified"
         )
         self.provider_id: str | None = provider_id if provider_id in QWEN3_EMBEDDING_PROVIDER_IDS else None
+        self.details: dict[str, int | float | str | None] = _sanitize_quality_details(details)
         super().__init__(message)
 
 
@@ -1052,6 +1102,15 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     return max(-1.0, min(1.0, score))
 
 
+def _repeat_gate_failures(
+    cosines: Sequence[float],
+    threshold: float,
+) -> list[tuple[int, float]]:
+    """Strict ``<`` boundary: a cosine exactly equal to the threshold passes."""
+
+    return [(index, cosine) for index, cosine in enumerate(cosines) if cosine < threshold]
+
+
 async def preflight_openrouter_qwen_providers(
     *,
     api_key: str,
@@ -1103,11 +1162,30 @@ async def preflight_openrouter_qwen_providers(
         first = await provider.embed_documents(samples)
         repeated = await provider.embed_documents(samples)
         cosines = tuple(_cosine(left, right) for left, right in zip(first, repeated, strict=True))
-        if min(cosines) < minimum_repeat_cosine:
+        failed = _repeat_gate_failures(cosines, minimum_repeat_cosine)
+        if failed:
+            lowest_index, lowest_cosine = min(failed, key=lambda item: item[1])
+            first_index = failed[0][0]
             raise EmbeddingV5Error(
                 f"{provider_id} repeated-input cosine is below the gate",
                 reason_code="repeat_cosine_below_gate",
                 provider_id=provider_id,
+                details={
+                    "gate_threshold": float(minimum_repeat_cosine),
+                    "minimum_cosine": float(min(cosines)),
+                    "mean_cosine": float(sum(cosines) / len(cosines)),
+                    "failed_sample_count": len(failed),
+                    "sample_count": len(cosines),
+                    "first_failed_index": int(first_index),
+                    "lowest_failed_index": int(lowest_index),
+                    "first_failed_input_sha256": hashlib.sha256(
+                        samples[first_index].encode("utf-8")
+                    ).hexdigest(),
+                    "lowest_failed_input_sha256": hashlib.sha256(
+                        samples[lowest_index].encode("utf-8")
+                    ).hexdigest(),
+                    "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                },
             )
         sample_rows = tuple(
             SampleRepeatResult(

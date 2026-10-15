@@ -294,6 +294,28 @@ hard gate는 파생 뷰·cache miss가 확정된 직후 embedding 이전의 dyna
 - 직전 성공 배치의 요구량을 초과하는 여유 공간 감소는 `capacity-observation.json`을 기준으로
   시작 직후 **warning only**로 출력하며 실행을 차단하지 않습니다.
 
+### 반복 임베딩 품질 실패(repeat_cosine_below_gate) 대응
+
+- 품질 gate는 의도적으로 자동 재시도하지 않습니다. 실패 시 실측이 남깁니다:
+  `gate_threshold`, `minimum_cosine`, `mean_cosine`, `failed_sample_count`, `sample_count`,
+  `first_failed_index`, `lowest_failed_index`, `first_failed_input_sha256`,
+  `lowest_failed_input_sha256`, `profile_endpoint_metadata_sha256` — stage 로그, 최종 JSON의
+  `quality_details`, `startup-attempt-history.jsonl`의 terminal 이력(`retry_eligible=false`)에
+  동일하게 보존됩니다. 품질 거절에서 `status_code`/`attempts`가 null인 것은 HTTP 재시도 계층이
+  적용되지 않았다는 뜻이며, 소진이나 미실행과 구별됩니다.
+- 운영 대응 순서: (1) writer 없음 확인, (2) production `startup-check` **1회** 재검증
+  (24 sample×2회×2 provider의 유비용 고정 예산 검사; corpus/게시/백업 없음), (3) 통과하면
+  "현재 재검증 통과, 과거 수치·원인 미확정"으로 기록 후 배치 진행, (4) 재실패하면
+  `quality_details`의 index/sha 분포와 metadata hash를 근거로 provider 변동·route 교체 여부를
+  판단하고, 같은 sample 반복 미달 시 가설·추가 1회 한도·시간/호출 예산을 명시한 probe 1회만
+  추가합니다. 성공할 때까지 반복하는 방식은 금지입니다.
+- 금지: 0.999 기본 threshold 완화, gate 생략, 이전 성공 결과 재사용, deepinfra→nebius 등
+  provider/model 자동 전환(캐시/profile/serving query 호환 영향), `Restart=` 주입.
+- 미갱신 상태 요약: `systemctl status cardrag-worker.service cardrag-worker.timer`,
+  `journalctl -u cardrag-worker.service -n 50 --no-pager`, readiness, MCP current generation,
+  `cardrag-worker backup status`(read-only). MCP healthy는 구 세대 서빙 유지의 증거일 뿐
+  당일 갱신 성공의 증거가 아닙니다.
+
 백업의 주기·시간 예산·대기 항목 처리는 [증분 백업 안내](RECOVERY.md#증분-webdav-백업-운영)를 따릅니다.
 아래 원격 generation 검증 정책은 `CARDRAG_PUBLICATION_TRANSPORT=webdav`를 선택한 호환 모드에 적용됩니다.
 WebDAV는 검증 이력이 있는 기존 객체를 재사용하고 성공 실행 14회·7일·신규 CAS 10 GiB 중

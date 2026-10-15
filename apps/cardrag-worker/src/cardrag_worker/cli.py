@@ -517,6 +517,8 @@ class StartupAttemptRecorder:
         elapsed_seconds: float | None = None,
         decision: str | None = None,
         next_retry_seconds: float | None = None,
+        retry_eligible: bool | None = None,
+        quality_details: dict[str, int | float | str | None] | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -539,6 +541,10 @@ class StartupAttemptRecorder:
             record["decision"] = decision
         if next_retry_seconds is not None:
             record["next_retry_seconds"] = next_retry_seconds
+        if retry_eligible is not None:
+            record["retry_eligible"] = retry_eligible
+        if quality_details:
+            record["quality_details"] = dict(quality_details)
         dir_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
@@ -663,6 +669,8 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
         }
         if exc.provider_id is not None:
             classified_contract["provider_id"] = exc.provider_id
+        if exc.details:
+            classified_contract["quality_details"] = dict(exc.details)
         return classified_contract
     if isinstance(exc, V5CapacityError):
         classified_capacity: dict[str, Any] = {
@@ -695,11 +703,12 @@ def _classified_failure_fields(classified: dict[str, Any]) -> str:
     provider_id = classified.get("provider_id")
     if isinstance(provider_id, str):
         parts.append(f"provider_id={provider_id}")
-    details = classified.get("capacity_details")
-    if isinstance(details, dict):
-        for key in sorted(details):
-            value = details[key]
-            parts.append(f"{key}={'null' if value is None else value}")
+    for group in ("capacity_details", "quality_details"):
+        details = classified.get(group)
+        if isinstance(details, dict):
+            for key in sorted(details):
+                value = details[key]
+                parts.append(f"{key}={'null' if value is None else value}")
     return " ".join(parts)
 
 
@@ -764,6 +773,8 @@ def _echo_worker_unexpected_failure(
             payload["provider_id"] = details["provider_id"]
         if isinstance(details.get("capacity_details"), dict):
             payload["capacity_details"] = details["capacity_details"]
+        if isinstance(details.get("quality_details"), dict):
+            payload["quality_details"] = details["quality_details"]
         resolved_phase = phase or details.get("phase")
         if resolved_phase is not None:
             payload["phase"] = resolved_phase
@@ -1064,11 +1075,23 @@ async def _qwen_embedding_provider(
                         elapsed_seconds=attempt_elapsed,
                         decision="retry",
                         next_retry_seconds=_WORKER_STARTUP_RETRY_DELAY_SECONDS,
+                        retry_eligible=True,
                     )
                 await asyncio.sleep(_WORKER_STARTUP_RETRY_DELAY_SECONDS)
                 continue
             terminal_exc: Exception = exc
             terminal_reason = reason if isinstance(reason, str) else None
+            if not recoverable:
+                log.info(
+                    "Startup stage retry decision stage=%s correlation_id=%s reason_code=%s "
+                    "retry_eligible=false decision=terminal status_code=%s http_attempts=%s "
+                    "(null http fields mean the HTTP retry layer did not apply, not that it ran out)",
+                    stage,
+                    correlation_id or "none",
+                    terminal_reason or "unclassified",
+                    classified.get("status_code"),
+                    classified.get("attempts"),
+                )
             if recoverable and attempt >= attempt_max:
                 log.warning(
                     "Startup stage retry budget exhausted stage=%s correlation_id=%s "
@@ -1101,6 +1124,7 @@ async def _qwen_embedding_provider(
                 attempt=attempt,
                 attempt_max=attempt_max,
             )
+            terminal_quality = classified.get("quality_details")
             if recorder is not None:
                 recorder.record(
                     stage,
@@ -1111,6 +1135,8 @@ async def _qwen_embedding_provider(
                     attempt_max=attempt_max,
                     elapsed_seconds=attempt_elapsed,
                     decision="terminal",
+                    retry_eligible=recoverable,
+                    quality_details=terminal_quality if isinstance(terminal_quality, dict) else None,
                 )
             raise WorkerStartupFailure(
                 stage, terminal_exc, elapsed_seconds=cumulative_elapsed

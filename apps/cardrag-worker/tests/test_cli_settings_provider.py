@@ -1311,6 +1311,77 @@ def test_cli_endpoint_preflight_does_not_retry_deterministic_contract(
     assert terminal["reason_code"] == "profile_fp8_forbidden"
 
 
+def test_cli_quality_gate_terminal_preserves_measurements_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cardrag_worker.embedding_v5 import EmbeddingV5Error
+
+    secret_sentinel = _repeated_test_token("COSINE_RESPONSE_", "TEXT", 4)
+    calls: list[int] = []
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def failing_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(len(calls))
+        raise EmbeddingV5Error(
+            f"{secret_sentinel} repeated cosine mismatch",
+            reason_code="repeat_cosine_below_gate",
+            provider_id="deepinfra",
+            details={
+                "gate_threshold": 0.999,
+                "minimum_cosine": 0.9812,
+                "mean_cosine": 0.9901,
+                "failed_sample_count": 3,
+                "sample_count": 24,
+                "first_failed_index": 5,
+                "lowest_failed_index": 17,
+                "first_failed_input_sha256": "b" * 64,
+            },
+        )
+
+    recorder = cli_module.StartupAttemptRecorder(tmp_path, "correlation789")
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", failing_preflight)
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 0.0)
+    settings = _startup_retry_settings(startup_check_max_attempts=3, startup_check_deadline_seconds=600)
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings, correlation_id="c", recorder=recorder))
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+    assert len(calls) == 1
+
+    async def run_failing_startup(_resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
+        raise exc_info.value
+
+    monkeypatch.setattr(cli_module, "_run", run_failing_startup)
+    result = CliRunner().invoke(cli_module.app, ["run"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error_class_category"] == "contract"
+    assert payload["failure_reason_code"] == "repeat_cosine_below_gate"
+    assert payload["provider_id"] == "deepinfra"
+    assert payload["quality_details"]["gate_threshold"] == 0.999
+    assert payload["quality_details"]["minimum_cosine"] == 0.9812
+    assert payload["quality_details"]["failed_sample_count"] == 3
+    assert secret_sentinel not in result.stdout
+
+    lines = [
+        json.loads(line) for line in (tmp_path / "startup-attempt-history.jsonl").read_text().splitlines()
+    ]
+    terminal = [
+        row for row in lines if row["stage"] == "qwen_endpoint_preflight" and row["status"] == "terminal"
+    ][-1]
+    assert terminal["decision"] == "terminal"
+    assert terminal["retry_eligible"] is False
+    assert terminal["reason_code"] == "repeat_cosine_below_gate"
+    assert terminal["provider_id"] == "deepinfra"
+    assert terminal["quality_details"]["first_failed_index"] == 5
+    assert terminal["quality_details"]["lowest_failed_index"] == 17
+    assert not [row for row in lines if row.get("decision") == "retry"]
+
+
 def test_cli_endpoint_preflight_retry_is_bounded_by_attempts_and_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
