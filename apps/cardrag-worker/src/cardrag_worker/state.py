@@ -1250,23 +1250,55 @@ class WorkerState:
         row = self._last_successful_collection(issuer)
         return None if row is None else str(row["observed_at"])
 
-    def issuer_consecutive_failures(self, issuer: str, *, limit: int = 30) -> int:
-        """Count most-recent completed collections that failed, newest first.
+    def issuer_consecutive_failures(
+        self,
+        issuer: str,
+        *,
+        current_run_id: str | None = None,
+        limit: int = 30,
+    ) -> int:
+        """Count consecutive collection failures for an issuer, newest first.
 
-        Only recorded issuer outcomes count; a run that never reached the
-        issuer bookkeeping boundary is skipped rather than treated as a
-        failure, and an unbounded history is never scanned.
+        If ``current_run_id`` is supplied, its recorded collection outcome in
+        ``issuer_collection`` (if already decided, even while the run itself is
+        still running) is included as the head of the sequence, followed by
+        completed prior runs ('succeeded','failed','no_change').
+        Incomplete or unrecorded current run states are treated as unconfirmed
+        and do not contribute a failure.
+        Concurrent or other incomplete runs are never included.
         """
 
         if limit < 1 or limit > 100:
             raise ValueError("issuer failure history limit must be between 1 and 100")
-        rows = self.connection.execute(
-            """SELECT c.succeeded FROM issuer_collection c JOIN run r ON r.run_id=c.run_id
-               WHERE c.issuer=? AND r.status IN ('succeeded','failed','no_change')
-               ORDER BY COALESCE(r.finished_at,r.started_at) DESC LIMIT ?""",
-            (issuer, limit),
-        ).fetchall()
-        consecutive = 0
+
+        current_succeeded: int | None = None
+        if current_run_id is not None:
+            cur_row = self.connection.execute(
+                """SELECT succeeded FROM issuer_collection
+                   WHERE run_id=? AND issuer=?""",
+                (current_run_id, issuer),
+            ).fetchone()
+            if cur_row is not None:
+                current_succeeded = int(cur_row["succeeded"])
+
+        if current_succeeded == 1:
+            return 0
+
+        consecutive = 1 if current_succeeded == 0 else 0
+        remaining_limit = limit - consecutive
+        if remaining_limit <= 0:
+            return consecutive
+
+        query = """SELECT c.succeeded FROM issuer_collection c JOIN run r ON r.run_id=c.run_id
+                   WHERE c.issuer=? AND r.status IN ('succeeded','failed','no_change')"""
+        params: list[Any] = [issuer]
+        if current_run_id is not None:
+            query += " AND r.run_id != ?"
+            params.append(current_run_id)
+        query += " ORDER BY COALESCE(r.finished_at,r.started_at) DESC LIMIT ?"
+        params.append(remaining_limit)
+
+        rows = self.connection.execute(query, tuple(params)).fetchall()
         for row in rows:
             if int(row["succeeded"]) == 1:
                 break

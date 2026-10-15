@@ -1365,6 +1365,128 @@ def test_startup_attempt_recorder_rotates_oversized_history(tmp_path: Path) -> N
     assert rotated.is_file()
 
 
+def test_cli_endpoint_preflight_deadline_cancels_in_flight_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def slow_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(len(calls))
+        await asyncio.sleep(0.5)
+        return SimpleNamespace(providers=[])
+
+    recorder = cli_module.StartupAttemptRecorder(tmp_path, "corr-deadline-1")
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", slow_preflight)
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 0.0)
+
+    settings = _startup_retry_settings(
+        startup_check_max_attempts=3,
+        startup_check_deadline_seconds=0.05,
+    )
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings, correlation_id="c", recorder=recorder))
+
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+    classified = cli_module._classify_startup_exception(exc_info.value.cause)
+    assert classified["error_class_category"] == "startup_deadline"
+    assert classified["reason_code"] == "startup_check_deadline_exceeded"
+    assert len(calls) == 1
+
+    lines = [
+        json.loads(line) for line in (tmp_path / "startup-attempt-history.jsonl").read_text().splitlines()
+    ]
+    terminals = [row for row in lines if row.get("decision") == "terminal"]
+    assert len(terminals) == 1
+    assert terminals[0]["reason_code"] == "startup_check_deadline_exceeded"
+
+
+def test_cli_endpoint_preflight_retry_uses_only_remaining_deadline_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cardrag_worker.embedding_v5 import EmbeddingV5Error
+
+    calls: list[float] = []
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(asset_sha256="fake_sha")
+
+    async def preflight_step(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(time.monotonic())
+        if len(calls) == 1:
+            await asyncio.sleep(0.02)
+            raise EmbeddingV5Error("transient", reason_code="metadata_not_json")
+        await asyncio.sleep(0.5)
+        return SimpleNamespace(providers=[])
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", preflight_step)
+    monkeypatch.setattr(cli_module, "_WORKER_STARTUP_RETRY_DELAY_SECONDS", 0.01)
+
+    settings = _startup_retry_settings(
+        startup_check_max_attempts=3,
+        startup_check_deadline_seconds=0.06,
+    )
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings))
+
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+    classified = cli_module._classify_startup_exception(exc_info.value.cause)
+    assert classified["error_class_category"] == "startup_deadline"
+    assert classified["reason_code"] == "startup_check_deadline_exceeded"
+    assert len(calls) == 2
+
+
+def test_startup_attempt_recorder_symlink_does_not_modify_target(tmp_path: Path) -> None:
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_bytes(b"original content intact")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    history_link = state_dir / cli_module._WORKER_STARTUP_HISTORY_FILENAME
+    history_link.symlink_to(outside_file)
+
+    recorder = cli_module.StartupAttemptRecorder(state_dir, "corr-symlink")
+    recorder.record("test_stage", "passed")
+
+    assert outside_file.read_bytes() == b"original content intact"
+    assert outside_file.stat().st_size == len(b"original content intact")
+
+
+def test_startup_attempt_recorder_fifo_immediate_fallback(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    fifo_path = state_dir / cli_module._WORKER_STARTUP_HISTORY_FILENAME
+    os.mkfifo(fifo_path)
+
+    recorder = cli_module.StartupAttemptRecorder(state_dir, "corr-fifo")
+    t_start = time.monotonic()
+    recorder.record("test_stage", "passed")
+    assert time.monotonic() - t_start < 1.0
+
+
+def test_startup_attempt_recorder_rotation_blocked_on_symlink_destination(tmp_path: Path) -> None:
+    outside_dest = tmp_path / "outside_dest.txt"
+    outside_dest.write_bytes(b"destination untouched")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    history = state_dir / cli_module._WORKER_STARTUP_HISTORY_FILENAME
+    history.write_bytes(b"x" * (cli_module._WORKER_STARTUP_HISTORY_MAX_BYTES + 10))
+
+    rotated_link = state_dir / f"{cli_module._WORKER_STARTUP_HISTORY_FILENAME}.1"
+    rotated_link.symlink_to(outside_dest)
+
+    recorder = cli_module.StartupAttemptRecorder(state_dir, "corr-rotate-symlink")
+    recorder.record("test_stage", "passed")
+
+    assert outside_dest.read_bytes() == b"destination untouched"
+
+
 def test_cli_capacity_startup_rejection_echoes_typed_gate_numbers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

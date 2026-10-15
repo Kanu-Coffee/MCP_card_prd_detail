@@ -3200,7 +3200,10 @@ class WorkerPipeline:
         outcomes = tuple(self._issuer_outcomes.values())
         for outcome in outcomes:
             try:
-                outcome.consecutive_failed_runs = self.state.issuer_consecutive_failures(outcome.issuer)
+                outcome.consecutive_failed_runs = self.state.issuer_consecutive_failures(
+                    outcome.issuer,
+                    current_run_id=run_id,
+                )
             except Exception:
                 # Freshness history is observability only; the collection record
                 # must still seal with null rather than fail the run.

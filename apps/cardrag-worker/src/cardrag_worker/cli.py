@@ -76,6 +76,7 @@ from .embedding_v5 import (
     EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
     ProviderComparisonReport,
+    StartupDeadlineExceededError,
     preflight_openrouter_qwen_providers,
 )
 from .gc import GCPartialFailure, _generation_chain, collect_garbage
@@ -538,16 +539,67 @@ class StartupAttemptRecorder:
             record["decision"] = decision
         if next_retry_seconds is not None:
             record["next_retry_seconds"] = next_retry_seconds
+        dir_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
-            if self.path.exists() and self.path.stat().st_size > _WORKER_STARTUP_HISTORY_MAX_BYTES:
-                os.replace(self.path, self.path.with_suffix(".jsonl.1"))
-            line = canonical_json_bytes(record)
-            descriptor = os.open(
-                self.path,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0),
-                0o600,
+            dir_fd = os.open(self.state_dir, dir_flags)
+        except OSError as exc:
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Startup attempt history unavailable reason=storage errno=%s correlation_id=%s",
+                exc.errno,
+                self.correlation_id,
             )
+            return
+
+        try:
+            filename = _WORKER_STARTUP_HISTORY_FILENAME
+            rotated_name = f"{filename}.1"
+
             try:
+                st = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode):
+                    logging.getLogger("cardrag_worker.cli").warning(
+                        "Startup attempt history unavailable reason=not_regular_file correlation_id=%s",
+                        self.correlation_id,
+                    )
+                    return
+                if st.st_size > _WORKER_STARTUP_HISTORY_MAX_BYTES:
+                    try:
+                        st_dst = os.stat(rotated_name, dir_fd=dir_fd, follow_symlinks=False)
+                        if not stat.S_ISREG(st_dst.st_mode):
+                            logging.getLogger("cardrag_worker.cli").warning(
+                                "Startup attempt history rotation blocked reason=destination_not_regular correlation_id=%s",
+                                self.correlation_id,
+                            )
+                            return
+                    except FileNotFoundError:
+                        pass
+                    os.replace(filename, rotated_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+            open_flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(filename, open_flags, 0o600, dir_fd=dir_fd)
+            try:
+                fst = os.fstat(descriptor)
+                if not stat.S_ISREG(fst.st_mode):
+                    logging.getLogger("cardrag_worker.cli").warning(
+                        "Startup attempt history unavailable reason=not_regular_file correlation_id=%s",
+                        self.correlation_id,
+                    )
+                    return
+                line = canonical_json_bytes(record)
                 os.write(descriptor, line + b"\n")
             finally:
                 os.close(descriptor)
@@ -557,6 +609,8 @@ class StartupAttemptRecorder:
                 exc.errno,
                 self.correlation_id,
             )
+        finally:
+            os.close(dir_fd)
 
 
 def _read_capacity_observation(state_dir: Path) -> dict[str, Any] | None:
@@ -579,6 +633,16 @@ def _read_capacity_observation(state_dir: Path) -> dict[str, Any] | None:
 
 def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
     """Sanitize and classify startup failures without leaking secret payloads."""
+    if isinstance(exc, StartupDeadlineExceededError):
+        return {
+            "error_class_category": "startup_deadline",
+            "reason_code": "startup_check_deadline_exceeded",
+        }
+    if isinstance(exc, TimeoutError):
+        return {
+            "error_class_category": "startup_deadline",
+            "reason_code": "startup_check_deadline_exceeded",
+        }
     if isinstance(exc, QwenTokenizerError):
         return {"error_class_category": "tokenizer", "reason_code": "tokenizer_asset_invalid"}
     if isinstance(exc, EmbeddingV5RequestError):
@@ -854,6 +918,7 @@ async def _qwen_embedding_provider(
     attempt_max = settings.startup_check_max_attempts
     deadline_seconds = settings.startup_check_deadline_seconds
     t1 = time.monotonic()
+    deadline_at = t1 + deadline_seconds
     attempt = 0
     log.info(
         "Startup stage starting stage=%s correlation_id=%s attempt_max=%d deadline_seconds=%d",
@@ -866,19 +931,97 @@ async def _qwen_embedding_provider(
     while True:
         attempt += 1
         t_attempt = time.monotonic()
+        remaining = deadline_at - t_attempt
+        if remaining <= 0:
+            cumulative_elapsed = t_attempt - t1
+            deadline_exc = StartupDeadlineExceededError(
+                f"Startup stage '{stage}' deadline of {deadline_seconds}s exceeded before attempt {attempt}",
+                elapsed_seconds=cumulative_elapsed,
+            )
+            log.warning(
+                "Startup stage retry deadline reached stage=%s correlation_id=%s "
+                "reason_code=startup_check_deadline_exceeded cumulative_seconds=%.3f "
+                "deadline_seconds=%d decision=terminal",
+                stage,
+                correlation_id or "none",
+                cumulative_elapsed,
+                deadline_seconds,
+            )
+            _log_startup_stage_failure(
+                stage,
+                deadline_exc,
+                cumulative_elapsed,
+                correlation_id=correlation_id,
+                attempt=attempt,
+                attempt_max=attempt_max,
+            )
+            if recorder is not None:
+                recorder.record(
+                    stage,
+                    "terminal",
+                    reason_code="startup_check_deadline_exceeded",
+                    attempt=attempt,
+                    attempt_max=attempt_max,
+                    elapsed_seconds=0.0,
+                    decision="terminal",
+                )
+            raise WorkerStartupFailure(
+                stage, deadline_exc, elapsed_seconds=cumulative_elapsed
+            ) from deadline_exc
+
         try:
-            comparison = await preflight_openrouter_qwen_providers(
-                api_key=api_key,
-                token_counter=tokenizer,
-                base_url=settings.openrouter_base_url,
-                timeout_seconds=settings.embedding_timeout_seconds,
-                embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
-                metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
-                request_max_attempts=settings.embedding_request_max_attempts,
-                retry_base_seconds=settings.embedding_retry_base_seconds,
-                retry_cap_seconds=settings.embedding_retry_cap_seconds,
+            comparison = await asyncio.wait_for(
+                preflight_openrouter_qwen_providers(
+                    api_key=api_key,
+                    token_counter=tokenizer,
+                    base_url=settings.openrouter_base_url,
+                    timeout_seconds=min(settings.embedding_timeout_seconds, remaining),
+                    embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
+                    metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
+                    request_max_attempts=settings.embedding_request_max_attempts,
+                    retry_base_seconds=settings.embedding_retry_base_seconds,
+                    retry_cap_seconds=settings.embedding_retry_cap_seconds,
+                ),
+                timeout=remaining,
             )
             break
+        except TimeoutError:
+            attempt_elapsed = time.monotonic() - t_attempt
+            cumulative_elapsed = time.monotonic() - t1
+            deadline_exc = StartupDeadlineExceededError(
+                f"Startup stage '{stage}' deadline of {deadline_seconds}s exceeded during attempt {attempt}",
+                elapsed_seconds=cumulative_elapsed,
+            )
+            log.warning(
+                "Startup stage retry deadline reached stage=%s correlation_id=%s "
+                "reason_code=startup_check_deadline_exceeded cumulative_seconds=%.3f "
+                "deadline_seconds=%d decision=terminal",
+                stage,
+                correlation_id or "none",
+                cumulative_elapsed,
+                deadline_seconds,
+            )
+            _log_startup_stage_failure(
+                stage,
+                deadline_exc,
+                cumulative_elapsed,
+                correlation_id=correlation_id,
+                attempt=attempt,
+                attempt_max=attempt_max,
+            )
+            if recorder is not None:
+                recorder.record(
+                    stage,
+                    "terminal",
+                    reason_code="startup_check_deadline_exceeded",
+                    attempt=attempt,
+                    attempt_max=attempt_max,
+                    elapsed_seconds=attempt_elapsed,
+                    decision="terminal",
+                )
+            raise WorkerStartupFailure(
+                stage, deadline_exc, elapsed_seconds=cumulative_elapsed
+            ) from deadline_exc
         except Exception as exc:
             attempt_elapsed = time.monotonic() - t_attempt
             cumulative_elapsed = time.monotonic() - t1
@@ -890,9 +1033,11 @@ async def _qwen_embedding_provider(
                 and isinstance(exc, EmbeddingV5Error)
                 and not isinstance(exc, EmbeddingV5RequestError)
             )
+            remaining_after_attempt = deadline_at - time.monotonic()
             retry_allowed = (
                 attempt < attempt_max
                 and recoverable
+                and remaining_after_attempt > 0
                 and cumulative_elapsed + _WORKER_STARTUP_RETRY_DELAY_SECONDS < deadline_seconds
             )
             provider_id = classified.get("provider_id")
@@ -922,6 +1067,8 @@ async def _qwen_embedding_provider(
                     )
                 await asyncio.sleep(_WORKER_STARTUP_RETRY_DELAY_SECONDS)
                 continue
+            terminal_exc: Exception = exc
+            terminal_reason = reason if isinstance(reason, str) else None
             if recoverable and attempt >= attempt_max:
                 log.warning(
                     "Startup stage retry budget exhausted stage=%s correlation_id=%s "
@@ -934,16 +1081,21 @@ async def _qwen_embedding_provider(
             elif recoverable:
                 log.warning(
                     "Startup stage retry deadline reached stage=%s correlation_id=%s "
-                    "reason_code=%s cumulative_seconds=%.3f deadline_seconds=%d decision=terminal",
+                    "reason_code=startup_check_deadline_exceeded cumulative_seconds=%.3f "
+                    "deadline_seconds=%d decision=terminal",
                     stage,
                     correlation_id or "none",
-                    reason,
                     cumulative_elapsed,
                     deadline_seconds,
                 )
+                terminal_exc = StartupDeadlineExceededError(
+                    f"Startup stage '{stage}' deadline reached before next attempt; last cause: {exc}",
+                    elapsed_seconds=cumulative_elapsed,
+                )
+                terminal_reason = "startup_check_deadline_exceeded"
             _log_startup_stage_failure(
                 stage,
-                exc,
+                terminal_exc,
                 cumulative_elapsed,
                 correlation_id=correlation_id,
                 attempt=attempt,
@@ -953,14 +1105,16 @@ async def _qwen_embedding_provider(
                 recorder.record(
                     stage,
                     "terminal",
-                    reason_code=reason if isinstance(reason, str) else None,
+                    reason_code=terminal_reason,
                     provider_id=provider_id if isinstance(provider_id, str) else None,
                     attempt=attempt,
                     attempt_max=attempt_max,
                     elapsed_seconds=attempt_elapsed,
                     decision="terminal",
                 )
-            raise WorkerStartupFailure(stage, exc, elapsed_seconds=cumulative_elapsed) from exc
+            raise WorkerStartupFailure(
+                stage, terminal_exc, elapsed_seconds=cumulative_elapsed
+            ) from terminal_exc
     assert comparison is not None
     log.info(
         "Startup stage passed stage=%s elapsed_seconds=%.3f attempts=%d/%d",

@@ -281,10 +281,14 @@ hard gate는 파생 뷰·cache miss가 확정된 직후 embedding 이전의 dyna
   남습니다. 저장 실패는 journal로만 대체되고 Worker를 실패시키지 않습니다.
 - 초기검증 stage 재시도는 `CARDRAG_WORKER_STARTUP_CHECK_MAX_ATTEMPTS`(기본 2, 1~3)와
   `CARDRAG_WORKER_STARTUP_CHECK_DEADLINE_SECONDS`(기본 600)로 bound됩니다.
+  이 deadline은 `qwen_endpoint_preflight` stage 진입 시점부터 공유되는 monotonic deadline으로,
+  진행 중인 preflight 실행(HTTP 요청 및 내부 request 재시도)과 재시도 대기(기본 30초) 전체를
+  포괄하여 제한합니다. 실행 중 deadline을 초과하면 진행 중 HTTP 작업이 즉시 취소·정리되고
+  `startup_check_deadline_exceeded` typed reason(`startup_deadline` 범주)으로 실패 처리되며,
+  재시도 발생 시 남은 deadline 예산만을 다음 attempt timeout으로 사용합니다.
   재시도 대상은 metadata 재조회로 회복 가능한 typed reason
   (`metadata_not_json`, `metadata_shape_invalid`, `metadata_no_allowlisted_endpoint`,
-  `provider_endpoint_missing`)뿐이며, HTTP transport/transient status의 12회 request 재시도와는
-  중첩되지 않게 stage attempt 전에 deadline을 확인합니다. FP8·dimension·norm·cosine·model 등
+  `provider_endpoint_missing`)뿐이며, FP8·dimension·norm·cosine·model 등
   결정적 계약 위반과 capacity 거절은 자동 재시도하지 않습니다. systemd unit에는 `Restart=`를
   주지 않습니다.
 - 직전 성공 배치의 요구량을 초과하는 여유 공간 감소는 `capacity-observation.json`을 기준으로

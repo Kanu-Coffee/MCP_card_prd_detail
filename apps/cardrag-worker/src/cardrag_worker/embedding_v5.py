@@ -116,6 +116,19 @@ class EmbeddingV5PermanentRequestError(EmbeddingV5RequestError):
     """A permanent OpenRouter rejection or local request configuration error."""
 
 
+class StartupDeadlineExceededError(EmbeddingV5Error):
+    """Raised when the startup preflight stage exceeds its shared deadline."""
+
+    def __init__(
+        self,
+        message: str = "Startup stage deadline exceeded",
+        *,
+        elapsed_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message, reason_code="startup_check_deadline_exceeded")
+        self.elapsed_seconds = elapsed_seconds
+
+
 _TRANSIENT_TRANSPORT_ERRORS = (
     httpx.TimeoutException,
     httpx.NetworkError,
@@ -1139,6 +1152,7 @@ __all__ = [
     "ProviderPreflightReport",
     "QwenEmbeddingProfileV5",
     "SampleRepeatResult",
+    "StartupDeadlineExceededError",
     "TokenCounter",
     "embedding_cache_key",
     "fetch_openrouter_qwen_endpoints",

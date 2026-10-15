@@ -47,11 +47,12 @@ def _tree_bytes(path: Path) -> int:
     return total
 
 
-def _remove_tree_with_accounting(path: Path, *, kind: str) -> int:
-    """Delete a tree and return reclaimed bytes.
+def _remove_tree_with_accounting(path: Path, *, kind: str) -> tuple[bool, int]:
+    """Delete a tree and return (succeeded, reclaimed_bytes).
 
-    A failed delete is logged with its errno and contributes zero reclaimed
-    bytes so a cleanup pass can never report suppressed failures as success.
+    A failed delete is logged with its errno and returns (False, 0).
+    A successful delete returns (True, reclaimed_bytes). Empty trees
+    successfully deleted return (True, 0).
     """
 
     size = _tree_bytes(path)
@@ -64,8 +65,8 @@ def _remove_tree_with_accounting(path: Path, *, kind: str) -> int:
             size,
             exc.errno,
         )
-        return 0
-    return size
+        return False, 0
+    return True, size
 
 
 def _fsync_file(path: Path) -> None:
@@ -400,6 +401,7 @@ class LocalServingTransport:
             # 6. Serving volume retention: retain current + previous generation(s)
             generations_root = self.serving_dir / "v1" / "generations"
             removed_generations = 0
+            failed_generations = 0
             reclaimed_generation_bytes = 0
             if generations_root.is_dir():
                 retain_gens = {generation_id}
@@ -416,20 +418,24 @@ class LocalServingTransport:
                         retain_gens.add(other_gens[0].name)
                 for gen_path in generations_root.iterdir():
                     if gen_path.is_dir() and gen_path.name not in retain_gens:
-                        reclaimed = _remove_tree_with_accounting(gen_path, kind="generation")
-                        if reclaimed or not gen_path.exists():
+                        succeeded, reclaimed = _remove_tree_with_accounting(gen_path, kind="generation")
+                        if succeeded:
                             removed_generations += 1
-                        reclaimed_generation_bytes += reclaimed
+                            reclaimed_generation_bytes += reclaimed
+                        else:
+                            failed_generations += 1
                 LOGGER.info(
-                    "Local serving retention cleanup retained=%d removed=%d reclaimed_bytes=%d "
+                    "Local serving retention cleanup retained=%d removed=%d failed=%d reclaimed_bytes=%d "
                     "serving_dir_present=true",
                     len(retain_gens),
                     removed_generations,
+                    failed_generations,
                     reclaimed_generation_bytes,
                 )
 
             # Clean up stale staging directories older than 10 minutes
             removed_staging = 0
+            failed_staging = 0
             reclaimed_staging_bytes = 0
             if staging_root.is_dir():
                 now_ts = time.time()
@@ -445,13 +451,17 @@ class LocalServingTransport:
                             )
                             stale = False
                         if stale:
-                            reclaimed = _remove_tree_with_accounting(old_stage, kind="staging")
-                            removed_staging += 1
-                            reclaimed_staging_bytes += reclaimed
-                if removed_staging or reclaimed_staging_bytes:
+                            succeeded, reclaimed = _remove_tree_with_accounting(old_stage, kind="staging")
+                            if succeeded:
+                                removed_staging += 1
+                                reclaimed_staging_bytes += reclaimed
+                            else:
+                                failed_staging += 1
+                if removed_staging or failed_staging or reclaimed_staging_bytes:
                     LOGGER.info(
-                        "Local staging cleanup removed=%d reclaimed_bytes=%d",
+                        "Local staging cleanup removed=%d failed=%d reclaimed_bytes=%d",
                         removed_staging,
+                        failed_staging,
                         reclaimed_staging_bytes,
                     )
 

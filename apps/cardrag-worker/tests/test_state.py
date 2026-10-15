@@ -613,3 +613,79 @@ def test_existing_v108_run_status_constraint_is_migrated_without_losing_foreign_
             == "interrupted"
         )
         assert state.connection.execute("SELECT run_id FROM legacy_child").fetchone()[0] == "old-running"
+
+
+def test_issuer_consecutive_failures_reflects_current_run_and_prior_history(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    with WorkerState(database) as state:
+        # Case 1: First failure in current run (no prior history)
+        state.start_run(run_id="run-1")
+        state.record_issuer_collection("run-1", "shinhan", succeeded=False)
+        assert state.issuer_consecutive_failures("shinhan", current_run_id="run-1") == 1
+        # issuer not recorded in current run -> returns 0 (unreached)
+        assert state.issuer_consecutive_failures("kb", current_run_id="run-1") == 0
+
+        # Complete run-1 as failed
+        state.finish_run("run-1", status="failed")
+
+        # Case 2: Consecutive failure in run-2 (prior failure + current failure)
+        state.start_run(run_id="run-2")
+        state.record_issuer_collection("run-2", "shinhan", succeeded=False)
+        assert state.issuer_consecutive_failures("shinhan", current_run_id="run-2") == 2
+
+        # Complete run-2 as succeeded
+        state.finish_run("run-2", status="succeeded")
+
+        # Case 3: Recovery in run-3 (current run succeeds -> resets streak to 0)
+        state.start_run(run_id="run-3")
+        state.record_issuer_collection("run-3", "shinhan", succeeded=True)
+        assert state.issuer_consecutive_failures("shinhan", current_run_id="run-3") == 0
+
+        # Complete run-3 as succeeded
+        state.finish_run("run-3", status="succeeded")
+        assert state.issuer_consecutive_failures("shinhan") == 0
+
+
+def test_issuer_consecutive_failures_ignores_concurrent_or_incomplete_runs(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    with WorkerState(database) as state:
+        state.start_run(run_id="run-past")
+        state.record_issuer_collection("run-past", "lotte", succeeded=True)
+        state.finish_run("run-past", status="succeeded")
+
+        # Concurrent/incomplete run with failure
+        state.start_run(run_id="run-other")
+        state.record_issuer_collection("run-other", "lotte", succeeded=False)
+
+        # Target run is running and succeeded
+        state.start_run(run_id="run-target")
+        state.record_issuer_collection("run-target", "lotte", succeeded=True)
+
+        assert state.issuer_consecutive_failures("lotte", current_run_id="run-target") == 0
+
+
+def test_issuer_consecutive_failures_limit_boundary(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    with WorkerState(database) as state:
+        for i in range(5):
+            rid = f"run-fail-{i}"
+            state.start_run(run_id=rid)
+            state.record_issuer_collection(rid, "shinhan", succeeded=False)
+            state.finish_run(rid, status="failed")
+
+        state.start_run(run_id="run-curr")
+        state.record_issuer_collection("run-curr", "shinhan", succeeded=False)
+
+        assert state.issuer_consecutive_failures("shinhan", current_run_id="run-curr", limit=3) == 3
+        assert state.issuer_consecutive_failures("shinhan", current_run_id="run-curr", limit=10) == 6
+
+        with pytest.raises(ValueError, match="limit"):
+            state.issuer_consecutive_failures("shinhan", limit=0)
+        with pytest.raises(ValueError, match="limit"):
+            state.issuer_consecutive_failures("shinhan", limit=101)
