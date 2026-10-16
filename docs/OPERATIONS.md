@@ -383,3 +383,53 @@ WebDAV 게시 모드의 게시 오류도 실패하지만, 로컬 게시 모드�
 `docker inspect cardrag-prod-008-first --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}'`
 에서 `exited`와 exit 0을 함께 확인합니다. running 중 ExitCode 0은 완료 근거가 아닙니다.
 예약 배치와 같은 Worker state/lock을 사용하고 중복 기동하지 않습니다.
+
+## 호스트 전체 디스크 정리와 볼륨 보호 정책
+
+호스트 디스크 공간 부족 시 운영 자산과 dangling 캐시를 명확히 구분하여 정리합니다.
+
+1. **dangling 볼륨 일괄 삭제 금지 (`docker volume prune` 절대 금지)**:
+   - Worker 컨테이너가 기동 중이지 않은 상태에서는 Worker state 볼륨(`cardrag-worker-state`, 약 45.9 GB), PaddleOCR 모델 볼륨(`cardrag-worker-paddleocr-models`, 약 2.07 GB), auth 볼륨이 Docker CLI에서 `dangling`으로 표시됩니다.
+   - 이는 스케줄된 Worker가 다음 실행 시 사용하는 핵심 영구 운영 자산이며, 삭제 시 전체 데이터베이스 및 캐시 유실이 발생합니다.
+   - 다른 프로젝트의 데이터베이스 볼륨(PostgreSQL, MongoDB 등) 및 시스템에 등록된 중지 VM(예: libvirt 등록 HAOS VM `antigravity-haos-vm-*`, 약 21 GB) 역시 꺼져 있다는 이유로 임의 삭제해서는 안 됩니다.
+
+2. **안전한 BuildKit 빌드 캐시 정리**:
+   - 실행 중인 Docker 빌드가 없는 것을 확인한 후 `docker builder prune --all --force`를 통해 미사용 빌드 캐시를 회수합니다.
+   - 2026-10-16 Reviewer 정리 결과: Docker 집계 36.99 GB 회수, 파일시스템 실제 여유 공간 약 33.97 GB(84.4 GB → 118.4 GB) 확보, 디스크 사용률 79% → 71%로 개선.
+   - 컨테이너, 볼륨, 이미지 및 MCP 서비스 무중단 유지.
+   - CardRAG 전용 빌드 시 캐시 상한 및 retention 정책을 준수하며, 타 프로젝트 데몬 설정은 건드리지 않습니다.
+
+3. **중복 run 및 publication 정리**:
+   - 로컬 상태 디렉터리의 대형 run 정리는 pipeline의 native retention(`retained_generations`, `retained_incomplete_runs`)과 publication closure 검증을 거쳐 안전하게 수행합니다.
+   - 검증된 publication seal 및 참조 체인(`execution-plan.json` source run)이 있는 디렉터리는 수동 삭제하지 않습니다.
+
+## Qwen 임베딩 재현성 게이트 정책 (일일 운영 smoke와 자격평가 분리)
+
+1. **일일 운영 smoke (Daily Smoke)**:
+   - 일일 배치 시작 시 설정된 활성 provider(`CARDRAG_EMBEDDING_PROVIDER_ID`)만 단독 검사합니다.
+   - 단일 provider 검사 시 상호 비교는 미수행 상태이므로 `minimum_cross_provider_cosine=not_evaluated`(JSON payload는 `null`)로 명시하여 허위 1.0 표기를 방지합니다.
+   - 단일 scalar 0.999는 **재현성 경고(warning) 기준**으로 운용합니다.
+   - **경고 및 하드 거부 기준 (운영 정책 후보 / 미인수 uncalibrated candidate)**:
+     - 검사 결과 cosine이 [0.990, 0.999) 구간일 경우:
+       - `quality_status="warning"`으로 기록하고, 경고 로그와 함께 `startup-attempt-history.jsonl` 및 CLI ready JSON에 구조화된 `quality_details`(위반 샘플 인덱스, SHA256 해시, 임계값)를 영속 보존하되 Worker 시작을 차단하지 않습니다.
+     - cosine이 0.990 미만이거나, 비정상 non-finite, 차원 불일치(4096), norm 오차 초과 시 `repeat_cosine_below_gate`로 fail-closed 차단합니다.
+     - **주의**: 0.990 하한과 0.980 의미 축퇴 임계치는 운영 관측 및 upstream 비결정성(FP16/BF16 drift) 방어를 위한 후보 정책(미인수)이며, 업무 gold 셋에 대한 nDCG@10 / Recall@10 / anchor calibration 실측 전까지 정규 품질 인수로 확정하지 않습니다. 2026-10-16 사용자가 운영 테스트를 통한 평가를 명시 승인하여 신규 정책을 운영에 적용합니다. 이는 calibration 완료를 뜻하지 않으며, 일배치의 품질 상태·repeat cosine·실패 사유와 실제 검색 결과를 누적 평가합니다. 반복 오류나 검색 품질 저하가 확인되면 보존된 `016-bb56d20` 이미지로 복귀합니다.
+   - **의미 축퇴(Semantic Collapse) 검증**:
+     - 정적 더미 벡터 반환으로 인한 거짓 repeat=1.0 통과를 방지하기 위해 CLI production 시작 경로에서 이종 의미 샘플 간 유사도가 비정상 축퇴(>= 0.980)될 경우 `embedding_semantic_collapsed`로 즉시 fail-closed 거부합니다.
+
+2. **배포/제공자 자격평가 (Provider Qualification)**:
+   - 프로바이더 교체, 신규 엔드포인트 도입 시 모든 지원 프로바이더(DeepInfra, Nebius)를 대상으로 24개 전 샘플 2회 호출 및 상호 프로바이더 간 일치도를 종합 평가(`mode="qualification"`, repeat cosine >= 0.999 강제)합니다.
+   - 일일 운영 배치 중 임의 프로바이더 자동 전환(failover)은 수행하지 않습니다.
+
+## 롯데카드 공시실 장애 대응 및 Degraded 수집
+
+1. **장애 원인 및 격리**:
+   - `www.lottecard.co.kr` (공식 landing 및 `/app/LPSCHAA_V100.lc` 목록 POST)는 호스트 네트워크 egress 또는 원본 방화벽/가용성 경계로 인해 TCP 연결 타임아웃(exit 28, `httpx.ConnectTimeout`)이 발생합니다.
+   - 반면 공식 PDF 다운로드 CDN(`image.lottecard.co.kr/UploadFiles/cardProvisionPath/`)은 HTTP 200으로 안정 접근 가능합니다.
+   - 연결 타임아웃은 파싱 오류(`IssuerMarkupChanged`)가 아닌 `issuer_origin_timeout`으로 정확히 분류됩니다.
+
+2. **파이프라인 Carry 및 Degraded 보호**:
+   - 목록 조회 단계 TCP 타임아웃은 호스트/네트워크 egress 장애로 미복구 상태입니다.
+   - 목록 조회 실패 시 파이프라인의 `_carry_failed_issuers` 메커니즘을 통해 직전 검증된 generation(`ec1255d9`)의 롯데카드 647개 문서를 그대로 승계(carryover)합니다.
+   - 목록 장애 상태에서는 해당 카드사의 단종(retirement) 처리를 전면 동결하여 기존 유효 상품이 누락되지 않도록 보호합니다.
+   - 네트워크/egress 문제가 해결되어 `www.lottecard.co.kr` TCP 연결이 복원되면 자동으로 전체 목록 수집이 재개됩니다.

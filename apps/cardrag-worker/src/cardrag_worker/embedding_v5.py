@@ -69,6 +69,10 @@ DEFAULT_EMBEDDING_CONTRACT_REASON: str = "embedding_contract_unclassified"
 _DETAIL_HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
 _MAX_DETAIL_INT = (1 << 32) - 1
 
+REPEAT_COSINE_WARNING_THRESHOLD: float = 0.999
+REPEAT_COSINE_HARD_REJECT_THRESHOLD: float = 0.990
+SEMANTIC_COLLAPSE_THRESHOLD: float = 0.980
+
 # Per-reason field allowlists.  A key not declared here cannot appear in any
 # output regardless of who populated the exception's details mapping, and only
 # these keys are looked up so a huge hostile mapping is never expanded.
@@ -81,6 +85,27 @@ QUALITY_DETAIL_SCHEMAS: dict[str, dict[str, str]] = {
         "sample_count": "count",
         "first_failed_index": "count",
         "lowest_failed_index": "count",
+        "first_failed_input_sha256": "hex64",
+        "lowest_failed_input_sha256": "hex64",
+        "profile_endpoint_metadata_sha256": "hex64",
+    },
+    "repeat_cosine_warning": {
+        "gate_threshold": "threshold",
+        "warning_threshold": "threshold",
+        "minimum_cosine": "cosine",
+        "mean_cosine": "cosine",
+        "failed_sample_count": "count",
+        "sample_count": "count",
+        "first_failed_index": "count",
+        "lowest_failed_index": "count",
+        "first_failed_input_sha256": "hex64",
+        "lowest_failed_input_sha256": "hex64",
+        "profile_endpoint_metadata_sha256": "hex64",
+    },
+    "embedding_semantic_collapsed": {
+        "gate_threshold": "threshold",
+        "cross_sample_cosine": "cosine",
+        "sample_count": "count",
         "first_failed_input_sha256": "hex64",
         "lowest_failed_input_sha256": "hex64",
         "profile_endpoint_metadata_sha256": "hex64",
@@ -457,14 +482,22 @@ class ProviderPreflightReport:
     samples: tuple[SampleRepeatResult, ...]
     minimum_repeat_cosine: float
     mean_repeat_cosine: float
+    quality_status: str = "passed"
+    warning_count: int = 0
+    warning_details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderComparisonReport:
     providers: tuple[ProviderPreflightReport, ...]
-    cross_provider_cosines: tuple[float, ...]
-    minimum_cross_provider_cosine: float
-    mean_cross_provider_cosine: float
+    cross_provider_cosines: tuple[float, ...] = ()
+    minimum_cross_provider_cosine: float | None = None
+    mean_cross_provider_cosine: float | None = None
+    quality_status: str = "passed"
+    warning_details: dict[str, Any] | None = None
+    mode: str = "qualification"
+    evaluated_provider_count: int = 1
+    cross_evaluated: bool = False
 
 
 # These are deliberately short contract-domain samples: the preflight is a
@@ -746,6 +779,13 @@ class OpenRouterQwenEmbeddingProviderV5:
         retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         transport: httpx.AsyncBaseTransport | None = None,
+        quality_status: str = "passed",
+        quality_details: Mapping[str, Any] | None = None,
+        preflight_mode: str = "daily_smoke",
+        evaluated_provider_count: int = 1,
+        cross_evaluated: bool = False,
+        minimum_cross_provider_cosine: float | None = None,
+        mean_cross_provider_cosine: float | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("OpenRouter API key is empty")
@@ -778,6 +818,39 @@ class OpenRouterQwenEmbeddingProviderV5:
         self.retry_cap_seconds: float = float(retry_cap_seconds)
         self.sleep = sleep
         self.transport = transport
+        self.quality_status: str = quality_status if quality_status in {"passed", "warning"} else "passed"
+        self.quality_details: dict[str, Any] | None = (
+            dict(validated_quality_details("repeat_cosine_warning", quality_details))
+            if self.quality_status == "warning" and quality_details
+            else None
+        )
+        self.preflight_mode: str = (
+            preflight_mode if preflight_mode in {"daily_smoke", "qualification"} else "daily_smoke"
+        )
+        self.evaluated_provider_count: int = (
+            evaluated_provider_count
+            if isinstance(evaluated_provider_count, int) and evaluated_provider_count >= 1
+            else 1
+        )
+        self.cross_evaluated: bool = bool(cross_evaluated)
+        if (
+            self.cross_evaluated
+            and type(minimum_cross_provider_cosine) is float
+            and math.isfinite(minimum_cross_provider_cosine)
+            and -1.0 <= minimum_cross_provider_cosine <= 1.0
+        ):
+            self.minimum_cross_provider_cosine: float | None = minimum_cross_provider_cosine
+        else:
+            self.minimum_cross_provider_cosine = None
+        if (
+            self.cross_evaluated
+            and type(mean_cross_provider_cosine) is float
+            and math.isfinite(mean_cross_provider_cosine)
+            and -1.0 <= mean_cross_provider_cosine <= 1.0
+        ):
+            self.mean_cross_provider_cosine: float | None = mean_cross_provider_cosine
+        else:
+            self.mean_cross_provider_cosine = None
         self.logical_batch_count = 0
         self.wire_attempt_count = 0
 
@@ -1139,19 +1212,28 @@ async def preflight_openrouter_qwen_providers(
     base_url: str = "https://openrouter.ai/api/v1",
     timeout_seconds: float = 120,
     transport: httpx.AsyncBaseTransport | None = None,
-    minimum_repeat_cosine: float = 0.999,
+    minimum_repeat_cosine: float = REPEAT_COSINE_WARNING_THRESHOLD,
+    hard_reject_repeat_cosine: float = REPEAT_COSINE_HARD_REJECT_THRESHOLD,
+    semantic_collapse_threshold: float = SEMANTIC_COLLAPSE_THRESHOLD,
+    provider_ids: Sequence[Qwen3EmbeddingProviderId] = QWEN3_EMBEDDING_PROVIDER_IDS,
+    mode: Literal["qualification", "daily_smoke"] = "qualification",
+    check_semantic_discriminability: bool = True,
     embedding_maximum_response_bytes: int = DEFAULT_EMBEDDING_RESPONSE_BYTES,
     metadata_maximum_response_bytes: int = DEFAULT_METADATA_RESPONSE_BYTES,
     request_max_attempts: int = DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
     retry_base_seconds: float = DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
     retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
 ) -> ProviderComparisonReport:
-    """Evaluate DeepInfra then Nebius with two identical 20+ sample calls each."""
+    """Evaluate target Qwen providers with two identical 20+ sample calls each."""
 
     if len(samples) < 20 or len(set(samples)) != len(samples) or any(not item.strip() for item in samples):
         raise ValueError("preflight requires at least 20 unique non-empty Korean samples")
     if not -1 <= minimum_repeat_cosine <= 1 or not math.isfinite(minimum_repeat_cosine):
         raise ValueError("minimum_repeat_cosine must be finite and within [-1,1]")
+    if not -1 <= hard_reject_repeat_cosine <= 1 or not math.isfinite(hard_reject_repeat_cosine):
+        raise ValueError("hard_reject_repeat_cosine must be finite and within [-1,1]")
+    if not -1 <= semantic_collapse_threshold <= 1 or not math.isfinite(semantic_collapse_threshold):
+        raise ValueError("semantic_collapse_threshold must be finite and within [-1,1]")
     endpoints = await fetch_openrouter_qwen_endpoints(
         api_key=api_key,
         base_url=base_url,
@@ -1164,7 +1246,7 @@ async def preflight_openrouter_qwen_providers(
     )
     reports: list[ProviderPreflightReport] = []
     first_runs: list[list[list[float]]] = []
-    for provider_id in QWEN3_EMBEDDING_PROVIDER_IDS:
+    for provider_id in provider_ids:
         endpoint = select_quality_endpoint(endpoints, provider_id=provider_id)
         profile = QwenEmbeddingProfileV5.from_endpoint(endpoint)
         provider = OpenRouterQwenEmbeddingProviderV5(
@@ -1181,20 +1263,40 @@ async def preflight_openrouter_qwen_providers(
         )
         first = await provider.embed_documents(samples)
         repeated = await provider.embed_documents(samples)
+
+        # Semantic discriminability check: guard against constant dummy vector collapse
+        # Sample 0 (benefit) and Sample 1 (exclusion) must not produce identical vectors.
+        if check_semantic_discriminability and len(first) >= 2:
+            cross_anchor = _cosine(first[0], first[1])
+            if cross_anchor >= semantic_collapse_threshold:
+                raise EmbeddingV5Error(
+                    f"{provider_id} embedding vectors lack semantic discriminability (cross_sample={cross_anchor:.4f})",
+                    reason_code="embedding_semantic_collapsed",
+                    provider_id=provider_id,
+                    details={
+                        "gate_threshold": float(semantic_collapse_threshold),
+                        "cross_sample_cosine": float(cross_anchor),
+                        "sample_count": len(samples),
+                        "first_failed_input_sha256": hashlib.sha256(samples[0].encode("utf-8")).hexdigest(),
+                        "lowest_failed_input_sha256": hashlib.sha256(samples[1].encode("utf-8")).hexdigest(),
+                        "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                    },
+                )
+
         cosines = tuple(_cosine(left, right) for left, right in zip(first, repeated, strict=True))
-        failed = _repeat_gate_failures(cosines, minimum_repeat_cosine)
-        if failed:
-            lowest_index, lowest_cosine = min(failed, key=lambda item: item[1])
-            first_index = failed[0][0]
+        hard_failed = _repeat_gate_failures(cosines, hard_reject_repeat_cosine)
+        if hard_failed:
+            lowest_index, lowest_cosine = min(hard_failed, key=lambda item: item[1])
+            first_index = hard_failed[0][0]
             raise EmbeddingV5Error(
-                f"{provider_id} repeated-input cosine is below the gate",
+                f"{provider_id} repeated-input cosine is below the hard reject gate",
                 reason_code="repeat_cosine_below_gate",
                 provider_id=provider_id,
                 details={
-                    "gate_threshold": float(minimum_repeat_cosine),
+                    "gate_threshold": float(hard_reject_repeat_cosine),
                     "minimum_cosine": float(min(cosines)),
                     "mean_cosine": float(sum(cosines) / len(cosines)),
-                    "failed_sample_count": len(failed),
+                    "failed_sample_count": len(hard_failed),
                     "sample_count": len(cosines),
                     "first_failed_index": int(first_index),
                     "lowest_failed_index": int(lowest_index),
@@ -1207,6 +1309,64 @@ async def preflight_openrouter_qwen_providers(
                     "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
                 },
             )
+
+        warning_failed = _repeat_gate_failures(cosines, minimum_repeat_cosine)
+        if warning_failed:
+            lowest_index, lowest_cosine = min(warning_failed, key=lambda item: item[1])
+            first_index = warning_failed[0][0]
+            if mode == "qualification":
+                raise EmbeddingV5Error(
+                    f"{provider_id} repeated-input cosine is below the gate",
+                    reason_code="repeat_cosine_below_gate",
+                    provider_id=provider_id,
+                    details={
+                        "gate_threshold": float(minimum_repeat_cosine),
+                        "minimum_cosine": float(min(cosines)),
+                        "mean_cosine": float(sum(cosines) / len(cosines)),
+                        "failed_sample_count": len(warning_failed),
+                        "sample_count": len(cosines),
+                        "first_failed_index": int(first_index),
+                        "lowest_failed_index": int(lowest_index),
+                        "first_failed_input_sha256": hashlib.sha256(
+                            samples[first_index].encode("utf-8")
+                        ).hexdigest(),
+                        "lowest_failed_input_sha256": hashlib.sha256(
+                            samples[lowest_index].encode("utf-8")
+                        ).hexdigest(),
+                        "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                    },
+                )
+            quality_status = "warning"
+            warning_count = len(warning_failed)
+            raw_warning_details = {
+                "gate_threshold": float(hard_reject_repeat_cosine),
+                "warning_threshold": float(minimum_repeat_cosine),
+                "minimum_cosine": float(min(cosines)),
+                "mean_cosine": float(sum(cosines) / len(cosines)),
+                "failed_sample_count": len(warning_failed),
+                "sample_count": len(cosines),
+                "first_failed_index": int(first_index),
+                "lowest_failed_index": int(lowest_index),
+                "first_failed_input_sha256": hashlib.sha256(samples[first_index].encode("utf-8")).hexdigest(),
+                "lowest_failed_input_sha256": hashlib.sha256(
+                    samples[lowest_index].encode("utf-8")
+                ).hexdigest(),
+                "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+            }
+            warning_details = validated_quality_details("repeat_cosine_warning", raw_warning_details)
+            LOGGER.warning(
+                "provider %s repeated-input cosine in warning band (min=%.6f, gate=%.6f, failed=%d/%d)",
+                provider_id,
+                min(cosines),
+                minimum_repeat_cosine,
+                len(warning_failed),
+                len(cosines),
+            )
+        else:
+            quality_status = "passed"
+            warning_count = 0
+            warning_details = None
+
         sample_rows = tuple(
             SampleRepeatResult(
                 input_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -1221,16 +1381,34 @@ async def preflight_openrouter_qwen_providers(
                 samples=sample_rows,
                 minimum_repeat_cosine=min(cosines),
                 mean_repeat_cosine=sum(cosines) / len(cosines),
+                quality_status=quality_status,
+                warning_count=warning_count,
+                warning_details=warning_details,
             )
         )
         first_runs.append(first)
-    left_provider, right_provider = first_runs
-    cross = tuple(_cosine(left, right) for left, right in zip(left_provider, right_provider, strict=True))
+    cross_evaluated = len(first_runs) >= 2
+    if cross_evaluated:
+        left_provider, right_provider = first_runs[:2]
+        cross = tuple(_cosine(left, right) for left, right in zip(left_provider, right_provider, strict=True))
+        min_cross: float | None = min(cross)
+        mean_cross: float | None = sum(cross) / len(cross)
+    else:
+        cross = ()
+        min_cross = None
+        mean_cross = None
+    overall_status = "warning" if any(r.quality_status == "warning" for r in reports) else "passed"
+    comp_warning_details = next((r.warning_details for r in reports if r.warning_details is not None), None)
     return ProviderComparisonReport(
         providers=tuple(reports),
         cross_provider_cosines=cross,
-        minimum_cross_provider_cosine=min(cross),
-        mean_cross_provider_cosine=sum(cross) / len(cross),
+        minimum_cross_provider_cosine=min_cross,
+        mean_cross_provider_cosine=mean_cross,
+        quality_status=overall_status,
+        warning_details=comp_warning_details,
+        mode=mode,
+        evaluated_provider_count=len(reports),
+        cross_evaluated=cross_evaluated,
     )
 
 
@@ -1249,7 +1427,10 @@ __all__ = [
     "ProviderComparisonReport",
     "ProviderPreflightReport",
     "QwenEmbeddingProfileV5",
+    "REPEAT_COSINE_HARD_REJECT_THRESHOLD",
+    "REPEAT_COSINE_WARNING_THRESHOLD",
     "SampleRepeatResult",
+    "SEMANTIC_COLLAPSE_THRESHOLD",
     "StartupDeadlineExceededError",
     "TokenCounter",
     "embedding_cache_key",

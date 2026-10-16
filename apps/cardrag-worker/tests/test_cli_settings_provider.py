@@ -27,6 +27,13 @@ import cardrag_worker.cli as cli_module
 import cardrag_worker.providers as providers_module
 from cardrag_worker.adoption import AdoptionError
 from cardrag_worker.capacity_v5 import V5CapacityError, WorkerStartCapacitySnapshot
+from cardrag_worker.embedding_v5 import (
+    OpenRouterEndpointMetadata,
+    ProviderComparisonReport,
+    ProviderPreflightReport,
+    QwenEmbeddingProfileV5,
+    SampleRepeatResult,
+)
 from cardrag_worker.gc import GCPartialFailure
 from cardrag_worker.pipeline import (
     OCRDocumentFailuresError,
@@ -3642,3 +3649,673 @@ async def test_opencode_ocr_timeout_and_cancel_cleanup(
 
     assert killed is True
     assert waited is True
+
+
+def test_cli_startup_rejects_constant_dummy_vector_collapse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production CLI startup path must reject providers returning constant dummy vectors."""
+    import httpx
+
+    from cardrag_worker.embedding_v5 import (
+        QWEN3_EMBEDDING_DIMENSION,
+        QWEN3_EMBEDDING_MODEL,
+        EmbeddingV5Error,
+    )
+
+    state_root = tmp_path / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        state_dir=state_root,
+        channel="candidate-v1.0.11",
+        minimum_start_free_bytes=0,
+        publication_transport="local",
+        serving_dir=tmp_path / "serving",
+        ocr_cache_mode="read-write",
+        ocr_cache_require_hit=False,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-6.1-sol",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+        startup_check_max_attempts=1,
+        startup_check_deadline_seconds=600,
+    )
+
+    def count_tokens(_text: str) -> int:
+        return 1
+
+    count_tokens.asset_sha256 = "fake_sha"  # type: ignore[attr-defined]
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return count_tokens
+
+    # MockTransport returning identical constant unit-vectors for all inputs
+    def constant_vector_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            endpoint = {
+                "name": "DeepInfra: Qwen3 Embedding",
+                "provider_name": "DeepInfra",
+                "tag": "deepinfra",
+                "model_id": QWEN3_EMBEDDING_MODEL,
+                "quantization": "bf16",
+                "context_length": 32768,
+                "max_prompt_tokens": 32768,
+                "supported_parameters": ["encoding_format", "dimensions"],
+            }
+            return httpx.Response(
+                200, json={"data": {"id": QWEN3_EMBEDDING_MODEL, "endpoints": [endpoint]}}, request=request
+            )
+        body = json.loads(request.content)
+        constant = [0.0] * QWEN3_EMBEDDING_DIMENSION
+        constant[0] = 1.0
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": "deepinfra",
+                "data": [{"index": i, "embedding": constant} for i in range(len(body["input"]))],
+            },
+            request=request,
+        )
+
+    recorder = cli_module.StartupAttemptRecorder(state_root, "corr-collapse")
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(
+        cli_module,
+        "OpenRouterQwenEmbeddingProviderV5",
+        lambda *args, **kwargs: cli_module.OpenRouterQwenEmbeddingProviderV5(
+            *args, **{**kwargs, "transport": httpx.MockTransport(constant_vector_handler)}
+        ),
+    )
+    # Also wrap fetch_openrouter_qwen_endpoints to use the mock transport
+    orig_preflight = cli_module.preflight_openrouter_qwen_providers
+
+    async def mock_transport_preflight(*args: Any, **kwargs: Any) -> Any:
+        kwargs["transport"] = httpx.MockTransport(constant_vector_handler)
+        return await orig_preflight(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", mock_transport_preflight)
+
+    with pytest.raises(cli_module.WorkerStartupFailure) as exc_info:
+        asyncio.run(cli_module._qwen_embedding_provider(settings, correlation_id="c", recorder=recorder))
+    assert exc_info.value.stage == "qwen_endpoint_preflight"
+    assert isinstance(exc_info.value.cause, EmbeddingV5Error)
+    assert exc_info.value.cause.reason_code == "embedding_semantic_collapsed"
+    assert exc_info.value.cause.details["cross_sample_cosine"] == pytest.approx(1.0)
+
+    # Check that startup-attempt-history has recorded the semantic collapse with quality details
+    lines = [
+        json.loads(line) for line in (state_root / "startup-attempt-history.jsonl").read_text().splitlines()
+    ]
+    terminal = [row for row in lines if row["status"] == "terminal"][-1]
+    assert terminal["reason_code"] == "embedding_semantic_collapsed"
+    assert terminal["quality_details"]["cross_sample_cosine"] == pytest.approx(1.0)
+
+
+def test_cli_startup_records_warning_details_and_not_evaluated_cross_cosine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preserve_worker_logging: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Preflight warning band records structured quality details and logs not_evaluated cross cosine."""
+    from cardrag_worker.embedding_v5 import (
+        OpenRouterEndpointMetadata,
+        ProviderComparisonReport,
+        ProviderPreflightReport,
+        QwenEmbeddingProfileV5,
+        SampleRepeatResult,
+    )
+
+    state_root = tmp_path / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        state_dir=state_root,
+        channel="candidate-v1.0.11",
+        minimum_start_free_bytes=0,
+        publication_transport="local",
+        serving_dir=tmp_path / "serving",
+        ocr_cache_mode="read-write",
+        ocr_cache_require_hit=False,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-6.1-sol",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+        startup_check_max_attempts=1,
+        startup_check_deadline_seconds=600,
+    )
+
+    def count_tokens(_text: str) -> int:
+        return 1
+
+    count_tokens.asset_sha256 = "test_sha"  # type: ignore[attr-defined]
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return count_tokens
+
+    endpoint = OpenRouterEndpointMetadata(
+        model="qwen/qwen3-embedding-8b",
+        provider_id="deepinfra",
+        provider_name="DeepInfra",
+        endpoint_name="deepinfra: Qwen3 Embedding",
+        quantization="bf16",
+        maximum_tokens=32768,
+        supported_parameters=("dimensions", "encoding_format"),
+        metadata_sha256="c" * 64,
+    )
+    profile = QwenEmbeddingProfileV5.from_endpoint(endpoint)
+    warning_details = {
+        "gate_threshold": 0.990,
+        "warning_threshold": 0.999,
+        "minimum_cosine": 0.9972,
+        "mean_cosine": 0.9998,
+        "failed_sample_count": 1,
+        "sample_count": 24,
+        "first_failed_index": 0,
+        "lowest_failed_index": 0,
+        "first_failed_input_sha256": "d" * 64,
+        "lowest_failed_input_sha256": "d" * 64,
+        "profile_endpoint_metadata_sha256": "e" * 64,
+    }
+    report = ProviderPreflightReport(
+        profile=profile,
+        sample_count=24,
+        samples=(SampleRepeatResult(input_sha256="d" * 64, repeated_cosine=0.9972),),
+        minimum_repeat_cosine=0.9972,
+        mean_repeat_cosine=0.9998,
+        quality_status="warning",
+        warning_count=1,
+        warning_details=warning_details,
+    )
+    comparison = ProviderComparisonReport(
+        providers=(report,),
+        cross_provider_cosines=(),
+        minimum_cross_provider_cosine=None,
+        mean_cross_provider_cosine=None,
+        quality_status="warning",
+        warning_details=warning_details,
+        mode="daily_smoke",
+        evaluated_provider_count=1,
+        cross_evaluated=False,
+    )
+
+    async def warning_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        return comparison
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", warning_preflight)
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_worker_start_capacity",
+        lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+    )
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", lambda cap: cap)
+    monkeypatch.setattr(cli_module, "_ocr_resolver", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli_module, "_probe_codex_version", lambda _exe: "codex 0.162.1")
+
+    logger = logging.getLogger("cardrag_worker")
+    prior_propagate = logger.propagate
+    try:
+        summary = asyncio.run(cli_module._run(None, startup_only=True))
+
+        assert summary["status"] == "ready"
+        assert summary["quality_status"] == "warning"
+        assert summary["quality_details"] == warning_details
+        assert summary["preflight_mode"] == "daily_smoke"
+        assert summary["evaluated_provider_count"] == 1
+        assert summary["cross_evaluated"] is False
+        assert summary["minimum_cross_provider_cosine"] is None
+
+        # Verify log output records minimum_cross_provider_cosine=not_evaluated
+        captured = capsys.readouterr()
+        assert "minimum_cross_provider_cosine=not_evaluated" in captured.err
+        assert "quality_status=warning" in captured.err
+
+        # Verify startup-attempt-history has recorded the warning on stage pass
+        lines = [
+            json.loads(line)
+            for line in (state_root / "startup-attempt-history.jsonl").read_text().splitlines()
+        ]
+        preflight_passed = [
+            row for row in lines if row["stage"] == "qwen_endpoint_preflight" and row["status"] == "passed"
+        ][-1]
+        assert preflight_passed["quality_status"] == "warning"
+        assert preflight_passed["reason_code"] == "repeat_cosine_warning"
+        assert preflight_passed["quality_details"]["first_failed_index"] == 0
+        assert preflight_passed["quality_details"]["minimum_cosine"] == pytest.approx(0.9972)
+        assert preflight_passed["quality_details"]["first_failed_input_sha256"] == "d" * 64
+        assert preflight_passed["cross_evaluated"] is False
+        assert preflight_passed["minimum_cross_provider_cosine"] is None
+        assert preflight_passed["preflight_mode"] == "daily_smoke"
+        assert preflight_passed["evaluated_provider_count"] == 1
+    finally:
+        logger.propagate = prior_propagate
+
+
+def test_cli_quality_details_output_boundary_sanitization_and_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "worker-state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        channel="candidate-v1.0.11",
+        state_dir=state_root,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-5.6-terra",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+        startup_check_max_attempts=1,
+        startup_check_deadline_seconds=600,
+    )
+
+    def count_tokens(_text: str) -> int:
+        return 1
+
+    count_tokens.asset_sha256 = "test_sha"  # type: ignore[attr-defined]
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return count_tokens
+
+    endpoint = OpenRouterEndpointMetadata(
+        model="qwen/qwen3-embedding-8b",
+        provider_id="deepinfra",
+        provider_name="DeepInfra",
+        endpoint_name="deepinfra: Qwen3 Embedding",
+        quantization="bf16",
+        maximum_tokens=32768,
+        supported_parameters=("dimensions", "encoding_format"),
+        metadata_sha256="c" * 64,
+    )
+    profile = QwenEmbeddingProfileV5.from_endpoint(endpoint)
+    hostile_details = {
+        "gate_threshold": 0.990,
+        "warning_threshold": 0.999,
+        "minimum_cosine": float("nan"),  # NaN must be dropped
+        "mean_cosine": float("inf"),  # Inf must be dropped
+        "failed_sample_count": 1,
+        "sample_count": 24,
+        "first_failed_index": 0,
+        "lowest_failed_index": 0,
+        "first_failed_input_sha256": "not-valid-hex-64-length",  # invalid hex64 must be dropped
+        "lowest_failed_input_sha256": "d" * 64,
+        "profile_endpoint_metadata_sha256": "e" * 64,
+        "unexpected_private_field": "synthetic-private-marker",  # unauthorized key must be dropped
+        "auth_token": "secret-leak-marker",  # unauthorized key must be dropped
+    }
+    report = ProviderPreflightReport(
+        profile=profile,
+        sample_count=24,
+        samples=(SampleRepeatResult(input_sha256="d" * 64, repeated_cosine=0.9972),),
+        minimum_repeat_cosine=0.9972,
+        mean_repeat_cosine=0.9998,
+        quality_status="warning",
+        warning_count=1,
+        warning_details=hostile_details,
+    )
+    comparison = ProviderComparisonReport(
+        providers=(report,),
+        cross_provider_cosines=(),
+        minimum_cross_provider_cosine=None,
+        mean_cross_provider_cosine=None,
+        quality_status="warning",
+        warning_details=hostile_details,
+        mode="daily_smoke",
+        evaluated_provider_count=1,
+        cross_evaluated=False,
+    )
+
+    async def warning_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        return comparison
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", warning_preflight)
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_worker_start_capacity",
+        lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+    )
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", lambda cap: cap)
+    monkeypatch.setattr(cli_module, "_ocr_resolver", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli_module, "_probe_codex_version", lambda _exe: "codex 0.162.1")
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    # 1. Test startup_only=True output boundary
+    summary = asyncio.run(cli_module._run(None, startup_only=True))
+    assert summary["quality_status"] == "warning"
+    details = summary["quality_details"]
+    assert "unexpected_private_field" not in details
+    assert "auth_token" not in details
+    assert "minimum_cosine" not in details  # NaN was dropped
+    assert "mean_cosine" not in details  # Inf was dropped
+    assert "first_failed_input_sha256" not in details  # invalid sha was dropped
+    # Valid fields are preserved
+    assert details["gate_threshold"] == 0.990
+    assert details["warning_threshold"] == 0.999
+    assert details["failed_sample_count"] == 1
+    assert details["first_failed_index"] == 0
+    assert details["lowest_failed_input_sha256"] == "d" * 64
+
+    # Verify history JSON also dropped hostile fields
+    lines = [
+        json.loads(line) for line in (state_root / "startup-attempt-history.jsonl").read_text().splitlines()
+    ]
+    preflight_passed = [
+        row for row in lines if row["stage"] == "qwen_endpoint_preflight" and row["status"] == "passed"
+    ][-1]
+    hist_details = preflight_passed["quality_details"]
+    assert "unexpected_private_field" not in hist_details
+    assert "auth_token" not in hist_details
+    assert "minimum_cosine" not in hist_details
+
+    # 2. Test post-construction tampering on provider
+    tampered_provider = SimpleNamespace(
+        quality_status="warning",
+        quality_details={
+            "gate_threshold": 0.990,
+            "warning_threshold": 0.999,
+            "minimum_cosine": 0.995,
+            "failed_sample_count": 1,
+            "sample_count": 24,
+            "first_failed_index": 0,
+            "lowest_failed_index": 0,
+            "first_failed_input_sha256": "f" * 64,
+            "lowest_failed_input_sha256": "f" * 64,
+            "profile_endpoint_metadata_sha256": "e" * 64,
+            "post_construction_leak": "should_be_filtered",
+        },
+        preflight_mode="daily_smoke",
+        evaluated_provider_count=1,
+        cross_evaluated=False,
+        minimum_cross_provider_cosine=None,
+    )
+    tampered_payload = cli_module._project_embedding_quality_payload(tampered_provider)
+    assert tampered_payload["quality_status"] == "warning"
+    assert "post_construction_leak" not in tampered_payload["quality_details"]
+    assert tampered_payload["quality_details"]["minimum_cosine"] == 0.995
+
+    # 3. Test invalid quality_status enum fallback
+    invalid_status_provider = SimpleNamespace(
+        quality_status="bogus_status",
+        quality_details={"gate_threshold": 0.99},
+    )
+    invalid_payload = cli_module._project_embedding_quality_payload(invalid_status_provider)
+    assert invalid_payload["quality_status"] == "passed"
+    assert "quality_details" not in invalid_payload
+
+
+@pytest.mark.parametrize("pipeline_status", ["succeeded", "no_change"])
+def test_cli_normal_batch_preserves_quality_status_and_preflight_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_status: str
+) -> None:
+    state_root = tmp_path / "worker-state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        channel="candidate-v1.0.11",
+        state_dir=state_root,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-5.6-terra",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+        startup_check_max_attempts=1,
+        startup_check_deadline_seconds=600,
+        backup_mode="disabled",
+    )
+
+    def count_tokens(_text: str) -> int:
+        return 1
+
+    count_tokens.asset_sha256 = "test_sha"  # type: ignore[attr-defined]
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return count_tokens
+
+    endpoint = OpenRouterEndpointMetadata(
+        model="qwen/qwen3-embedding-8b",
+        provider_id="deepinfra",
+        provider_name="DeepInfra",
+        endpoint_name="deepinfra: Qwen3 Embedding",
+        quantization="bf16",
+        maximum_tokens=32768,
+        supported_parameters=("dimensions", "encoding_format"),
+        metadata_sha256="c" * 64,
+    )
+    profile = QwenEmbeddingProfileV5.from_endpoint(endpoint)
+    warning_details = {
+        "gate_threshold": 0.990,
+        "warning_threshold": 0.999,
+        "minimum_cosine": 0.9972,
+        "mean_cosine": 0.9998,
+        "failed_sample_count": 1,
+        "sample_count": 24,
+        "first_failed_index": 0,
+        "lowest_failed_index": 0,
+        "first_failed_input_sha256": "d" * 64,
+        "lowest_failed_input_sha256": "d" * 64,
+        "profile_endpoint_metadata_sha256": "e" * 64,
+    }
+    report = ProviderPreflightReport(
+        profile=profile,
+        sample_count=24,
+        samples=(SampleRepeatResult(input_sha256="d" * 64, repeated_cosine=0.9972),),
+        minimum_repeat_cosine=0.9972,
+        mean_repeat_cosine=0.9998,
+        quality_status="warning",
+        warning_count=1,
+        warning_details=warning_details,
+    )
+    comparison = ProviderComparisonReport(
+        providers=(report,),
+        cross_provider_cosines=(),
+        minimum_cross_provider_cosine=None,
+        mean_cross_provider_cosine=None,
+        quality_status="warning",
+        warning_details=warning_details,
+        mode="daily_smoke",
+        evaluated_provider_count=1,
+        cross_evaluated=False,
+    )
+
+    async def warning_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        return comparison
+
+    class FakeWorkerPipeline:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def run(self, *args: Any, **kwargs: Any) -> PipelineResult:
+            return PipelineResult(
+                run_id="run-normal-batch-1",
+                status=pipeline_status,
+                corpus_sha256="a" * 64,
+                contract_sha256="b" * 64,
+                generation_id="gen-test-batch",
+                document_count=5,
+                evidence_count=10,
+                published=False,
+            )
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", warning_preflight)
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_worker_start_capacity",
+        lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+    )
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", lambda cap: cap)
+    monkeypatch.setattr(cli_module, "_ocr_resolver", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli_module, "_probe_codex_version", lambda _exe: "codex 0.162.1")
+    monkeypatch.setattr(cli_module, "WorkerPipeline", FakeWorkerPipeline)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    # Run normal batch execution (startup_only=False)
+    summary = asyncio.run(cli_module._run(None, startup_only=False))
+
+    # Batch pipeline status is preserved
+    assert summary["status"] == pipeline_status
+    assert summary["run_id"] == "run-normal-batch-1"
+    assert summary["generation_id"] == "gen-test-batch"
+
+    # Quality status and validated details are preserved in normal batch
+    assert summary["quality_status"] == "warning"
+    assert summary["quality_details"] == warning_details
+    assert summary["preflight_mode"] == "daily_smoke"
+    assert summary["evaluated_provider_count"] == 1
+    assert summary["cross_evaluated"] is False
+    assert summary["minimum_cross_provider_cosine"] is None
+
+    # JSON serialization round-trip: minimum_cross_provider_cosine is explicit null
+    serialized = json.dumps(summary)
+    roundtripped = json.loads(serialized)
+    assert roundtripped["quality_status"] == "warning"
+    assert roundtripped["quality_details"] == warning_details
+    assert roundtripped["cross_evaluated"] is False
+    assert roundtripped["minimum_cross_provider_cosine"] is None
+
+
+def test_cli_normal_batch_passed_quality_has_no_quality_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "worker-state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    base_settings = cli_module.WorkerSettings.from_env(require_providers=False)
+    settings = dataclasses.replace(
+        base_settings,
+        channel="candidate-v1.0.11",
+        state_dir=state_root,
+        ocr_provider="codex-exec",
+        ocr_model="gpt-5.6-terra",
+        ocr_fallback_provider="local-paddleocr",
+        ocr_fallback_model="PaddleOCR-VL-1.6",
+        codex_executable="/usr/local/bin/codex",
+        openrouter_api_key="test-key",
+        embedding_provider_id="deepinfra",
+        embedding_maximum_tokens=32768,
+        embedding_model="qwen/qwen3-embedding-8b",
+        embedding_dimension=4096,
+        startup_check_max_attempts=1,
+        startup_check_deadline_seconds=600,
+        backup_mode="disabled",
+    )
+
+    def count_tokens(_text: str) -> int:
+        return 1
+
+    count_tokens.asset_sha256 = "test_sha"  # type: ignore[attr-defined]
+
+    async def fake_tokenizer(*_args: Any, **_kwargs: Any) -> Any:
+        return count_tokens
+
+    endpoint = OpenRouterEndpointMetadata(
+        model="qwen/qwen3-embedding-8b",
+        provider_id="deepinfra",
+        provider_name="DeepInfra",
+        endpoint_name="deepinfra: Qwen3 Embedding",
+        quantization="bf16",
+        maximum_tokens=32768,
+        supported_parameters=("dimensions", "encoding_format"),
+        metadata_sha256="c" * 64,
+    )
+    profile = QwenEmbeddingProfileV5.from_endpoint(endpoint)
+    report = ProviderPreflightReport(
+        profile=profile,
+        sample_count=24,
+        samples=(SampleRepeatResult(input_sha256="d" * 64, repeated_cosine=0.9995),),
+        minimum_repeat_cosine=0.9995,
+        mean_repeat_cosine=0.9999,
+        quality_status="passed",
+        warning_count=0,
+        warning_details=None,
+    )
+    comparison = ProviderComparisonReport(
+        providers=(report,),
+        cross_provider_cosines=(),
+        minimum_cross_provider_cosine=None,
+        mean_cross_provider_cosine=None,
+        quality_status="passed",
+        warning_details=None,
+        mode="daily_smoke",
+        evaluated_provider_count=1,
+        cross_evaluated=False,
+    )
+
+    async def passed_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        return comparison
+
+    class FakeWorkerPipeline:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def run(self, *args: Any, **kwargs: Any) -> PipelineResult:
+            return PipelineResult(
+                run_id="run-passed-batch-1",
+                status="succeeded",
+                corpus_sha256="a" * 64,
+                contract_sha256="b" * 64,
+                generation_id="gen-test-passed",
+                document_count=5,
+                evidence_count=10,
+                published=False,
+            )
+
+    monkeypatch.setattr(cli_module, "ensure_qwen_tokenizer", fake_tokenizer)
+    monkeypatch.setattr(cli_module, "preflight_openrouter_qwen_providers", passed_preflight)
+    monkeypatch.setattr(cli_module.WorkerSettings, "from_env", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "preflight_worker_start_capacity",
+        lambda *_args, **_kwargs: SimpleNamespace(filesystem_free_bytes=1000, minimum_free_bytes=0),
+    )
+    monkeypatch.setattr(cli_module, "revalidate_worker_start_capacity", lambda cap: cap)
+    monkeypatch.setattr(cli_module, "_ocr_resolver", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli_module, "_probe_codex_version", lambda _exe: "codex 0.162.1")
+    monkeypatch.setattr(cli_module, "WorkerPipeline", FakeWorkerPipeline)
+    monkeypatch.setattr(cli_module, "_configure_worker_logging", lambda: None)
+
+    summary = asyncio.run(cli_module._run(None, startup_only=False))
+
+    assert summary["status"] == "succeeded"
+    assert summary["quality_status"] == "passed"
+    assert "quality_details" not in summary
+    assert summary["preflight_mode"] == "daily_smoke"
+    assert summary["evaluated_provider_count"] == 1
+    assert summary["cross_evaluated"] is False
+    assert summary["minimum_cross_provider_cosine"] is None

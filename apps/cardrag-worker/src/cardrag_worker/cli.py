@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -520,6 +521,11 @@ class StartupAttemptRecorder:
         next_retry_seconds: float | None = None,
         retry_eligible: bool | None = None,
         quality_details: dict[str, int | float | str | None] | None = None,
+        quality_status: str | None = None,
+        preflight_mode: str | None = None,
+        evaluated_provider_count: int | None = None,
+        cross_evaluated: bool | None = None,
+        minimum_cross_provider_cosine: float | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -544,10 +550,43 @@ class StartupAttemptRecorder:
             record["next_retry_seconds"] = next_retry_seconds
         if retry_eligible is not None:
             record["retry_eligible"] = retry_eligible
+        if quality_status is not None:
+            record["quality_status"] = quality_status if quality_status in {"passed", "warning"} else "passed"
         if quality_details:
-            boundary = validated_quality_details(reason_code, quality_details)
+            boundary = validated_quality_details(reason_code or "repeat_cosine_warning", quality_details)
             if boundary:
                 record["quality_details"] = boundary
+        if preflight_mode is not None:
+            record["preflight_mode"] = (
+                preflight_mode if preflight_mode in {"daily_smoke", "qualification"} else "daily_smoke"
+            )
+        if evaluated_provider_count is not None:
+            record["evaluated_provider_count"] = (
+                evaluated_provider_count
+                if isinstance(evaluated_provider_count, int) and evaluated_provider_count >= 1
+                else 1
+            )
+        if cross_evaluated is not None:
+            cross_bool = bool(cross_evaluated)
+            record["cross_evaluated"] = cross_bool
+            if (
+                cross_bool
+                and type(minimum_cross_provider_cosine) is float
+                and math.isfinite(minimum_cross_provider_cosine)
+                and -1.0 <= minimum_cross_provider_cosine <= 1.0
+            ):
+                record["minimum_cross_provider_cosine"] = minimum_cross_provider_cosine
+            else:
+                record["minimum_cross_provider_cosine"] = None
+        elif minimum_cross_provider_cosine is not None:
+            if (
+                type(minimum_cross_provider_cosine) is float
+                and math.isfinite(minimum_cross_provider_cosine)
+                and -1.0 <= minimum_cross_provider_cosine <= 1.0
+            ):
+                record["minimum_cross_provider_cosine"] = minimum_cross_provider_cosine
+            else:
+                record["minimum_cross_provider_cosine"] = None
         dir_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
@@ -854,6 +893,40 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
     )
 
 
+def _project_embedding_quality_payload(embeddings: Any) -> dict[str, Any]:
+    raw_status = getattr(embeddings, "quality_status", "passed")
+    quality_status = raw_status if raw_status in {"passed", "warning"} else "passed"
+    raw_mode = getattr(embeddings, "preflight_mode", "daily_smoke")
+    preflight_mode = raw_mode if raw_mode in {"daily_smoke", "qualification"} else "daily_smoke"
+    raw_count = getattr(embeddings, "evaluated_provider_count", 1)
+    provider_count = raw_count if type(raw_count) is int and raw_count >= 1 else 1
+    cross_evaluated = bool(getattr(embeddings, "cross_evaluated", False))
+    raw_min_cross = getattr(embeddings, "minimum_cross_provider_cosine", None)
+    if (
+        cross_evaluated
+        and type(raw_min_cross) is float
+        and math.isfinite(raw_min_cross)
+        and -1.0 <= raw_min_cross <= 1.0
+    ):
+        min_cross = raw_min_cross
+    else:
+        min_cross = None
+
+    payload: dict[str, Any] = {
+        "quality_status": quality_status,
+        "preflight_mode": preflight_mode,
+        "evaluated_provider_count": provider_count,
+        "cross_evaluated": cross_evaluated,
+        "minimum_cross_provider_cosine": min_cross,
+    }
+    if quality_status == "warning":
+        raw_details = getattr(embeddings, "quality_details", None)
+        validated = validated_quality_details("repeat_cosine_warning", raw_details)
+        if validated:
+            payload["quality_details"] = validated
+    return payload
+
+
 def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
     return {
         "collection_status": result.collection_status,
@@ -999,6 +1072,11 @@ async def _qwen_embedding_provider(
                     request_max_attempts=settings.embedding_request_max_attempts,
                     retry_base_seconds=settings.embedding_retry_base_seconds,
                     retry_cap_seconds=settings.embedding_retry_cap_seconds,
+                    provider_ids=(settings.embedding_provider_id,),
+                    mode="daily_smoke",
+                    minimum_repeat_cosine=0.999,
+                    hard_reject_repeat_cosine=0.990,
+                    check_semantic_discriminability=True,
                 ),
                 timeout=remaining,
             )
@@ -1156,13 +1234,23 @@ async def _qwen_embedding_provider(
         attempt,
         attempt_max,
     )
+    comp_quality_status = getattr(comparison, "quality_status", "passed")
+    comp_warning_details = getattr(comparison, "warning_details", None)
     if recorder is not None:
         recorder.record(
             stage,
             "passed",
+            reason_code="repeat_cosine_warning" if comp_quality_status == "warning" else None,
+            provider_id=settings.embedding_provider_id,
             attempt=attempt,
             attempt_max=attempt_max,
             elapsed_seconds=time.monotonic() - t1,
+            quality_status=comp_quality_status,
+            quality_details=comp_warning_details,
+            preflight_mode=getattr(comparison, "mode", "daily_smoke"),
+            evaluated_provider_count=getattr(comparison, "evaluated_provider_count", 1),
+            cross_evaluated=getattr(comparison, "cross_evaluated", False),
+            minimum_cross_provider_cosine=getattr(comparison, "minimum_cross_provider_cosine", None),
         )
 
     stage = "embedding_verification"
@@ -1202,14 +1290,33 @@ async def _qwen_embedding_provider(
     if recorder is not None:
         recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t2)
 
+    quality_status = getattr(selected, "quality_status", "passed")
+    warning_count = getattr(selected, "warning_count", 0)
+    mean_cosine = getattr(selected, "mean_repeat_cosine", selected.minimum_repeat_cosine)
+
+    if quality_status == "warning":
+        log.warning(
+            "Qwen provider preflight warning provider=%s samples=%d warning_count=%d "
+            "minimum_repeat_cosine=%.6f mean_repeat_cosine=%.6f warning_threshold=%.6f",
+            profile.provider_id,
+            selected.sample_count,
+            warning_count,
+            selected.minimum_repeat_cosine,
+            mean_cosine,
+            0.999,
+        )
+
+    cross_cosine = comparison.minimum_cross_provider_cosine
+    cross_str = f"{cross_cosine:.6f}" if cross_cosine is not None else "not_evaluated"
     log.info(
         "Qwen provider preflight passed provider=%s samples=%d minimum_repeat_cosine=%.6f "
-        "minimum_cross_provider_cosine=%.6f tokenizer_sha256=%s",
+        "minimum_cross_provider_cosine=%s tokenizer_sha256=%s quality_status=%s",
         profile.provider_id,
         selected.sample_count,
         selected.minimum_repeat_cosine,
-        comparison.minimum_cross_provider_cosine,
+        cross_str,
         tokenizer.asset_sha256,
+        quality_status,
     )
     return OpenRouterQwenEmbeddingProviderV5(
         api_key=api_key,
@@ -1221,6 +1328,13 @@ async def _qwen_embedding_provider(
         request_max_attempts=settings.embedding_request_max_attempts,
         retry_base_seconds=settings.embedding_retry_base_seconds,
         retry_cap_seconds=settings.embedding_retry_cap_seconds,
+        quality_status=quality_status,
+        quality_details=getattr(selected, "warning_details", None),
+        preflight_mode=getattr(comparison, "mode", "daily_smoke"),
+        evaluated_provider_count=getattr(comparison, "evaluated_provider_count", 1),
+        cross_evaluated=getattr(comparison, "cross_evaluated", False),
+        minimum_cross_provider_cosine=getattr(comparison, "minimum_cross_provider_cosine", None),
+        mean_cross_provider_cosine=getattr(comparison, "mean_cross_provider_cosine", None),
     )
 
 
@@ -1475,7 +1589,7 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                     logging.getLogger("cardrag_worker.cli").info(
                         "Worker startup check completed elapsed_seconds=%.3f", time.monotonic() - started
                     )
-                    return {
+                    payload = {
                         "codex_version": codex_ver,
                         "embedding_model": settings.embedding_model,
                         "embedding_provider": settings.embedding_provider_id,
@@ -1486,7 +1600,9 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                         "stage": "completed",
                         "status": "ready",
                         "elapsed_seconds": round(time.monotonic() - started, 3),
+                        **_project_embedding_quality_payload(embeddings),
                     }
+                    return payload
                 stage = "pipeline_entry"
                 t_stage = time.monotonic()
                 logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
@@ -1586,6 +1702,7 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                             result.published if publication_transport == "local" else False
                         ),
                         **backup_info,
+                        **_project_embedding_quality_payload(embeddings),
                     }
                 )
                 return payload
