@@ -75,9 +75,24 @@ RUN addgroup -S -g 10001 cardrag && \
 USER 10001:10001
 
 
+# Upgrade the signed CA package against the shell-free runtime's own package
+# database. Keep its Python 3.14 base pinned; current latest uses Python 3.15.
+FROM ${PYTHON_RUNTIME_IMAGE} AS runtime-base
+FROM ${PYTHON_DEV_IMAGE} AS runtime-security
+# Root is needed only to prepare the runtime root in this build stage.
+# hadolint ignore=DL3002
+USER 0
+COPY --from=runtime-base / /runtime-root/
+# This signed CA-data package needs no ldconfig commit hook in the shell-free
+# target. Require the patched security floor without changing its Python ABI.
+# hadolint ignore=DL3018
+RUN apk --root /runtime-root --no-cache --no-commit-hooks add 'ca-certificates-bundle>=20260909-r3'
+
+
 # The MCP runtime is intentionally shell- and package-manager-free. Keep this
 # stage and every descendant free of RUN instructions.
 FROM ${PYTHON_RUNTIME_IMAGE} AS runtime
+COPY --from=runtime-security /runtime-root/ /
 
 ARG APP_VERSION=dev
 ARG VCS_REF=unknown
@@ -136,6 +151,7 @@ ENV PATH="/opt/cardrag/bin:${PATH}" \
 RUN apk add --no-cache \
       bubblewrap \
       ca-certificates \
+      'ca-certificates-bundle>=20260909-r3' \
       glib \
       libcap-utils \
       libgomp \

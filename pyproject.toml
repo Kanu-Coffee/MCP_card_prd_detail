@@ -2,6 +2,10 @@
 # MCP's transitive HTTP client: reject versions affected by CVE-2026-84382.
 constraint-dependencies = [
   "httpx2>=2.12.0",
+  # Patched transport, certificate bundle and file-lock dependencies.
+  "aiohttp>=3.14.4",
+  "certifi>=2026.10.19",
+  "filelock>=4.2.1",
   # Keep the existing Python 3.14 runtime resolution independent from the
   # older versions required by the optional Python 3.13 Paddle stack.
   "numpy==2.5.2; python_version >= '3.14'",
