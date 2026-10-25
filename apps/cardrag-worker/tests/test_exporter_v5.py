@@ -780,7 +780,7 @@ def test_v5_export_streams_lazy_rows_without_retaining_the_previous_load(
     vectors = tmp_path / "vectors.f32"
     original_write = exporter_module._write_vector_sidecar
 
-    def write(path: Path, views: Any) -> tuple[str, int]:
+    def write(path: Path, views: Any, profile: Any = None) -> tuple[str, int]:
         assert calls == [], "metadata preflight must not invoke any vector loaders"
         return original_write(path, views)
 

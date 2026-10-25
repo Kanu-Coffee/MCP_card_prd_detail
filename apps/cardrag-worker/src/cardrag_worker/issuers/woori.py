@@ -111,7 +111,7 @@ def parse_detail_records(
         file_name = first(raw, "fileNm", "fileName", "s1Nm") or PurePosixPath(file_path).name
         begin = first(raw, "beginDt", "beginDate", "effectiveDate")
         version = first(raw, "gdccVer", "version")
-        if not file_path or not begin or not version or not file_name.casefold().endswith(".pdf"):
+        if not file_path or not begin or not version or not file_name.casefold().endswith((".pdf", ".zip")):
             continue
         rows.append(
             SourceRecord(
@@ -125,7 +125,10 @@ def parse_detail_records(
                 file_name=file_name,
                 category="personal",
                 discovered_at=discovered_at,
-                metadata={"raonk_file_path": file_path},
+                metadata={
+                    "raonk_file_path": file_path,
+                    **({"attachment_type": "zip"} if file_name.casefold().endswith(".zip") else {}),
+                },
             )
         )
     rows.sort(
@@ -138,7 +141,7 @@ def parse_detail_records(
 def raonk_plaintext(file_path: str, file_name: str, *, guid: str | None = None) -> str:
     if not file_path.startswith("/") or ".." in PurePosixPath(file_path).parts:
         raise ValueError("invalid RAONK file path")
-    if PurePosixPath(file_name).name != file_name or not file_name.casefold().endswith(".pdf"):
+    if PurePosixPath(file_name).name != file_name or not file_name.casefold().endswith((".pdf", ".zip")):
         raise ValueError("invalid RAONK file name")
     return (
         "kc\fc11"
@@ -163,6 +166,7 @@ def encrypt_raonk(plaintext: str) -> str:
 class WooriAdapter:
     spec = SPEC
     parser_version = "woori.current.v1"
+    detail_inventory = None
 
     def __init__(self, *, base_url: str = BASE_URL, minimum_records: int | None = None) -> None:
         self.base_url = base_url.rstrip("/")
@@ -194,6 +198,10 @@ class WooriAdapter:
             {"cct11PrdntcAgrmReqVo": {"part": 0, "pageIndex": "1", "pageSize": "1000"}},
         )
         products = list((main.get("mainDataList") or {}).get("cct11PrdntcAgrmMainVo") or [])
+        # The official endpoint currently requests at most 1,000 rows. Refuse
+        # a saturated response rather than declaring a truncated inventory complete.
+        if len(products) >= 1000:
+            raise IssuerMarkupChanged("Woori main listing requires pagination")
         require_minimum(products, label="Woori product listing", minimum=self.minimum_records)
         records: list[SourceRecord] = []
         for product in products:
@@ -203,6 +211,14 @@ class WooriAdapter:
             name = str(product.get("codeName") or "").strip()
             if not code or not name:
                 continue
+            from ..contracts import canonical_sha256
+
+            fingerprint = canonical_sha256(product)
+            if self.detail_inventory is not None:
+                retained = self.detail_inventory.lookup(self.spec.code, code, fingerprint, now=started)
+                if retained is not None:
+                    records.extend(retained)
+                    continue
             detail = await self._post_json(
                 client,
                 DETAIL_PATH,
@@ -217,14 +233,10 @@ class WooriAdapter:
                     }
                 },
             )
-            records.extend(
-                parse_detail_records(
-                    detail,
-                    product_code=code,
-                    product_name=name,
-                    discovered_at=started,
-                )
-            )
+            parsed = parse_detail_records(detail, product_code=code, product_name=name, discovered_at=started)
+            records.extend(parsed)
+            if self.detail_inventory is not None:
+                self.detail_inventory.put(self.spec.code, code, fingerprint, parsed, now=started)
         require_minimum(records, label="Woori current PDF disclosure", minimum=self.minimum_records)
         return snapshot_from_records(
             issuer=self.spec.code,

@@ -1,5 +1,9 @@
 # 릴리스와 stable 전환
 
+## v1.0.37 GitHub 소스 릴리스
+
+v1.0.37은 카드사 선택·증분 수집, 일일 순회, 범위별 백업, OCR 재개·fallback 및 운영 배포 검증 개선을 포함합니다. [릴리스 노트](RELEASE_NOTES_v1.0.37.md)와 [handoff 종료 인덱스](../.handoff/STATUS_v1.0.37.md)를 참고하십시오. 패키지 3종·Worker 표시 버전·lockfile을 동기화하고 전체 CI가 통과한 main commit에 annotated tag를 생성한 뒤 GitHub 소스 릴리스를 발행합니다. 아래의 v1.0.34 전용 공개 이미지 workflow는 이 릴리스에 실행하지 않습니다. 새 registry 이미지·서명 발행이나 운영 이미지 교체는 이번 소스 발행에 포함되지 않습니다. 검증된 운영 이미지와 데이터·인증 볼륨, 매일14:30 KST 예약을 유지합니다.
+
 ## v1.0.36 GitHub 소스 릴리스
 
 v1.0.36은 Worker 초기화 진단, 공통 startup-check 경로 및 Codex CLI 0.162.1 업데이트를 담은

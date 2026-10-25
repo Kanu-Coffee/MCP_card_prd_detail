@@ -17,6 +17,7 @@ import re
 import sqlite3
 import stat
 import struct
+import time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -836,27 +837,43 @@ def _encode_vector(values: Sequence[float] | bytes, *, row_index: int) -> bytes:
     return packed
 
 
-def _encode_view_vector(view: EmbeddingViewInput) -> bytes:
+def _profile_add(profile: dict[str, float] | None, key: str, seconds: float) -> None:
+    if profile is not None:
+        profile[key] = profile.get(key, 0.0) + seconds
+
+
+def _encode_view_vector(view: EmbeddingViewInput, profile: dict[str, float] | None = None) -> bytes:
     """Resolve and validate exactly one embedding view vector."""
 
     source = view.vector
     if not isinstance(source, LazyEmbeddingVector):
-        return _encode_vector(source, row_index=view.row_index)
+        started = time.monotonic()
+        encoded = _encode_vector(source, row_index=view.row_index)
+        _profile_add(profile, "vector_encode_seconds", time.monotonic() - started)
+        return encoded
     _validate_view_vector(view)
 
     # Loader exceptions deliberately propagate.  A cache miss, identity
     # collision, or integrity failure must abort the export rather than be
     # translated into an apparently valid serving artifact.
+    started = time.monotonic()
     loaded = source.loader()
+    _profile_add(profile, "cache_loader_seconds", time.monotonic() - started)
     if not isinstance(loaded, bytes):
         raise ServingDatabaseV5Error(
             f"lazy vector row {view.row_index} loader did not return canonical bytes"
         )
-    if hashlib.sha256(loaded).hexdigest() != source.expected_vector_sha256:
+    started = time.monotonic()
+    digest_ok = hashlib.sha256(loaded).hexdigest() == source.expected_vector_sha256
+    _profile_add(profile, "vector_digest_seconds", time.monotonic() - started)
+    if not digest_ok:
         raise ServingDatabaseV5Error(
             f"lazy vector row {view.row_index} changed after its cache identity was sealed"
         )
-    return _encode_vector(loaded, row_index=view.row_index)
+    started = time.monotonic()
+    encoded = _encode_vector(loaded, row_index=view.row_index)
+    _profile_add(profile, "vector_encode_seconds", time.monotonic() - started)
+    return encoded
 
 
 def _validate_view_vector(view: EmbeddingViewInput) -> None:
@@ -1378,11 +1395,15 @@ def _validate_inputs(
     return tuple(sorted(coverage_rows, key=lambda row: row.contract_revision_id))
 
 
-def _write_vector_sidecar(path: Path, views: Sequence[EmbeddingViewInput]) -> tuple[str, int]:
+def _write_vector_sidecar(
+    path: Path,
+    views: Sequence[EmbeddingViewInput],
+    profile: dict[str, float] | None = None,
+) -> tuple[str, int]:
     digest = hashlib.sha256()
     with path.open("xb") as target:
         for row in sorted(views, key=lambda item: item.row_index):
-            encoded = _encode_view_vector(row)
+            encoded = _encode_view_vector(row, profile)
             target.write(encoded)
             digest.update(encoded)
             # Do not retain the preceding lazy-loaded row while resolving the
@@ -1837,6 +1858,7 @@ class ServingDatabaseExporterV5:
         maximum_vector_sidecar_bytes: int | None = None,
         reserved_free_space_bytes: int = 0,
         replace_incomplete_owned_targets: bool = False,
+        profile: dict[str, float] | None = None,
     ) -> ServingExportV5:
         if database_target.absolute() == vectors_target.absolute():
             raise ServingDatabaseV5Error("database and vector sidecar targets must differ")
@@ -1982,7 +2004,9 @@ class ServingDatabaseExporterV5:
                 raise
 
         try:
-            vector_sha256, vector_size_bytes = _write_vector_sidecar(vectors_working, ordered_views)
+            phase_started = time.monotonic()
+            vector_sha256, vector_size_bytes = _write_vector_sidecar(vectors_working, ordered_views, profile)
+            _profile_add(profile, "vector_sidecar_seconds", time.monotonic() - phase_started)
             if vector_size_bytes != expected_vector_size:
                 raise ServingDatabaseV5Error("vector sidecar size changed from its exact prediction")
             if vector_limit is not None and vector_size_bytes > vector_limit:
@@ -2126,6 +2150,7 @@ class ServingDatabaseExporterV5:
                         raise ServingDatabaseV5Error("extra metadata value is invalid")
                 metadata.update(extra_metadata)
 
+            build_started = time.monotonic()
             connection = sqlite3.connect(database_working)
             connection.execute(f"PRAGMA page_size={SQLITE_PAGE_BYTES}")
             sealed_page_size = connection.execute("PRAGMA page_size").fetchone()
@@ -2420,10 +2445,12 @@ class ServingDatabaseExporterV5:
                     for span_ordinal, span in enumerate(row.source_spans)
                 ),
             )
+            fts_started = time.monotonic()
             connection.executemany(
                 "INSERT INTO embedding_views_fts(row_index,node_id,display_text) VALUES(?,?,?)",
                 ((row.row_index, row.node_id, row.display_text) for row in ordered_views),
             )
+            _profile_add(profile, "fts_index_seconds", time.monotonic() - fts_started)
             connection.executemany(
                 """INSERT INTO revision_coverage
                    (contract_revision_id,source_sha256,source_non_whitespace_count,
@@ -2441,6 +2468,7 @@ class ServingDatabaseExporterV5:
                 ),
             )
             connection.commit()
+            _profile_add(profile, "sqlite_rows_seconds", time.monotonic() - build_started)
             expected_counts = {
                 "issuers": len(ordered_issuers),
                 "product_lineages": len(ordered_lineages),
@@ -2457,6 +2485,7 @@ class ServingDatabaseExporterV5:
                 "embedding_views_fts": len(ordered_views),
                 "revision_coverage": len(coverage_rows),
             }
+            verify_started = time.monotonic()
             _verify_database(
                 connection,
                 expected_metadata=metadata,
@@ -2464,6 +2493,7 @@ class ServingDatabaseExporterV5:
                 run_fts_integrity_check=True,
                 run_integrity_check=False,
             )
+            _profile_add(profile, "working_verify_seconds", time.monotonic() - verify_started)
             connection.commit()
             working_database_size = database_working.stat().st_size
             if effective_database_limit is not None and working_database_size > 2 * effective_database_limit:
@@ -2480,9 +2510,11 @@ class ServingDatabaseExporterV5:
                     raise ServingDatabaseV5Error(
                         "serving database vacuum lacks configured reserved free space"
                     )
+            vacuum_started = time.monotonic()
             connection.execute("VACUUM INTO ?", (str(database_vacuumed),))
             connection.close()
             connection = None
+            _profile_add(profile, "vacuum_seconds", time.monotonic() - vacuum_started)
             vacuumed_database_size = database_vacuumed.stat().st_size
             if database_limit is not None and vacuumed_database_size > database_limit:
                 raise ServingDatabaseV5Error(
@@ -2500,6 +2532,7 @@ class ServingDatabaseExporterV5:
                 expected_size_bytes=vacuumed_database_size,
                 maximum_size_bytes=effective_database_limit,
             )
+            final_verify_started = time.monotonic()
             verify = sqlite3.connect(f"file:{database_vacuumed}?mode=ro&immutable=1", uri=True)
             try:
                 _verify_database(
@@ -2521,11 +2554,13 @@ class ServingDatabaseExporterV5:
                 expected_sha256=vector_sha256,
                 expected_rows=len(ordered_views),
             )
+            _profile_add(profile, "final_verify_seconds", time.monotonic() - final_verify_started)
 
             # Seal the exact identities and bytes that passed the expensive
             # SQLite/vector verification.  Revalidate both artifacts before
             # publishing either target so a detected source mutation cannot
             # disturb an owned incomplete pair from an earlier attempt.
+            install_started = time.monotonic()
             vector_seal = _seal_regular_artifact(
                 vectors_working,
                 field="vector sidecar",
@@ -2591,6 +2626,7 @@ class ServingDatabaseExporterV5:
                 field="installed serving database",
                 maximum_size_bytes=effective_database_limit,
             )
+            _profile_add(profile, "install_seconds", time.monotonic() - install_started)
         except sqlite3.DatabaseError as exc:
             if not replace_incomplete_owned_targets:
                 for target, sealed in reversed(installed_targets):

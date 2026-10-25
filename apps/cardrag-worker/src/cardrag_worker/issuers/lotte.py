@@ -30,7 +30,7 @@ MAXIMUM_RECORDS = 10_000
 CATEGORY = "shared"
 # Reviewed against the official listing and current attachment URLs on 2026-09-06.
 # A product, metadata, date, or URL change invalidates this exact identity binding.
-# Only a fresh HTTP 404 permits exclusion; repaired attachments return automatically.
+# Only an exact reviewed 404 observation permits exclusion, until its bounded audit due.
 SOURCE_UNAVAILABLE_ALLOWANCES = {
     "1603": (
         "source_3942b85e984b704350f7f60e93cf89cd820439a68bacdf5c7f2c9890065c9195",
@@ -71,7 +71,7 @@ def _pdf_url(file_name: str) -> str:
     if (
         PurePosixPath(file_name).name != file_name
         or "\\" in file_name
-        or not file_name.casefold().endswith(".pdf")
+        or not file_name.casefold().endswith((".pdf", ".zip"))
         or any(ord(character) < 32 for character in file_name)
     ):
         raise IssuerMarkupChanged("Lotte disclosure attachment filename is invalid")
@@ -165,6 +165,7 @@ def parse_listing_page(
                     "classification_basis": "official_shared_listing",
                     "official_product_code": official_code.strip(),
                     "issuance_ended": ended == "Y",
+                    **({"attachment_type": "zip"} if file_name.casefold().endswith(".zip") else {}),
                 },
             )
         )
@@ -173,6 +174,7 @@ def parse_listing_page(
 
 class LotteAdapter:
     spec = SPEC
+    origin_policy = None
     parser_version = "lotte.current.v2"
 
     def __init__(
@@ -249,8 +251,22 @@ class LotteAdapter:
                 and source.source_version == allowance[1]
                 and source.source_url == _pdf_url(allowance[2])
             ):
+                negative = (
+                    self.origin_policy.negative(source.source_id, now=started)
+                    if self.origin_policy is not None
+                    else None
+                )
+                if negative is not None and negative.get("status") == 404:
+                    warnings.append(
+                        f"source_unavailable_cached issuer=lotte source_id={source.source_id} status=404"
+                    )
+                    continue
                 async with client.stream("GET", source.source_url, follow_redirects=False) as response:
                     if response.status_code == 404:
+                        if self.origin_policy is not None:
+                            self.origin_policy.remember_negative(
+                                source.source_id, {"status": 404}, now=started, known=True
+                            )
                         warnings.append(
                             f"source_unavailable issuer=lotte product_code={source.product_code} "
                             f"source_id={source.source_id} status=404 "

@@ -138,7 +138,9 @@ def queue_reprocess_requests(state_dir: Path, requests: tuple[OCRReprocessReques
             temporary.unlink(missing_ok=True)
 
 
-def load_next_reprocess_request(state_dir: Path) -> OCRReprocessRequest | None:
+def load_next_reprocess_request(
+    state_dir: Path, *, eligible_document_ids: frozenset[str] | None = None
+) -> OCRReprocessRequest | None:
     root = _request_root(state_dir)
     if not root.exists():
         return None
@@ -154,6 +156,8 @@ def load_next_reprocess_request(state_dir: Path) -> OCRReprocessRequest | None:
             raise ValueError("OCR request file is invalid") from exc
         if request.canonical_bytes() != path.read_bytes() or path.name != f"{request.request_id}.json":
             raise ValueError("OCR request file identity is invalid")
+        if _delegated_request(root, request):
+            continue
         receipt = completed / f"{request.request_id}.json"
         if receipt.exists():
             if receipt.is_symlink() or not receipt.is_file() or receipt.stat().st_size > 4096:
@@ -174,11 +178,17 @@ def load_next_reprocess_request(state_dir: Path) -> OCRReprocessRequest | None:
             validate_identifier(receipt_payload["run_id"], label="run_id")
             validate_identifier(receipt_payload["generation_id"], label="generation_id")
             continue
+        if eligible_document_ids is not None and any(
+            t.document_id not in eligible_document_ids for t in request.targets
+        ):
+            continue
         return request
     return None
 
 
-def select_run_reprocess_request(state_dir: Path, run_id: str) -> OCRReprocessRequest | None:
+def select_run_reprocess_request(
+    state_dir: Path, run_id: str, *, eligible_document_ids: frozenset[str] | None = None
+) -> OCRReprocessRequest | None:
     """Keep a resumed run on its original request, including an empty selection."""
 
     safe_run_id = validate_identifier(run_id, label="run_id")
@@ -198,13 +208,17 @@ def select_run_reprocess_request(state_dir: Path, run_id: str) -> OCRReprocessRe
         ):
             raise ValueError("OCR run request selection contract is invalid")
         request = payload["request"]
+        if request is not None and eligible_document_ids is not None:
+            parsed = OCRReprocessRequest.model_validate_json(canonical_json_bytes(request))
+            if any(t.document_id not in eligible_document_ids for t in parsed.targets):
+                raise ValueError("persisted OCR request exceeds the frozen issuer scope")
         return (
             None
             if request is None
             else OCRReprocessRequest.model_validate_json(canonical_json_bytes(request))
         )
 
-    request = load_next_reprocess_request(state_dir)
+    request = load_next_reprocess_request(state_dir, eligible_document_ids=eligible_document_ids)
     path.parent.mkdir(parents=True, exist_ok=True)
     body = canonical_json_bytes({"request": request})
     with path.open("xb") as handle:
@@ -303,3 +317,139 @@ def pending_reprocess_targets(
                         pass
         pending.append({"document_id": target.document_id, "reason_code": reason})
     return pending
+
+
+def partition_reprocess_requests(state_dir: Path, issuer_by_document: dict[str, str]) -> None:
+    """Delegate immutable mixed requests to deterministic issuer children.
+
+    The parent is retained. Its completion is a verified conjunction of the
+    child publication receipts; it never claims one generation processed all.
+    """
+    import hashlib
+
+    root = _request_root(state_dir)
+    if not root.exists():
+        return
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("OCR request directory is unsafe")
+    delegated = root / "delegated"
+    if delegated.is_symlink():
+        raise ValueError("OCR delegation directory is unsafe")
+    delegated.mkdir(exist_ok=True, mode=0o700)
+    for path in sorted(root.glob("ocr-*.json")):
+        if path.is_symlink() or path.stat().st_size > 64 * 1024:
+            raise ValueError("OCR request file is unsafe")
+        parent = OCRReprocessRequest.model_validate_json(path.read_bytes())
+        if parent.canonical_bytes() != path.read_bytes() or path.name != f"{parent.request_id}.json":
+            raise ValueError("OCR request file identity is invalid")
+        if (root / "completed" / path.name).exists():
+            continue
+        groups: dict[str, list[OCRRequestTarget]] = {}
+        for target in parent.targets:
+            issuer = issuer_by_document.get(target.document_id)
+            if issuer is None:
+                break  # Unknown provenance is never guessed into a scope.
+            groups.setdefault(issuer, []).append(target)
+        else:
+            if len(groups) < 2:
+                continue
+            children = []
+            for issuer, targets in sorted(groups.items()):
+                digest = hashlib.sha256(canonical_json_bytes([parent.request_id, issuer])).hexdigest()
+                child = parent.model_copy(
+                    update={"request_id": f"ocr-child-{digest}", "targets": tuple(targets)}
+                )
+                child_path = root / f"{child.request_id}.json"
+                if child_path.exists():
+                    if child_path.is_symlink() or child_path.read_bytes() != child.canonical_bytes():
+                        raise ValueError("OCR child identity conflict")
+                else:
+                    queue_reprocess_requests(state_dir, (child,))
+                children.append(child.request_id)
+            mapping = canonical_json_bytes({"parent": parent.request_id, "children": children})
+            mapping_path = delegated / path.name
+            if mapping_path.exists():
+                if mapping_path.is_symlink() or mapping_path.read_bytes() != mapping:
+                    raise ValueError("OCR delegation identity conflict")
+            else:
+                with mapping_path.open("xb") as out:
+                    os.chmod(mapping_path, 0o600)
+                    out.write(mapping)
+                    out.flush()
+                    os.fsync(out.fileno())
+
+
+def _delegated_request(root: Path, parent: OCRReprocessRequest) -> bool:
+    """Validate immutable child partition and all available completion proofs."""
+    if (root / "delegated").is_symlink() or (root / "completed").is_symlink():
+        raise ValueError("OCR delegation directory is unsafe")
+    path = root / "delegated" / f"{parent.request_id}.json"
+    if not path.exists():
+        return False
+    if path.is_symlink() or path.stat().st_size > 64 * 1024:
+        raise ValueError("OCR delegation is unsafe")
+    mapping = json.loads(path.read_bytes())
+    if (
+        set(mapping) != {"parent", "children"}
+        or mapping["parent"] != parent.request_id
+        or canonical_json_bytes(mapping) != path.read_bytes()
+    ):
+        raise ValueError("OCR delegation is invalid")
+    targets: list[OCRRequestTarget] = []
+    proofs = []
+    for child_id in mapping["children"]:
+        validate_identifier(child_id, label="request_id")
+        child_path = root / f"{child_id}.json"
+        if child_path.is_symlink() or child_path.stat().st_size > 64 * 1024:
+            raise ValueError("OCR child is unsafe")
+        child = OCRReprocessRequest.model_validate_json(child_path.read_bytes())
+        if (
+            child.request_id != child_id
+            or child.canonical_bytes() != child_path.read_bytes()
+            or child.source_generation_id != parent.source_generation_id
+        ):
+            raise ValueError("OCR child is invalid")
+        targets.extend(child.targets)
+        proof_path = root / "completed" / f"{child_id}.json"
+        if proof_path.exists():
+            if proof_path.is_symlink() or proof_path.stat().st_size > 4096:
+                raise ValueError("OCR child proof is unsafe")
+            proof = json.loads(proof_path.read_bytes())
+            if (
+                set(proof) != {"schema_version", "request_id", "run_id", "generation_id"}
+                or proof["schema_version"] != "cardrag.ocr-reprocess-completion.v1"
+                or proof["request_id"] != child_id
+                or canonical_json_bytes(proof) != proof_path.read_bytes()
+            ):
+                raise ValueError("OCR child completion proof is invalid")
+            validate_identifier(proof["run_id"], label="run_id")
+            validate_identifier(proof["generation_id"], label="generation_id")
+            proofs.append(proof)
+    if sorted(t.document_id for t in targets) != sorted(t.document_id for t in parent.targets):
+        raise ValueError("OCR child partition does not cover its parent exactly")
+    expected = {t.document_id: t for t in parent.targets}
+    if any(expected[t.document_id] != t for t in targets):
+        raise ValueError("OCR child target changed")
+    if len(proofs) == len(mapping["children"]):
+        completed = root / "delegated-completed"
+        if completed.is_symlink():
+            raise ValueError("OCR delegated completion directory is unsafe")
+        completed.mkdir(exist_ok=True, mode=0o700)
+        receipt = completed / f"{parent.request_id}.json"
+        body = canonical_json_bytes(
+            {
+                "schema_version": "cardrag.ocr-delegated-completion.v1",
+                "request_id": parent.request_id,
+                "children": proofs,
+            }
+        )
+        if receipt.exists():
+            if receipt.is_symlink() or receipt.read_bytes() != body:
+                raise ValueError("OCR delegated completion conflict")
+        else:
+            with receipt.open("xb") as out:
+                os.chmod(receipt, 0o600)
+                out.write(body)
+                out.flush()
+                os.fsync(out.fileno())
+    return True

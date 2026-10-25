@@ -307,7 +307,7 @@ def install_http(
 
 
 def expire_pdf_cache_binding(state: WorkerState, source_id: str) -> str:
-    expired = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    expired = (datetime.now(UTC) - timedelta(days=91)).isoformat()
     state.connection.execute(
         "UPDATE pdf_cache_source SET last_observed_at=? WHERE source_id=?",
         (expired, source_id),
@@ -3413,7 +3413,9 @@ async def test_run_marks_preexisting_running_state_interrupted_under_worker_lock
         current = next(value for run_id, value in rows.items() if run_id != "stale-run")
         assert current[0] == "failed"
         assert current[2] == captured.value.stored_error
-        assert captured.value.failure.error_class_category == "runtime"
+        assert captured.value.failure.error_class_category == "issuer_origin"
+        assert captured.value.failure.reason_code == "issuer_source_invalid"
+        assert captured.value.failure.stage == "discovery"
 
 
 @pytest.mark.asyncio
@@ -3478,7 +3480,9 @@ async def test_discovery_drop_fails_before_download_and_pointer_update(tmp_path:
         )
         with pytest.raises(WorkerUnexpectedFailureError) as captured:
             await pipeline.run()
-        assert captured.value.failure.error_class_category == "runtime"
+        assert captured.value.failure.error_class_category == "issuer_origin"
+        assert captured.value.failure.reason_code == "issuer_source_invalid"
+        assert captured.value.failure.stage == "discovery"
         assert captured.value.report_path.is_file()
     assert adapter.prepare_calls == 0
 
@@ -4112,3 +4116,64 @@ async def test_completed_download_revalidation_redacts_untrusted_log_identifiers
     assert "run_id=redacted stage=download document_id=redacted" in caplog.text
     assert "RAW_REVALIDATION" not in caplog.text
     assert_completed_download_preserved(context)
+
+
+def test_cleanup_local_runs_preserves_retained_current_previous_and_source_runs(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    with WorkerState(tmp_path / "state.sqlite3") as state:
+        publish_order = (
+            ("cur", "g-c", "2026-10-16"),
+            ("prev", "g-p", "2026-10-15"),
+            ("older", "g-o", "2026-10-14"),
+        )
+        for run_id, generation, day in publish_order:
+            state.start_run(run_id=run_id)
+            state.finish_run(run_id, "succeeded")
+            state.record_publish(
+                generation_id=generation,
+                run_id=run_id,
+                corpus_sha256="c" * 64,
+                contract_sha256="d" * 64,
+                serving_sha256="e" * 64,
+                status="ready",
+                details={},
+            )
+            state.connection.execute(
+                "UPDATE publish SET published_at=? WHERE generation_id=?",
+                (f"{day}T00:00:00+00:00", generation),
+            )
+        # Creation order is chronological: fail-oldest first, fail-newest last.
+        for failed in ("fail-oldest", "fail-mid", "fail-newest", "fail-second"):
+            state.start_run(run_id=failed)
+            state.finish_run(failed, "failed")
+        for run_id in (
+            "cur",
+            "prev",
+            "older",
+            "fail-oldest",
+            "fail-mid",
+            "fail-newest",
+            "fail-second",
+            "runner",
+        ):
+            (runs_root / run_id).mkdir(parents=True, exist_ok=True)
+        # fail-oldest is beyond keep=2 (prunable) yet is the transitive source
+        # of fail-newest's execution plan, so cleanup must protect it.
+        (runs_root / "fail-newest" / "execution-plan.json").write_text(
+            json.dumps({"skipped_stages": [], "source_run_id": "fail-oldest", "dry_run": False}),
+            encoding="utf-8",
+        )
+        pipeline = WorkerPipeline.__new__(WorkerPipeline)
+        pipeline.state = state
+        pipeline.state_dir = tmp_path
+        pipeline.retained_generations = 2
+        pipeline.retained_incomplete_runs = 2
+        pipeline._cleanup_local_runs(exclude_run_id="runner")
+        assert (runs_root / "cur").is_dir()
+        assert (runs_root / "prev").is_dir()
+        assert not (runs_root / "older").is_dir()
+        assert (runs_root / "fail-newest").is_dir()
+        assert (runs_root / "fail-second").is_dir()
+        assert (runs_root / "fail-oldest").is_dir()
+        assert not (runs_root / "fail-mid").is_dir()
+        assert (runs_root / "runner").is_dir()

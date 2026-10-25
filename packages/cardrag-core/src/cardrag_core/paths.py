@@ -76,6 +76,21 @@ def content_ocr_variant_root_path(reuse_key: str, variant_label: str) -> PurePos
     return ocr_cache_root_path(reuse_key, kind="content") / "variants" / label
 
 
+def ocr_variant_root_path(reuse_key: str, variant_token: str, *, kind: str = "native") -> PurePosixPath:
+    """Return the traversal-safe directory for one specific OCR variant under a cache key."""
+
+    label = validate_identifier(variant_token, label="variant_token")
+    return ocr_cache_root_path(reuse_key, kind=kind) / "variants" / label
+
+
+def ocr_variant_manifest_path(reuse_key: str, variant_token: str, *, kind: str = "native") -> PurePosixPath:
+    return ocr_variant_root_path(reuse_key, variant_token, kind=kind) / "manifest.json"
+
+
+def ocr_variant_ready_path(reuse_key: str, variant_token: str, *, kind: str = "native") -> PurePosixPath:
+    return ocr_variant_root_path(reuse_key, variant_token, kind=kind) / "READY.json"
+
+
 def generation_root_path(generation_id: str) -> PurePosixPath:
     return PurePosixPath("v1", "generations", validate_identifier(generation_id, label="generation_id"))
 

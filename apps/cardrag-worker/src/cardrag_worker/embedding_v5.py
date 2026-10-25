@@ -58,8 +58,132 @@ _RETRYABLE_EMBEDDING_HTTP_STATUSES = frozenset({408, 425, 429})
 LOGGER = logging.getLogger(__name__)
 
 
+_REASON_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}")
+
+# Contract failures stay deterministic and fail-closed; only the reason code,
+# allowlisted identity fields, and schema-declared measurements survive to the
+# journal, CLI payload, and startup history. Free-form provider text, request
+# identifiers, and arbitrary strings are never propagated, and every output
+# boundary re-validates the (mutable) exception payload instead of trusting it.
+DEFAULT_EMBEDDING_CONTRACT_REASON: str = "embedding_contract_unclassified"
+_DETAIL_HEX64_PATTERN = re.compile(r"[0-9a-f]{64}")
+_MAX_DETAIL_INT = (1 << 32) - 1
+
+REPEAT_COSINE_WARNING_THRESHOLD: float = 0.999
+REPEAT_COSINE_HARD_REJECT_THRESHOLD: float = 0.990
+SEMANTIC_COLLAPSE_THRESHOLD: float = 0.980
+
+# Per-reason field allowlists.  A key not declared here cannot appear in any
+# output regardless of who populated the exception's details mapping, and only
+# these keys are looked up so a huge hostile mapping is never expanded.
+QUALITY_DETAIL_SCHEMAS: dict[str, dict[str, str]] = {
+    "repeat_cosine_below_gate": {
+        "gate_threshold": "threshold",
+        "minimum_cosine": "cosine",
+        "mean_cosine": "cosine",
+        "failed_sample_count": "count",
+        "sample_count": "count",
+        "first_failed_index": "count",
+        "lowest_failed_index": "count",
+        "first_failed_input_sha256": "hex64",
+        "lowest_failed_input_sha256": "hex64",
+        "profile_endpoint_metadata_sha256": "hex64",
+    },
+    "repeat_cosine_warning": {
+        "gate_threshold": "threshold",
+        "warning_threshold": "threshold",
+        "minimum_cosine": "cosine",
+        "mean_cosine": "cosine",
+        "failed_sample_count": "count",
+        "sample_count": "count",
+        "first_failed_index": "count",
+        "lowest_failed_index": "count",
+        "first_failed_input_sha256": "hex64",
+        "lowest_failed_input_sha256": "hex64",
+        "profile_endpoint_metadata_sha256": "hex64",
+    },
+    "embedding_semantic_collapsed": {
+        "gate_threshold": "threshold",
+        "cross_sample_cosine": "cosine",
+        "sample_count": "count",
+        "first_failed_input_sha256": "hex64",
+        "lowest_failed_input_sha256": "hex64",
+        "profile_endpoint_metadata_sha256": "hex64",
+    },
+}
+
+QualityValue = int | float | str
+
+
+def validated_quality_details(
+    reason_code: str | None,
+    details: object,
+) -> dict[str, QualityValue | None]:
+    """Project ``details`` through the reason's field schema at an output edge.
+
+    Unknown keys, wrong types, NaN/infinity, out-of-range numbers, and any
+    non-hex64 string are dropped.  The function is the single trust boundary
+    for construction and for every later emission (journal, CLI payload,
+    startup history), so mutating an exception's details after construction
+    cannot smuggle content past it.
+    """
+
+    schema = QUALITY_DETAIL_SCHEMAS.get(reason_code or "", {})
+    out: dict[str, QualityValue | None] = {}
+    if not isinstance(details, Mapping):
+        return out
+    for key, kind in schema.items():
+        try:
+            present = key in details
+        except TypeError:
+            return out
+        if not present:
+            continue
+        value = details.get(key)
+        if kind in ("cosine", "threshold"):
+            low, high = (-1.0, 1.0) if kind == "cosine" else (0.0, 1.0)
+            if type(value) is float and math.isfinite(value) and low <= value <= high:
+                out[key] = value
+        elif kind == "count":
+            if type(value) is int and 0 <= value <= _MAX_DETAIL_INT:
+                out[key] = value
+        elif kind == "hex64":
+            if type(value) is str and _DETAIL_HEX64_PATTERN.fullmatch(value):
+                out[key] = value
+    return out
+
+
 class EmbeddingV5Error(RuntimeError):
-    """A fail-closed Qwen profile, routing, or response contract error."""
+    """A fail-closed Qwen profile, routing, or response contract error.
+
+    ``reason_code`` is a snake-case typed identifier for the exact contract
+    boundary that rejected the response or metadata.  ``provider_id`` is only
+    accepted when it is one of the allowlisted Qwen embedding providers.
+    ``details`` keeps only the schema-declared bounded measurements for that
+    reason code; consumers must call :func:`validated_quality_details` again
+    before emitting because the mapping stays mutable after construction.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str | None = None,
+        provider_id: str | None = None,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        code = reason_code if isinstance(reason_code, str) else None
+        self.reason_code: str = (
+            code
+            if code is not None and _REASON_CODE_PATTERN.fullmatch(code)
+            else "embedding_contract_unclassified"
+        )
+        self.provider_id: str | None = provider_id if provider_id in QWEN3_EMBEDDING_PROVIDER_IDS else None
+        self.details: dict[str, QualityValue | None] = validated_quality_details(
+            self.reason_code,
+            details,
+        )
+        super().__init__(message)
 
 
 class EmbeddingV5RequestError(EmbeddingV5Error):
@@ -76,7 +200,7 @@ class EmbeddingV5RequestError(EmbeddingV5Error):
         self.kind = kind if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", kind) else "unknown"
         self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
         self.attempts = attempts if type(attempts) is int and attempts >= 1 else 1
-        super().__init__(message)
+        super().__init__(message, reason_code=f"request_{self.kind}")
 
 
 class EmbeddingV5TransientError(EmbeddingV5RequestError):
@@ -85,6 +209,19 @@ class EmbeddingV5TransientError(EmbeddingV5RequestError):
 
 class EmbeddingV5PermanentRequestError(EmbeddingV5RequestError):
     """A permanent OpenRouter rejection or local request configuration error."""
+
+
+class StartupDeadlineExceededError(EmbeddingV5Error):
+    """Raised when the startup preflight stage exceeds its shared deadline."""
+
+    def __init__(
+        self,
+        message: str = "Startup stage deadline exceeded",
+        *,
+        elapsed_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message, reason_code="startup_check_deadline_exceeded")
+        self.elapsed_seconds = elapsed_seconds
 
 
 _TRANSIENT_TRANSPORT_ERRORS = (
@@ -219,11 +356,17 @@ def _validate_response_limit(value: int, *, maximum: int, label: str) -> int:
 async def _bounded_response_bytes(response: httpx.Response, maximum_bytes: int) -> bytes:
     raw_length = response.headers.get("content-length")
     if raw_length is not None and (not raw_length.isdigit() or int(raw_length) > maximum_bytes):
-        raise EmbeddingV5Error("OpenRouter response Content-Length is invalid")
+        raise EmbeddingV5Error(
+            "OpenRouter response Content-Length is invalid",
+            reason_code="response_content_length_invalid",
+        )
     body = bytearray()
     async for chunk in response.aiter_bytes():
         if len(chunk) > maximum_bytes - len(body):
-            raise EmbeddingV5Error("OpenRouter response exceeds its configured byte cap")
+            raise EmbeddingV5Error(
+                "OpenRouter response exceeds its configured byte cap",
+                reason_code="response_byte_cap_exceeded",
+            )
         body.extend(chunk)
     return bytes(body)
 
@@ -285,9 +428,17 @@ class QwenEmbeddingProfileV5:
     @classmethod
     def from_endpoint(cls, endpoint: OpenRouterEndpointMetadata) -> QwenEmbeddingProfileV5:
         if endpoint.model != QWEN3_EMBEDDING_MODEL:
-            raise EmbeddingV5Error("endpoint metadata is for a different model")
+            raise EmbeddingV5Error(
+                "endpoint metadata is for a different model",
+                reason_code="profile_endpoint_model_mismatch",
+                provider_id=endpoint.provider_id,
+            )
         if endpoint.is_fp8:
-            raise EmbeddingV5Error("FP8 endpoints are forbidden by the quality profile")
+            raise EmbeddingV5Error(
+                "FP8 endpoints are forbidden by the quality profile",
+                reason_code="profile_fp8_forbidden",
+                provider_id=endpoint.provider_id,
+            )
         return cls(
             profile_id=qwen3_embedding_profile_id(
                 endpoint.provider_id,
@@ -331,14 +482,22 @@ class ProviderPreflightReport:
     samples: tuple[SampleRepeatResult, ...]
     minimum_repeat_cosine: float
     mean_repeat_cosine: float
+    quality_status: str = "passed"
+    warning_count: int = 0
+    warning_details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderComparisonReport:
     providers: tuple[ProviderPreflightReport, ...]
-    cross_provider_cosines: tuple[float, ...]
-    minimum_cross_provider_cosine: float
-    mean_cross_provider_cosine: float
+    cross_provider_cosines: tuple[float, ...] = ()
+    minimum_cross_provider_cosine: float | None = None
+    mean_cross_provider_cosine: float | None = None
+    quality_status: str = "passed"
+    warning_details: dict[str, Any] | None = None
+    mode: str = "qualification"
+    evaluated_provider_count: int = 1
+    cross_evaluated: bool = False
 
 
 # These are deliberately short contract-domain samples: the preflight is a
@@ -373,15 +532,25 @@ KOREAN_PREFLIGHT_SAMPLES: tuple[str, ...] = (
 )
 
 
-def _required_mapping(value: object, *, field: str) -> Mapping[str, Any]:
+def _required_mapping(
+    value: object,
+    *,
+    field: str,
+    reason_code: str,
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an object")
+        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an object", reason_code=reason_code)
     return cast(Mapping[str, Any], value)
 
 
-def _required_sequence(value: object, *, field: str) -> Sequence[object]:
+def _required_sequence(
+    value: object,
+    *,
+    field: str,
+    reason_code: str,
+) -> Sequence[object]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an array")
+        raise EmbeddingV5Error(f"OpenRouter metadata {field} must be an array", reason_code=reason_code)
     return cast(Sequence[object], value)
 
 
@@ -404,14 +573,19 @@ def parse_openrouter_endpoint_metadata(
 ) -> tuple[OpenRouterEndpointMetadata, ...]:
     """Parse the public model endpoint response without trusting loose fields."""
 
-    root = _required_mapping(payload, field="response")
-    data = _required_mapping(root.get("data"), field="data")
+    root = _required_mapping(payload, field="response", reason_code="metadata_shape_invalid")
+    data = _required_mapping(root.get("data"), field="data", reason_code="metadata_shape_invalid")
     if data.get("id") != model:
-        raise EmbeddingV5Error("OpenRouter metadata returned a different model id")
-    endpoints = _required_sequence(data.get("endpoints"), field="data.endpoints")
+        raise EmbeddingV5Error(
+            "OpenRouter metadata returned a different model id",
+            reason_code="metadata_model_id_mismatch",
+        )
+    endpoints = _required_sequence(
+        data.get("endpoints"), field="data.endpoints", reason_code="metadata_shape_invalid"
+    )
     parsed: list[OpenRouterEndpointMetadata] = []
     for value in endpoints:
-        row = _required_mapping(value, field="data.endpoints[]")
+        row = _required_mapping(value, field="data.endpoints[]", reason_code="metadata_shape_invalid")
         provider_id = _provider_id(row)
         if provider_id is None:
             continue
@@ -419,10 +593,18 @@ def parse_openrouter_endpoint_metadata(
         endpoint_name = row.get("name")
         quantization = row.get("quantization")
         if not all(isinstance(item, str) and item for item in (provider_name, endpoint_name, quantization)):
-            raise EmbeddingV5Error("allowlisted endpoint has incomplete provider/precision metadata")
+            raise EmbeddingV5Error(
+                "allowlisted endpoint has incomplete provider/precision metadata",
+                reason_code="metadata_endpoint_incomplete",
+                provider_id=provider_id,
+            )
         endpoint_model = row.get("model_id", model)
         if endpoint_model != model:
-            raise EmbeddingV5Error("endpoint row is bound to a different model")
+            raise EmbeddingV5Error(
+                "endpoint row is bound to a different model",
+                reason_code="metadata_endpoint_model_mismatch",
+                provider_id=provider_id,
+            )
         # OpenRouter currently emits ``max_prompt_tokens: null`` alongside a
         # valid integer ``context_length`` for both allowlisted Qwen routes.
         # A present null must not shadow the validated context fallback.
@@ -430,13 +612,22 @@ def parse_openrouter_endpoint_metadata(
         if maximum_tokens is None:
             maximum_tokens = row.get("context_length")
         if isinstance(maximum_tokens, bool) or not isinstance(maximum_tokens, int) or maximum_tokens <= 0:
-            raise EmbeddingV5Error("endpoint maximum input tokens are missing or invalid")
+            raise EmbeddingV5Error(
+                "endpoint maximum input tokens are missing or invalid",
+                reason_code="metadata_maximum_tokens_invalid",
+                provider_id=provider_id,
+            )
         supported_raw = _required_sequence(
             row.get("supported_parameters"),
             field="endpoint.supported_parameters",
+            reason_code="metadata_shape_invalid",
         )
         if not all(isinstance(item, str) and item for item in supported_raw):
-            raise EmbeddingV5Error("endpoint supported_parameters contains an invalid value")
+            raise EmbeddingV5Error(
+                "endpoint supported_parameters contains an invalid value",
+                reason_code="metadata_supported_parameters_invalid",
+                provider_id=provider_id,
+            )
         supported = tuple(sorted(set(cast(Sequence[str], supported_raw))))
         parsed.append(
             OpenRouterEndpointMetadata(
@@ -451,7 +642,10 @@ def parse_openrouter_endpoint_metadata(
             )
         )
     if not parsed:
-        raise EmbeddingV5Error("metadata contains no allowlisted Qwen embedding endpoint")
+        raise EmbeddingV5Error(
+            "metadata contains no allowlisted Qwen embedding endpoint",
+            reason_code="metadata_no_allowlisted_endpoint",
+        )
     priority = {provider: index for index, provider in enumerate(QWEN3_EMBEDDING_PROVIDER_IDS)}
     return tuple(sorted(parsed, key=lambda row: (priority[row.provider_id], row.endpoint_name)))
 
@@ -465,11 +659,23 @@ def select_quality_endpoint(
 
     matches = tuple(row for row in endpoints if row.provider_id == provider_id)
     if not matches:
-        raise EmbeddingV5Error(f"no endpoint metadata found for {provider_id}")
+        raise EmbeddingV5Error(
+            f"no endpoint metadata found for {provider_id}",
+            reason_code="provider_endpoint_missing",
+            provider_id=provider_id,
+        )
     if any(row.is_fp8 for row in matches):
-        raise EmbeddingV5Error(f"{provider_id} advertises an FP8 endpoint")
+        raise EmbeddingV5Error(
+            f"{provider_id} advertises an FP8 endpoint",
+            reason_code="provider_endpoint_fp8",
+            provider_id=provider_id,
+        )
     if len(matches) != 1:
-        raise EmbeddingV5Error(f"{provider_id} endpoint route is ambiguous")
+        raise EmbeddingV5Error(
+            f"{provider_id} endpoint route is ambiguous",
+            reason_code="provider_endpoint_ambiguous",
+            provider_id=provider_id,
+        )
     endpoint = matches[0]
     return endpoint
 
@@ -504,26 +710,37 @@ def embedding_cache_key(
 
 def _normalize_vector(values: object, *, index: int) -> list[float]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
-        raise EmbeddingV5Error(f"embedding {index} is not an array")
+        raise EmbeddingV5Error(
+            f"embedding {index} is not an array", reason_code="response_embedding_not_array"
+        )
     if len(values) != QWEN3_EMBEDDING_DIMENSION:
         raise EmbeddingV5Error(
-            f"embedding {index} dimension {len(values)} is not {QWEN3_EMBEDDING_DIMENSION}"
+            f"embedding {index} dimension {len(values)} is not {QWEN3_EMBEDDING_DIMENSION}",
+            reason_code="response_dimension_mismatch",
         )
     if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
-        raise EmbeddingV5Error(f"embedding {index} contains a non-numeric value")
+        raise EmbeddingV5Error(
+            f"embedding {index} contains a non-numeric value", reason_code="response_non_numeric_value"
+        )
     try:
         vector = [float(value) for value in values]
     except (TypeError, ValueError):
-        raise EmbeddingV5Error(f"embedding {index} contains a non-numeric value") from None
+        raise EmbeddingV5Error(
+            f"embedding {index} contains a non-numeric value", reason_code="response_non_numeric_value"
+        ) from None
     if not all(math.isfinite(value) for value in vector):
-        raise EmbeddingV5Error(f"embedding {index} contains a non-finite value")
+        raise EmbeddingV5Error(
+            f"embedding {index} contains a non-finite value", reason_code="response_non_finite_value"
+        )
     norm = math.sqrt(sum(value * value for value in vector))
     if not math.isfinite(norm) or norm <= 1e-12:
-        raise EmbeddingV5Error(f"embedding {index} has an invalid norm")
+        raise EmbeddingV5Error(f"embedding {index} has an invalid norm", reason_code="response_norm_invalid")
     normalized = [value / norm for value in vector]
     normalized_norm = sum(value * value for value in normalized)
     if not math.isclose(normalized_norm, 1.0, rel_tol=_NORM_TOLERANCE, abs_tol=_NORM_TOLERANCE):
-        raise EmbeddingV5Error(f"embedding {index} failed L2 normalization")
+        raise EmbeddingV5Error(
+            f"embedding {index} failed L2 normalization", reason_code="response_normalization_failed"
+        )
     return normalized
 
 
@@ -562,6 +779,13 @@ class OpenRouterQwenEmbeddingProviderV5:
         retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         transport: httpx.AsyncBaseTransport | None = None,
+        quality_status: str = "passed",
+        quality_details: Mapping[str, Any] | None = None,
+        preflight_mode: str = "daily_smoke",
+        evaluated_provider_count: int = 1,
+        cross_evaluated: bool = False,
+        minimum_cross_provider_cosine: float | None = None,
+        mean_cross_provider_cosine: float | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("OpenRouter API key is empty")
@@ -594,6 +818,39 @@ class OpenRouterQwenEmbeddingProviderV5:
         self.retry_cap_seconds: float = float(retry_cap_seconds)
         self.sleep = sleep
         self.transport = transport
+        self.quality_status: str = quality_status if quality_status in {"passed", "warning"} else "passed"
+        self.quality_details: dict[str, Any] | None = (
+            dict(validated_quality_details("repeat_cosine_warning", quality_details))
+            if self.quality_status == "warning" and quality_details
+            else None
+        )
+        self.preflight_mode: str = (
+            preflight_mode if preflight_mode in {"daily_smoke", "qualification"} else "daily_smoke"
+        )
+        self.evaluated_provider_count: int = (
+            evaluated_provider_count
+            if isinstance(evaluated_provider_count, int) and evaluated_provider_count >= 1
+            else 1
+        )
+        self.cross_evaluated: bool = bool(cross_evaluated)
+        if (
+            self.cross_evaluated
+            and type(minimum_cross_provider_cosine) is float
+            and math.isfinite(minimum_cross_provider_cosine)
+            and -1.0 <= minimum_cross_provider_cosine <= 1.0
+        ):
+            self.minimum_cross_provider_cosine: float | None = minimum_cross_provider_cosine
+        else:
+            self.minimum_cross_provider_cosine = None
+        if (
+            self.cross_evaluated
+            and type(mean_cross_provider_cosine) is float
+            and math.isfinite(mean_cross_provider_cosine)
+            and -1.0 <= mean_cross_provider_cosine <= 1.0
+        ):
+            self.mean_cross_provider_cosine: float | None = mean_cross_provider_cosine
+        else:
+            self.mean_cross_provider_cosine = None
         self.logical_batch_count = 0
         self.wire_attempt_count = 0
 
@@ -613,10 +870,14 @@ class OpenRouterQwenEmbeddingProviderV5:
         for index, value in enumerate(values):
             count = self.token_counter(value)
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                raise EmbeddingV5Error("token counter returned an invalid value")
+                raise EmbeddingV5Error(
+                    "token counter returned an invalid value", reason_code="token_counter_invalid"
+                )
             if count > self.profile.maximum_tokens:
                 raise EmbeddingV5Error(
-                    f"embedding input {index} exceeds sealed maximum_tokens; truncation is forbidden"
+                    f"embedding input {index} exceeds sealed maximum_tokens; truncation is forbidden",
+                    reason_code="token_limit_exceeded",
+                    provider_id=self.profile.provider_id,
                 )
 
     @staticmethod
@@ -744,30 +1005,51 @@ class OpenRouterQwenEmbeddingProviderV5:
         try:
             payload = json.loads(response_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            raise EmbeddingV5Error("OpenRouter embedding response is not JSON") from None
-        root = _required_mapping(payload, field="embedding response")
+            raise EmbeddingV5Error(
+                "OpenRouter embedding response is not JSON", reason_code="response_not_json"
+            ) from None
+        root = _required_mapping(payload, field="embedding response", reason_code="response_shape_invalid")
         # OpenRouter accepts the lower-case registry slug in requests but its
         # live Qwen response canonicalizes the same slug as
         # ``Qwen/Qwen3-Embedding-8B``.  Bind every path component and spelling
         # while allowing only this case normalization.
         actual_model = root.get("model")
         if not isinstance(actual_model, str) or actual_model.casefold() != self.profile.model.casefold():
-            raise EmbeddingV5Error("OpenRouter response model does not match the sealed profile")
+            raise EmbeddingV5Error(
+                "OpenRouter response model does not match the sealed profile",
+                reason_code="response_model_mismatch",
+                provider_id=self.profile.provider_id,
+            )
         actual_provider = _response_provider(root, response_provider)
         if actual_provider is None or not _provider_matches(actual_provider, self.profile.provider_id):
-            raise EmbeddingV5Error("OpenRouter response provider does not match the pinned route")
-        data = _required_sequence(root.get("data"), field="embedding response.data")
+            raise EmbeddingV5Error(
+                "OpenRouter response provider does not match the pinned route",
+                reason_code="response_provider_mismatch",
+                provider_id=self.profile.provider_id,
+            )
+        data = _required_sequence(
+            root.get("data"), field="embedding response.data", reason_code="response_shape_invalid"
+        )
         if len(data) != len(values):
-            raise EmbeddingV5Error("OpenRouter embedding response count mismatch")
+            raise EmbeddingV5Error(
+                "OpenRouter embedding response count mismatch", reason_code="response_count_mismatch"
+            )
         indexed: dict[int, list[float]] = {}
         for value in data:
-            row = _required_mapping(value, field="embedding response.data[]")
+            row = _required_mapping(
+                value, field="embedding response.data[]", reason_code="response_shape_invalid"
+            )
             index = row.get("index")
             if isinstance(index, bool) or not isinstance(index, int) or index in indexed:
-                raise EmbeddingV5Error("OpenRouter embedding response index is invalid")
+                raise EmbeddingV5Error(
+                    "OpenRouter embedding response index is invalid", reason_code="response_index_invalid"
+                )
             indexed[index] = _normalize_vector(row.get("embedding"), index=index)
         if set(indexed) != set(range(len(values))):
-            raise EmbeddingV5Error("OpenRouter embedding response indices are not contiguous")
+            raise EmbeddingV5Error(
+                "OpenRouter embedding response indices are not contiguous",
+                reason_code="response_indices_not_contiguous",
+            )
         return [indexed[index] for index in range(len(values))]
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
@@ -896,17 +1178,30 @@ async def fetch_openrouter_qwen_endpoints(
     try:
         payload = json.loads(response_body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        raise EmbeddingV5Error("OpenRouter endpoint metadata response is not JSON") from None
+        raise EmbeddingV5Error(
+            "OpenRouter endpoint metadata response is not JSON", reason_code="metadata_not_json"
+        ) from None
     return parse_openrouter_endpoint_metadata(payload)
 
 
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     if len(left) != len(right) or not left:
-        raise EmbeddingV5Error("cannot compare incompatible embedding vectors")
+        raise EmbeddingV5Error(
+            "cannot compare incompatible embedding vectors", reason_code="cosine_vectors_incompatible"
+        )
     score = sum(a * b for a, b in zip(left, right, strict=True))
     if not math.isfinite(score):
-        raise EmbeddingV5Error("embedding cosine is non-finite")
+        raise EmbeddingV5Error("embedding cosine is non-finite", reason_code="cosine_non_finite")
     return max(-1.0, min(1.0, score))
+
+
+def _repeat_gate_failures(
+    cosines: Sequence[float],
+    threshold: float,
+) -> list[tuple[int, float]]:
+    """Strict ``<`` boundary: a cosine exactly equal to the threshold passes."""
+
+    return [(index, cosine) for index, cosine in enumerate(cosines) if cosine < threshold]
 
 
 async def preflight_openrouter_qwen_providers(
@@ -917,19 +1212,28 @@ async def preflight_openrouter_qwen_providers(
     base_url: str = "https://openrouter.ai/api/v1",
     timeout_seconds: float = 120,
     transport: httpx.AsyncBaseTransport | None = None,
-    minimum_repeat_cosine: float = 0.999,
+    minimum_repeat_cosine: float = REPEAT_COSINE_WARNING_THRESHOLD,
+    hard_reject_repeat_cosine: float = REPEAT_COSINE_HARD_REJECT_THRESHOLD,
+    semantic_collapse_threshold: float = SEMANTIC_COLLAPSE_THRESHOLD,
+    provider_ids: Sequence[Qwen3EmbeddingProviderId] = QWEN3_EMBEDDING_PROVIDER_IDS,
+    mode: Literal["qualification", "daily_smoke"] = "qualification",
+    check_semantic_discriminability: bool = True,
     embedding_maximum_response_bytes: int = DEFAULT_EMBEDDING_RESPONSE_BYTES,
     metadata_maximum_response_bytes: int = DEFAULT_METADATA_RESPONSE_BYTES,
     request_max_attempts: int = DEFAULT_EMBEDDING_REQUEST_MAX_ATTEMPTS,
     retry_base_seconds: float = DEFAULT_EMBEDDING_RETRY_BASE_SECONDS,
     retry_cap_seconds: float = DEFAULT_EMBEDDING_RETRY_CAP_SECONDS,
 ) -> ProviderComparisonReport:
-    """Evaluate DeepInfra then Nebius with two identical 20+ sample calls each."""
+    """Evaluate target Qwen providers with two identical 20+ sample calls each."""
 
     if len(samples) < 20 or len(set(samples)) != len(samples) or any(not item.strip() for item in samples):
         raise ValueError("preflight requires at least 20 unique non-empty Korean samples")
     if not -1 <= minimum_repeat_cosine <= 1 or not math.isfinite(minimum_repeat_cosine):
         raise ValueError("minimum_repeat_cosine must be finite and within [-1,1]")
+    if not -1 <= hard_reject_repeat_cosine <= 1 or not math.isfinite(hard_reject_repeat_cosine):
+        raise ValueError("hard_reject_repeat_cosine must be finite and within [-1,1]")
+    if not -1 <= semantic_collapse_threshold <= 1 or not math.isfinite(semantic_collapse_threshold):
+        raise ValueError("semantic_collapse_threshold must be finite and within [-1,1]")
     endpoints = await fetch_openrouter_qwen_endpoints(
         api_key=api_key,
         base_url=base_url,
@@ -942,7 +1246,7 @@ async def preflight_openrouter_qwen_providers(
     )
     reports: list[ProviderPreflightReport] = []
     first_runs: list[list[list[float]]] = []
-    for provider_id in QWEN3_EMBEDDING_PROVIDER_IDS:
+    for provider_id in provider_ids:
         endpoint = select_quality_endpoint(endpoints, provider_id=provider_id)
         profile = QwenEmbeddingProfileV5.from_endpoint(endpoint)
         provider = OpenRouterQwenEmbeddingProviderV5(
@@ -959,9 +1263,110 @@ async def preflight_openrouter_qwen_providers(
         )
         first = await provider.embed_documents(samples)
         repeated = await provider.embed_documents(samples)
+
+        # Semantic discriminability check: guard against constant dummy vector collapse
+        # Sample 0 (benefit) and Sample 1 (exclusion) must not produce identical vectors.
+        if check_semantic_discriminability and len(first) >= 2:
+            cross_anchor = _cosine(first[0], first[1])
+            if cross_anchor >= semantic_collapse_threshold:
+                raise EmbeddingV5Error(
+                    f"{provider_id} embedding vectors lack semantic discriminability (cross_sample={cross_anchor:.4f})",
+                    reason_code="embedding_semantic_collapsed",
+                    provider_id=provider_id,
+                    details={
+                        "gate_threshold": float(semantic_collapse_threshold),
+                        "cross_sample_cosine": float(cross_anchor),
+                        "sample_count": len(samples),
+                        "first_failed_input_sha256": hashlib.sha256(samples[0].encode("utf-8")).hexdigest(),
+                        "lowest_failed_input_sha256": hashlib.sha256(samples[1].encode("utf-8")).hexdigest(),
+                        "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                    },
+                )
+
         cosines = tuple(_cosine(left, right) for left, right in zip(first, repeated, strict=True))
-        if min(cosines) < minimum_repeat_cosine:
-            raise EmbeddingV5Error(f"{provider_id} repeated-input cosine is below the gate")
+        hard_failed = _repeat_gate_failures(cosines, hard_reject_repeat_cosine)
+        if hard_failed:
+            lowest_index, lowest_cosine = min(hard_failed, key=lambda item: item[1])
+            first_index = hard_failed[0][0]
+            raise EmbeddingV5Error(
+                f"{provider_id} repeated-input cosine is below the hard reject gate",
+                reason_code="repeat_cosine_below_gate",
+                provider_id=provider_id,
+                details={
+                    "gate_threshold": float(hard_reject_repeat_cosine),
+                    "minimum_cosine": float(min(cosines)),
+                    "mean_cosine": float(sum(cosines) / len(cosines)),
+                    "failed_sample_count": len(hard_failed),
+                    "sample_count": len(cosines),
+                    "first_failed_index": int(first_index),
+                    "lowest_failed_index": int(lowest_index),
+                    "first_failed_input_sha256": hashlib.sha256(
+                        samples[first_index].encode("utf-8")
+                    ).hexdigest(),
+                    "lowest_failed_input_sha256": hashlib.sha256(
+                        samples[lowest_index].encode("utf-8")
+                    ).hexdigest(),
+                    "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                },
+            )
+
+        warning_failed = _repeat_gate_failures(cosines, minimum_repeat_cosine)
+        if warning_failed:
+            lowest_index, lowest_cosine = min(warning_failed, key=lambda item: item[1])
+            first_index = warning_failed[0][0]
+            if mode == "qualification":
+                raise EmbeddingV5Error(
+                    f"{provider_id} repeated-input cosine is below the gate",
+                    reason_code="repeat_cosine_below_gate",
+                    provider_id=provider_id,
+                    details={
+                        "gate_threshold": float(minimum_repeat_cosine),
+                        "minimum_cosine": float(min(cosines)),
+                        "mean_cosine": float(sum(cosines) / len(cosines)),
+                        "failed_sample_count": len(warning_failed),
+                        "sample_count": len(cosines),
+                        "first_failed_index": int(first_index),
+                        "lowest_failed_index": int(lowest_index),
+                        "first_failed_input_sha256": hashlib.sha256(
+                            samples[first_index].encode("utf-8")
+                        ).hexdigest(),
+                        "lowest_failed_input_sha256": hashlib.sha256(
+                            samples[lowest_index].encode("utf-8")
+                        ).hexdigest(),
+                        "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+                    },
+                )
+            quality_status = "warning"
+            warning_count = len(warning_failed)
+            raw_warning_details = {
+                "gate_threshold": float(hard_reject_repeat_cosine),
+                "warning_threshold": float(minimum_repeat_cosine),
+                "minimum_cosine": float(min(cosines)),
+                "mean_cosine": float(sum(cosines) / len(cosines)),
+                "failed_sample_count": len(warning_failed),
+                "sample_count": len(cosines),
+                "first_failed_index": int(first_index),
+                "lowest_failed_index": int(lowest_index),
+                "first_failed_input_sha256": hashlib.sha256(samples[first_index].encode("utf-8")).hexdigest(),
+                "lowest_failed_input_sha256": hashlib.sha256(
+                    samples[lowest_index].encode("utf-8")
+                ).hexdigest(),
+                "profile_endpoint_metadata_sha256": profile.endpoint_metadata_sha256,
+            }
+            warning_details = validated_quality_details("repeat_cosine_warning", raw_warning_details)
+            LOGGER.warning(
+                "provider %s repeated-input cosine in warning band (min=%.6f, gate=%.6f, failed=%d/%d)",
+                provider_id,
+                min(cosines),
+                minimum_repeat_cosine,
+                len(warning_failed),
+                len(cosines),
+            )
+        else:
+            quality_status = "passed"
+            warning_count = 0
+            warning_details = None
+
         sample_rows = tuple(
             SampleRepeatResult(
                 input_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -976,16 +1381,34 @@ async def preflight_openrouter_qwen_providers(
                 samples=sample_rows,
                 minimum_repeat_cosine=min(cosines),
                 mean_repeat_cosine=sum(cosines) / len(cosines),
+                quality_status=quality_status,
+                warning_count=warning_count,
+                warning_details=warning_details,
             )
         )
         first_runs.append(first)
-    left_provider, right_provider = first_runs
-    cross = tuple(_cosine(left, right) for left, right in zip(left_provider, right_provider, strict=True))
+    cross_evaluated = len(first_runs) >= 2
+    if cross_evaluated:
+        left_provider, right_provider = first_runs[:2]
+        cross = tuple(_cosine(left, right) for left, right in zip(left_provider, right_provider, strict=True))
+        min_cross: float | None = min(cross)
+        mean_cross: float | None = sum(cross) / len(cross)
+    else:
+        cross = ()
+        min_cross = None
+        mean_cross = None
+    overall_status = "warning" if any(r.quality_status == "warning" for r in reports) else "passed"
+    comp_warning_details = next((r.warning_details for r in reports if r.warning_details is not None), None)
     return ProviderComparisonReport(
         providers=tuple(reports),
         cross_provider_cosines=cross,
-        minimum_cross_provider_cosine=min(cross),
-        mean_cross_provider_cosine=sum(cross) / len(cross),
+        minimum_cross_provider_cosine=min_cross,
+        mean_cross_provider_cosine=mean_cross,
+        quality_status=overall_status,
+        warning_details=comp_warning_details,
+        mode=mode,
+        evaluated_provider_count=len(reports),
+        cross_evaluated=cross_evaluated,
     )
 
 
@@ -1004,7 +1427,11 @@ __all__ = [
     "ProviderComparisonReport",
     "ProviderPreflightReport",
     "QwenEmbeddingProfileV5",
+    "REPEAT_COSINE_HARD_REJECT_THRESHOLD",
+    "REPEAT_COSINE_WARNING_THRESHOLD",
     "SampleRepeatResult",
+    "SEMANTIC_COLLAPSE_THRESHOLD",
+    "StartupDeadlineExceededError",
     "TokenCounter",
     "embedding_cache_key",
     "fetch_openrouter_qwen_endpoints",

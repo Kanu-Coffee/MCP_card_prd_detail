@@ -354,24 +354,33 @@ class ContentOCRVariantStore:
                         n_man = OCRArtifactManifest.model_validate_json(native_man_path.read_bytes())
                         provenance = n_man.contract
 
-                cand_variant_id = doc.get("ocr_variant_id")
-                if isinstance(cand_variant_id, str) and re.fullmatch(r"[0-9a-f]{64}", cand_variant_id):
-                    manifest = ContentOCRArtifactManifest(
-                        schema_version="cardrag.ocr-content-artifact.v1",
-                        reuse_key=key,
-                        cache_epoch=cache_epoch,
-                        source=source,
-                        output=ArtifactRef.for_cas(
-                            sha256=ocr_sha,
-                            size_bytes=ocr_size,
-                            media_type="text/markdown; charset=utf-8",
-                        ),
-                        ocr_chars=verified.char_count,
-                        page_output_sha256=verified.page_sha256,
-                        created_at=created_at_val,
-                        provenance=provenance,
-                        variant_id=cand_variant_id,
-                    )
+                content_man_path = cand_run / "documents" / cand_doc_id / "ocr" / "content-manifest.json"
+                restored_manifest: ContentOCRArtifactManifest | None = None
+                if content_man_path.is_file() and not content_man_path.is_symlink():
+                    with suppress(Exception):
+                        raw_c = content_man_path.read_bytes()
+                        if 0 < len(raw_c) <= CONTROL_OBJECT_MAX_BYTES:
+                            c_cand = ContentOCRArtifactManifest.model_validate_json(raw_c)
+                            if (
+                                c_cand.canonical_bytes() == raw_c
+                                and c_cand.source.pdf_sha256 == source.pdf_sha256
+                                and c_cand.source.pdf_size_bytes == source.pdf_size_bytes
+                                and c_cand.source.page_count == source.page_count
+                                and c_cand.cache_epoch == cache_epoch
+                                and c_cand.reuse_key == key
+                                and c_cand.output.sha256 == ocr_sha
+                                and c_cand.output.size_bytes == ocr_size
+                                and c_cand.ocr_chars == verified.char_count
+                                and c_cand.page_output_sha256 == verified.page_sha256
+                                and (
+                                    doc_cache_kind != "content"
+                                    or c_cand.variant_id == doc.get("ocr_variant_id")
+                                )
+                            ):
+                                restored_manifest = c_cand
+
+                if restored_manifest is not None:
+                    manifest = restored_manifest
                 else:
                     manifest = ContentOCRArtifactManifest.create(
                         source=source,

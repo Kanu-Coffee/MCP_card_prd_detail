@@ -431,6 +431,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS pdf_cache_source_revision_active_idx
   ON pdf_cache_source_revision(source_id) WHERE superseded_at IS NULL;
 CREATE INDEX IF NOT EXISTS pdf_cache_source_revision_history_idx
   ON pdf_cache_source_revision(source_id, revision_id);
+
+CREATE TABLE IF NOT EXISTS pdf_cache_remediated_revision (
+  source_id TEXT NOT NULL,
+  pdf_sha256 TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  remediated_at TEXT NOT NULL,
+  disposition TEXT NOT NULL CHECK(disposition IN ('updated_to_latest','past_excluded','current_error')),
+  PRIMARY KEY (source_id, pdf_sha256, reason_code)
+) STRICT, WITHOUT ROWID;
 """
 
 
@@ -1250,6 +1259,61 @@ class WorkerState:
         row = self._last_successful_collection(issuer)
         return None if row is None else str(row["observed_at"])
 
+    def issuer_consecutive_failures(
+        self,
+        issuer: str,
+        *,
+        current_run_id: str | None = None,
+        limit: int = 30,
+    ) -> int:
+        """Count consecutive collection failures for an issuer, newest first.
+
+        If ``current_run_id`` is supplied, its recorded collection outcome in
+        ``issuer_collection`` (if already decided, even while the run itself is
+        still running) is included as the head of the sequence, followed by
+        completed prior runs ('succeeded','failed','no_change').
+        Incomplete or unrecorded current run states are treated as unconfirmed
+        and do not contribute a failure.
+        Concurrent or other incomplete runs are never included.
+        """
+
+        if limit < 1 or limit > 100:
+            raise ValueError("issuer failure history limit must be between 1 and 100")
+
+        current_succeeded: int | None = None
+        if current_run_id is not None:
+            cur_row = self.connection.execute(
+                """SELECT succeeded FROM issuer_collection
+                   WHERE run_id=? AND issuer=?""",
+                (current_run_id, issuer),
+            ).fetchone()
+            if cur_row is not None:
+                current_succeeded = int(cur_row["succeeded"])
+
+        if current_succeeded == 1:
+            return 0
+
+        consecutive = 1 if current_succeeded == 0 else 0
+        remaining_limit = limit - consecutive
+        if remaining_limit <= 0:
+            return consecutive
+
+        query = """SELECT c.succeeded FROM issuer_collection c JOIN run r ON r.run_id=c.run_id
+                   WHERE c.issuer=? AND r.status IN ('succeeded','failed','no_change')"""
+        params: list[Any] = [issuer]
+        if current_run_id is not None:
+            query += " AND r.run_id != ?"
+            params.append(current_run_id)
+        query += " ORDER BY COALESCE(r.finished_at,r.started_at) DESC LIMIT ?"
+        params.append(remaining_limit)
+
+        rows = self.connection.execute(query, tuple(params)).fetchall()
+        for row in rows:
+            if int(row["succeeded"]) == 1:
+                break
+            consecutive += 1
+        return consecutive
+
     def retained_publication_run_ids(self, *, limit: int = 2) -> tuple[str, ...]:
         if limit < 1:
             raise ValueError("publication retention limit must be positive")
@@ -1587,6 +1651,90 @@ class WorkerState:
             (issuer, product_code, document_type),
         ).fetchall()
         return tuple(PDFSourceRevisionRow(**dict(row)) for row in rows)
+
+    def pdf_cache_source_issuer(self, source_id: str) -> str | None:
+        if not _SOURCE_ID.fullmatch(source_id):
+            return None
+        row = self.connection.execute(
+            "SELECT issuer FROM pdf_cache_source WHERE source_id=? LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        return None if row is None else str(row["issuer"])
+
+    def record_remediated_revision(
+        self,
+        *,
+        source_id: str,
+        pdf_sha256: str,
+        reason_code: str,
+        disposition: str,
+        remediated_at: str | None = None,
+    ) -> None:
+        if not _SOURCE_ID.fullmatch(source_id):
+            raise ValueError("source_id is invalid")
+        if not _SHA256.fullmatch(pdf_sha256):
+            raise ValueError("pdf_sha256 is invalid")
+        if disposition not in {"updated_to_latest", "past_excluded", "current_error"}:
+            raise ValueError("disposition is invalid")
+        remediated_at = remediated_at or datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """INSERT OR REPLACE INTO pdf_cache_remediated_revision
+               (source_id, pdf_sha256, reason_code, remediated_at, disposition)
+               VALUES (?, ?, ?, ?, ?)""",
+            (source_id, pdf_sha256, reason_code, remediated_at, disposition),
+        )
+
+    def is_revision_remediated(
+        self,
+        source_id: str,
+        pdf_sha256: str,
+        reason_code: str | None = None,
+    ) -> bool:
+        if not _SOURCE_ID.fullmatch(source_id) or not _SHA256.fullmatch(pdf_sha256):
+            return False
+        if reason_code is not None:
+            rows = self.connection.execute(
+                """SELECT disposition FROM pdf_cache_remediated_revision
+                   WHERE source_id=? AND pdf_sha256=? AND reason_code=?""",
+                (source_id, pdf_sha256, reason_code),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """SELECT disposition FROM pdf_cache_remediated_revision
+                   WHERE source_id=? AND pdf_sha256=?""",
+                (source_id, pdf_sha256),
+            ).fetchall()
+        if not rows:
+            return False
+        if any(str(r[0]) == "current_error" for r in rows):
+            return False
+        return all(str(r[0]) in ("updated_to_latest", "past_excluded") for r in rows)
+
+    def clear_remediated_revision(
+        self,
+        source_id: str,
+        pdf_sha256: str,
+        reason_code: str | None = None,
+    ) -> int:
+        if reason_code is not None:
+            cur = self.connection.execute(
+                "DELETE FROM pdf_cache_remediated_revision WHERE source_id=? AND pdf_sha256=? AND reason_code=?",
+                (source_id, pdf_sha256, reason_code),
+            )
+        else:
+            cur = self.connection.execute(
+                "DELETE FROM pdf_cache_remediated_revision WHERE source_id=? AND pdf_sha256=?",
+                (source_id, pdf_sha256),
+            )
+        return int(cur.rowcount)
+
+    def remediated_revisions(self) -> tuple[dict[str, Any], ...]:
+        rows = self.connection.execute(
+            """SELECT source_id, pdf_sha256, reason_code, remediated_at, disposition
+               FROM pdf_cache_remediated_revision
+               ORDER BY source_id, pdf_sha256, reason_code"""
+        ).fetchall()
+        return tuple(dict(r) for r in rows)
 
     def mark_pdf_cache_verified(
         self,

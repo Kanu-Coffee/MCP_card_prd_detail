@@ -2011,6 +2011,14 @@ class OCRResolver:
                     tmp.write_bytes(body)
                     os.chmod(tmp, 0o600)
                     tmp.replace(target_ocr)
+                prior_c_man = prior_output_dir / "content-manifest.json"
+                target_c_man = output_dir / "content-manifest.json"
+                if prior_c_man.is_file() and not prior_c_man.is_symlink() and not target_c_man.is_file():
+                    c_bytes = prior_c_man.read_bytes()
+                    tmp_m = output_dir / f".content-manifest.{secrets.token_hex(8)}.tmp"
+                    tmp_m.write_bytes(c_bytes)
+                    os.chmod(tmp_m, 0o600)
+                    tmp_m.replace(target_c_man)
 
         cache_kind: Literal["native", "adopted", "content"] = (
             cast(Literal["native", "adopted", "content"], prior.cache_kind)
@@ -2025,8 +2033,10 @@ class OCRResolver:
         else:
             if self.cache_epoch != 0:
                 return None
-            reuse_key = prior.reuse_key or content_addressed_ocr_reuse_key(
-                source, cache_epoch=self.cache_epoch
+            reuse_key = prior.reuse_key or (
+                native_ocr_reuse_key(self.contract, source)
+                if cache_kind == "native"
+                else content_addressed_ocr_reuse_key(source, cache_epoch=self.cache_epoch)
             )
 
         provider = prior.provider
@@ -2092,9 +2102,13 @@ class OCRResolver:
                                         model = str(prov["model"])
 
         variant_id = (
-            prior.variant_id
-            if (prior.variant_id and re.fullmatch(r"[0-9a-f]{64}", prior.variant_id))
-            else prior.ocr_sha256
+            (
+                prior.variant_id
+                if (prior.variant_id and re.fullmatch(r"[0-9a-f]{64}", prior.variant_id))
+                else prior.ocr_sha256
+            )
+            if cache_kind == "content"
+            else None
         )
         return OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
@@ -2234,6 +2248,13 @@ class OCRResolver:
                     cache_publication_deferred=True,
                     cache_publication_reason_code=error.reason_code,
                 )
+            with suppress(Exception):
+                target_man = output_dir / "content-manifest.json"
+                if not target_man.is_file():
+                    tmp_m = output_dir / f".content-manifest.{secrets.token_hex(8)}.tmp"
+                    tmp_m.write_bytes(content_manifest.canonical_bytes())
+                    os.chmod(tmp_m, 0o600)
+                    tmp_m.replace(target_man)
             return replace(
                 result,
                 reuse_key=content_manifest.reuse_key,
@@ -2521,6 +2542,13 @@ class OCRResolver:
                     tmp.write_bytes(content_hit.body)
                     os.chmod(tmp, 0o600)
                     tmp.replace(target_ocr)
+                with suppress(Exception):
+                    target_man = output_dir / "content-manifest.json"
+                    if not target_man.is_file():
+                        tmp_m = output_dir / f".content-manifest.{secrets.token_hex(8)}.tmp"
+                        tmp_m.write_bytes(content_manifest.canonical_bytes())
+                        os.chmod(tmp_m, 0o600)
+                        tmp_m.replace(target_man)
                 return OCRResult(
                     pages=tuple(_page_body(page) for page in verified.pages),
                     ocr_bytes=content_hit.body,
@@ -2717,11 +2745,20 @@ class OCRResolver:
                 "failing closed to prevent mass OCR re-processing."
             )
         if isinstance(self.provider, DocumentOCRProvider):
-            raw_pages = await self.provider.recognize_document(
-                pdf_path,
-                expected_page_count=page_count,
-                output_dir=output_dir,
-            )
+            try:
+                raw_pages = await self.provider.recognize_document(
+                    pdf_path,
+                    expected_page_count=page_count,
+                    output_dir=output_dir,
+                )
+            except ProviderSystemicError as exc:
+                exc.with_request_context(
+                    provider=self.provider.provider,
+                    phase="primary",
+                    page_start=1,
+                    page_end=page_count,
+                )
+                raise
             normalized_values: list[str] = []
             for value in raw_pages:
                 normalized = value.strip()
@@ -2857,13 +2894,23 @@ class OCRResolver:
                         cache_reused = True
                         continue
             provider_called = True
-            raw = await self.provider.recognize(
-                selected,
-                page_numbers=call.input_page_numbers,
-                target_page_numbers=call.target_page_numbers,
-                total_pages=page_count,
-                prompt=self.prompt,
-            )
+            try:
+                raw = await self.provider.recognize(
+                    selected,
+                    page_numbers=call.input_page_numbers,
+                    target_page_numbers=call.target_page_numbers,
+                    total_pages=page_count,
+                    prompt=self.prompt,
+                )
+            except ProviderSystemicError as exc:
+                exc.with_request_context(
+                    provider=self.provider.provider,
+                    phase="primary",
+                    chunk_index=chunk_index,
+                    page_start=min(call.target_page_numbers),
+                    page_end=max(call.target_page_numbers),
+                )
+                raise
             # Context images may inform continuity but are never persisted as
             # output from this call. Exact target markers enforce that boundary.
             sparse_wrapper_correction_required = False
@@ -2882,13 +2929,23 @@ class OCRResolver:
                 # the complete corrective budget; its result passes through
                 # the unchanged validator below or propagates immediately.
                 raw = ""
-                corrected_raw = await self.provider.recognize(
-                    selected,
-                    page_numbers=call.input_page_numbers,
-                    target_page_numbers=call.target_page_numbers,
-                    total_pages=page_count,
-                    prompt=self.prompt + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
-                )
+                try:
+                    corrected_raw = await self.provider.recognize(
+                        selected,
+                        page_numbers=call.input_page_numbers,
+                        target_page_numbers=call.target_page_numbers,
+                        total_pages=page_count,
+                        prompt=self.prompt + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
+                    )
+                except ProviderSystemicError as exc:
+                    exc.with_request_context(
+                        provider=self.provider.provider,
+                        phase="primary",
+                        chunk_index=chunk_index,
+                        page_start=min(call.target_page_numbers),
+                        page_end=max(call.target_page_numbers),
+                    )
+                    raise
                 values = _validated_provider_target_values(
                     corrected_raw,
                     target_page_numbers=call.target_page_numbers,
@@ -3215,6 +3272,20 @@ class FailoverOCRResolver:
                 prior_local_native=primary_prior,
             )
 
+        except ProviderSystemicError as exc:
+            exc.with_request_context(
+                provider=getattr(getattr(self.primary, "provider", None), "provider", None),
+                phase="primary",
+            )
+            # The local whole-document provider can cover an exhausted Codex
+            # allowance. Authentication, contract and other systemic failures
+            # remain terminal, as do quota errors for other provider pairs.
+            if not (
+                exc.reason_code == "provider_process_rate_limited"
+                and getattr(getattr(self.primary, "provider", None), "provider", None) == "codex-exec"
+                and getattr(getattr(self.fallback, "provider", None), "provider", None) == "local-paddleocr"
+            ):
+                raise
         except (
             ProviderDocumentError,
             OCRValidationError,
@@ -3234,10 +3305,17 @@ class FailoverOCRResolver:
             RuntimeWarning,
             stacklevel=2,
         )
-        result = await self.fallback.resolve(
-            **kwargs,
-            output_dir=output_dir / "fallback",
-            prior_local_native=fallback_prior,
-        )
+        try:
+            result = await self.fallback.resolve(
+                **kwargs,
+                output_dir=output_dir / "fallback",
+                prior_local_native=fallback_prior,
+            )
+        except ProviderSystemicError as exc:
+            exc.with_request_context(
+                provider=getattr(getattr(self.fallback, "provider", None), "provider", None),
+                phase="fallback",
+            )
+            raise
         shutil.rmtree(output_dir / "primary" / "rendered", ignore_errors=True)
         return result

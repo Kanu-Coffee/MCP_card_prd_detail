@@ -788,3 +788,21 @@ async def test_manual_success_completes_only_with_bound_durable_proof(corpus, mo
     else:
         assert load_next_reprocess_request(source.root) is None
         assert receipt.exists()
+
+
+async def test_reuse_source_structure_skip_fails_closed_when_intermediate_missing(corpus):
+    pipeline, source, state, pdf_calls, embed_calls, ocr, dav = corpus
+    document = next(iter(source.documents.values()))
+    # Remove the unsealed intermediate structure directory/file
+    structure_file = source.directory / "documents" / document.document_id / "structure/structure.v2.json"
+    if structure_file.exists():
+        structure_file.unlink()
+
+    # Preflight for skipping pdf and ocr succeeds because publication seal objects are present
+    source.preflight(ExecutionPlan(frozenset({"pdf", "ocr"}), source.run_id))
+
+    # Preflight for skipping structure fails closed because structure.v2.json is missing
+    with pytest.raises(PartialExecutionError) as exc_info:
+        source.preflight(ExecutionPlan(frozenset({"pdf", "ocr", "structure"}), source.run_id))
+    assert exc_info.value.reason_code == "skip_artifact_missing"
+    assert exc_info.value.stage == "structure"

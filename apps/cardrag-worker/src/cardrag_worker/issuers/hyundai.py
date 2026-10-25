@@ -145,11 +145,14 @@ def parse_detail(payload: object, *, product: ListingProduct, discovered_at: dat
     for effective, name in dated_attachments:
         if effective != newest_date:
             continue
-        if not name.casefold().endswith(".pdf") or any(char in name for char in ("/", "\\", "\x00")):
+        if not name.casefold().endswith((".pdf", ".zip")) or any(
+            char in name for char in ("/", "\\", "\x00")
+        ):
             raise IssuerMarkupChanged(f"Hyundai product {product.product_code} latest attachment is invalid")
         metadata: dict[str, object] = {
             "classification_basis": "official_shared_listing",
             "issuance_discontinued": product.discontinued_date is not None,
+            **({"attachment_type": "zip"} if name.casefold().endswith(".zip") else {}),
         }
         if product.launch_date is not None:
             metadata["product_launch_date"] = product.launch_date.isoformat()
@@ -183,6 +186,7 @@ def parse_detail(payload: object, *, product: ListingProduct, discovered_at: dat
 class HyundaiAdapter:
     spec = SPEC
     parser_version = "hyundai.current.v1"
+    detail_inventory = None
 
     def __init__(self, *, base_url: str = BASE_URL, minimum_records: int | None = None) -> None:
         self.base_url = absolute_https_url(BASE_URL, base_url, self.spec.allowed_hosts).rstrip("/")
@@ -197,6 +201,23 @@ class HyundaiAdapter:
         records: list[SourceRecord] = []
         warnings: list[str] = []
         for product in products:
+            from dataclasses import asdict
+
+            from ..contracts import canonical_sha256
+
+            fingerprint = canonical_sha256(
+                {
+                    key: value.isoformat() if isinstance(value, date) else value
+                    for key, value in asdict(product).items()
+                }
+            )
+            if self.detail_inventory is not None:
+                retained = self.detail_inventory.lookup(
+                    self.spec.code, product.product_code, fingerprint, now=started
+                )
+                if retained is not None:
+                    records.extend(retained)
+                    continue
             response = await client.post(
                 self.base_url + DETAIL_PATH,
                 data={"sqno": product.product_code},
@@ -216,6 +237,14 @@ class HyundaiAdapter:
                 warnings.append(f"Hyundai product {product.product_code}: no published PDF attachment")
             else:
                 records.append(record)
+            if self.detail_inventory is not None:
+                self.detail_inventory.put(
+                    self.spec.code,
+                    product.product_code,
+                    fingerprint,
+                    [record] if record is not None else [],
+                    now=started,
+                )
         require_minimum(records, label="Hyundai current PDF disclosure", minimum=self.minimum_records)
         return snapshot_from_records(
             issuer=self.spec.code,

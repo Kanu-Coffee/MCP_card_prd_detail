@@ -16,7 +16,10 @@
 | `worker/compose.cache-seed.yaml` | 종료된 호환 Worker 상태의 읽기 전용 seed |
 | `worker/compose.adoption.yaml` | 검증된 외부 OCR export의 읽기 전용 입력 |
 | `worker/compose.aggregation-profile.yaml` | 검증된 문서 집계 프로파일 |
-| `worker/cardrag-worker.service`, `.timer` | 선택적 systemd 실행·예약 템플릿 |
+| `worker/cardrag-worker.service`, `.timer` | 선택적 systemd 실행·예약 템플릿. service는 활성 release의 `operations/worker-compose.sh`를 사용하고 timer는 missed slot을 자동 catch-up하지 않음 |
+| `worker/install-systemd.sh` | unit 설치·daemon-reload·timer 영속 disable. Worker를 시작하거나 timer를 enable하지 않음 |
+| `worker/verify-service-access.sh` | root에서 실제 cardrag 계정·docker 그룹으로 후보 release의 config-only 접근/실행 검증. 활성화·timer 변경 전 필수 |
+| `worker/verify-recovery-point.py` | active/rollback guidance의 protected snapshot 존재·SHA·SQLite quick_check를 읽기 전용 검증. DB restore는 수행하지 않음 |
 
 기본 이미지는 소스에서 빌드합니다. 릴리스 이미지를 사용할 때는 검증된 immutable digest를
 역할별 `CARDRAG_WORKER_IMAGE`, `CARDRAG_MCP_IMAGE`에 지정하십시오.

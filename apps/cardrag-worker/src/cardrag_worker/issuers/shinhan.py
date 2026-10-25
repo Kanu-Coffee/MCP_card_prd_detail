@@ -103,11 +103,16 @@ def _parse_listing_records(
             source_url=absolute_https_url(BASE_URL, DOWNLOAD_PATH, SPEC.allowed_hosts),
             source_post_id=f"{category}:{product_code}",
             file_name=(
-                local_file_name if local_file_name.casefold().endswith(".pdf") else local_file_name + ".pdf"
+                local_file_name
+                if local_file_name.casefold().endswith((".pdf", ".zip"))
+                else local_file_name + ".pdf"
             ),
             category=category,
             discovered_at=discovered_at,
-            metadata={DOWNLOAD_NAME_METADATA_KEY: download_name},
+            metadata={
+                DOWNLOAD_NAME_METADATA_KEY: download_name,
+                **({"attachment_type": "zip"} if local_file_name.casefold().endswith(".zip") else {}),
+            },
         )
         rows.append(_ListingRecord(source=source, file_token=token, download_name=download_name))
     more = re.search(r"<!--\s*MORE\(([^)]+)\)\s*-->", page_html, flags=re.I)
@@ -192,15 +197,19 @@ def _validate_download_source_identity(source: SourceRecord) -> None:
     download_name = source.metadata.get(DOWNLOAD_NAME_METADATA_KEY)
     expected_file_name = (
         download_name.strip()
-        if isinstance(download_name, str) and download_name.casefold().strip().endswith(".pdf")
+        if isinstance(download_name, str) and download_name.casefold().strip().endswith((".pdf", ".zip"))
         else f"{download_name.strip()}.pdf"
         if isinstance(download_name, str)
         else ""
     )
+    expected_metadata = {
+        DOWNLOAD_NAME_METADATA_KEY: download_name,
+        **({"attachment_type": "zip"} if source.file_name.casefold().endswith(".zip") else {}),
+    }
     if (
         not isinstance(download_name, str)
         or not download_name.strip()
-        or dict(source.metadata) != {DOWNLOAD_NAME_METADATA_KEY: download_name}
+        or dict(source.metadata) != expected_metadata
         or source.source_url != BASE_URL + DOWNLOAD_PATH
         or source.source_post_id != f"{source.category}:{source.product_code}"
         or source.file_name != expected_file_name
@@ -425,6 +434,21 @@ class ShinhanAdapter:
             maximum_records=REFRESH_MAXIMUM_RECORDS,
         )
         matches = _matching_mobile_records(current, source)
+        if not matches and not current and "+" in primary_search_term:
+            # Some official display names contain '+' or other search syntax.
+            # A verified empty name search may use a shorter literal prefix;
+            # selection still checks the full stable identity, never the prefix.
+            prefix = re.split(r"[\s+()\[\]]", primary_search_term, maxsplit=1)[0]
+            if prefix and prefix != primary_search_term:
+                current = await self._query_mobile_current(
+                    client,
+                    category=source.category,
+                    product_name=prefix,
+                    referer=landing_url,
+                    maximum_pages=REFRESH_MAXIMUM_PAGES,
+                    maximum_records=REFRESH_MAXIMUM_RECORDS,
+                )
+                matches = _matching_mobile_records(current, source)
         if len(matches) != 1:
             # A few official rows cannot be found by their own display name.
             # Fall back only after a structurally valid primary response, and

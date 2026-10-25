@@ -80,7 +80,10 @@ class _LimitedStream:
             await self.limiter.wait()
             self.context = self.client.stream(self.method, self.url, **self.kwargs)
             return cast(httpx.Response, await self.context.__aenter__())
-        except BaseException:
+        except BaseException as exc:
+            from .issuer_metrics import note_transport_failure
+
+            note_transport_failure(exc)
             if self.host_context is not None:
                 await self.host_context.__aexit__(None, None, None)
             raise
@@ -101,26 +104,62 @@ class RateLimitedClient:
         client: httpx.AsyncClient,
         limiter: IssuerRateLimiter,
         host_limiter: HostConcurrencyLimiter | None = None,
+        *,
+        issuer: str = "unknown",
+        purpose: str = "catalog",
     ) -> None:
         self.client = client
         self.limiter = limiter
         self.host_limiter = host_limiter
+        self.issuer, self.purpose = issuer, purpose
+
+    def _extensions(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        kwargs["extensions"] = {
+            **kwargs.get("extensions", {}),
+            "cardrag_issuer": self.issuer,
+            "cardrag_purpose": self.purpose,
+        }
+        return kwargs
+
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        try:
+            if self.host_limiter is not None:
+                async with self.host_limiter.slot(url):
+                    await self.limiter.wait()
+                    response = await self.client.request(method, url, **self._extensions(kwargs))
+            else:
+                await self.limiter.wait()
+                response = await self.client.request(method, url, **self._extensions(kwargs))
+        except httpx.RequestError as exc:
+            from .issuer_metrics import note_transport_failure
+
+            note_transport_failure(exc)
+            raise
+        self._raise_for_origin_service_error(response)
+        return response
+
+    @staticmethod
+    def _raise_for_origin_service_error(response: httpx.Response) -> None:
+        if response.status_code != 200 or not response.is_stream_consumed:
+            return
+        content_type = response.headers.get("content-type")
+        from .issuer_collection import OriginServiceError, classify_html_service_error, safe_mime_type
+
+        signal = classify_html_service_error(response.content[:65536], content_type)
+        if signal is not None:
+            raise OriginServiceError(
+                status_code=response.status_code,
+                mime_type=safe_mime_type(content_type),
+                service_signal=signal,
+            )
 
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:
-        if self.host_limiter is not None:
-            async with self.host_limiter.slot(url):
-                await self.limiter.wait()
-                return await self.client.get(url, **kwargs)
-        await self.limiter.wait()
-        return await self.client.get(url, **kwargs)
+        return await self._request("GET", url, **kwargs)
 
     async def post(self, url: str, **kwargs: Any) -> httpx.Response:
-        if self.host_limiter is not None:
-            async with self.host_limiter.slot(url):
-                await self.limiter.wait()
-                return await self.client.post(url, **kwargs)
-        await self.limiter.wait()
-        return await self.client.post(url, **kwargs)
+        return await self._request("POST", url, **kwargs)
 
     def stream(self, method: str, url: str, **kwargs: Any) -> _LimitedStream:
-        return _LimitedStream(self.client, self.limiter, method, url, kwargs, self.host_limiter)
+        return _LimitedStream(
+            self.client, self.limiter, method, url, self._extensions(kwargs), self.host_limiter
+        )

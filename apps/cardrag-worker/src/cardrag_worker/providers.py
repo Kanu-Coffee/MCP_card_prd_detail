@@ -153,6 +153,14 @@ class ProviderSystemicError(ProviderError):
         exit_code: int | None = None,
         stderr_size_bytes: int | None = None,
         stderr_sha256: str | None = None,
+        stdout_size_bytes: int | None = None,
+        stdout_sha256: str | None = None,
+        provider: str | None = None,
+        phase: str | None = None,
+        classification_basis: str | None = None,
+        chunk_index: int | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
     ) -> None:
         if reason_code in _PROVIDER_PROCESS_EXIT_REASONS:
             if (
@@ -175,13 +183,98 @@ class ProviderSystemicError(ProviderError):
             or re.fullmatch(r"[0-9a-f]{64}", stderr_sha256) is None
         ):
             raise ValueError("provider stderr diagnostics are invalid")
+        if (stdout_size_bytes is None) != (stdout_sha256 is None):
+            raise ValueError("provider stdout diagnostics must be complete")
+        if stdout_size_bytes is not None and (
+            reason_code not in _PROVIDER_PROCESS_EXIT_REASONS
+            or isinstance(stdout_size_bytes, bool)
+            or not isinstance(stdout_size_bytes, int)
+            or not 0 <= stdout_size_bytes <= 2**63 - 1
+            or stdout_sha256 is None
+            or re.fullmatch(r"[0-9a-f]{64}", stdout_sha256) is None
+        ):
+            raise ValueError("provider stdout diagnostics are invalid")
+        if provider is not None and (
+            not isinstance(provider, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", provider) is None
+        ):
+            raise ValueError("provider identity is invalid")
+        if phase is not None and (
+            not isinstance(phase, str) or re.fullmatch(r"[a-z0-9_]{1,32}", phase) is None
+        ):
+            raise ValueError("provider request phase is invalid")
+        if classification_basis is not None and (
+            not isinstance(classification_basis, str)
+            or re.fullmatch(r"[a-z0-9_]{1,64}", classification_basis) is None
+        ):
+            raise ValueError("provider classification basis is invalid")
+        if chunk_index is not None and (
+            isinstance(chunk_index, bool) or not isinstance(chunk_index, int) or chunk_index < 0
+        ):
+            raise ValueError("provider chunk index is invalid")
+        if (page_start is None) != (page_end is None):
+            raise ValueError("provider page range must be complete")
+        if page_start is not None and (
+            isinstance(page_start, bool)
+            or not isinstance(page_start, int)
+            or isinstance(page_end, bool)
+            or not isinstance(page_end, int)
+            or page_start < 1
+            or page_end < page_start
+        ):
+            raise ValueError("provider page range is invalid")
         self.reason_code = reason_code
         self.reason, self.error_kind, self.retryable = _PROVIDER_SYSTEMIC_REASONS[reason_code]
         self.exit_code = exit_code
         self.stderr_size_bytes = stderr_size_bytes
         self.stderr_sha256 = stderr_sha256
+        self.stdout_size_bytes = stdout_size_bytes
+        self.stdout_sha256 = stdout_sha256
+        self.provider = provider
+        self.phase = phase
+        self.classification_basis = classification_basis
+        self.chunk_index = chunk_index
+        self.page_start = page_start
+        self.page_end = page_end
         suffix = f" (exit_code={exit_code})" if exit_code is not None else ""
         super().__init__(f"{self.reason_code}: {self.reason}{suffix}")
+
+    def with_request_context(
+        self,
+        *,
+        provider: str | None = None,
+        phase: str | None = None,
+        chunk_index: int | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> ProviderSystemicError:
+        """Attach bounded request context without retaining provider output."""
+
+        if self.reason_code not in _PROVIDER_PROCESS_EXIT_REASONS:
+            return self
+        try:
+            validated = ProviderSystemicError(
+                self.reason_code,
+                exit_code=self.exit_code,
+                stderr_size_bytes=self.stderr_size_bytes,
+                stderr_sha256=self.stderr_sha256,
+                stdout_size_bytes=self.stdout_size_bytes,
+                stdout_sha256=self.stdout_sha256,
+                provider=self.provider if provider is None else provider,
+                phase=self.phase if phase is None else phase,
+                classification_basis=self.classification_basis,
+                chunk_index=self.chunk_index if chunk_index is None else chunk_index,
+                page_start=self.page_start if page_start is None else page_start,
+                page_end=self.page_end if page_end is None else page_end,
+            )
+        except (TypeError, ValueError):
+            # Diagnostics must never replace the original provider failure.
+            return self
+        self.provider = validated.provider
+        self.phase = validated.phase
+        self.chunk_index = validated.chunk_index
+        self.page_start = validated.page_start
+        self.page_end = validated.page_end
+        return self
 
 
 _CODEX_AUTH_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -261,38 +354,91 @@ _CODEX_PROVIDER_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
+_PROVIDER_CLASSIFICATIONS: tuple[tuple[tuple[re.Pattern[str], ...], ProviderSystemicReasonCode], ...] = (
+    (_CODEX_AUTH_FAILURE_PATTERNS, "provider_process_authentication_failed"),
+    (_CODEX_CONFIG_FAILURE_PATTERNS, "provider_process_configuration_failed"),
+    (_CODEX_RATE_LIMIT_PATTERNS, "provider_process_rate_limited"),
+    (_CODEX_NETWORK_FAILURE_PATTERNS, "provider_process_network_error"),
+    (_CODEX_PROVIDER_FAILURE_PATTERNS, "provider_process_provider_unavailable"),
+)
+
+
+def _classify_provider_diagnostic(diagnostic: str) -> ProviderSystemicReasonCode:
+    for patterns, reason_code in _PROVIDER_CLASSIFICATIONS:
+        if any(pattern.search(diagnostic) is not None for pattern in patterns):
+            return reason_code
+    return "provider_process_exit_unknown"
+
+
+def _classify_codex_process_exit_diagnostic(
+    stderr: bytes,
+) -> tuple[ProviderSystemicReasonCode, str]:
+    """Classify Codex stderr and retain only the allowlisted evidence channel."""
+
+    reason_code = _classify_provider_diagnostic(stderr.decode("utf-8", errors="replace"))
+    if reason_code == "provider_process_exit_unknown":
+        return reason_code, "stderr_allowlist_no_match"
+    return reason_code, "stderr_allowlist"
+
+
 def _classify_codex_process_exit(stderr: bytes) -> ProviderSystemicReasonCode:
     """Return an allowlisted category without retaining provider diagnostics."""
 
-    diagnostic = stderr.decode("utf-8", errors="replace")
-    classifications: tuple[tuple[tuple[re.Pattern[str], ...], ProviderSystemicReasonCode], ...] = (
-        (_CODEX_AUTH_FAILURE_PATTERNS, "provider_process_authentication_failed"),
-        (_CODEX_CONFIG_FAILURE_PATTERNS, "provider_process_configuration_failed"),
-        (_CODEX_RATE_LIMIT_PATTERNS, "provider_process_rate_limited"),
-        (_CODEX_NETWORK_FAILURE_PATTERNS, "provider_process_network_error"),
-        (_CODEX_PROVIDER_FAILURE_PATTERNS, "provider_process_provider_unavailable"),
-    )
-    for patterns, reason_code in classifications:
-        if any(pattern.search(diagnostic) is not None for pattern in patterns):
-            return reason_code
-    return "provider_process_exit_unknown"
+    return _classify_codex_process_exit_diagnostic(stderr)[0]
+
+
+def _opencode_stdout_error_diagnostic(stdout: bytes) -> str | None:
+    """Extract only official OpenCode error events, never ordinary text parts."""
+
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    found_error_event = False
+    fragments: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "error":
+            continue
+        found_error_event = True
+        for key in ("message", "error", "data"):
+            value = event.get(key)
+            if isinstance(value, str):
+                fragments.append(value)
+            elif isinstance(value, (dict, list)):
+                fragments.append(json.dumps(value, sort_keys=True))
+    if not found_error_event:
+        return None
+    return "\n".join(fragments)
+
+
+def _classify_opencode_process_exit_diagnostic(
+    stderr: bytes, stdout: bytes = b""
+) -> tuple[ProviderSystemicReasonCode, str]:
+    """Classify stderr and structured OpenCode error events only."""
+
+    reason_code = _classify_provider_diagnostic(stderr.decode("utf-8", errors="replace"))
+    if reason_code != "provider_process_exit_unknown":
+        return reason_code, "stderr_allowlist"
+    stdout_diagnostic = _opencode_stdout_error_diagnostic(stdout)
+    if stdout_diagnostic is None:
+        return reason_code, "stderr_allowlist_no_match"
+    reason_code = _classify_provider_diagnostic(stdout_diagnostic)
+    if reason_code == "provider_process_exit_unknown":
+        return reason_code, "stdout_error_event_no_match"
+    return reason_code, "stdout_error_event_allowlist"
 
 
 def _classify_opencode_process_exit(stderr: bytes, stdout: bytes = b"") -> ProviderSystemicReasonCode:
-    """Classify OpenCode stderr and stdout using identical allowlisted reason codes."""
+    """Classify OpenCode stderr and official error events using one allowlist."""
 
-    diagnostic = (stderr + b"\n" + stdout).decode("utf-8", errors="replace")
-    classifications: tuple[tuple[tuple[re.Pattern[str], ...], ProviderSystemicReasonCode], ...] = (
-        (_CODEX_AUTH_FAILURE_PATTERNS, "provider_process_authentication_failed"),
-        (_CODEX_CONFIG_FAILURE_PATTERNS, "provider_process_configuration_failed"),
-        (_CODEX_RATE_LIMIT_PATTERNS, "provider_process_rate_limited"),
-        (_CODEX_NETWORK_FAILURE_PATTERNS, "provider_process_network_error"),
-        (_CODEX_PROVIDER_FAILURE_PATTERNS, "provider_process_provider_unavailable"),
-    )
-    for patterns, reason_code in classifications:
-        if any(pattern.search(diagnostic) is not None for pattern in patterns):
-            return reason_code
-    return "provider_process_exit_unknown"
+    return _classify_opencode_process_exit_diagnostic(stderr, stdout)[0]
 
 
 # These patterns intentionally identify token *forms* without ever retaining
@@ -791,7 +937,10 @@ class CodexOCRProvider:
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError:
-            raise ProviderSystemicError("provider_process_spawn_failed") from None
+            raise ProviderSystemicError(
+                "provider_process_spawn_failed",
+                provider=self.provider,
+            ) from None
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate((prompt + "\n\n" + instructions).encode()),
@@ -802,11 +951,16 @@ class CodexOCRProvider:
             await process.wait()
             raise
         if process.returncode:
+            reason_code, classification_basis = _classify_codex_process_exit_diagnostic(stderr)
             raise ProviderSystemicError(
-                _classify_codex_process_exit(stderr),
+                reason_code,
                 exit_code=process.returncode,
                 stderr_size_bytes=len(stderr),
                 stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                stdout_size_bytes=len(stdout),
+                stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                provider=self.provider,
+                classification_basis=classification_basis,
             ) from None
         reject_credential_bearing_ocr(stdout)
         try:
@@ -1024,7 +1178,10 @@ class OpenCodeOCRProvider:
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError:
-            raise ProviderSystemicError("provider_process_spawn_failed") from None
+            raise ProviderSystemicError(
+                "provider_process_spawn_failed",
+                provider=self.provider,
+            ) from None
 
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -1042,11 +1199,16 @@ class OpenCodeOCRProvider:
             raise
 
         if process.returncode:
+            reason_code, classification_basis = _classify_opencode_process_exit_diagnostic(stderr, stdout)
             raise ProviderSystemicError(
-                _classify_opencode_process_exit(stderr, stdout),
+                reason_code,
                 exit_code=process.returncode,
                 stderr_size_bytes=len(stderr),
                 stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                stdout_size_bytes=len(stdout),
+                stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                provider=self.provider,
+                classification_basis=classification_basis,
             ) from None
 
         try:
@@ -1171,9 +1333,12 @@ class PaddleOCRVLProvider:
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError:
-            raise ProviderSystemicError("provider_process_spawn_failed") from None
+            raise ProviderSystemicError(
+                "provider_process_spawn_failed",
+                provider=self.provider,
+            ) from None
         try:
-            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
         except (TimeoutError, asyncio.CancelledError):
             process.kill()
             await process.wait()
@@ -1186,6 +1351,10 @@ class PaddleOCRVLProvider:
                     exit_code=process.returncode or 1,
                     stderr_size_bytes=len(stderr),
                     stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                    stdout_size_bytes=len(stdout),
+                    stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                    provider=self.provider,
+                    classification_basis="fixed_exit_policy",
                 ) from None
         finally:
             result_path.unlink(missing_ok=True)
@@ -1229,9 +1398,12 @@ class PaddleOCRVLProvider:
                     stderr=asyncio.subprocess.PIPE,
                 )
             except OSError:
-                raise ProviderSystemicError("provider_process_spawn_failed") from None
+                raise ProviderSystemicError(
+                    "provider_process_spawn_failed",
+                    provider=self.provider,
+                ) from None
             try:
-                _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
             except (TimeoutError, asyncio.CancelledError):
                 process.kill()
                 await process.wait()
@@ -1246,6 +1418,10 @@ class PaddleOCRVLProvider:
                     exit_code=process.returncode,
                     stderr_size_bytes=len(stderr),
                     stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                    stdout_size_bytes=len(stdout),
+                    stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                    provider=self.provider,
+                    classification_basis="fixed_exit_policy",
                 ) from None
             if not result_path.is_file() or result_path.stat().st_size > 64 * 1024 * 1024:
                 raise ProviderSystemicError("provider_contract_invalid") from None

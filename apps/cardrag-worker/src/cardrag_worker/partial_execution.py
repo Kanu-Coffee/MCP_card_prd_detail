@@ -53,8 +53,16 @@ class ExecutionPlan:
     channel: str = "candidate-009"
     actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     started: float = field(default_factory=time.monotonic)
+    phase: str = "all"
+    selected_issuers: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.phase not in {"all", "collect", "process"}:
+            raise ValueError("phase must be all, collect or process")
+        if self.phase == "collect" and (self.skipped or self.source_run_id):
+            raise ValueError("collect cannot be combined with skip/reuse")
+        if self.phase == "process" and (self.skipped != frozenset({"pdf"}) or not self.source_run_id):
+            raise ValueError("process requires a collection source and no other stage skips")
         if not self.skipped.issubset(STAGES):
             raise ValueError("unknown skip stage; choose " + ", ".join(STAGES))
         if self.source_run_id is not None and not _RUN_ID.fullmatch(self.source_run_id):
@@ -77,6 +85,14 @@ class ExecutionPlan:
             "source_run_id": self.source_run_id,
             "channel": self.channel,
             "skipped_stages": [s for s in STAGES if self.skips(s)],
+            **(
+                {
+                    "phase": self.phase,
+                    "selected_issuers": list(self.selected_issuers) if self.selected_issuers else None,
+                }
+                if self.phase != "all" or self.selected_issuers
+                else {}
+            ),
         }
 
     def payload(self) -> dict[str, Any]:
@@ -379,19 +395,60 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
         OCRDocumentFailuresError,
         OCRFailureBookkeepingError,
         OCRFailureRecord,
+        _AcquiredDocument,
         _atomic_write,
         _bounded_report_text,
         _known_snapshot_sources,
         _OCRFailedDocument,
         _ProcessedDocument,
         _restore_snapshot,
+        _v5_corpus_identity_payload,
         _write_ocr_failure_report,
+        canonical_acquired_document_key,
         classify_ocr_failure,
         is_isolatable_document_ocr_failure,
     )
     from .structure import build_derived_views, parse_structure_artifact
 
     source: ReuseSource = pipeline.reuse_source
+    from .acquisition import AcquisitionSource
+
+    preserved_acquired, preserved_processed, preserved_failed, preserved_unsupported = (), (), (), ()
+    if isinstance(source, AcquisitionSource):
+        pipeline._unsupported_attachment_count = len(source.unsupported_attachments)
+        pipeline._unsupported_attachments = tuple(source.unsupported_attachments)
+        if source.receipt.get("retirement_ledger") is not None:
+            from dataclasses import replace
+
+            from .retirement import _parse_ledger
+
+            ledger = _parse_ledger(canonical_json_bytes(source.receipt["retirement_ledger"]))
+            pipeline._pending_retirement_ledger = replace(ledger, updated_run_id=run_id)
+        from .issuer_scope import preservation_source, preserve_inputs
+
+        current = await pipeline.webdav.validated_current_generation()
+        if (current.generation_id if current else None) != source.manifest.generation_id:
+            raise PartialExecutionError("acquisition_baseline_changed", "scope")
+        pipeline._preserved_source = await preservation_source(pipeline)
+        (
+            preserved_acquired,
+            preserved_processed,
+            preserved_failed,
+            preserved_unsupported,
+        ) = preserve_inputs(pipeline, pipeline._preserved_source, run_id)
+    elif hasattr(source, "directory"):
+        if (
+            hasattr(source, "seal")
+            and isinstance(source.seal, dict)
+            and "unsupported_attachment_count" in source.seal
+        ):
+            pipeline._unsupported_attachment_count = int(source.seal["unsupported_attachment_count"])
+            pipeline._unsupported_attachments = tuple(source.seal.get("unsupported_attachments", ()))
+        else:
+            receipt_path = source.directory / "execution-result.json"
+            if receipt_path.is_file():
+                res_data = read_json(source.root, receipt_path, "export")
+                pipeline._unsupported_attachment_count = int(res_data.get("unsupported_attachment_count", 0))
     plan: ExecutionPlan = pipeline.execution_plan
     profile = pipeline.v5_profile
     if profile is None:
@@ -406,6 +463,7 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
     processed = []
     failed = []
     unsupported = []
+    replayed_acquired = []
     provider_called = 0
     failures = []
     failure_report = pipeline.state_dir / "runs" / run_id / "reports/ocr-failures.json"
@@ -432,28 +490,6 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
     for doc_id, doc in source.documents.items():
         started = time.monotonic()
         row = source.revisions.get(doc_id)
-        if row is None and plan.skips("ocr"):
-            failure = next(r for r in source.failed if r["document_id"] == doc_id)
-            pdf = source.pdf(doc_id, "")
-            failed.append(
-                _OCRFailedDocument(
-                    OCRFailedProductRecord(
-                        document_id=doc_id,
-                        issuer=failure["issuer"],
-                        product_code=failure["product_code"],
-                        product_name=failure["name"],
-                        title=failure["title"],
-                        pdf_sha256=doc.pdf.sha256,
-                        pdf_size_bytes=doc.pdf.size_bytes,
-                        page_count=doc.page_count,
-                        reason_code=failure["reason_code"],
-                        reason=failure["reason"],
-                        attempts=failure["attempts"],
-                    ),
-                    pdf.path,
-                )
-            )
-            continue
         if row is None:
             failure = next(r for r in source.failed if r["document_id"] == doc_id)
             matches = [
@@ -473,6 +509,40 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
         if record is None or record.document_id(doc.pdf.sha256) != doc_id:
             raise PartialExecutionError("skip_source_unavailable", "pdf", doc_id)
         pdf = source.pdf(doc_id, record.source_url)
+        replayed_acquired.append(
+            _AcquiredDocument(
+                source=record,
+                pdf=pdf,
+                temporal_status=row.get("temporal_status", "current"),
+                supersedes_document_id=row.get("supersedes_document_id"),
+                is_historical=row.get("temporal_status") != "current",
+            )
+        )
+        if source.revisions.get(doc_id) is None and plan.skips("ocr"):
+            failure = next(r for r in source.failed if r["document_id"] == doc_id)
+            failed.append(
+                _OCRFailedDocument(
+                    OCRFailedProductRecord(
+                        document_id=doc_id,
+                        issuer=failure["issuer"],
+                        product_code=failure["product_code"],
+                        product_name=failure["name"],
+                        title=failure["title"],
+                        pdf_sha256=doc.pdf.sha256,
+                        pdf_size_bytes=doc.pdf.size_bytes,
+                        page_count=doc.page_count,
+                        reason_code=failure["reason_code"],
+                        reason=failure["reason"],
+                        attempts=failure["attempts"],
+                    ),
+                    pdf.path,
+                    is_historical=False,
+                    source=record,
+                    temporal_status="current",
+                    supersedes_document_id=None,
+                )
+            )
+            continue
         plan.record("pdf", "reused", seconds=time.monotonic() - started)
         ocr_dir = pipeline.state_dir / "runs" / run_id / "documents" / doc_id / "ocr"
         started = time.monotonic()
@@ -561,6 +631,9 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
                         ),
                         pdf_path=pdf.path,
                         is_historical=row["temporal_status"] != "current",
+                        source=record,
+                        temporal_status=row["temporal_status"],
+                        supersedes_document_id=row["supersedes_document_id"],
                     )
                 )
                 _write_ocr_failure_report(failure_report, run_id=run_id, failures=failures)
@@ -672,6 +745,11 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
                 row["protected_magic"],
             )
         )
+    replayed_acquired.extend(preserved_acquired)
+    replayed_acquired.sort(key=canonical_acquired_document_key)
+    processed.extend(preserved_processed)
+    failed.extend(preserved_failed)
+    unsupported.extend(preserved_unsupported)
     pipeline._unsupported_count = len(unsupported)
     issuers = {item.record.issuer for item in processed} | {item.record.issuer for item in failed}
     raw_counts = [
@@ -693,20 +771,109 @@ async def replay_pdf_source(pipeline: Any, run_id: str) -> PipelineResult:
         )
         for issuer, succeeded, failed_count in raw_counts
     )
-    # No new collection snapshot or retirement grace is recorded by frozen replay.
+    raw_unresolved = source.seal.get("v5_metrics", {}).get("historical_revision_unresolved_identities", [])
+    if hasattr(pipeline.state, "is_revision_remediated"):
+        from .revision_history_v5 import (
+            UnresolvedRevisionIdentityV5,
+            UnresolvedRevisionReasonV5,
+            canonical_unresolved_revision_ledger_v5,
+            unresolved_revision_ledger_sha256_v5,
+        )
+        from .unresolved_remediation import (
+            apply_unresolved_remediation,
+            plan_unresolved_remediation,
+            validate_unresolved_ledger_in_seal,
+            write_remediation_inventory_artifact,
+        )
+
+        if "v5_metrics" in source.seal:
+            try:
+                validated_entries = validate_unresolved_ledger_in_seal(source.seal, state=pipeline.state)
+            except Exception as exc:
+                raise PartialExecutionError("issuer_scope_baseline_incompatible", "export") from exc
+
+            processed_map: dict[str, set[str]] = {}
+            for processed_doc in processed:
+                processed_map.setdefault(processed_doc.record.issuer, set()).add(
+                    processed_doc.record.product_code
+                )
+            failed_map: dict[str, set[str]] = {}
+            for failed_doc in failed:
+                failed_map.setdefault(failed_doc.record.issuer, set()).add(failed_doc.record.product_code)
+            unsupported_map: dict[str, set[str]] = {}
+            for unsupported_doc in unsupported:
+                unsupported_map.setdefault(unsupported_doc.source.issuer, set()).add(
+                    unsupported_doc.source.product_code
+                )
+            for doc in getattr(pipeline, "_unsupported_attachments", ()):
+                if hasattr(doc, "source"):
+                    unsupported_map.setdefault(doc.source.issuer, set()).add(doc.source.product_code)
+
+            remediation_plan = plan_unresolved_remediation(
+                pipeline.state,
+                source.seal,
+                current_processed_products=processed_map,
+                current_failed_products=failed_map,
+                current_unsupported_products=unsupported_map,
+                pdf_cache=pipeline.pdf_cache,
+                phase="process",
+            )
+            apply_unresolved_remediation(pipeline.state, remediation_plan)
+            write_remediation_inventory_artifact(
+                pipeline.state_dir / "runs" / run_id,
+                remediation_plan,
+                phase="process",
+                run_id=run_id,
+            )
+
+            unresolved_ledger = [
+                e
+                for e in validated_entries
+                if not pipeline.state.is_revision_remediated(e["source_id"], e["pdf_sha256"])
+            ]
+        else:
+            unresolved_ledger = []
+
+        parsed_identities = [
+            UnresolvedRevisionIdentityV5(e["source_id"], e["pdf_sha256"], cast(UnresolvedRevisionReasonV5, r))
+            for e in unresolved_ledger
+            for r in e["reason_codes"]
+        ]
+        canonical_ledger = list(canonical_unresolved_revision_ledger_v5(parsed_identities))
+        unresolved_ledger = canonical_ledger
+        unresolved_sha = unresolved_revision_ledger_sha256_v5(canonical_ledger)
+    else:
+        unresolved_ledger = raw_unresolved
+        unresolved_sha = source.seal.get("v5_metrics", {}).get("historical_revision_unresolved_sha256", "")
+
+    if pipeline.v5_profile is not None and unresolved_ledger != raw_unresolved:
+        replayed_unsupported = sorted(
+            (item.payload for item in unsupported),
+            key=canonical_json_bytes,
+        )
+        corpus_payload = _v5_corpus_identity_payload(
+            acquired=replayed_acquired,
+            unsupported_documents=replayed_unsupported,
+            unresolved_revisions=unresolved_ledger,
+            unresolved_revision_sha256=unresolved_sha,
+        )
+        replayed_corpus_sha256 = canonical_sha256(corpus_payload)
+    else:
+        replayed_corpus_sha256 = source.manifest.corpus_sha256
+
     built: PipelineResult = await pipeline._build_v5_generation(
         run_id=run_id,
         run_dir=pipeline.state_dir / "runs" / run_id,
         seal_path=pipeline.state_dir / "runs" / run_id / "sealed/publish.json",
-        corpus_sha256=source.manifest.corpus_sha256,
+        corpus_sha256=replayed_corpus_sha256,
         contract_sha256=pipeline.contract_sha256,
         processed=processed,
         unsupported=unsupported,
         failed_documents=failed,
         issuer_ocr_counts=issuer_counts,
         ocr_cache_publication_deferred=0,
-        unresolved_revision_ledger=source.seal["v5_metrics"]["historical_revision_unresolved_identities"],
-        unresolved_revision_sha256=source.seal["v5_metrics"]["historical_revision_unresolved_sha256"],
+        unresolved_revision_ledger=unresolved_ledger,
+        unresolved_revision_sha256=unresolved_sha,
         historical_pdf_cache_hits=0,
         ocr_cache_reused_count=len(processed) if plan.skips("ocr") else 0,
         ocr_provider_called_count=provider_called,

@@ -44,3 +44,13 @@ regexes = [
   '''reuse_key["']?\s*:\s*["']4774228792a90184c61851a466f97c02152ff840f3889eb2c3a27612ffebd86f["']''',
   '''reuse_key["']?\s*:\s*["']387db64b6ff467abc49a5d0e29a5bd188ea839df0c38cf973c4ffe4a43dfa11c["']''',
 ]
+
+[[allowlists]]
+description = "Public 019 backup object and OCR cache identities; exact digests only"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^94cdb144c916a6cae490f6cae6fe89139bf6dfc3f7ec32643149261efa73352f$''',
+  '''^a7745ec9619c6016f7ddffea3423378c9718b74ff0f6c9aa9be2ac90fc55d206$''',
+  '''^8cf30f1b9062834df6849e4aa46ef50d49e9fb9291ebe698c5dcbceb8b7e3501$''',
+]

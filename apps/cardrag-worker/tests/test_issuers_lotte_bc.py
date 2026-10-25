@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, unquote
 import httpx
 import pytest
 
+from cardrag_worker.issuer_collection import origin_failure
 from cardrag_worker.issuers.bc import BCAdapter
 from cardrag_worker.issuers.bc import parse_listing as parse_bc_listing
 from cardrag_worker.issuers.common import IssuerMarkupChanged
@@ -501,3 +502,33 @@ async def test_new_adapter_download_rejects_wrong_binding_without_network(issuer
 def test_new_adapter_requires_allowed_https_base_url(adapter: type[LotteAdapter] | type[BCAdapter]) -> None:
     with pytest.raises(ValueError, match="HTTPS allowlist"):
         adapter(base_url="https://evil.example")
+
+
+@pytest.mark.asyncio
+async def test_lotte_connect_timeout_on_landing_classifies_as_origin_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connection timed out to www.lottecard.co.kr", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = LotteAdapter(minimum_records=1)
+        with pytest.raises(httpx.ConnectTimeout) as exc_info:
+            await adapter.discover_current(client)
+        failure = origin_failure(exc_info.value)
+        assert failure.reason_code == "issuer_origin_timeout"
+        assert failure.exception_class == "ConnectTimeout"
+
+
+@pytest.mark.asyncio
+async def test_lotte_connect_timeout_on_listing_classifies_as_origin_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, text="landing OK")
+        raise httpx.ConnectTimeout("connection timed out to www.lottecard.co.kr", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = LotteAdapter(minimum_records=1)
+        with pytest.raises(httpx.ConnectTimeout) as exc_info:
+            await adapter.discover_current(client)
+        failure = origin_failure(exc_info.value)
+        assert failure.reason_code == "issuer_origin_timeout"
+        assert failure.exception_class == "ConnectTimeout"

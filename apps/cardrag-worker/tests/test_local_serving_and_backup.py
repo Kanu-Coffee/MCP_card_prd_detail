@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -234,7 +235,7 @@ async def test_backup_ledger_triggers_and_flush(tmp_path: Path) -> None:
             self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
 
         async def get(self, path: str) -> bytes:
-            return self.storage.get(path, b"")
+            return self.storage.get(path)
 
         async def close(self) -> None:
             pass
@@ -343,6 +344,108 @@ async def test_local_serving_transport_retention_policy(tmp_path: Path) -> None:
     assert sorted(gens) == ["gen-three", "gen-two"] or sorted(gens) == ["gen-two", "gen-three"]
 
 
+def test_remove_tree_with_accounting_empty_and_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from cardrag_worker.local_publisher import _remove_tree_with_accounting
+
+    # 1. Empty tree removal succeeds and returns (True, 0)
+    empty_tree = tmp_path / "empty_dir"
+    empty_tree.mkdir()
+    succeeded, size = _remove_tree_with_accounting(empty_tree, kind="staging")
+    assert succeeded is True
+    assert size == 0
+    assert not empty_tree.exists()
+
+    # 2. Normal tree removal succeeds and returns (True, size)
+    data_tree = tmp_path / "data_dir"
+    data_tree.mkdir()
+    (data_tree / "file.txt").write_bytes(b"hello world")
+    succeeded, size = _remove_tree_with_accounting(data_tree, kind="staging")
+    assert succeeded is True
+    assert size == len(b"hello world")
+    assert not data_tree.exists()
+
+    # 3. Failed tree removal returns (False, 0) and logs warning
+    fail_tree = tmp_path / "fail_dir"
+    fail_tree.mkdir()
+    (fail_tree / "file.txt").write_bytes(b"keep me")
+
+    def mock_rmtree_fail(_path: Any) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("shutil.rmtree", mock_rmtree_fail)
+    caplog.clear()
+    succeeded, size = _remove_tree_with_accounting(fail_tree, kind="staging")
+    assert succeeded is False
+    assert size == 0
+    assert fail_tree.exists()
+    assert "reason_code=local_retention_cleanup_failed" in caplog.text
+    assert "errno=13" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_local_serving_staging_cleanup_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import shutil
+
+    serving_dir = tmp_path / "serving"
+    transport = LocalServingTransport(serving_dir, channel="stable")
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(b"%PDF content")
+    pdf_sha = sha256_bytes(b"%PDF content")
+
+    m, _, _, db, _ = create_sample_generation("gen-001")
+    db_file = tmp_path / "index_gen-001.sqlite3"
+    db_file.write_bytes(db)
+
+    # Create stale staging directories
+    staging_root = serving_dir / "staging"
+    staging_root.mkdir(parents=True)
+    stale_failed = staging_root / "stale_failed"
+    stale_failed.mkdir()
+    (stale_failed / "data.bin").write_bytes(b"stale")
+    os.utime(stale_failed, (time.time() - 1000, time.time() - 1000))
+
+    stale_empty = staging_root / "stale_empty"
+    stale_empty.mkdir()
+    os.utime(stale_empty, (time.time() - 1000, time.time() - 1000))
+
+    real_rmtree = shutil.rmtree
+
+    def selective_rmtree(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if "stale_failed" in str(path):
+            raise PermissionError(13, "Permission denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("shutil.rmtree", selective_rmtree)
+    caplog.clear()
+    caplog.set_level("INFO")
+
+    await transport.publish(
+        generation_id="gen-001",
+        database=db_file,
+        manifest=m.model_dump(mode="json"),
+        unique_objects=[(pdf_file, "application/pdf", pdf_sha, len(b"%PDF content"))],
+    )
+
+    # Failed directory still exists
+    assert stale_failed.exists()
+    # Empty directory was removed
+    assert not stale_empty.exists()
+
+    # Cleanup log accurately reflects removed=1 failed=1
+    log_messages = [record.message for record in caplog.records if "Local staging cleanup" in record.message]
+    assert len(log_messages) == 1
+    assert "removed=1" in log_messages[0]
+    assert "failed=1" in log_messages[0]
+
+
 @pytest.mark.asyncio
 async def test_backup_ledger_deduplicate_and_missing_source(tmp_path: Path) -> None:
     from types import SimpleNamespace
@@ -444,10 +547,10 @@ def test_backup_cli_restore_default_target_dir_resolves_cache_hit(
             self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
 
         async def get(self, path: str, *args: Any, **kwargs: Any) -> bytes:
-            return self.storage.get(path, b"")
+            return self.storage.get(path)
 
         async def get_bytes(self, path: str, *args: Any, **kwargs: Any) -> bytes:
-            return self.storage.get(path, b"")
+            return self.storage.get(path)
 
         async def close(self) -> None:
             pass

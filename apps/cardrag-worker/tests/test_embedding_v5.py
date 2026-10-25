@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
+import re
 from typing import Any
 
 import httpx
@@ -14,6 +17,8 @@ from cardrag_core.embedding import (
 
 from cardrag_worker.embedding_v5 import (
     KOREAN_PREFLIGHT_SAMPLES,
+    QUALITY_DETAIL_SCHEMAS,
+    SEMANTIC_COLLAPSE_THRESHOLD,
     EmbeddingV5Error,
     EmbeddingV5PermanentRequestError,
     EmbeddingV5TransientError,
@@ -25,6 +30,7 @@ from cardrag_worker.embedding_v5 import (
     parse_openrouter_endpoint_metadata,
     preflight_openrouter_qwen_providers,
     select_quality_endpoint,
+    validated_quality_details,
 )
 
 BASE_URL = "https://mock.openrouter.test/api/v1"
@@ -672,16 +678,23 @@ async def test_credential_injected_preflight_compares_20_plus_korean_samples() -
         assert body["provider"]["allow_fallbacks"] is False
         assert body["provider"]["require_parameters"] is False
         assert body["input"] == list(KOREAN_PREFLIGHT_SAMPLES)
-        vector = _unit_vector(provider_id)
+        data = []
+        for index in reversed(range(len(body["input"]))):
+            dim = (index * 2) % (QWEN3_EMBEDDING_DIMENSION - 2)
+            vector = [0.0] * QWEN3_EMBEDDING_DIMENSION
+            if provider_id == "deepinfra":
+                vector[dim] = 1.0
+            else:
+                vector[dim] = 0.8
+                vector[dim + 1] = 0.6
+            data.append({"index": index, "embedding": vector})
         return httpx.Response(
             200,
             json={
                 "model": QWEN3_EMBEDDING_MODEL,
                 "provider": provider_id,
                 # Reversed response rows exercise exact index rebinding.
-                "data": [
-                    {"index": index, "embedding": vector} for index in reversed(range(len(body["input"])))
-                ],
+                "data": data,
             },
             request=request,
         )
@@ -698,3 +711,392 @@ async def test_credential_injected_preflight_compares_20_plus_korean_samples() -
     assert all(row.sample_count == len(KOREAN_PREFLIGHT_SAMPLES) for row in report.providers)
     assert all(row.minimum_repeat_cosine == pytest.approx(1.0) for row in report.providers)
     assert report.minimum_cross_provider_cosine == pytest.approx(0.8)
+
+
+def test_metadata_contract_failures_carry_typed_reason_codes() -> None:
+    with pytest.raises(EmbeddingV5Error) as wrong_model:
+        parse_openrouter_endpoint_metadata({"data": {"id": "other/model", "endpoints": []}})
+    assert wrong_model.value.reason_code == "metadata_model_id_mismatch"
+
+    with pytest.raises(EmbeddingV5Error) as bad_shape:
+        parse_openrouter_endpoint_metadata({"data": "not-an-object"})
+    assert bad_shape.value.reason_code == "metadata_shape_invalid"
+
+    with pytest.raises(EmbeddingV5Error) as no_allowlisted:
+        parse_openrouter_endpoint_metadata(
+            _metadata_payload(
+                {
+                    "name": "Other: Qwen3 Embedding",
+                    "provider_name": "Other",
+                    "tag": "otherprovider",
+                    "model_id": QWEN3_EMBEDDING_MODEL,
+                    "quantization": "bf16",
+                    "context_length": 8192,
+                    "max_prompt_tokens": 8192,
+                    "supported_parameters": ["encoding_format"],
+                }
+            )
+        )
+    assert no_allowlisted.value.reason_code == "metadata_no_allowlisted_endpoint"
+
+    endpoints = parse_openrouter_endpoint_metadata(
+        _metadata_payload(_endpoint("deepinfra", quantization="fp8"))
+    )
+    with pytest.raises(EmbeddingV5Error) as missing:
+        select_quality_endpoint(endpoints, provider_id="nebius")
+    assert missing.value.reason_code == "provider_endpoint_missing"
+    assert missing.value.provider_id == "nebius"
+
+    with pytest.raises(EmbeddingV5Error) as fp8:
+        select_quality_endpoint(endpoints, provider_id="deepinfra")
+    assert fp8.value.reason_code == "provider_endpoint_fp8"
+    assert fp8.value.provider_id == "deepinfra"
+
+
+def test_embedding_v5_error_sanitizes_untrusted_reason_and_identity() -> None:
+    plain = EmbeddingV5Error("anything")
+    assert plain.reason_code == "embedding_contract_unclassified"
+    assert plain.provider_id is None
+
+    hostile = EmbeddingV5Error("x", reason_code="Not A Code", provider_id="evil/../../")
+    assert hostile.reason_code == "embedding_contract_unclassified"
+    assert hostile.provider_id is None
+
+    transient = EmbeddingV5TransientError("rate limited", kind="rate_limit", status_code=429)
+    assert transient.reason_code == "request_rate_limit"
+
+
+@pytest.mark.asyncio
+async def test_response_contract_failures_expose_typed_reason_codes() -> None:
+    def not_json(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"definitely not json", request=request)
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        transport=httpx.MockTransport(not_json),
+    )
+    with pytest.raises(EmbeddingV5Error) as captured:
+        await provider.embed_documents(["text"])
+    assert captured.value.reason_code == "response_not_json"
+
+    def wrong_dimension(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "model": QWEN3_EMBEDDING_MODEL,
+                    "provider": "deepinfra",
+                    "data": [{"index": 0, "embedding": [1.0] * (QWEN3_EMBEDDING_DIMENSION - 1)}],
+                }
+            ).encode(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    dimension_provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="injected-test-credential",
+        profile=_profile(),
+        token_counter=lambda _text: 1,
+        base_url=BASE_URL,
+        transport=httpx.MockTransport(wrong_dimension),
+    )
+    with pytest.raises(EmbeddingV5Error) as dimension:
+        await dimension_provider.embed_documents(["text"])
+    assert dimension.value.reason_code == "response_dimension_mismatch"
+
+
+def _repeat_variation_handler(fail_index: int, cosine: float) -> Any:
+    post_calls = {"deepinfra": 0, "nebius": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json=_metadata_payload(_endpoint("deepinfra"), _endpoint("nebius")),
+                request=request,
+            )
+        body = json.loads(request.content)
+        provider_id = body["provider"]["order"][0]
+        post_calls[provider_id] = int(post_calls[provider_id]) + 1
+        vectors = []
+        for index in range(len(body["input"])):
+            dim = (index * 2) % (QWEN3_EMBEDDING_DIMENSION - 2)
+            if provider_id == "deepinfra" and post_calls["deepinfra"] == 2 and index == fail_index:
+                vector = [0.0] * QWEN3_EMBEDDING_DIMENSION
+                vector[dim] = cosine
+                vector[dim + 1] = math.sqrt(max(0.0, 1.0 - cosine * cosine))
+                vectors.append(vector)
+            else:
+                vector = [0.0] * QWEN3_EMBEDDING_DIMENSION
+                if provider_id == "deepinfra":
+                    vector[dim] = 1.0
+                else:
+                    vector[dim] = 0.8
+                    vector[dim + 1] = 0.6
+                vectors.append(vector)
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": provider_id,
+                "data": [{"index": index, "embedding": vector} for index, vector in enumerate(vectors)],
+            },
+            request=request,
+        )
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_repeat_cosine_gate_failure_exposes_structured_measurements() -> None:
+    fail_index = 3
+    transport = _repeat_variation_handler(fail_index, 0.9985)
+    with pytest.raises(EmbeddingV5Error) as captured:
+        await preflight_openrouter_qwen_providers(
+            api_key="injected-test-credential",
+            token_counter=lambda _text: 1,
+            transport=transport,
+        )
+    error = captured.value
+    assert error.reason_code == "repeat_cosine_below_gate"
+    assert error.provider_id == "deepinfra"
+    expected_sha = hashlib.sha256(KOREAN_PREFLIGHT_SAMPLES[fail_index].encode("utf-8")).hexdigest()
+    assert error.details["gate_threshold"] == pytest.approx(0.999)
+    assert error.details["minimum_cosine"] == pytest.approx(0.9985)
+    assert error.details["failed_sample_count"] == 1
+    assert error.details["sample_count"] == len(KOREAN_PREFLIGHT_SAMPLES)
+    assert error.details["first_failed_index"] == fail_index
+    assert error.details["lowest_failed_index"] == fail_index
+    assert error.details["first_failed_input_sha256"] == expected_sha
+    assert error.details["lowest_failed_input_sha256"] == expected_sha
+    assert re.fullmatch(r"[0-9a-f]{64}", str(error.details["profile_endpoint_metadata_sha256"]))
+
+
+@pytest.mark.asyncio
+async def test_repeat_cosine_gate_slight_variation_above_threshold_passes_both_providers() -> None:
+    transport = _repeat_variation_handler(3, 0.9995)
+    report = await preflight_openrouter_qwen_providers(
+        api_key="injected-test-credential",
+        token_counter=lambda _text: 1,
+        transport=transport,
+    )
+    assert [row.profile.provider_id for row in report.providers] == ["deepinfra", "nebius"]
+    assert report.providers[0].minimum_repeat_cosine == pytest.approx(0.9995)
+
+
+def test_repeat_gate_boundary_allows_exact_threshold_and_rejects_below() -> None:
+    from cardrag_worker.embedding_v5 import _repeat_gate_failures
+
+    assert _repeat_gate_failures([0.999, 1.0, 0.9990001], 0.999) == []
+    assert _repeat_gate_failures([1.0, 0.9989999999999998], 0.999) == [(1, 0.9989999999999998)]
+
+
+def test_quality_details_sanitization_boundaries() -> None:
+    hex64 = "a" * 64
+    details: dict[str, object] = {
+        "gate_threshold": 0.999,
+        "minimum_cosine": float("nan"),
+        "mean_cosine": float("inf"),
+        "sample_count": 24,
+        "huge_bytes": 2**70,
+        "first_failed_input_sha256": hex64,
+        "provider_route": "route-1.2_3",
+        "request_id": "sk-test-PRIVATE-DIAGNOSTIC-TOKEN",
+        "secret_like": "Bearer sk-supersecret-value",
+        "too_long": "x" * 65,
+        "nested": {"a": 1},
+        "ok_null": None,
+    }
+    for index in range(40):
+        details[f"extra_key_{index}"] = index
+    error = EmbeddingV5Error("quality", reason_code="repeat_cosine_below_gate", details=details)
+    assert error.details["gate_threshold"] == 0.999
+    assert error.details["sample_count"] == 24
+    assert error.details["first_failed_input_sha256"] == hex64
+    assert set(error.details) <= set(QUALITY_DETAIL_SCHEMAS["repeat_cosine_below_gate"])
+    for banned in ("minimum_cosine", "mean_cosine", "huge_bytes", "secret_like", "too_long", "nested"):
+        assert banned not in error.details
+    assert "provider_route" not in error.details
+    assert "request_id" not in error.details
+    assert "ok_null" not in error.details
+    assert "sk-test-PRIVATE-DIAGNOSTIC-TOKEN" not in repr(error.details)
+    assert "sk-supersecret" not in repr(error.details)
+
+    # Post-construction mutation must not survive any output boundary.
+    error.details["provider_response"] = "Bearer sk-test-PRIVATE-DIAGNOSTIC-TOKEN"
+    error.details["gate_threshold"] = "sk-test-PRIVATE-DIAGNOSTIC-TOKEN"
+    boundary = validated_quality_details(error.reason_code, error.details)
+    assert boundary["sample_count"] == 24
+    assert "gate_threshold" not in boundary
+    assert "provider_response" not in boundary
+    assert "sk-test-PRIVATE-DIAGNOSTIC-TOKEN" not in repr(boundary)
+
+    # Unreasoned and hostile payloads collapse to empty without expanding.
+    assert validated_quality_details("metadata_not_json", {"any": 1}) == {}
+
+    class ExplodingMapping(dict):  # type: ignore[type-arg]
+        def items(self) -> Any:  # type: ignore[override]
+            raise AssertionError("hostile mapping must not be expanded")
+
+    hostile = ExplodingMapping()
+    hostile["gate_threshold"] = "x"  # direct item bypasses the failing items()
+    assert validated_quality_details("repeat_cosine_below_gate", hostile) == {}
+
+
+@pytest.mark.asyncio
+async def test_preflight_daily_smoke_warning_band_passes_with_warning_status() -> None:
+    # 0.9972 variation (like observed on 2026-10-16 sample0) is within the warning band [0.990, 0.999).
+    transport = _repeat_variation_handler(0, 0.9972)
+    report = await preflight_openrouter_qwen_providers(
+        api_key="injected-test-credential",
+        token_counter=lambda _text: 1,
+        transport=transport,
+        mode="daily_smoke",
+        minimum_repeat_cosine=0.999,
+        hard_reject_repeat_cosine=0.990,
+    )
+    assert report.quality_status == "warning"
+    deepinfra = next(r for r in report.providers if r.profile.provider_id == "deepinfra")
+    assert deepinfra.quality_status == "warning"
+    assert deepinfra.warning_count == 1
+    assert deepinfra.minimum_repeat_cosine == pytest.approx(0.9972)
+    assert deepinfra.warning_details is not None
+    assert deepinfra.warning_details["first_failed_index"] == 0
+    assert deepinfra.warning_details["warning_threshold"] == pytest.approx(0.999)
+    assert deepinfra.warning_details["gate_threshold"] == pytest.approx(0.990)
+    assert report.warning_details == deepinfra.warning_details
+
+
+@pytest.mark.asyncio
+async def test_preflight_daily_smoke_hard_reject_fails_closed() -> None:
+    # 0.985 variation is below hard reject threshold 0.990 -> must fail-closed!
+    transport = _repeat_variation_handler(0, 0.985)
+    with pytest.raises(EmbeddingV5Error) as captured:
+        await preflight_openrouter_qwen_providers(
+            api_key="injected-test-credential",
+            token_counter=lambda _text: 1,
+            transport=transport,
+            mode="daily_smoke",
+            minimum_repeat_cosine=0.999,
+            hard_reject_repeat_cosine=0.990,
+        )
+    assert captured.value.reason_code == "repeat_cosine_below_gate"
+    assert captured.value.details["gate_threshold"] == pytest.approx(0.990)
+    assert captured.value.details["minimum_cosine"] == pytest.approx(0.985)
+
+
+@pytest.mark.asyncio
+async def test_preflight_evaluates_only_specified_provider() -> None:
+    transport = _repeat_variation_handler(0, 0.9995)
+    report = await preflight_openrouter_qwen_providers(
+        api_key="injected-test-credential",
+        token_counter=lambda _text: 1,
+        transport=transport,
+        provider_ids=("deepinfra",),
+        mode="daily_smoke",
+    )
+    assert len(report.providers) == 1
+    assert report.providers[0].profile.provider_id == "deepinfra"
+    assert report.cross_provider_cosines == ()
+    assert report.minimum_cross_provider_cosine is None
+    assert report.mean_cross_provider_cosine is None
+    assert report.cross_evaluated is False
+    assert report.quality_status == "passed"
+
+
+@pytest.mark.asyncio
+async def test_preflight_detects_semantic_collapse_when_enabled() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_metadata_payload(_endpoint("deepinfra")), request=request)
+        body = json.loads(request.content)
+        constant = [0.0] * QWEN3_EMBEDDING_DIMENSION
+        constant[0] = 1.0
+        return httpx.Response(
+            200,
+            json={
+                "model": QWEN3_EMBEDDING_MODEL,
+                "provider": "deepinfra",
+                "data": [{"index": i, "embedding": constant} for i in range(len(body["input"]))],
+            },
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    with pytest.raises(EmbeddingV5Error) as captured:
+        await preflight_openrouter_qwen_providers(
+            api_key="injected-test-credential",
+            token_counter=lambda _text: 1,
+            transport=transport,
+            provider_ids=("deepinfra",),
+            mode="daily_smoke",
+        )
+    assert captured.value.reason_code == "embedding_semantic_collapsed"
+    assert captured.value.details["cross_sample_cosine"] == pytest.approx(1.0)
+    assert captured.value.details["gate_threshold"] == pytest.approx(SEMANTIC_COLLAPSE_THRESHOLD)
+
+
+def test_openrouter_provider_defensively_copies_and_validates_quality_details_and_metadata() -> None:
+    profile = _profile("deepinfra")
+
+    hostile_input = {
+        "gate_threshold": 0.990,
+        "warning_threshold": 0.999,
+        "minimum_cosine": 0.995,
+        "mean_cosine": 0.998,
+        "failed_sample_count": 1,
+        "sample_count": 24,
+        "first_failed_index": 0,
+        "lowest_failed_index": 0,
+        "first_failed_input_sha256": "a" * 64,
+        "lowest_failed_input_sha256": "b" * 64,
+        "profile_endpoint_metadata_sha256": "c" * 64,
+        "leak_marker": "unauthorized_private_key",
+        "nested": {"secret": 1},
+    }
+
+    provider = OpenRouterQwenEmbeddingProviderV5(
+        api_key="test-key",
+        profile=profile,
+        token_counter=lambda _text: 1,
+        quality_status="warning",
+        quality_details=hostile_input,
+        preflight_mode="daily_smoke",
+        evaluated_provider_count=1,
+        cross_evaluated=False,
+        minimum_cross_provider_cosine=0.995,  # must be ignored because cross_evaluated=False
+        mean_cross_provider_cosine=0.998,  # must be ignored because cross_evaluated=False
+    )
+
+    # Unauthorized keys are dropped at construction
+    assert provider.quality_details is not None
+    assert "leak_marker" not in provider.quality_details
+    assert "nested" not in provider.quality_details
+    assert provider.quality_details["minimum_cosine"] == 0.995
+    assert provider.quality_details["gate_threshold"] == 0.990
+
+    # Mutating original input dict does not affect provider.quality_details
+    hostile_input["minimum_cosine"] = 0.5
+    assert provider.quality_details["minimum_cosine"] == 0.995
+
+    # Preflight metadata checks
+    assert provider.quality_status == "warning"
+    assert provider.preflight_mode == "daily_smoke"
+    assert provider.evaluated_provider_count == 1
+    assert provider.cross_evaluated is False
+    assert provider.minimum_cross_provider_cosine is None
+    assert provider.mean_cross_provider_cosine is None
+
+    # Invalid quality_status fallback to passed
+    provider_invalid = OpenRouterQwenEmbeddingProviderV5(
+        api_key="test-key",
+        profile=profile,
+        token_counter=lambda _text: 1,
+        quality_status="unknown_status",
+        quality_details=hostile_input,
+    )
+    assert provider_invalid.quality_status == "passed"
+    assert provider_invalid.quality_details is None

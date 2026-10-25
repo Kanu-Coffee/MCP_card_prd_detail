@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -50,6 +51,9 @@ DEFAULT_MAX_SERVING_DATABASE_BYTES: Final = 32 * GIB
 FLOAT32_BYTES: Final = 4
 VECTOR_ROW_BYTES: Final = QWEN3_EMBEDDING_DIMENSION * FLOAT32_BYTES
 SQLITE_PAGE_BYTES: Final = 4096
+
+_REASON_CODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{2,63}")
+_DETAIL_KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{2,63}")
 
 # A cache row has one 16 KiB BLOB plus a WITHOUT ROWID primary tree and a
 # profile/input secondary index. Two vector rows are reserved per miss so the
@@ -97,7 +101,54 @@ BASE_DATABASE_METADATA_ROWS: Final = 62
 
 
 class V5CapacityError(RuntimeError):
-    """A v5 build cannot be proven to fit a configured or physical bound."""
+    """A v5 build cannot be proven to fit a configured or physical bound.
+
+    ``reason_code`` names the exact rejected gate and ``details`` carries only
+    bounded integers (or null with the gate that failed to measure), so the
+    journal, CLI payload, and run record preserve the sub-gate without raw
+    exception text.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str | None = None,
+        details: Mapping[str, int | None] | None = None,
+    ) -> None:
+        code = reason_code if isinstance(reason_code, str) else None
+        self.reason_code: str = (
+            code if code is not None and _REASON_CODE_PATTERN.fullmatch(code) else "capacity_unclassified"
+        )
+        safe: dict[str, int | None] = {}
+        if isinstance(details, Mapping):
+            for key, value in details.items():
+                if not isinstance(key, str) or not _DETAIL_KEY_PATTERN.fullmatch(key):
+                    continue
+                if value is None or (type(value) is int and -MAX_SAFE_BYTES <= value <= MAX_SAFE_BYTES):
+                    safe[key] = value
+        self.details: dict[str, int | None] = safe
+        super().__init__(message)
+
+
+# Structured rejection reasons.  Each one names exactly one gate so a reserved
+# free-space deficit is never confused with a file-size, quota, or WAL bound.
+CAPACITY_AVAILABLE_UNMEASURED = "capacity_available_unmeasured"
+CAPACITY_BYTES_RANGE_EXCEEDED = "capacity_bytes_range_exceeded"
+CAPACITY_DATABASE_LIMIT = "capacity_database_limit"
+CAPACITY_FREE_SPACE = "capacity_free_space"
+CAPACITY_PATH_INVALID = "capacity_path_invalid"
+CAPACITY_PATH_UNAVAILABLE = "capacity_path_unavailable"
+CAPACITY_POLICY_LOST = "capacity_policy_lost"
+CAPACITY_PREDICTION_CONTRACT_INVALID = "capacity_prediction_contract_invalid"
+CAPACITY_REMAINING_FREE_SPACE = "capacity_remaining_free_space"
+CAPACITY_SIDECAR_LIMIT = "capacity_sidecar_limit"
+CAPACITY_STARTUP_FREE_SPACE = "capacity_startup_free_space"
+CAPACITY_STATE_QUOTA = "capacity_state_quota"
+CAPACITY_STATE_ROOT_CHANGED = "capacity_state_root_changed"
+CAPACITY_WAL_BASELINE_UNSEALED = "capacity_wal_baseline_unsealed"
+CAPACITY_WAL_BOUND_EXCEEDED = "capacity_wal_bound_exceeded"
+CAPACITY_WAL_RESEAL_FAILED = "capacity_wal_reseal_failed"
 
 
 def _bounded_integer(value: int, *, label: str, allow_zero: bool) -> int:
@@ -112,7 +163,15 @@ def _checked_add(left: int, right: int, *, label: str) -> int:
     _bounded_integer(left, label=label, allow_zero=True)
     _bounded_integer(right, label=label, allow_zero=True)
     if right > MAX_SAFE_BYTES - left:
-        raise V5CapacityError(f"{label} exceeds the supported byte range")
+        raise V5CapacityError(
+            f"{label} exceeds the supported byte range",
+            reason_code=CAPACITY_BYTES_RANGE_EXCEEDED,
+            details={
+                "maximum_safe_bytes": MAX_SAFE_BYTES,
+                "left_bytes": left,
+                "right_bytes": right,
+            },
+        )
     return left + right
 
 
@@ -120,7 +179,15 @@ def _checked_multiply(left: int, right: int, *, label: str) -> int:
     _bounded_integer(left, label=label, allow_zero=True)
     _bounded_integer(right, label=label, allow_zero=True)
     if left and right > MAX_SAFE_BYTES // left:
-        raise V5CapacityError(f"{label} exceeds the supported byte range")
+        raise V5CapacityError(
+            f"{label} exceeds the supported byte range",
+            reason_code=CAPACITY_BYTES_RANGE_EXCEEDED,
+            details={
+                "maximum_safe_bytes": MAX_SAFE_BYTES,
+                "left_bytes": left,
+                "right_bytes": right,
+            },
+        )
     return left * right
 
 
@@ -281,6 +348,9 @@ class V5CapacitySnapshot:
     state_usage_bytes: int
     filesystem_free_bytes: int
     prediction: V5ArtifactPrediction
+    required_free_bytes: int | None = None
+    policy: V5CapacityPolicy | None = None
+    probe_path: Path | None = None
 
     @property
     def projected_state_bytes(self) -> int:
@@ -369,7 +439,10 @@ def _text_binding_bytes(*values: str | None) -> int:
         try:
             amount = len(value.encode("utf-8"))
         except UnicodeEncodeError:
-            raise V5CapacityError("database text binding is not valid UTF-8") from None
+            raise V5CapacityError(
+                "database text binding is not valid UTF-8",
+                reason_code=CAPACITY_PREDICTION_CONTRACT_INVALID,
+            ) from None
         total = _checked_add(total, amount, label="database payload bytes")
     return total
 
@@ -868,7 +941,11 @@ def predict_v5_local_artifacts(
         label="v5 peak filesystem growth",
     )
     if peak_growth < logical_growth:  # Defensive if the accounting model is edited later.
-        raise V5CapacityError("v5 peak growth is smaller than logical growth")
+        raise V5CapacityError(
+            "v5 peak growth is smaller than logical growth",
+            reason_code=CAPACITY_PREDICTION_CONTRACT_INVALID,
+            details={"peak_growth_bytes": peak_growth, "logical_growth_bytes": logical_growth},
+        )
 
     return V5ArtifactPrediction(
         derived_view_count=views,
@@ -896,7 +973,10 @@ def _directory_open_flags() -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
     if nofollow is None or directory is None:
-        raise V5CapacityError("Worker capacity checks require no-follow directory descriptors")
+        raise V5CapacityError(
+            "Worker capacity checks require no-follow directory descriptors",
+            reason_code=CAPACITY_PATH_UNAVAILABLE,
+        )
     return int(os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0))
 
 
@@ -913,7 +993,10 @@ def _open_capacity_directory(
     try:
         descriptor = os.open(os.sep, flags)
     except OSError:
-        raise V5CapacityError("Worker state filesystem root is unavailable") from None
+        raise V5CapacityError(
+            "Worker state filesystem root is unavailable",
+            reason_code=CAPACITY_PATH_UNAVAILABLE,
+        ) from None
     probe = Path(os.sep)
     try:
         for component in requested.parts[1:]:
@@ -923,24 +1006,43 @@ def _open_capacity_directory(
                 if allow_missing_suffix:
                     yield requested, probe, descriptor
                     return
-                raise V5CapacityError("Worker state capacity root is unavailable") from None
-            except OSError:
-                raise V5CapacityError("Worker state filesystem path is unavailable") from None
+                raise V5CapacityError(
+                    "Worker state capacity root is unavailable",
+                    reason_code=CAPACITY_PATH_UNAVAILABLE,
+                ) from None
+            except OSError as exc:
+                raise V5CapacityError(
+                    "Worker state filesystem path is unavailable",
+                    reason_code=CAPACITY_PATH_UNAVAILABLE,
+                    details={"probe_errno": exc.errno},
+                ) from None
             if stat.S_ISLNK(before.st_mode):
-                raise V5CapacityError("Worker state filesystem path contains a symlink")
+                raise V5CapacityError(
+                    "Worker state filesystem path contains a symlink",
+                    reason_code=CAPACITY_PATH_INVALID,
+                )
             if not stat.S_ISDIR(before.st_mode):
-                raise V5CapacityError("Worker state filesystem path contains a non-directory")
+                raise V5CapacityError(
+                    "Worker state filesystem path contains a non-directory",
+                    reason_code=CAPACITY_PATH_INVALID,
+                )
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
             except OSError:
-                raise V5CapacityError("Worker state filesystem path changed during traversal") from None
+                raise V5CapacityError(
+                    "Worker state filesystem path changed during traversal",
+                    reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                ) from None
             try:
                 after = os.fstat(child)
                 if not stat.S_ISDIR(after.st_mode) or (before.st_dev, before.st_ino) != (
                     after.st_dev,
                     after.st_ino,
                 ):
-                    raise V5CapacityError("Worker state filesystem path changed during traversal")
+                    raise V5CapacityError(
+                        "Worker state filesystem path changed during traversal",
+                        reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                    )
             except BaseException:
                 os.close(child)
                 raise
@@ -983,37 +1085,64 @@ def _tree_usage_fd(descriptor: int, *, filesystem_device: int) -> int:
     try:
         directory_before = os.fstat(descriptor)
     except OSError:
-        raise V5CapacityError("Worker state capacity tree changed during traversal") from None
+        raise V5CapacityError(
+            "Worker state capacity tree changed during traversal",
+            reason_code=CAPACITY_STATE_ROOT_CHANGED,
+        ) from None
     if not stat.S_ISDIR(directory_before.st_mode) or directory_before.st_dev != filesystem_device:
-        raise V5CapacityError("Worker state capacity tree changed during traversal")
+        raise V5CapacityError(
+            "Worker state capacity tree changed during traversal",
+            reason_code=CAPACITY_STATE_ROOT_CHANGED,
+        )
     try:
         names = sorted(os.listdir(descriptor))
     except OSError:
-        raise V5CapacityError("Worker state capacity tree is unreadable") from None
+        raise V5CapacityError(
+            "Worker state capacity tree is unreadable",
+            reason_code=CAPACITY_PATH_UNAVAILABLE,
+        ) from None
     total = 0
     for name in names:
         try:
             before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
         except OSError:
-            raise V5CapacityError("Worker state capacity tree changed during traversal") from None
+            raise V5CapacityError(
+                "Worker state capacity tree changed during traversal",
+                reason_code=CAPACITY_STATE_ROOT_CHANGED,
+            ) from None
         mode = before.st_mode
         if before.st_dev != filesystem_device:
-            raise V5CapacityError("Worker state capacity tree crosses a filesystem boundary")
+            raise V5CapacityError(
+                "Worker state capacity tree crosses a filesystem boundary",
+                reason_code=CAPACITY_PATH_INVALID,
+            )
         if stat.S_ISLNK(mode):
-            raise V5CapacityError("Worker state capacity tree contains a symlink")
+            raise V5CapacityError(
+                "Worker state capacity tree contains a symlink",
+                reason_code=CAPACITY_PATH_INVALID,
+            )
         if stat.S_ISDIR(mode):
             try:
                 child = os.open(name, _directory_open_flags(), dir_fd=descriptor)
             except OSError:
-                raise V5CapacityError("Worker state capacity tree changed during traversal") from None
+                raise V5CapacityError(
+                    "Worker state capacity tree changed during traversal",
+                    reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                ) from None
             try:
                 opened = os.fstat(child)
                 if not stat.S_ISDIR(opened.st_mode) or not _same_observed_entry(before, opened):
-                    raise V5CapacityError("Worker state capacity tree changed during traversal")
+                    raise V5CapacityError(
+                        "Worker state capacity tree changed during traversal",
+                        reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                    )
                 amount = _tree_usage_fd(child, filesystem_device=filesystem_device)
                 child_after = os.fstat(child)
                 if not _same_observed_entry(opened, child_after):
-                    raise V5CapacityError("Worker state capacity tree changed during traversal")
+                    raise V5CapacityError(
+                        "Worker state capacity tree changed during traversal",
+                        reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                    )
             finally:
                 os.close(child)
         elif stat.S_ISREG(mode):
@@ -1026,40 +1155,68 @@ def _tree_usage_fd(descriptor: int, *, filesystem_device: int) -> int:
             try:
                 child = os.open(name, file_flags, dir_fd=descriptor)
             except OSError:
-                raise V5CapacityError("Worker state capacity tree changed during traversal") from None
+                raise V5CapacityError(
+                    "Worker state capacity tree changed during traversal",
+                    reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                ) from None
             try:
                 opened = os.fstat(child)
                 if not stat.S_ISREG(opened.st_mode) or not _same_observed_entry(before, opened):
-                    raise V5CapacityError("Worker state capacity tree changed during traversal")
+                    raise V5CapacityError(
+                        "Worker state capacity tree changed during traversal",
+                        reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                    )
                 amount = opened.st_size
                 child_after = os.fstat(child)
                 if not _same_observed_entry(opened, child_after):
-                    raise V5CapacityError("Worker state capacity tree changed during traversal")
+                    raise V5CapacityError(
+                        "Worker state capacity tree changed during traversal",
+                        reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                    )
             finally:
                 os.close(child)
         else:
-            raise V5CapacityError("Worker state capacity tree contains a non-regular entry")
+            raise V5CapacityError(
+                "Worker state capacity tree contains a non-regular entry",
+                reason_code=CAPACITY_PATH_INVALID,
+            )
         try:
             entry_after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
         except OSError:
-            raise V5CapacityError("Worker state capacity tree changed during traversal") from None
+            raise V5CapacityError(
+                "Worker state capacity tree changed during traversal",
+                reason_code=CAPACITY_STATE_ROOT_CHANGED,
+            ) from None
         if not _same_observed_entry(before, entry_after):
-            raise V5CapacityError("Worker state capacity tree changed during traversal")
+            raise V5CapacityError(
+                "Worker state capacity tree changed during traversal",
+                reason_code=CAPACITY_STATE_ROOT_CHANGED,
+            )
         total = _checked_add(total, amount, label="Worker state usage")
     try:
         directory_after = os.fstat(descriptor)
     except OSError:
-        raise V5CapacityError("Worker state capacity tree changed during traversal") from None
+        raise V5CapacityError(
+            "Worker state capacity tree changed during traversal",
+            reason_code=CAPACITY_STATE_ROOT_CHANGED,
+        ) from None
     if not _same_observed_entry(directory_before, directory_after):
-        raise V5CapacityError("Worker state capacity tree changed during traversal")
+        raise V5CapacityError(
+            "Worker state capacity tree changed during traversal",
+            reason_code=CAPACITY_STATE_ROOT_CHANGED,
+        )
     return total
 
 
 def _filesystem_free_bytes(descriptor: int) -> int:
     try:
         filesystem = os.fstatvfs(descriptor)
-    except OSError:
-        raise V5CapacityError("Worker filesystem free space is unavailable") from None
+    except OSError as exc:
+        raise V5CapacityError(
+            "Worker filesystem free space is unavailable",
+            reason_code=CAPACITY_AVAILABLE_UNMEASURED,
+            details={"available_bytes": None, "probe_errno": exc.errno},
+        ) from None
     return _checked_multiply(
         filesystem.f_bavail,
         filesystem.f_frsize,
@@ -1151,7 +1308,16 @@ def preflight_v5_remaining_free_capacity(
     ):
         free_bytes = _filesystem_free_bytes(descriptor)
     if required > free_bytes:
-        raise V5CapacityError("Worker remaining free-space gate rejected v5 artifacts")
+        raise V5CapacityError(
+            "Worker remaining free-space gate rejected v5 artifacts",
+            reason_code=CAPACITY_REMAINING_FREE_SPACE,
+            details={
+                "remaining_misses": remaining_embedding_cache_miss_count,
+                "required_free_bytes": required,
+                "available_bytes": free_bytes,
+                "deficit_bytes": required - free_bytes,
+            },
+        )
     return V5RemainingCapacitySnapshot(
         root=requested,
         filesystem_free_bytes=free_bytes,
@@ -1185,9 +1351,21 @@ def preflight_worker_start_capacity(
         try:
             filesystem_id = int(os.fstatvfs(descriptor).f_fsid)
         except (AttributeError, OSError, TypeError, ValueError):
-            raise V5CapacityError("Worker startup filesystem identity is unavailable") from None
+            raise V5CapacityError(
+                "Worker startup filesystem identity is unavailable",
+                reason_code=CAPACITY_AVAILABLE_UNMEASURED,
+                details={"available_bytes": free_bytes, "filesystem_id_bytes": None},
+            ) from None
     if free_bytes < minimum:
-        raise V5CapacityError("Worker minimum startup free-space gate rejected this run")
+        raise V5CapacityError(
+            "Worker minimum startup free-space gate rejected this run",
+            reason_code=CAPACITY_STARTUP_FREE_SPACE,
+            details={
+                "available_bytes": free_bytes,
+                "minimum_free_bytes": minimum,
+                "deficit_bytes": minimum - free_bytes,
+            },
+        )
     return WorkerStartCapacitySnapshot(
         requested_state_root=requested,
         filesystem_probe_path=probe,
@@ -1217,7 +1395,10 @@ def revalidate_worker_start_capacity(
         has_state_root_device != has_state_root_inode
         or snapshot.state_root_existed != has_state_root_identity
     ):
-        raise V5CapacityError("Worker startup state-root identity evidence is inconsistent")
+        raise V5CapacityError(
+            "Worker startup state-root identity evidence is inconsistent",
+            reason_code=CAPACITY_STATE_ROOT_CHANGED,
+        )
     with _open_capacity_directory(snapshot.filesystem_probe_path, allow_missing_suffix=False) as (
         _requested_probe,
         _probe,
@@ -1228,7 +1409,14 @@ def revalidate_worker_start_capacity(
             snapshot.probe_device,
             snapshot.probe_inode,
         ):
-            raise V5CapacityError("Worker startup filesystem ancestry changed after preflight")
+            raise V5CapacityError(
+                "Worker startup filesystem ancestry changed after preflight",
+                reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                details={
+                    "observed_device": probe_stat.st_dev,
+                    "expected_device": snapshot.probe_device,
+                },
+            )
     with _open_capacity_directory(snapshot.requested_state_root, allow_missing_suffix=False) as (
         requested,
         _state_probe,
@@ -1241,19 +1429,54 @@ def revalidate_worker_start_capacity(
             and (state_stat.st_dev, state_stat.st_ino)
             != (snapshot.state_root_device, snapshot.state_root_inode)
         ):
-            raise V5CapacityError("Worker state root changed after startup preflight")
+            raise V5CapacityError(
+                "Worker state root changed after startup preflight",
+                reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                details={
+                    "observed_device": state_stat.st_dev,
+                    "expected_device": snapshot.state_root_device
+                    if snapshot.state_root_device is not None
+                    else -1,
+                },
+            )
         if state_stat.st_dev != snapshot.filesystem_device:
-            raise V5CapacityError("Worker state root moved to another filesystem")
+            raise V5CapacityError(
+                "Worker state root moved to another filesystem",
+                reason_code=CAPACITY_STATE_ROOT_CHANGED,
+                details={
+                    "observed_device": state_stat.st_dev,
+                    "expected_device": snapshot.filesystem_device,
+                },
+            )
         _tree_usage_fd(descriptor, filesystem_device=state_stat.st_dev)
         free_bytes = _filesystem_free_bytes(descriptor)
         try:
             filesystem_id = int(os.fstatvfs(descriptor).f_fsid)
         except (AttributeError, OSError, TypeError, ValueError):
-            raise V5CapacityError("Worker startup filesystem identity is unavailable") from None
+            raise V5CapacityError(
+                "Worker startup filesystem identity is unavailable",
+                reason_code=CAPACITY_AVAILABLE_UNMEASURED,
+                details={"available_bytes": free_bytes, "filesystem_id_bytes": None},
+            ) from None
     if filesystem_id != snapshot.filesystem_id:
-        raise V5CapacityError("Worker startup filesystem identity changed after preflight")
+        raise V5CapacityError(
+            "Worker startup filesystem identity changed after preflight",
+            reason_code=CAPACITY_STATE_ROOT_CHANGED,
+            details={
+                "observed_filesystem_id": filesystem_id,
+                "expected_filesystem_id": snapshot.filesystem_id,
+            },
+        )
     if free_bytes < snapshot.minimum_free_bytes:
-        raise V5CapacityError("Worker minimum startup free-space gate rejected this run")
+        raise V5CapacityError(
+            "Worker minimum startup free-space gate rejected this run",
+            reason_code=CAPACITY_STARTUP_FREE_SPACE,
+            details={
+                "available_bytes": free_bytes,
+                "minimum_free_bytes": snapshot.minimum_free_bytes,
+                "deficit_bytes": snapshot.minimum_free_bytes - free_bytes,
+            },
+        )
     return WorkerStartCapacitySnapshot(
         requested_state_root=requested,
         filesystem_probe_path=snapshot.filesystem_probe_path,
@@ -1283,11 +1506,34 @@ def preflight_v5_capacity(
     if not isinstance(selected, V5CapacityPolicy):
         raise TypeError("policy must be a V5CapacityPolicy")
     if prediction.vector_dimension != 4096 or prediction.vector_row_bytes != 4096 * FLOAT32_BYTES:
-        raise V5CapacityError("v5 capacity prediction violates the exact 4096D FP32 contract")
+        raise V5CapacityError(
+            "v5 capacity prediction violates the exact 4096D FP32 contract",
+            reason_code=CAPACITY_PREDICTION_CONTRACT_INVALID,
+            details={
+                "vector_dimension": prediction.vector_dimension,
+                "vector_row_bytes": prediction.vector_row_bytes,
+            },
+        )
     if prediction.vector_sidecar_bytes > selected.maximum_vector_sidecar_bytes:
-        raise V5CapacityError("v5 vector sidecar exceeds the configured file limit")
+        raise V5CapacityError(
+            "v5 vector sidecar exceeds the configured file limit",
+            reason_code=CAPACITY_SIDECAR_LIMIT,
+            details={
+                "predicted_sidecar_bytes": prediction.vector_sidecar_bytes,
+                "limit_bytes": selected.maximum_vector_sidecar_bytes,
+                "deficit_bytes": prediction.vector_sidecar_bytes - selected.maximum_vector_sidecar_bytes,
+            },
+        )
     if prediction.serving_database_bytes > selected.maximum_serving_database_bytes:
-        raise V5CapacityError("predicted v5 serving database exceeds the configured file limit")
+        raise V5CapacityError(
+            "predicted v5 serving database exceeds the configured file limit",
+            reason_code=CAPACITY_DATABASE_LIMIT,
+            details={
+                "predicted_database_bytes": prediction.serving_database_bytes,
+                "limit_bytes": selected.maximum_serving_database_bytes,
+                "deficit_bytes": prediction.serving_database_bytes - selected.maximum_serving_database_bytes,
+            },
+        )
 
     with _open_capacity_directory(root, allow_missing_suffix=False) as (
         requested,
@@ -1298,7 +1544,16 @@ def preflight_v5_capacity(
         if usage > selected.maximum_state_bytes or (
             prediction.logical_growth_bytes > selected.maximum_state_bytes - usage
         ):
-            raise V5CapacityError("Worker state quota has insufficient capacity for v5 artifacts")
+            raise V5CapacityError(
+                "Worker state quota has insufficient capacity for v5 artifacts",
+                reason_code=CAPACITY_STATE_QUOTA,
+                details={
+                    "state_usage_bytes": usage,
+                    "logical_growth_bytes": prediction.logical_growth_bytes,
+                    "limit_bytes": selected.maximum_state_bytes,
+                    "deficit_bytes": usage + prediction.logical_growth_bytes - selected.maximum_state_bytes,
+                },
+            )
         free_bytes = _filesystem_free_bytes(descriptor)
     required_free = _checked_add(
         prediction.peak_growth_bytes,
@@ -1306,16 +1561,45 @@ def preflight_v5_capacity(
         label="v5 required filesystem bytes",
     )
     if required_free > free_bytes:
-        raise V5CapacityError("Worker reserved free-space gate rejected v5 artifacts")
+        raise V5CapacityError(
+            "Worker reserved free-space gate rejected v5 artifacts",
+            reason_code=CAPACITY_FREE_SPACE,
+            details={
+                "peak_growth_bytes": prediction.peak_growth_bytes,
+                "reserved_free_bytes": selected.reserved_free_space_bytes,
+                "required_free_bytes": required_free,
+                "available_bytes": free_bytes,
+                "deficit_bytes": required_free - free_bytes,
+            },
+        )
     return V5CapacitySnapshot(
         root=requested,
         state_usage_bytes=usage,
         filesystem_free_bytes=free_bytes,
         prediction=prediction,
+        required_free_bytes=required_free,
+        policy=selected,
+        probe_path=requested,
     )
 
 
 __all__ = [
+    "CAPACITY_AVAILABLE_UNMEASURED",
+    "CAPACITY_BYTES_RANGE_EXCEEDED",
+    "CAPACITY_DATABASE_LIMIT",
+    "CAPACITY_FREE_SPACE",
+    "CAPACITY_PATH_INVALID",
+    "CAPACITY_PATH_UNAVAILABLE",
+    "CAPACITY_POLICY_LOST",
+    "CAPACITY_PREDICTION_CONTRACT_INVALID",
+    "CAPACITY_REMAINING_FREE_SPACE",
+    "CAPACITY_SIDECAR_LIMIT",
+    "CAPACITY_STARTUP_FREE_SPACE",
+    "CAPACITY_STATE_QUOTA",
+    "CAPACITY_STATE_ROOT_CHANGED",
+    "CAPACITY_WAL_BASELINE_UNSEALED",
+    "CAPACITY_WAL_BOUND_EXCEEDED",
+    "CAPACITY_WAL_RESEAL_FAILED",
     "DATABASE_EXPORT_PEAK_MULTIPLIER",
     "DATABASE_FIXED_BYTES",
     "DATABASE_FTS_INDEXED_TEXT_MULTIPLIER",

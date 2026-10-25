@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -13,12 +14,18 @@ import subprocess
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import typer
-from cardrag_core import STABLE_POINTER_PATH, OCRInput, content_addressed_ocr_reuse_key
+from cardrag_core import (
+    STABLE_POINTER_PATH,
+    OCRInput,
+    canonical_json_bytes,
+    content_addressed_ocr_reuse_key,
+)
 
 from .adoption import (
     ADOPTION_POLICY_VERSION,
@@ -33,7 +40,7 @@ from .adoption import (
     write_reports,
 )
 from .aggregation_profile_v5 import load_verified_aggregation_profile_v5
-from .backup import BackupLedger
+from .backup import BackupLedger, canonical_remote_root
 from .cache_seed import (
     CacheSeedError,
     apply_cache_seed,
@@ -51,6 +58,7 @@ from .cache_seed_v109 import (
 from .capacity_v5 import (
     V5CapacityError,
     V5CapacityPolicy,
+    WorkerStartCapacitySnapshot,
     preflight_worker_start_capacity,
     revalidate_worker_start_capacity,
 )
@@ -68,7 +76,10 @@ from .embedding_v5 import (
     EmbeddingV5RequestError,
     EmbeddingV5TransientError,
     OpenRouterQwenEmbeddingProviderV5,
+    ProviderComparisonReport,
+    StartupDeadlineExceededError,
     preflight_openrouter_qwen_providers,
+    validated_quality_details,
 )
 from .gc import GCPartialFailure, _generation_chain, collect_garbage
 from .issuers import enabled_adapters
@@ -440,6 +451,18 @@ def _echo_ocr_systemic_failure(exc: OCRSystemicFailureError) -> None:
     if failure.stderr_size_bytes is not None:
         payload["stderr_size_bytes"] = failure.stderr_size_bytes
         payload["stderr_sha256"] = failure.stderr_sha256
+    if failure.stdout_size_bytes is not None:
+        payload["stdout_size_bytes"] = failure.stdout_size_bytes
+        payload["stdout_sha256"] = failure.stdout_sha256
+    if failure.provider is not None:
+        payload["provider"] = failure.provider
+    if failure.classification_basis is not None:
+        payload["classification_basis"] = failure.classification_basis
+    if failure.chunk_index is not None:
+        payload["chunk_index"] = failure.chunk_index
+    if failure.page_start is not None:
+        payload["page_start"] = failure.page_start
+        payload["page_end"] = failure.page_end
     _echo(payload)
 
 
@@ -465,13 +488,227 @@ def _probe_codex_version(executable: str | None) -> str | None:
     return None
 
 
+_WORKER_STARTUP_HISTORY_FILENAME = "startup-attempt-history.jsonl"
+_WORKER_STARTUP_HISTORY_MAX_BYTES = 262144
+# Metadata content-availability failures are re-fetched by a fresh stage
+# attempt (the HTTP layer already retried transport/status transients).
+# Deterministic contract violations are never in this set.
+WORKER_STARTUP_RETRYABLE_REASON_CODES = frozenset(
+    {
+        "metadata_not_json",
+        "metadata_shape_invalid",
+        "metadata_no_allowlisted_endpoint",
+        "provider_endpoint_missing",
+    }
+)
+_WORKER_STARTUP_RETRY_DELAY_SECONDS = 30.0
+
+
+class StartupAttemptRecorder:
+    """Bounded persistent journal for pre-run startup attempts.
+
+    The systemd journal is the primary store; this JSONL sidecar survives
+    short-lived containers and is capped in size and record count.  A storage
+    failure here must never mask the real startup outcome, so the recorder
+    degrades to the journal instead of raising.
+    """
+
+    def __init__(self, state_dir: Path, correlation_id: str) -> None:
+        self.state_dir = state_dir
+        self.correlation_id = correlation_id
+        self.path = state_dir / _WORKER_STARTUP_HISTORY_FILENAME
+        self._enabled = state_dir.is_dir()
+
+    def record(
+        self,
+        stage: str,
+        status: str,
+        *,
+        reason_code: str | None = None,
+        provider_id: str | None = None,
+        attempt: int = 1,
+        attempt_max: int = 1,
+        elapsed_seconds: float | None = None,
+        decision: str | None = None,
+        next_retry_seconds: float | None = None,
+        retry_eligible: bool | None = None,
+        quality_details: dict[str, int | float | str | None] | None = None,
+        quality_status: str | None = None,
+        preflight_mode: str | None = None,
+        evaluated_provider_count: int | None = None,
+        cross_evaluated: bool | None = None,
+        minimum_cross_provider_cosine: float | None = None,
+    ) -> None:
+        if not self._enabled:
+            return
+        record = {
+            "schema_version": "cardrag.worker-startup-attempt.v1",
+            "correlation_id": self.correlation_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "stage": stage,
+            "status": status,
+            "attempt": attempt,
+            "attempt_max": attempt_max,
+        }
+        if reason_code is not None:
+            record["reason_code"] = reason_code
+        if provider_id is not None:
+            record["provider_id"] = provider_id
+        if elapsed_seconds is not None:
+            record["elapsed_seconds"] = round(elapsed_seconds, 3)
+        if decision is not None:
+            record["decision"] = decision
+        if next_retry_seconds is not None:
+            record["next_retry_seconds"] = next_retry_seconds
+        if retry_eligible is not None:
+            record["retry_eligible"] = retry_eligible
+        if quality_status is not None:
+            record["quality_status"] = quality_status if quality_status in {"passed", "warning"} else "passed"
+        if quality_details:
+            boundary = validated_quality_details(reason_code or "repeat_cosine_warning", quality_details)
+            if boundary:
+                record["quality_details"] = boundary
+        if preflight_mode is not None:
+            record["preflight_mode"] = (
+                preflight_mode if preflight_mode in {"daily_smoke", "qualification"} else "daily_smoke"
+            )
+        if evaluated_provider_count is not None:
+            record["evaluated_provider_count"] = (
+                evaluated_provider_count
+                if isinstance(evaluated_provider_count, int) and evaluated_provider_count >= 1
+                else 1
+            )
+        if cross_evaluated is not None:
+            cross_bool = bool(cross_evaluated)
+            record["cross_evaluated"] = cross_bool
+            if (
+                cross_bool
+                and type(minimum_cross_provider_cosine) is float
+                and math.isfinite(minimum_cross_provider_cosine)
+                and -1.0 <= minimum_cross_provider_cosine <= 1.0
+            ):
+                record["minimum_cross_provider_cosine"] = minimum_cross_provider_cosine
+            else:
+                record["minimum_cross_provider_cosine"] = None
+        elif minimum_cross_provider_cosine is not None:
+            if (
+                type(minimum_cross_provider_cosine) is float
+                and math.isfinite(minimum_cross_provider_cosine)
+                and -1.0 <= minimum_cross_provider_cosine <= 1.0
+            ):
+                record["minimum_cross_provider_cosine"] = minimum_cross_provider_cosine
+            else:
+                record["minimum_cross_provider_cosine"] = None
+        dir_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            dir_fd = os.open(self.state_dir, dir_flags)
+        except OSError as exc:
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Startup attempt history unavailable reason=storage errno=%s correlation_id=%s",
+                exc.errno,
+                self.correlation_id,
+            )
+            return
+
+        try:
+            filename = _WORKER_STARTUP_HISTORY_FILENAME
+            rotated_name = f"{filename}.1"
+
+            try:
+                st = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode):
+                    logging.getLogger("cardrag_worker.cli").warning(
+                        "Startup attempt history unavailable reason=not_regular_file correlation_id=%s",
+                        self.correlation_id,
+                    )
+                    return
+                if st.st_size > _WORKER_STARTUP_HISTORY_MAX_BYTES:
+                    try:
+                        st_dst = os.stat(rotated_name, dir_fd=dir_fd, follow_symlinks=False)
+                        if not stat.S_ISREG(st_dst.st_mode):
+                            logging.getLogger("cardrag_worker.cli").warning(
+                                "Startup attempt history rotation blocked reason=destination_not_regular correlation_id=%s",
+                                self.correlation_id,
+                            )
+                            return
+                    except FileNotFoundError:
+                        pass
+                    os.replace(filename, rotated_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+            open_flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(filename, open_flags, 0o600, dir_fd=dir_fd)
+            try:
+                fst = os.fstat(descriptor)
+                if not stat.S_ISREG(fst.st_mode):
+                    logging.getLogger("cardrag_worker.cli").warning(
+                        "Startup attempt history unavailable reason=not_regular_file correlation_id=%s",
+                        self.correlation_id,
+                    )
+                    return
+                line = canonical_json_bytes(record)
+                os.write(descriptor, line + b"\n")
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Startup attempt history unavailable reason=storage errno=%s correlation_id=%s",
+                exc.errno,
+                self.correlation_id,
+            )
+        finally:
+            os.close(dir_fd)
+
+
+def _read_capacity_observation(state_dir: Path) -> dict[str, Any] | None:
+    """Best-effort read of the last successful batch capacity requirement."""
+
+    path = state_dir / "capacity-observation.json"
+    try:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    required = payload.get("required_free_bytes")
+    if type(required) is not int or required < 0:
+        return None
+    return payload
+
+
 def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
     """Sanitize and classify startup failures without leaking secret payloads."""
+    if isinstance(exc, StartupDeadlineExceededError):
+        return {
+            "error_class_category": "startup_deadline",
+            "reason_code": "startup_check_deadline_exceeded",
+        }
+    if isinstance(exc, TimeoutError):
+        return {
+            "error_class_category": "startup_deadline",
+            "reason_code": "startup_check_deadline_exceeded",
+        }
     if isinstance(exc, QwenTokenizerError):
-        return {"error_class_category": "tokenizer"}
+        return {"error_class_category": "tokenizer", "reason_code": "tokenizer_asset_invalid"}
     if isinstance(exc, EmbeddingV5RequestError):
         payload: dict[str, Any] = {
             "error_class_category": "openrouter_request",
+            "reason_code": exc.reason_code,
             "retryable": isinstance(exc, EmbeddingV5TransientError),
         }
         if exc.status_code is not None and 100 <= exc.status_code <= 599:
@@ -480,9 +717,27 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
             payload["attempts"] = exc.attempts
         return payload
     if isinstance(exc, EmbeddingV5Error):
-        return {"error_class_category": "contract"}
+        classified_contract: dict[str, Any] = {
+            "error_class_category": "contract",
+            "reason_code": exc.reason_code,
+        }
+        if exc.provider_id is not None:
+            classified_contract["provider_id"] = exc.provider_id
+        # The details mapping stays mutable after construction; never emit the
+        # live object.  Re-project it through the reason's schema here so the
+        # journal, CLI payload, and startup history share one trust boundary.
+        quality = validated_quality_details(exc.reason_code, exc.details)
+        if quality:
+            classified_contract["quality_details"] = quality
+        return classified_contract
     if isinstance(exc, V5CapacityError):
-        return {"error_class_category": "capacity"}
+        classified_capacity: dict[str, Any] = {
+            "error_class_category": "capacity",
+            "reason_code": exc.reason_code,
+        }
+        if exc.details:
+            classified_capacity["capacity_details"] = dict(exc.details)
+        return classified_capacity
     category, status_code, errno = _classify_worker_failure(exc)
     classified: dict[str, Any] = {"error_class_category": category}
     if status_code is not None:
@@ -496,16 +751,49 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
     return classified
 
 
-def _log_startup_stage_failure(stage: str, exc: Exception, elapsed_seconds: float) -> None:
+def _classified_failure_fields(classified: dict[str, Any]) -> str:
+    """Render the allowlisted reason/numeric fields of a classification."""
+
+    parts: list[str] = []
+    reason_code = classified.get("reason_code")
+    if isinstance(reason_code, str):
+        parts.append(f"reason_code={reason_code}")
+    provider_id = classified.get("provider_id")
+    if isinstance(provider_id, str):
+        parts.append(f"provider_id={provider_id}")
+    for group in ("capacity_details", "quality_details"):
+        details = classified.get(group)
+        if isinstance(details, dict):
+            for key in sorted(details):
+                value = details[key]
+                parts.append(f"{key}={'null' if value is None else value}")
+    return " ".join(parts)
+
+
+def _log_startup_stage_failure(
+    stage: str,
+    exc: Exception,
+    elapsed_seconds: float,
+    *,
+    correlation_id: str | None = None,
+    attempt: int = 1,
+    attempt_max: int = 1,
+) -> None:
     classified = _classify_startup_exception(exc)
+    fields = _classified_failure_fields(classified)
     logging.getLogger("cardrag_worker.cli").error(
-        "Startup stage failed stage=%s category=%s status_code=%s retryable=%s attempts=%s elapsed_seconds=%.3f",
+        "Startup stage failed stage=%s category=%s %s status_code=%s retryable=%s "
+        "attempts=%s elapsed_seconds=%.3f correlation_id=%s attempt=%d/%d",
         stage,
         classified["error_class_category"],
+        fields or "reason_code=unclassified",
         classified.get("status_code"),
         classified.get("retryable"),
         classified.get("attempts"),
         elapsed_seconds,
+        correlation_id or "none",
+        attempt,
+        attempt_max,
     )
 
 
@@ -528,15 +816,33 @@ def _echo_worker_unexpected_failure(
                 "run_id": exc.run_id,
             }
         )
+        if exc.failure.reason_code != "worker_unexpected_failure":
+            payload["reason_code"] = exc.failure.reason_code
+            payload["failure_reason_code"] = exc.failure.reason_code
+            payload["reason"] = exc.failure.reason
         if exc.failure.phase is not None:
             payload["phase"] = exc.failure.phase
+        if exc.failure.stage is not None:
+            payload["stage"] = exc.failure.stage
+        if exc.failure.document_id is not None:
+            payload["document_id"] = exc.failure.document_id
         if exc.failure.status_code is not None:
             payload["status_code"] = exc.failure.status_code
+        if exc.failure.mime_type is not None:
+            payload["mime_type"] = exc.failure.mime_type
         if exc.failure.errno is not None:
             payload["errno"] = exc.failure.errno
     elif isinstance(exc, Exception):
         details = _classify_startup_exception(exc)
         payload["error_class_category"] = details["error_class_category"]
+        if isinstance(details.get("reason_code"), str):
+            payload["failure_reason_code"] = details["reason_code"]
+        if isinstance(details.get("provider_id"), str):
+            payload["provider_id"] = details["provider_id"]
+        if isinstance(details.get("capacity_details"), dict):
+            payload["capacity_details"] = details["capacity_details"]
+        if isinstance(details.get("quality_details"), dict):
+            payload["quality_details"] = details["quality_details"]
         resolved_phase = phase or details.get("phase")
         if resolved_phase is not None:
             payload["phase"] = resolved_phase
@@ -609,6 +915,40 @@ def _provider(settings: WorkerSettings, name: str, model: str) -> OCRProvider:
     )
 
 
+def _project_embedding_quality_payload(embeddings: Any) -> dict[str, Any]:
+    raw_status = getattr(embeddings, "quality_status", "passed")
+    quality_status = raw_status if raw_status in {"passed", "warning"} else "passed"
+    raw_mode = getattr(embeddings, "preflight_mode", "daily_smoke")
+    preflight_mode = raw_mode if raw_mode in {"daily_smoke", "qualification"} else "daily_smoke"
+    raw_count = getattr(embeddings, "evaluated_provider_count", 1)
+    provider_count = raw_count if type(raw_count) is int and raw_count >= 1 else 1
+    cross_evaluated = bool(getattr(embeddings, "cross_evaluated", False))
+    raw_min_cross = getattr(embeddings, "minimum_cross_provider_cosine", None)
+    if (
+        cross_evaluated
+        and type(raw_min_cross) is float
+        and math.isfinite(raw_min_cross)
+        and -1.0 <= raw_min_cross <= 1.0
+    ):
+        min_cross = raw_min_cross
+    else:
+        min_cross = None
+
+    payload: dict[str, Any] = {
+        "quality_status": quality_status,
+        "preflight_mode": preflight_mode,
+        "evaluated_provider_count": provider_count,
+        "cross_evaluated": cross_evaluated,
+        "minimum_cross_provider_cosine": min_cross,
+    }
+    if quality_status == "warning":
+        raw_details = getattr(embeddings, "quality_details", None)
+        validated = validated_quality_details("repeat_cosine_warning", raw_details)
+        if validated:
+            payload["quality_details"] = validated
+    return payload
+
+
 def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
     return {
         "collection_status": result.collection_status,
@@ -620,6 +960,7 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "contract_sha256": result.contract_sha256,
         "documents": result.document_count,
         "unsupported_documents": result.unsupported_document_count,
+        "unsupported_attachment_count": result.unsupported_attachment_count,
         "evidence": result.evidence_count,
         "gc_status": result.gc_status,
         "gc_deleted": result.gc_deleted,
@@ -636,6 +977,8 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "pdf_cache_revalidations": result.pdf_cache_revalidations,
         "pdf_downloads": result.pdf_downloads,
         "pdf_revisions": result.pdf_revisions,
+        "pdf_succeeded_count": result.pdf_succeeded_count,
+        "pdf_skipped_count": result.pdf_skipped_count,
         "ocr_cache_publication_deferred": result.ocr_cache_publication_deferred,
         "retired_count": result.retired_count,
         "retirement_candidate_count": result.retirement_candidate_count,
@@ -648,14 +991,18 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
 
 async def _qwen_embedding_provider(
     settings: WorkerSettings,
+    *,
+    correlation_id: str | None = None,
+    recorder: StartupAttemptRecorder | None = None,
 ) -> OpenRouterQwenEmbeddingProviderV5:
     """Run the credentialed provider/tokenizer preflight before touching a corpus."""
 
     api_key = settings.openrouter_api_key or ""
+    log = logging.getLogger("cardrag_worker.cli")
 
     stage = "tokenizer_validation"
     t0 = time.monotonic()
-    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    log.info("Startup stage starting stage=%s correlation_id=%s", stage, correlation_id or "none")
     try:
         tokenizer = await ensure_qwen_tokenizer(
             settings.embedding_tokenizer_path,
@@ -663,38 +1010,277 @@ async def _qwen_embedding_provider(
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
-        _log_startup_stage_failure(stage, exc, elapsed)
+        _log_startup_stage_failure(
+            stage,
+            exc,
+            elapsed,
+            correlation_id=correlation_id,
+            attempt_max=settings.startup_check_max_attempts,
+        )
+        if recorder is not None:
+            recorder.record(
+                stage,
+                "terminal",
+                reason_code=_classify_startup_exception(exc).get("reason_code"),
+                elapsed_seconds=elapsed,
+                decision="terminal",
+            )
         raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-    logging.getLogger("cardrag_worker.cli").info(
-        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t0
-    )
+    log.info("Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t0)
+    if recorder is not None:
+        recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t0)
 
     stage = "qwen_endpoint_preflight"
+    attempt_max = settings.startup_check_max_attempts
+    deadline_seconds = settings.startup_check_deadline_seconds
     t1 = time.monotonic()
-    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
-    try:
-        comparison = await preflight_openrouter_qwen_providers(
-            api_key=api_key,
-            token_counter=tokenizer,
-            base_url=settings.openrouter_base_url,
-            timeout_seconds=settings.embedding_timeout_seconds,
-            embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
-            metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
-            request_max_attempts=settings.embedding_request_max_attempts,
-            retry_base_seconds=settings.embedding_retry_base_seconds,
-            retry_cap_seconds=settings.embedding_retry_cap_seconds,
-        )
-    except Exception as exc:
-        elapsed = time.monotonic() - t1
-        _log_startup_stage_failure(stage, exc, elapsed)
-        raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-    logging.getLogger("cardrag_worker.cli").info(
-        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t1
+    deadline_at = t1 + deadline_seconds
+    attempt = 0
+    log.info(
+        "Startup stage starting stage=%s correlation_id=%s attempt_max=%d deadline_seconds=%d",
+        stage,
+        correlation_id or "none",
+        attempt_max,
+        deadline_seconds,
     )
+    comparison: ProviderComparisonReport | None = None
+    while True:
+        attempt += 1
+        t_attempt = time.monotonic()
+        remaining = deadline_at - t_attempt
+        if remaining <= 0:
+            cumulative_elapsed = t_attempt - t1
+            deadline_exc = StartupDeadlineExceededError(
+                f"Startup stage '{stage}' deadline of {deadline_seconds}s exceeded before attempt {attempt}",
+                elapsed_seconds=cumulative_elapsed,
+            )
+            log.warning(
+                "Startup stage retry deadline reached stage=%s correlation_id=%s "
+                "reason_code=startup_check_deadline_exceeded cumulative_seconds=%.3f "
+                "deadline_seconds=%d decision=terminal",
+                stage,
+                correlation_id or "none",
+                cumulative_elapsed,
+                deadline_seconds,
+            )
+            _log_startup_stage_failure(
+                stage,
+                deadline_exc,
+                cumulative_elapsed,
+                correlation_id=correlation_id,
+                attempt=attempt,
+                attempt_max=attempt_max,
+            )
+            if recorder is not None:
+                recorder.record(
+                    stage,
+                    "terminal",
+                    reason_code="startup_check_deadline_exceeded",
+                    attempt=attempt,
+                    attempt_max=attempt_max,
+                    elapsed_seconds=0.0,
+                    decision="terminal",
+                )
+            raise WorkerStartupFailure(
+                stage, deadline_exc, elapsed_seconds=cumulative_elapsed
+            ) from deadline_exc
+
+        try:
+            comparison = await asyncio.wait_for(
+                preflight_openrouter_qwen_providers(
+                    api_key=api_key,
+                    token_counter=tokenizer,
+                    base_url=settings.openrouter_base_url,
+                    timeout_seconds=min(settings.embedding_timeout_seconds, remaining),
+                    embedding_maximum_response_bytes=settings.embedding_max_response_bytes,
+                    metadata_maximum_response_bytes=settings.embedding_metadata_max_response_bytes,
+                    request_max_attempts=settings.embedding_request_max_attempts,
+                    retry_base_seconds=settings.embedding_retry_base_seconds,
+                    retry_cap_seconds=settings.embedding_retry_cap_seconds,
+                    provider_ids=(settings.embedding_provider_id,),
+                    mode="daily_smoke",
+                    minimum_repeat_cosine=0.999,
+                    hard_reject_repeat_cosine=0.990,
+                    check_semantic_discriminability=True,
+                ),
+                timeout=remaining,
+            )
+            break
+        except TimeoutError:
+            attempt_elapsed = time.monotonic() - t_attempt
+            cumulative_elapsed = time.monotonic() - t1
+            deadline_exc = StartupDeadlineExceededError(
+                f"Startup stage '{stage}' deadline of {deadline_seconds}s exceeded during attempt {attempt}",
+                elapsed_seconds=cumulative_elapsed,
+            )
+            log.warning(
+                "Startup stage retry deadline reached stage=%s correlation_id=%s "
+                "reason_code=startup_check_deadline_exceeded cumulative_seconds=%.3f "
+                "deadline_seconds=%d decision=terminal",
+                stage,
+                correlation_id or "none",
+                cumulative_elapsed,
+                deadline_seconds,
+            )
+            _log_startup_stage_failure(
+                stage,
+                deadline_exc,
+                cumulative_elapsed,
+                correlation_id=correlation_id,
+                attempt=attempt,
+                attempt_max=attempt_max,
+            )
+            if recorder is not None:
+                recorder.record(
+                    stage,
+                    "terminal",
+                    reason_code="startup_check_deadline_exceeded",
+                    attempt=attempt,
+                    attempt_max=attempt_max,
+                    elapsed_seconds=attempt_elapsed,
+                    decision="terminal",
+                )
+            raise WorkerStartupFailure(
+                stage, deadline_exc, elapsed_seconds=cumulative_elapsed
+            ) from deadline_exc
+        except Exception as exc:
+            attempt_elapsed = time.monotonic() - t_attempt
+            cumulative_elapsed = time.monotonic() - t1
+            classified = _classify_startup_exception(exc)
+            reason = classified.get("reason_code")
+            recoverable = (
+                isinstance(reason, str)
+                and reason in WORKER_STARTUP_RETRYABLE_REASON_CODES
+                and isinstance(exc, EmbeddingV5Error)
+                and not isinstance(exc, EmbeddingV5RequestError)
+            )
+            remaining_after_attempt = deadline_at - time.monotonic()
+            retry_allowed = (
+                attempt < attempt_max
+                and recoverable
+                and remaining_after_attempt > 0
+                and cumulative_elapsed + _WORKER_STARTUP_RETRY_DELAY_SECONDS < deadline_seconds
+            )
+            provider_id = classified.get("provider_id")
+            if retry_allowed:
+                log.warning(
+                    "Startup stage retry stage=%s correlation_id=%s reason_code=%s "
+                    "attempt=%d/%d cumulative_seconds=%.3f next_retry_seconds=%.1f decision=retry",
+                    stage,
+                    correlation_id or "none",
+                    reason,
+                    attempt,
+                    attempt_max,
+                    cumulative_elapsed,
+                    _WORKER_STARTUP_RETRY_DELAY_SECONDS,
+                )
+                if recorder is not None:
+                    recorder.record(
+                        stage,
+                        "retrying",
+                        reason_code=reason if isinstance(reason, str) else None,
+                        provider_id=provider_id if isinstance(provider_id, str) else None,
+                        attempt=attempt,
+                        attempt_max=attempt_max,
+                        elapsed_seconds=attempt_elapsed,
+                        decision="retry",
+                        next_retry_seconds=_WORKER_STARTUP_RETRY_DELAY_SECONDS,
+                        retry_eligible=True,
+                    )
+                await asyncio.sleep(_WORKER_STARTUP_RETRY_DELAY_SECONDS)
+                continue
+            terminal_exc: Exception = exc
+            terminal_reason = reason if isinstance(reason, str) else None
+            if not recoverable:
+                log.info(
+                    "Startup stage retry decision stage=%s correlation_id=%s reason_code=%s "
+                    "retry_eligible=false decision=terminal status_code=%s http_attempts=%s "
+                    "(null http fields mean the HTTP retry layer did not apply, not that it ran out)",
+                    stage,
+                    correlation_id or "none",
+                    terminal_reason or "unclassified",
+                    classified.get("status_code"),
+                    classified.get("attempts"),
+                )
+            if recoverable and attempt >= attempt_max:
+                log.warning(
+                    "Startup stage retry budget exhausted stage=%s correlation_id=%s "
+                    "reason_code=%s attempt_max=%d decision=terminal",
+                    stage,
+                    correlation_id or "none",
+                    reason,
+                    attempt_max,
+                )
+            elif recoverable:
+                log.warning(
+                    "Startup stage retry deadline reached stage=%s correlation_id=%s "
+                    "reason_code=startup_check_deadline_exceeded cumulative_seconds=%.3f "
+                    "deadline_seconds=%d decision=terminal",
+                    stage,
+                    correlation_id or "none",
+                    cumulative_elapsed,
+                    deadline_seconds,
+                )
+                terminal_exc = StartupDeadlineExceededError(
+                    f"Startup stage '{stage}' deadline reached before next attempt; last cause: {exc}",
+                    elapsed_seconds=cumulative_elapsed,
+                )
+                terminal_reason = "startup_check_deadline_exceeded"
+            _log_startup_stage_failure(
+                stage,
+                terminal_exc,
+                cumulative_elapsed,
+                correlation_id=correlation_id,
+                attempt=attempt,
+                attempt_max=attempt_max,
+            )
+            terminal_quality = classified.get("quality_details")
+            if recorder is not None:
+                recorder.record(
+                    stage,
+                    "terminal",
+                    reason_code=terminal_reason,
+                    provider_id=provider_id if isinstance(provider_id, str) else None,
+                    attempt=attempt,
+                    attempt_max=attempt_max,
+                    elapsed_seconds=attempt_elapsed,
+                    decision="terminal",
+                    retry_eligible=recoverable,
+                    quality_details=terminal_quality if isinstance(terminal_quality, dict) else None,
+                )
+            raise WorkerStartupFailure(
+                stage, terminal_exc, elapsed_seconds=cumulative_elapsed
+            ) from terminal_exc
+    assert comparison is not None
+    log.info(
+        "Startup stage passed stage=%s elapsed_seconds=%.3f attempts=%d/%d",
+        stage,
+        time.monotonic() - t1,
+        attempt,
+        attempt_max,
+    )
+    comp_quality_status = getattr(comparison, "quality_status", "passed")
+    comp_warning_details = getattr(comparison, "warning_details", None)
+    if recorder is not None:
+        recorder.record(
+            stage,
+            "passed",
+            reason_code="repeat_cosine_warning" if comp_quality_status == "warning" else None,
+            provider_id=settings.embedding_provider_id,
+            attempt=attempt,
+            attempt_max=attempt_max,
+            elapsed_seconds=time.monotonic() - t1,
+            quality_status=comp_quality_status,
+            quality_details=comp_warning_details,
+            preflight_mode=getattr(comparison, "mode", "daily_smoke"),
+            evaluated_provider_count=getattr(comparison, "evaluated_provider_count", 1),
+            cross_evaluated=getattr(comparison, "cross_evaluated", False),
+            minimum_cross_provider_cosine=getattr(comparison, "minimum_cross_provider_cosine", None),
+        )
 
     stage = "embedding_verification"
     t2 = time.monotonic()
-    logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+    log.info("Startup stage starting stage=%s correlation_id=%s", stage, correlation_id or "none")
     try:
         matching = [
             report
@@ -715,20 +1301,47 @@ async def _qwen_embedding_provider(
             raise ValueError("configured embedding model/dimension differs from the verified Qwen profile")
     except Exception as exc:
         elapsed = time.monotonic() - t2
-        _log_startup_stage_failure(stage, exc, elapsed)
+        _log_startup_stage_failure(
+            stage,
+            exc,
+            elapsed,
+            correlation_id=correlation_id,
+            attempt_max=settings.startup_check_max_attempts,
+        )
+        if recorder is not None:
+            recorder.record(stage, "terminal", elapsed_seconds=elapsed, decision="terminal")
         raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
-    logging.getLogger("cardrag_worker.cli").info(
-        "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t2
-    )
+    log.info("Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t2)
+    if recorder is not None:
+        recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t2)
 
-    logging.getLogger("cardrag_worker.cli").info(
+    quality_status = getattr(selected, "quality_status", "passed")
+    warning_count = getattr(selected, "warning_count", 0)
+    mean_cosine = getattr(selected, "mean_repeat_cosine", selected.minimum_repeat_cosine)
+
+    if quality_status == "warning":
+        log.warning(
+            "Qwen provider preflight warning provider=%s samples=%d warning_count=%d "
+            "minimum_repeat_cosine=%.6f mean_repeat_cosine=%.6f warning_threshold=%.6f",
+            profile.provider_id,
+            selected.sample_count,
+            warning_count,
+            selected.minimum_repeat_cosine,
+            mean_cosine,
+            0.999,
+        )
+
+    cross_cosine = comparison.minimum_cross_provider_cosine
+    cross_str = f"{cross_cosine:.6f}" if cross_cosine is not None else "not_evaluated"
+    log.info(
         "Qwen provider preflight passed provider=%s samples=%d minimum_repeat_cosine=%.6f "
-        "minimum_cross_provider_cosine=%.6f tokenizer_sha256=%s",
+        "minimum_cross_provider_cosine=%s tokenizer_sha256=%s quality_status=%s",
         profile.provider_id,
         selected.sample_count,
         selected.minimum_repeat_cosine,
-        comparison.minimum_cross_provider_cosine,
+        cross_str,
         tokenizer.asset_sha256,
+        quality_status,
     )
     return OpenRouterQwenEmbeddingProviderV5(
         api_key=api_key,
@@ -740,6 +1353,13 @@ async def _qwen_embedding_provider(
         request_max_attempts=settings.embedding_request_max_attempts,
         retry_base_seconds=settings.embedding_retry_base_seconds,
         retry_cap_seconds=settings.embedding_retry_cap_seconds,
+        quality_status=quality_status,
+        quality_details=getattr(selected, "warning_details", None),
+        preflight_mode=getattr(comparison, "mode", "daily_smoke"),
+        evaluated_provider_count=getattr(comparison, "evaluated_provider_count", 1),
+        cross_evaluated=getattr(comparison, "cross_evaluated", False),
+        minimum_cross_provider_cosine=getattr(comparison, "minimum_cross_provider_cosine", None),
+        mean_cross_provider_cosine=getattr(comparison, "mean_cross_provider_cosine", None),
     )
 
 
@@ -829,7 +1449,13 @@ def _ocr_resolver(
     return resolver
 
 
-async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
+async def _run(
+    resume: str | None,
+    *,
+    startup_only: bool = False,
+    selected_issuers: tuple[str, ...] | None = None,
+    issuer_mode: str = "all",
+) -> dict[str, Any]:
     started = time.monotonic()
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
@@ -839,15 +1465,49 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
         # must not permanently block resuming it through the capacity
         # preflight's symlink refusal.
         sweep_stale_paddle_input_symlinks(settings.state_dir, resume)
-    startup_capacity = preflight_worker_start_capacity(
-        settings.state_dir,
-        minimum_free_bytes=settings.minimum_start_free_bytes,
-    )
+    startup_capacity: WorkerStartCapacitySnapshot
+    correlation_id = os.urandom(16).hex()
+    startup_recorder = StartupAttemptRecorder(settings.state_dir, correlation_id)
+    try:
+        startup_capacity = preflight_worker_start_capacity(
+            settings.state_dir,
+            minimum_free_bytes=settings.minimum_start_free_bytes,
+        )
+    except V5CapacityError as exc:
+        logging.getLogger("cardrag_worker.cli").error(
+            "Worker startup capacity preflight failed %s probe_path=%s correlation_id=%s",
+            _classified_failure_fields(_classify_startup_exception(exc)),
+            settings.state_dir,
+            correlation_id,
+        )
+        startup_recorder.record(
+            "startup_capacity_preflight",
+            "terminal",
+            reason_code=exc.reason_code,
+            decision="terminal",
+        )
+        raise
     logging.getLogger("cardrag_worker.cli").info(
-        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d",
+        "Worker startup capacity preflight passed filesystem_free_bytes=%d minimum_free_bytes=%d "
+        "note=minimum_start_gate_only correlation_id=%s",
         startup_capacity.filesystem_free_bytes,
         startup_capacity.minimum_free_bytes,
+        correlation_id,
     )
+    startup_recorder.record("startup_capacity_preflight", "passed")
+    last_capacity_observation = _read_capacity_observation(settings.state_dir)
+    if last_capacity_observation is not None:
+        last_required = last_capacity_observation["required_free_bytes"]
+        if startup_capacity.filesystem_free_bytes < last_required:
+            last_run = last_capacity_observation.get("run_id")
+            logging.getLogger("cardrag_worker.cli").warning(
+                "Worker startup free space is below the last successful batch requirement "
+                "filesystem_free_bytes=%d required_free_bytes=%d source_run_id=%s "
+                "warning_only=true hard_gate=capacity_preflight_before_embedding",
+                startup_capacity.filesystem_free_bytes,
+                last_required,
+                last_run if isinstance(last_run, str) else "none",
+            )
     document_aggregation = None
     if settings.document_aggregation_profile_path is not None:
         expected_artifact_sha256 = settings.document_aggregation_profile_artifact_sha256
@@ -912,16 +1572,31 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
             ) as state:
                 if isinstance(transport, WebDAVClient):
                     transport.configure_verification(state, settings.webdav_verification)
+                if issuer_mode == "round_robin" and resume is None and not startup_only:
+                    from .rotation import Rotation
+
+                    Rotation(state, channel=settings.channel).check_limit()
                 stage = "ocr_resolver"
                 t_stage = time.monotonic()
-                logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
+                logging.getLogger("cardrag_worker.cli").info(
+                    "Startup stage starting stage=%s correlation_id=%s", stage, correlation_id
+                )
                 try:
                     resolver = _ocr_resolver(
                         settings, state, transport if isinstance(transport, WebDAVClient) else None
                     )
                 except Exception as exc:
                     elapsed = time.monotonic() - t_stage
-                    _log_startup_stage_failure(stage, exc, elapsed)
+                    _log_startup_stage_failure(stage, exc, elapsed, correlation_id=correlation_id)
+                    classified_ocr = _classify_startup_exception(exc)
+                    ocr_reason = classified_ocr.get("reason_code")
+                    startup_recorder.record(
+                        stage,
+                        "terminal",
+                        reason_code=ocr_reason if isinstance(ocr_reason, str) else None,
+                        elapsed_seconds=elapsed,
+                        decision="terminal",
+                    )
                     raise WorkerStartupFailure(stage, exc, elapsed_seconds=elapsed) from exc
                 codex_ver = (
                     _probe_codex_version(settings.codex_executable)
@@ -934,17 +1609,22 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                     time.monotonic() - t_stage,
                     codex_ver or "not_applicable",
                 )
+                startup_recorder.record(stage, "passed", elapsed_seconds=time.monotonic() - t_stage)
                 logging.getLogger("cardrag_worker.cli").info(
                     "Remote OCR cache access mode=%s require_hit=%s",
                     settings.ocr_cache_mode,
                     settings.ocr_cache_require_hit,
                 )
-                embeddings = await _qwen_embedding_provider(settings)
+                embeddings = await _qwen_embedding_provider(
+                    settings,
+                    correlation_id=correlation_id,
+                    recorder=startup_recorder,
+                )
                 if startup_only:
                     logging.getLogger("cardrag_worker.cli").info(
                         "Worker startup check completed elapsed_seconds=%.3f", time.monotonic() - started
                     )
-                    return {
+                    payload = {
                         "codex_version": codex_ver,
                         "embedding_model": settings.embedding_model,
                         "embedding_provider": settings.embedding_provider_id,
@@ -955,7 +1635,9 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                         "stage": "completed",
                         "status": "ready",
                         "elapsed_seconds": round(time.monotonic() - started, 3),
+                        **_project_embedding_quality_payload(embeddings),
                     }
+                    return payload
                 stage = "pipeline_entry"
                 t_stage = time.monotonic()
                 logging.getLogger("cardrag_worker.cli").info("Startup stage starting stage=%s", stage)
@@ -965,99 +1647,163 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                 logging.getLogger("cardrag_worker.cli").info(
                     "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t_stage
                 )
-                result = await WorkerPipeline(
-                    state=state,
-                    state_dir=settings.state_dir,
-                    adapters=enabled_adapters(),
-                    ocr=resolver,  # type: ignore[arg-type]
-                    embeddings=embeddings,
-                    webdav=transport,
-                    settings=settings,
-                    issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
-                    issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
-                    pdf_concurrency=settings.pdf_concurrency,
-                    pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
-                    local_processing_workers=settings.local_processing_workers,
-                    maximum_attempts=settings.stage_max_attempts,
-                    retry_cap_seconds=settings.retry_cap_seconds,
-                    collect_remote_garbage=settings.collect_remote_garbage,
+                from .issuers.registry import DEFAULT_ENABLED_ISSUERS, enabled_issuer_codes
+                from .rotation import scope_session
+
+                pool = enabled_issuer_codes()
+                async with scope_session(
+                    state,
+                    settings.state_dir,
+                    pool,
+                    selected=selected_issuers,
+                    mode=issuer_mode,
+                    channel=settings.channel,
+                    resume=resume,
+                    transport=transport,
                     stable_publication_approved=settings.stable_publication_approved,
-                    ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
-                    remote_gc_approved=settings.remote_gc_approved,
-                    retained_generations=settings.retain_generations,
-                    retained_incomplete_runs=settings.retained_incomplete_runs,
-                    retirement_grace_runs=settings.retirement_grace_runs,
-                    retirement_grace_days=settings.retirement_grace_days,
-                    retirement_max_per_run=settings.retirement_max_per_run,
-                    garbage_grace_days=settings.garbage_grace_days,
-                    pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
-                    pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
-                    document_aggregation=document_aggregation,
-                    capacity_policy_v5=V5CapacityPolicy(
-                        maximum_state_bytes=settings.maximum_state_bytes,
-                        reserved_free_space_bytes=settings.reserved_free_space_bytes,
-                        maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
-                        maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
-                    ),
-                    lock_held=True,
-                ).run(resume_run_id=resume)
-
-                backup_info: dict[str, Any] = {
-                    "backup_status": "disabled",
-                    "backup_bytes_uploaded": 0,
-                    "backup_requests": 0,
-                    "pending_ocr_count": 0,
-                    "pending_bytes": 0,
-                    "oldest_pending_at": None,
-                    "last_backup_at": None,
-                    "runs_since_last_backup": 0,
-                }
-                backup_mode = getattr(settings, "backup_mode", "disabled")
-                if backup_mode != "disabled":
-                    try:
-                        backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
-                        if result.status in {"succeeded", "no_change"}:
-                            backup_ledger.record_run_success(result.run_id, settings.state_dir, settings)
-                            status_before = backup_ledger.get_status(settings)
-                            if status_before["should_trigger"]:
-                                flush_res = await backup_ledger.flush(
-                                    settings,
-                                    timeout_seconds=getattr(settings, "backup_inline_budget_seconds", 300.0),
-                                )
-                                backup_info["backup_status"] = flush_res.get("status", "failed")
-                                backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
-                                backup_info["backup_requests"] = flush_res.get("requests", 0)
-                            else:
-                                backup_info["backup_status"] = "deferred"
-                        status_dict = backup_ledger.get_status(settings)
-                        backup_info.update(
-                            {
-                                "pending_ocr_count": status_dict.get(
-                                    "pending_ocr_count", status_dict["pending_count"]
-                                ),
-                                "pending_bytes": status_dict["pending_bytes"],
-                                "oldest_pending_at": status_dict["oldest_pending_at"],
-                                "last_backup_at": status_dict["last_backup_at"],
-                                "runs_since_last_backup": status_dict["runs_since_last_backup"],
-                            }
-                        )
-                    except Exception as backup_exc:
-                        logging.getLogger("cardrag_worker.cli").warning(
-                            "Backup ledger operation failed (isolated from run success): %s", backup_exc
-                        )
-                        backup_info["backup_status"] = "error"
-
-                payload = _pipeline_result_payload(result)
-                payload.update(
-                    {
-                        "publication_transport": publication_transport,
-                        "local_generation_published": (
-                            result.published if publication_transport == "local" else False
+                ) as (assignment, bind):
+                    if assignment.result is not None:
+                        return assignment.result
+                    result = await WorkerPipeline(
+                        state=state,
+                        state_dir=settings.state_dir,
+                        adapters=enabled_adapters(),
+                        selected_issuers=assignment.scope.selected,
+                        issuer_execution_mode=assignment.scope.mode,
+                        on_run_created=bind,
+                        ocr=resolver,  # type: ignore[arg-type]
+                        embeddings=embeddings,
+                        webdav=transport,
+                        settings=settings,
+                        issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
+                        issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
+                        pdf_concurrency=settings.pdf_concurrency,
+                        pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
+                        local_processing_workers=settings.local_processing_workers,
+                        maximum_attempts=settings.stage_max_attempts,
+                        retry_cap_seconds=settings.retry_cap_seconds,
+                        collect_remote_garbage=settings.collect_remote_garbage,
+                        stable_publication_approved=settings.stable_publication_approved,
+                        ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
+                        remote_gc_approved=settings.remote_gc_approved,
+                        retained_generations=settings.retain_generations,
+                        retained_incomplete_runs=settings.retained_incomplete_runs,
+                        retirement_grace_runs=settings.retirement_grace_runs,
+                        retirement_grace_days=settings.retirement_grace_days,
+                        retirement_max_per_run=settings.retirement_max_per_run,
+                        garbage_grace_days=settings.garbage_grace_days,
+                        pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
+                        pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
+                        document_aggregation=document_aggregation,
+                        capacity_policy_v5=V5CapacityPolicy(
+                            maximum_state_bytes=settings.maximum_state_bytes,
+                            reserved_free_space_bytes=settings.reserved_free_space_bytes,
+                            maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
+                            maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
                         ),
-                        **backup_info,
+                        lock_held=True,
+                    ).run(resume_run_id=resume or assignment.run_id)
+
+                    backup_info: dict[str, Any] = {
+                        "backup_status": "disabled",
+                        "backup_bytes_uploaded": 0,
+                        "backup_requests": 0,
+                        "pending_ocr_count": 0,
+                        "pending_bytes": 0,
+                        "oldest_pending_at": None,
+                        "last_backup_at": None,
+                        "runs_since_last_backup": 0,
+                        "backup_in_scope_remaining": None,
+                        "backup_in_scope_lost_source": None,
+                        "backup_in_scope_conflicts": None,
+                        "backup_in_scope_missing": None,
+                        "backup_in_scope_unbound": None,
+                        "backup_pending_out_of_scope": None,
+                        "backup_pending_out_of_scope_bytes": None,
+                        "backup_excluded_shared_cache": None,
+                        "backup_scope_complete": None,
+                        "backup_defer_reasons": None,
+                        "backup_diagnostics_mode": None,
+                        "backup_scope_run_id": None,
                     }
-                )
-                return payload
+                    backup_mode = getattr(settings, "backup_mode", "disabled")
+                    if backup_mode != "disabled":
+                        try:
+                            backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+                            if result.status in {"succeeded", "no_change"}:
+                                scoped_backup = set(assignment.scope.selected) != set(DEFAULT_ENABLED_ISSUERS)
+                                backup_ledger.record_run_success(
+                                    result.run_id,
+                                    settings.state_dir,
+                                    settings,
+                                    selected_issuers=assignment.scope.selected,
+                                )
+                                status_before = backup_ledger.get_status(settings)
+                                if status_before["should_trigger"]:
+                                    allowed = expected = None
+                                    if scoped_backup:
+                                        allowed, expected = backup_ledger.scoped_backup_scope(
+                                            result.run_id,
+                                            settings.state_dir,
+                                            assignment.scope.selected,
+                                            remote_root=canonical_remote_root(settings),
+                                        )
+                                    flush_res = await backup_ledger.flush(
+                                        settings,
+                                        timeout_seconds=getattr(
+                                            settings, "backup_inline_budget_seconds", 300.0
+                                        ),
+                                        allowed_remote_paths=allowed,
+                                        expected_artifacts=expected,
+                                    )
+                                    backup_info["backup_status"] = flush_res.get("status", "failed")
+                                    backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
+                                    backup_info["backup_requests"] = flush_res.get("requests", 0)
+                                    from .backup import scoped_backup_result_fields
+
+                                    backup_info.update(scoped_backup_result_fields(flush_res))
+                                else:
+                                    backup_info["backup_status"] = "deferred"
+                                    backup_info["backup_defer_reasons"] = status_before.get("trigger_reasons")
+                                    if scoped_backup:
+                                        # Threshold deferral still reports the
+                                        # read-only scope view; completion is
+                                        # left unknown, never assumed.
+                                        backup_info.update(
+                                            backup_ledger.scoped_pending_diagnostics(
+                                                settings, result.run_id, assignment.scope.selected
+                                            )
+                                        )
+                            status_dict = backup_ledger.get_status(settings)
+                            backup_info.update(
+                                {
+                                    "pending_ocr_count": status_dict.get(
+                                        "pending_ocr_count", status_dict["pending_count"]
+                                    ),
+                                    "pending_bytes": status_dict["pending_bytes"],
+                                    "oldest_pending_at": status_dict["oldest_pending_at"],
+                                    "last_backup_at": status_dict["last_backup_at"],
+                                    "runs_since_last_backup": status_dict["runs_since_last_backup"],
+                                }
+                            )
+                        except Exception as backup_exc:
+                            logging.getLogger("cardrag_worker.cli").warning(
+                                "Backup ledger operation failed (isolated from run success): %s", backup_exc
+                            )
+                            backup_info["backup_status"] = "error"
+
+                    payload = _pipeline_result_payload(result)
+                    payload.update(
+                        {
+                            "publication_transport": publication_transport,
+                            "local_generation_published": (
+                                result.published if publication_transport == "local" else False
+                            ),
+                            **backup_info,
+                            **_project_embedding_quality_payload(embeddings),
+                        }
+                    )
+                    return payload
     finally:
         await transport.close()
         logging.getLogger("cardrag_worker.cli").info(
@@ -1137,9 +1883,9 @@ async def _operation_with_signal_shutdown(
     return result
 
 
-async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
+async def _run_with_signal_shutdown(resume: str | None, **scope_options: Any) -> dict[str, Any]:
     return await _operation_with_signal_shutdown(
-        lambda: _run(resume),
+        lambda: _run(resume, **scope_options),
         task_name="cardrag-worker-pipeline",
     )
 
@@ -1186,11 +1932,38 @@ def run_command(
     reuse_from_run: str | None = typer.Option(None, "--reuse-from-run"),
     dry_run: bool = typer.Option(False, "--dry-run"),
     publish_channel: str = typer.Option("candidate-009", "--publish-channel"),
+    issuer: list[str] | None = typer.Option(None, "--issuer", help="Repeat to select configured issuers."),
+    round_robin: bool = typer.Option(False, "--round-robin"),
+    all_issuers: bool = typer.Option(False, "--all"),
+    phase: str = typer.Option("all", "--phase", help="all, collect, or process (with --reuse-from-run)."),
 ) -> None:
     from .partial_cli import run_partial
     from .partial_execution import ExecutionPlan, PartialExecutionError
 
     try:
+        from .issuers.registry import enabled_issuer_codes
+
+        phase = phase if isinstance(phase, str) else "all"
+        if phase not in {"all", "collect", "process"}:
+            raise ValueError("--phase must be all, collect or process")
+        selected = tuple(issuer) if isinstance(issuer, list) else None
+        rotate = round_robin is True
+        explicit_all = all_issuers is True
+        if sum((bool(selected), rotate, explicit_all)) > 1:
+            raise ValueError("--issuer, --round-robin and --all are mutually exclusive")
+        pool = enabled_issuer_codes()
+        if selected is not None and (
+            not selected or len(set(selected)) != len(selected) or not set(selected) <= set(pool)
+        ):
+            raise ValueError("--issuer must select unique configured issuer codes")
+        if selected is not None:
+            selected = tuple(code for code in pool if code in selected)
+        default_mode = os.environ.get("CARDRAG_ISSUER_EXECUTION_MODE", "").strip() or "all"
+        if default_mode not in {"all", "round_robin"}:
+            raise ValueError("CARDRAG_ISSUER_EXECUTION_MODE must be all or round_robin")
+        mode = (
+            "selected" if selected else "all" if explicit_all else "round_robin" if rotate else default_mode
+        )
         skipped = set(skip_stage or [])
         skipped.update(
             s
@@ -1202,6 +1975,15 @@ def run_command(
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", resume):
                 raise ValueError("invalid resume run ID")
             resume_settings = WorkerSettings.from_env()
+            scope_path = resume_settings.state_dir / "runs" / resume / "issuer-scope.json"
+            if scope_path.exists() and (explicit_all or rotate):
+                from .partial_execution import read_json
+
+                scope = read_json(resume_settings.state_dir, scope_path, "scope")
+                if (explicit_all and set(scope["selected"]) != set(scope["pool"])) or (
+                    rotate and scope["mode"] != "round_robin"
+                ):
+                    raise ValueError("resume options conflict with the frozen issuer scope")
             resume_plan_path = resume_settings.state_dir / "runs" / resume / "execution-plan.json"
             if resume_plan_path.is_file():
                 persisted = json.loads(resume_plan_path.read_bytes())
@@ -1209,14 +1991,54 @@ def run_command(
                     skipped = set(persisted["skipped_stages"])
                     reuse_from_run = persisted["source_run_id"]
                     publish_channel = persisted.get("channel", "candidate-009")
-        if skipped or reuse_from_run or dry_run or persisted:
+        if persisted:
+            persisted_phase = persisted.get("phase", "all")
+            if phase == "all" and not (
+                rotate or (mode == "round_robin" and not selected and not explicit_all)
+            ):
+                phase = persisted_phase
+            elif phase != persisted_phase:
+                raise ValueError("resume phase conflicts with persisted execution plan")
+            if selected is None and persisted.get("selected_issuers"):
+                selected = tuple(persisted["selected_issuers"])
+            elif (
+                selected is not None
+                and persisted.get("selected_issuers")
+                and selected != tuple(persisted["selected_issuers"])
+            ):
+                raise ValueError("resume issuer selection conflicts with persisted execution plan")
+        if phase != "all":
+            if rotate or (mode == "round_robin" and not selected and not explicit_all):
+                raise ValueError("round-robin requires --phase all")
+            if skipped and not (persisted and phase == "process" and skipped == {"pdf"}):
+                raise ValueError("--phase cannot be combined with stage skips")
+            if phase == "collect" and reuse_from_run:
+                raise ValueError("collect does not accept a reuse source")
+            if phase == "process" and reuse_from_run is None:
+                raise ValueError("process requires --reuse-from-run collection ID")
+            if phase == "process":
+                skipped = {"pdf"}
+        if skipped or reuse_from_run or dry_run or persisted or phase != "all":
+            if phase == "all" and (selected or rotate or (mode == "round_robin" and not explicit_all)):
+                raise ValueError(
+                    "stage reuse/dry-run requires --all; scoped phases use their own source contract"
+                )
             if resume and reuse_from_run and resume != reuse_from_run:
                 # A resumed partial run uses its persisted original source below.
                 settings = WorkerSettings.from_env()
                 path = settings.state_dir / "runs" / resume / "execution-plan.json"
                 if not path.is_file() or json.loads(path.read_bytes()).get("source_run_id") != reuse_from_run:
                     raise ValueError("resume source differs from the persisted execution plan")
-            plan = ExecutionPlan(frozenset(skipped), reuse_from_run or resume, dry_run, publish_channel)
+            plan = ExecutionPlan(
+                frozenset(skipped),
+                reuse_from_run or (resume if phase == "all" else None),
+                dry_run,
+                publish_channel,
+                phase=phase,
+                selected_issuers=selected,
+            )
+            if phase != "all" and publish_channel == "candidate-009":
+                plan.channel = WorkerSettings.from_env().channel
             _echo(
                 asyncio.run(
                     _operation_with_signal_shutdown(
@@ -1225,7 +2047,17 @@ def run_command(
                 )
             )
         else:
-            _echo(asyncio.run(_run_with_signal_shutdown(resume)))
+            scope_options = (
+                {}
+                if selected is None and mode == "all"
+                else {"selected_issuers": selected, "issuer_mode": mode}
+            )
+            payload = asyncio.run(_run_with_signal_shutdown(resume, **scope_options))
+            _echo(payload)
+            if payload.get("status") in {"failed", "interrupted", "blocked"}:
+                raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
     except PartialExecutionError as exc:
         _echo(
             {
@@ -2113,21 +2945,291 @@ def gc_command(
         raise typer.Exit(code=1) from None
 
 
+@app.command("remediate-unresolved-history")
+def remediate_unresolved_history_command(
+    apply: bool = typer.Option(False, "--apply", help="Apply remediation to state database."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Run remediation planning without modifying database (default)."
+    ),
+    seal_path: Path | None = typer.Option(
+        None, "--seal-path", help="Path to publish.json seal file to remediate."
+    ),
+) -> None:
+    """Analyze and remediate baseline unresolved revision history for batch reliability."""
+    from .pdf_cache import PDFCache
+    from .settings import WorkerSettings
+    from .state import WorkerState, worker_lock
+    from .unresolved_remediation import (
+        apply_unresolved_remediation,
+        plan_unresolved_remediation,
+    )
+
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    with worker_lock(settings.lock_file):
+        state = WorkerState(settings.state_database)
+        try:
+            is_apply = apply and not dry_run
+            current_serving_generation_id: str | None = None
+            if is_apply:
+                publication_transport = getattr(settings, "publication_transport", None)
+                if publication_transport is None:
+                    publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav")
+                channel = getattr(settings, "channel", "stable")
+                serving_dir = getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving"))
+                try:
+                    transport: LocalServingTransport | WebDAVClient
+                    if publication_transport == "local":
+                        transport = LocalServingTransport(serving_dir, channel=channel)
+                    else:
+                        configured = WebDAVClient.from_env(
+                            stable_publication_approved=settings.stable_publication_approved
+                        )
+                        transport = WebDAVClient(
+                            configured.core,
+                            channel=channel,
+                            stable_publication_approved=settings.stable_publication_approved,
+                            upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+                        )
+                    try:
+                        import asyncio
+
+                        cur_gen = asyncio.run(transport.validated_current_generation())
+                        if cur_gen is None:
+                            _echo(
+                                {
+                                    "status": "failed",
+                                    "error": f"No verified current serving generation found on channel '{channel}'",
+                                }
+                            )
+                            raise typer.Exit(code=1)
+                        current_serving_generation_id = cur_gen.generation_id
+                    finally:
+                        with suppress(Exception):
+                            import asyncio
+
+                            asyncio.run(transport.close())
+                except typer.Exit:
+                    raise
+                except Exception as exc:
+                    _echo(
+                        {
+                            "status": "failed",
+                            "error": f"Failed querying current serving generation from transport: {exc}",
+                        }
+                    )
+                    raise typer.Exit(code=1) from None
+
+            target_seal_path: Path | None = seal_path
+            if target_seal_path is None:
+                if is_apply and current_serving_generation_id:
+                    row = state.connection.execute(
+                        "SELECT run_id FROM publish WHERE generation_id=? AND status='ready'",
+                        (current_serving_generation_id,),
+                    ).fetchone()
+                    if row is not None:
+                        candidate = settings.state_dir / "runs" / str(row[0]) / "sealed" / "publish.json"
+                        if candidate.is_file():
+                            target_seal_path = candidate
+                if target_seal_path is None:
+                    retained_ids = state.retained_publication_run_ids(limit=5)
+                    for run_id in retained_ids:
+                        candidate = settings.state_dir / "runs" / run_id / "sealed" / "publish.json"
+                        if candidate.is_file():
+                            target_seal_path = candidate
+                            break
+            if target_seal_path is None or not target_seal_path.is_file():
+                _echo({"status": "failed", "error": "No baseline seal file found to remediate"})
+                raise typer.Exit(code=1)
+
+            try:
+                seal_data = json.loads(target_seal_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                _echo({"status": "failed", "error": f"Failed reading seal file: {exc}"})
+                raise typer.Exit(code=1) from None
+
+            pdf_cache = PDFCache(settings.state_dir, state)
+            try:
+                plan = plan_unresolved_remediation(
+                    state,
+                    seal_data,
+                    pdf_cache=pdf_cache,
+                    require_verified_run=True,
+                    require_verified_serving=is_apply,
+                    current_serving_generation_id=current_serving_generation_id,
+                )
+            except Exception as exc:
+                _echo({"status": "failed", "error": f"Baseline seal validation failed: {exc}"})
+                raise typer.Exit(code=1) from None
+
+            applied_count = 0
+            if is_apply:
+                applied_count = apply_unresolved_remediation(state, plan)
+            result = {
+                "status": "succeeded",
+                "mode": "apply" if is_apply else "dry_run",
+                "seal_path": str(target_seal_path),
+                "applied_count": applied_count,
+                "plan": plan.to_dict(),
+            }
+            _echo(result)
+        finally:
+            state.close()
+
+
 @backup_app.command("status")
-def backup_status_command() -> None:
+def backup_status_command(
+    run_id: str | None = typer.Option(
+        None, "--run", help="Add the read-only selected-scope view of one retained run"
+    ),
+    issuer: list[str] | None = typer.Option(None, "--issuer", help="Issuer code(s) for --run scope"),
+) -> None:
     settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
-    _echo(ledger.get_status(settings))
+    status = ledger.get_status(settings)
+    if run_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+            raise typer.BadParameter("invalid run ID")
+        selected = tuple(dict.fromkeys(issuer)) if issuer else None
+        if selected is None:
+            scope_path = settings.state_dir / "runs" / run_id / "issuer-scope.json"
+            if not scope_path.is_file():
+                raise typer.BadParameter("--issuer is required when the run has no frozen issuer scope")
+            selected = tuple(json.loads(scope_path.read_text()).get("selected", ()))
+        if not selected:
+            raise typer.BadParameter("scoped status requires at least one issuer")
+        status.update(ledger.scoped_pending_diagnostics(settings, run_id, selected))
+    _echo(status)
 
 
 @backup_app.command("flush")
 def backup_flush_command(
     force: bool = typer.Option(False, "--force", help="Force flush ignoring threshold conditions"),
+    run_id: str | None = typer.Option(
+        None,
+        "--run",
+        help="Scoped formal retry: flush only the verified selected-issuer artifacts of a retained run",
+    ),
+    issuer: list[str] | None = typer.Option(
+        None, "--issuer", help="Issuer code to scope with --run; repeat. Defaults to the run's frozen scope"
+    ),
 ) -> None:
     settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
-    res = asyncio.run(ledger.flush(settings, force=force))
+    allowed = None
+    expected = None
+    scoped_run_id: str | None = None
+    scoped_issuers: tuple[str, ...] | None = None
+    if run_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+            raise typer.BadParameter("invalid run ID")
+        selected = tuple(dict.fromkeys(issuer)) if issuer else None
+        if selected is None:
+            scope_path = settings.state_dir / "runs" / run_id / "issuer-scope.json"
+            if not scope_path.is_file():
+                _echo(
+                    {
+                        "status": "config_error",
+                        "error": "--issuer is required when the run has no frozen issuer scope",
+                    }
+                )
+                raise typer.Exit(code=2)
+            selected = tuple(json.loads(scope_path.read_text()).get("selected", ()))
+        if not selected:
+            raise typer.BadParameter("scoped retry requires at least one issuer")
+        # Formal provider-free retry: re-register the retained run's current
+        # verified bundles from seal/run evidence before planning the scope, so
+        # an already-recorded run whose variant metadata never reached the
+        # ledger (pending 0) is transported by this command itself instead of
+        # requiring a manual recorder call.  Registration is idempotent; rows
+        # already pending or receipted at the canonical root are untouched.
+        if getattr(settings, "backup_mode", "disabled") != "disabled":
+            ledger.record_run_success(
+                run_id,
+                settings.state_dir,
+                settings,
+                selected_issuers=selected,
+            )
+        allowed, expected = ledger.scoped_backup_scope(
+            run_id, settings.state_dir, selected, remote_root=canonical_remote_root(settings)
+        )
+        if not allowed:
+            _echo(
+                {
+                    "status": "config_error",
+                    "error": "run seal is unavailable or selects no allowed artifacts; retention may have pruned it",
+                    "in_scope_remaining": None,
+                    "pending_out_of_scope": None,
+                }
+            )
+            raise typer.Exit(code=2)
+        force = True  # an explicit operator retry is always forced, never threshold-deferred
+        scoped_run_id = run_id
+        scoped_issuers = selected
+    res = asyncio.run(
+        ledger.flush(settings, force=force, allowed_remote_paths=allowed, expected_artifacts=expected)
+    )
+    if scoped_run_id is not None:
+        res["scoped_run_id"] = scoped_run_id
+        res["scoped_issuers"] = list(scoped_issuers or ())
     _echo(res)
+
+
+@backup_app.command("recover-metadata")
+def backup_recover_metadata_command(
+    run_id: str = typer.Option(
+        ...,
+        "--run",
+        help="Retained run whose sealed native OCR metadata pairs must be verified",
+    ),
+    issuer: list[str] | None = typer.Option(
+        None,
+        "--issuer",
+        help="Issuer code(s) for --run scope; defaults to the run's frozen scope",
+    ),
+    key: list[str] | None = typer.Option(
+        None,
+        "--key",
+        help="Restrict recovery to specific 64-hex OCR reuse key(s); repeat",
+    ),
+) -> None:
+    """Verify remote native manifest/READY pairs and restore local cache evidence.
+
+    Remote access is GET-only and root-receipt-bound: no receipt, seal, pending
+    row, or remote object is modified, and matching bodies are never re-uploaded.
+    A missing/corrupt/mismatched pair stays unverified and blocks completion.
+    """
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+        raise typer.BadParameter("invalid run ID")
+    selected = tuple(dict.fromkeys(issuer)) if issuer else None
+    if selected is None:
+        scope_path = settings.state_dir / "runs" / run_id / "issuer-scope.json"
+        if not scope_path.is_file():
+            _echo(
+                {
+                    "status": "config_error",
+                    "error": "--issuer is required when the run has no frozen issuer scope",
+                }
+            )
+            raise typer.Exit(code=2)
+        selected = tuple(json.loads(scope_path.read_text()).get("selected", ()))
+    if not selected:
+        raise typer.BadParameter("metadata recovery requires at least one issuer")
+    keys = None
+    if key:
+        keys = tuple(dict.fromkeys(key))
+        for candidate_key in keys:
+            if not re.fullmatch(r"[0-9a-f]{64}", candidate_key):
+                raise typer.BadParameter("--key must be a lowercase 64-character hex reuse key")
+    res = asyncio.run(ledger.recover_verified_ocr_metadata(settings, run_id, selected, keys=keys))
+    res["scoped_run_id"] = run_id
+    res["scoped_issuers"] = list(selected)
+    _echo(res)
+    if res.get("status") == "config_error":
+        raise typer.Exit(code=2)
+    if res.get("status") in {"partial", "locked"}:
+        raise typer.Exit(code=1)
 
 
 @backup_app.command("audit")
@@ -2153,6 +3255,8 @@ def backup_restore_command(
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
     res = asyncio.run(ledger.restore(settings, target_dir=dest))
     _echo(res)
+    if res.get("status") in {"failed", "locked"}:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

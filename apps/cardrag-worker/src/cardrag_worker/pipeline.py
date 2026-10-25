@@ -67,20 +67,28 @@ from cardrag_core import (
 from cardrag_core import (
     IssuerParserProfile as ManifestIssuerParserProfile,
 )
+from pydantic import ValidationError
 
 from .aggregation_profile_v5 import VerifiedAggregationProfileV5
 from .async_utils import to_thread_fenced
 from .bounded import bounded_ordered_map
 from .cache_seed_v109 import load_v109_seed_pins
 from .capacity_v5 import (
+    CAPACITY_POLICY_LOST,
+    CAPACITY_WAL_BASELINE_UNSEALED,
+    CAPACITY_WAL_BOUND_EXCEEDED,
+    CAPACITY_WAL_RESEAL_FAILED,
+    V5ArtifactPrediction,
     V5CapacityError,
     V5CapacityPolicy,
+    V5CapacitySnapshot,
     build_v5_database_ledger,
     predict_serving_database_bytes,
     predict_v5_local_artifacts,
     preflight_v5_capacity,
     preflight_v5_remaining_free_capacity,
 )
+from .content_cache import ContentCacheValidationError
 from .contracts import (
     GENERATION_SCHEMA_ID,
     SERVING_SCHEMA_ID,
@@ -116,6 +124,7 @@ from .downloader import (
     PDFNotModified,
     ProtectedDocumentError,
     SecurePDFDownloader,
+    UnsupportedAttachmentError,
 )
 from .embedding_v5 import (
     EmbeddingV5Error,
@@ -146,10 +155,16 @@ from .exporter_v5 import (
     ViewSourceSpanInput,
     unexpected_v5_integrity_errors,
 )
-from .issuer_collection import IssuerCollectionError, IssuerCollectionOutcome, origin_failure
+from .issuer_collection import (
+    IssuerCollectionError,
+    IssuerCollectionFailedError,
+    IssuerCollectionOutcome,
+    origin_failure,
+)
 from .issuer_http import create_issuer_client
 from .local_publisher import LocalServingTransport
 from .ocr import (
+    OCRCacheMissError,
     OCRCachePublicationError,
     OCRResolver,
     OCRResult,
@@ -166,7 +181,7 @@ from .ocr_requests import (
     select_run_reprocess_request,
 )
 from .partial_execution import ExecutionPlan, PartialExecutionError, ReuseSource, replay_pdf_source
-from .pdf_cache import PDFCache, PDFCachePruneError, PDFSourceIdentity
+from .pdf_cache import PDFCache, PDFCacheHit, PDFCachePruneError, PDFSourceIdentity
 from .performance import ExactTokenMemo, WorkerPerformance
 from .providers import (
     EmbeddingProvider,
@@ -225,6 +240,114 @@ SERVING_SCHEMA_ID_V5: Literal["cardrag.serving-db.v6"] = "cardrag.serving-db.v6"
 V5_VIEW_MAXIMUM_CHARACTERS = 131_072
 MAX_GENERATION_MANIFEST_BYTES = 32 * 1024 * 1024
 MAX_WORKER_SEAL_BYTES = 64 * 1024 * 1024
+# One export vector memo entry is exactly VECTOR_ROW_BYTES (16 KiB for 4,096D
+# float32).  512 entries bound the dedup cache at 8 MiB regardless of corpus
+# size; the exporter still digests and revalidates every row independently.
+EXPORT_VECTOR_CACHE_MAX_ENTRIES = 512
+
+
+class BoundedVectorFetchMemo:
+    """Execution-scoped memo for repeated sealed embedding cache fetches.
+
+    Entries are pinned by the sealed ``(cache_key, input_sha256,
+    vector_sha256)`` triple.  The memo is FIFO-bounded so peak memory stays
+    at ``max_entries * 16 KiB`` regardless of corpus size; a miss simply
+    re-reads and revalidates the cache row.  Exporters must still digest and
+    validate every returned row independently.
+    """
+
+    def __init__(self, max_entries: int = EXPORT_VECTOR_CACHE_MAX_ENTRIES) -> None:
+        if max_entries < 1:
+            raise ValueError("vector fetch memo requires at least one entry")
+        self._entries: dict[tuple[str, str, str], bytes] = {}
+        self._max_entries = max_entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, identity: tuple[str, str, str]) -> bytes | None:
+        return self._entries.get(identity)
+
+    def put(self, identity: tuple[str, str, str], vector: bytes) -> None:
+        while len(self._entries) >= self._max_entries:
+            self._entries.pop(next(iter(self._entries)))
+        self._entries[identity] = vector
+
+
+def make_lazy_cache_vector(
+    *,
+    state: WorkerState,
+    performance: WorkerPerformance,
+    memo: BoundedVectorFetchMemo | None,
+    profile: Any,
+    cache_key: str,
+    input_sha256: str,
+    expected_vector_sha256: str,
+) -> LazyEmbeddingVector:
+    """Build one sealed, cache-bound vector source with bounded dedup fetches.
+
+    Shared by the live export loop and tests so the memo exercises the real
+    ``WorkerState.get_embedding_v5`` path.  ``memo=None`` disables reuse.
+    """
+
+    def load() -> bytes:
+        identity = (cache_key, input_sha256, expected_vector_sha256)
+        if memo is not None:
+            reused = memo.get(identity)
+            if reused is not None:
+                performance.increment("export_cache_fetch_deduped")
+                return reused
+        performance.increment("export_cache_lookups")
+        cached = state.get_embedding_v5(
+            cache_key,
+            profile_id=profile.profile_id,
+            input_sha256=input_sha256,
+            dimension=profile.dimension,
+            dtype=profile.dtype,
+            normalization=profile.normalization,
+            validate_norm=False,
+        )
+        if cached is None:
+            raise RuntimeError("sealed v5 embedding cache row disappeared before export")
+        expected_identity = (
+            cache_key,
+            profile.profile_id,
+            input_sha256,
+            profile.dimension,
+            profile.dtype,
+            profile.normalization,
+        )
+        actual_identity = (
+            cached.cache_key,
+            cached.profile_id,
+            cached.input_sha256,
+            cached.dimension,
+            cached.dtype,
+            cached.normalization,
+        )
+        if actual_identity != expected_identity:
+            raise RuntimeError("sealed v5 embedding cache row changed identity before export")
+        if hashlib.sha256(cached.embedding).hexdigest() != expected_vector_sha256:
+            raise RuntimeError("sealed v5 embedding cache row changed bytes before export")
+        # Bounded in-execution memo for repeated sealed cache keys.  The
+        # sealed (cache_key, input_sha256, vector_sha256) triple pins the
+        # bytes; the exporter still digests and revalidates every row.
+        if memo is not None:
+            memo.put(identity, cached.embedding)
+        return cached.embedding
+
+    return LazyEmbeddingVector(
+        cache_identity=cache_key,
+        profile_id=profile.profile_id,
+        input_sha256=input_sha256,
+        expected_vector_sha256=expected_vector_sha256,
+        loader=load,
+        dimension=profile.dimension,
+        dtype=profile.dtype,
+        normalization=profile.normalization,
+    )
+
+
 STRUCTURE_FALLBACK_LEDGER_SCHEMA = "cardrag.structure-fallback-ledger.v1"
 STRUCTURE_FAILED_LEDGER_SCHEMA = "cardrag.structure-failed-ledger.v1"
 V5_RETRIEVAL_POLICY = {
@@ -483,6 +606,13 @@ class OCRSystemicFailureRecord:
     exit_code: int | None = None
     stderr_size_bytes: int | None = None
     stderr_sha256: str | None = None
+    stdout_size_bytes: int | None = None
+    stdout_sha256: str | None = None
+    provider: str | None = None
+    classification_basis: str | None = None
+    chunk_index: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
 
     def __post_init__(self) -> None:
         bounded_identity = {
@@ -541,6 +671,43 @@ class OCRSystemicFailureRecord:
             or re.fullmatch(r"[0-9a-f]{64}", self.stderr_sha256) is None
         ):
             raise ValueError("OCR systemic failure stderr diagnostics are invalid")
+        if (self.stdout_size_bytes is None) != (self.stdout_sha256 is None):
+            raise ValueError("OCR systemic failure stdout diagnostics must be complete")
+        if self.stdout_size_bytes is not None and (
+            isinstance(self.stdout_size_bytes, bool)
+            or not isinstance(self.stdout_size_bytes, int)
+            or not 0 <= self.stdout_size_bytes <= 2**63 - 1
+            or self.stdout_sha256 is None
+            or re.fullmatch(r"[0-9a-f]{64}", self.stdout_sha256) is None
+        ):
+            raise ValueError("OCR systemic failure stdout diagnostics are invalid")
+        if self.provider is not None and (
+            not isinstance(self.provider, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", self.provider) is None
+        ):
+            raise ValueError("OCR systemic failure provider is invalid")
+        if self.classification_basis is not None and (
+            not isinstance(self.classification_basis, str)
+            or re.fullmatch(r"[a-z0-9_]{1,64}", self.classification_basis) is None
+        ):
+            raise ValueError("OCR systemic failure classification basis is invalid")
+        if self.chunk_index is not None and (
+            isinstance(self.chunk_index, bool)
+            or not isinstance(self.chunk_index, int)
+            or self.chunk_index < 0
+        ):
+            raise ValueError("OCR systemic failure chunk index is invalid")
+        if (self.page_start is None) != (self.page_end is None):
+            raise ValueError("OCR systemic failure page range must be complete")
+        if self.page_start is not None and (
+            isinstance(self.page_start, bool)
+            or not isinstance(self.page_start, int)
+            or isinstance(self.page_end, bool)
+            or not isinstance(self.page_end, int)
+            or self.page_start < 1
+            or self.page_end < self.page_start
+        ):
+            raise ValueError("OCR systemic failure page range is invalid")
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -572,6 +739,18 @@ class OCRSystemicFailureRecord:
         if self.stderr_size_bytes is not None:
             payload["stderr_size_bytes"] = self.stderr_size_bytes
             payload["stderr_sha256"] = self.stderr_sha256
+        if self.stdout_size_bytes is not None:
+            payload["stdout_size_bytes"] = self.stdout_size_bytes
+            payload["stdout_sha256"] = self.stdout_sha256
+        if self.provider is not None:
+            payload["provider"] = self.provider
+        if self.classification_basis is not None:
+            payload["classification_basis"] = self.classification_basis
+        if self.chunk_index is not None:
+            payload["chunk_index"] = self.chunk_index
+        if self.page_start is not None:
+            payload["page_start"] = self.page_start
+            payload["page_end"] = self.page_end
         return payload
 
 
@@ -619,6 +798,9 @@ class WorkerUnexpectedFailureRecord:
     errno: int | None = None
     reason_code: str = "worker_unexpected_failure"
     reason: str = "Worker pipeline failed unexpectedly."
+    document_id: str | None = None
+    stage: str | None = None
+    mime_type: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -637,10 +819,42 @@ class WorkerUnexpectedFailureRecord:
             raise ValueError("Worker failure status_code is invalid")
         if self.errno is not None and (isinstance(self.errno, bool) or not 1 <= self.errno <= 4095):
             raise ValueError("Worker failure errno is invalid")
-        if self.reason_code != "worker_unexpected_failure":
+        ALLOWED_REASON_CODES = {
+            "worker_unexpected_failure",
+            "stage_revalidation_failed",
+            "cache_validation_error",
+            "identity_validation_error",
+            "ocr_validation_error",
+            "stage_bookkeeping_failed",
+            "issuer_origin_service_error",
+            "issuer_origin_timeout",
+            "issuer_origin_network",
+            "issuer_origin_http_status",
+            "issuer_origin_cooldown",
+            "issuer_origin_budget_deferred",
+            "issuer_origin_authentication_required",
+            "issuer_source_invalid",
+            "issuer_discovery_deadline",
+            "issuer_origin_unavailable",
+        }
+        if self.reason_code not in ALLOWED_REASON_CODES:
             raise ValueError("Worker failure reason_code is invalid")
-        if self.reason != "Worker pipeline failed unexpectedly.":
+        if (
+            not self.reason
+            or len(self.reason) > 512
+            or any(ord(c) < 32 or ord(c) == 127 for c in self.reason)
+        ):
             raise ValueError("Worker failure reason is invalid")
+        if self.document_id is not None and not re.fullmatch(
+            r"(?:source|doc)_[0-9a-f]{64}", self.document_id
+        ):
+            raise ValueError("Worker failure document_id is invalid")
+        if self.stage is not None and not re.fullmatch(r"[a-z0-9_-]{1,64}", self.stage):
+            raise ValueError("Worker failure stage is invalid")
+        if self.mime_type is not None and not re.fullmatch(
+            r"[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,63}", self.mime_type
+        ):
+            raise ValueError("Worker failure mime_type is invalid")
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -657,6 +871,12 @@ class WorkerUnexpectedFailureRecord:
             payload["errno"] = self.errno
         if self.phase is not None:
             payload["phase"] = self.phase
+        if self.document_id is not None:
+            payload["document_id"] = self.document_id
+        if self.stage is not None:
+            payload["stage"] = self.stage
+        if self.mime_type is not None:
+            payload["mime_type"] = self.mime_type
         return payload
 
 
@@ -674,7 +894,13 @@ class WorkerUnexpectedFailureError(RuntimeError):
         self.report_path = report_path
         self.report = f"runs/{run_id}/reports/worker-failure.json"
         self.failure = failure
-        self.stored_error = f"{failure.reason_code}: {failure.reason}; report={self.report}"
+        extra = []
+        if failure.stage is not None:
+            extra.append(f"stage={failure.stage}")
+        if failure.document_id is not None:
+            extra.append(f"document_id={failure.document_id}")
+        extra_str = f" ({', '.join(extra)})" if extra else ""
+        self.stored_error = f"{failure.reason_code}: {failure.reason}{extra_str}; report={self.report}"
         super().__init__(self.stored_error)
 
 
@@ -688,6 +914,7 @@ class PipelineResult:
     document_count: int
     evidence_count: int
     unsupported_document_count: int = 0
+    unsupported_attachment_count: int = 0
     gc_status: str | None = None
     gc_deleted: int = 0
     gc_error: str | None = None
@@ -697,6 +924,8 @@ class PipelineResult:
     pdf_revisions: int = 0
     pdf_cache_revalidations: int = 0
     pdf_cache_not_modified: int = 0
+    pdf_succeeded_count: int = 0
+    pdf_skipped_count: int = 0
     pdf_cache_prune_status: str | None = None
     pdf_cache_pruned_objects: int = 0
     pdf_cache_pruned_bytes: int = 0
@@ -738,12 +967,42 @@ class _IssuerSkippedDownload:
 
 
 @dataclass(frozen=True, slots=True)
+class _UnsupportedAttachment:
+    source: SourceRecord
+    reason: str
+    format: str = "zip"
+    sha256: str | None = None
+    size_bytes: int = 0
+
+
+def _is_explicit_zip(source: SourceRecord) -> bool:
+    if getattr(source, "is_zip", False):
+        return True
+    if source.file_name.casefold().endswith(".zip"):
+        return True
+    if source.source_url.casefold().endswith(".zip"):
+        return True
+    meta = getattr(source, "metadata", {}) or {}
+    return meta.get("attachment_type") == "zip"
+
+
+@dataclass(frozen=True, slots=True)
 class _AcquiredDocument:
     source: SourceRecord
     pdf: DownloadedPDF
     temporal_status: TemporalStatusV5 = "current"
     supersedes_document_id: str | None = None
     is_historical: bool = False
+
+
+def canonical_acquired_document_key(item: _AcquiredDocument) -> tuple[str, str, Any, str, str]:
+    return (
+        item.source.issuer,
+        item.source.product_code,
+        item.source.effective_date,
+        item.source.source_version,
+        item.pdf.sha256,
+    )
 
 
 def _v5_corpus_identity_payload(
@@ -757,6 +1016,7 @@ def _v5_corpus_identity_payload(
 
     if unresolved_revision_sha256 != unresolved_revision_ledger_sha256_v5(unresolved_revisions):
         raise RuntimeError("v5 corpus unresolved revision ledger hash mismatch")
+    ordered_acquired = tuple(sorted(acquired, key=canonical_acquired_document_key))
     return {
         "schema_version": "cardrag.current-corpus.v3",
         "documents": [
@@ -766,7 +1026,7 @@ def _v5_corpus_identity_payload(
                 "pdf_size_bytes": item.pdf.size_bytes,
                 "page_count": item.pdf.page_count,
             }
-            for item in acquired
+            for item in ordered_acquired
         ],
         "unsupported_documents": list(unsupported_documents),
         "revision_history": {
@@ -779,7 +1039,7 @@ def _v5_corpus_identity_payload(
                     "temporal_status": item.temporal_status,
                     "supersedes_document_id": item.supersedes_document_id,
                 }
-                for item in acquired
+                for item in ordered_acquired
             ],
             "unresolved_ledger_schema": UNRESOLVED_REVISION_LEDGER_SCHEMA,
             "unresolved_revision_count": len(unresolved_revisions),
@@ -794,6 +1054,9 @@ class _OCRFailedDocument:
     record: OCRFailedProductRecord
     pdf_path: Path
     is_historical: bool = False
+    source: SourceRecord | None = None
+    temporal_status: TemporalStatusV5 = "current"
+    supersedes_document_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,6 +1466,13 @@ class _OCRSystemicFailureReason:
     exit_code: int | None = None
     stderr_size_bytes: int | None = None
     stderr_sha256: str | None = None
+    stdout_size_bytes: int | None = None
+    stdout_sha256: str | None = None
+    provider: str | None = None
+    classification_basis: str | None = None
+    chunk_index: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
@@ -1227,15 +1497,39 @@ def _classify_ocr_systemic_failure(exc: Exception) -> _OCRSystemicFailureReason:
             )
         except (KeyError, TypeError, ValueError):
             canonical_provider_error = ProviderSystemicError()
+        with suppress(KeyError, TypeError, ValueError):
+            # Optional diagnostics must not erase a valid provider reason.
+            canonical_provider_error = ProviderSystemicError(
+                canonical_provider_error.reason_code,
+                exit_code=canonical_provider_error.exit_code,
+                stderr_size_bytes=canonical_provider_error.stderr_size_bytes,
+                stderr_sha256=canonical_provider_error.stderr_sha256,
+                stdout_size_bytes=getattr(exc, "stdout_size_bytes", None),
+                stdout_sha256=getattr(exc, "stdout_sha256", None),
+                provider=getattr(exc, "provider", None),
+                phase=getattr(exc, "phase", None),
+                classification_basis=getattr(exc, "classification_basis", None),
+                chunk_index=getattr(exc, "chunk_index", None),
+                page_start=getattr(exc, "page_start", None),
+                page_end=getattr(exc, "page_end", None),
+            )
         return _OCRSystemicFailureReason(
             canonical_provider_error.reason_code,
             canonical_provider_error.reason,
             "ocr_provider_systemic",
+            phase=canonical_provider_error.phase,
             error_kind=canonical_provider_error.error_kind,
             retryable=canonical_provider_error.retryable,
             exit_code=canonical_provider_error.exit_code,
             stderr_size_bytes=canonical_provider_error.stderr_size_bytes,
             stderr_sha256=canonical_provider_error.stderr_sha256,
+            stdout_size_bytes=canonical_provider_error.stdout_size_bytes,
+            stdout_sha256=canonical_provider_error.stdout_sha256,
+            provider=canonical_provider_error.provider,
+            classification_basis=canonical_provider_error.classification_basis,
+            chunk_index=canonical_provider_error.chunk_index,
+            page_start=canonical_provider_error.page_start,
+            page_end=canonical_provider_error.page_end,
         )
     if isinstance(exc, ProviderError):
         return _OCRSystemicFailureReason(
@@ -1489,6 +1783,8 @@ def _classify_worker_failure(exc: Exception) -> tuple[str, int | None, int | Non
             else None
         )
         return "local_io", None, safe_errno
+    if isinstance(exc, IssuerCollectionFailedError):
+        return "issuer_origin", exc.status_code, None
     if isinstance(exc, (ValueError, TypeError, KeyError, AssertionError)):
         return "contract", None, None
     if isinstance(exc, RuntimeError):
@@ -1537,9 +1833,35 @@ def _retryable_download_revalidation_kind(exc: Exception) -> str | None:
     return None
 
 
+def _capacity_failure_fields(exc: V5CapacityError) -> str:
+    """Render only the gate's bounded integers/nulls; never raw exception text."""
+
+    parts = [f"capacity_reason={exc.reason_code}"]
+    for key in sorted(exc.details):
+        value = exc.details[key]
+        parts.append(f"{key}={'null' if value is None else value}")
+    return " ".join(parts)
+
+
+def _capacity_gate_fields(
+    prediction: V5ArtifactPrediction,
+    policy: V5CapacityPolicy,
+) -> str:
+    return (
+        f"sidecar_limit_bytes={policy.maximum_vector_sidecar_bytes} "
+        f"database_limit_bytes={policy.maximum_serving_database_bytes} "
+        f"state_limit_bytes={policy.maximum_state_bytes} "
+        f"reserve_bytes={policy.reserved_free_space_bytes} "
+        f"required_free_bytes={prediction.peak_growth_bytes + policy.reserved_free_space_bytes}"
+    )
+
+
 def _safe_v5_embedding_terminal_error(exc: Exception) -> str:
     if isinstance(exc, V5CapacityError):
-        return "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts"
+        return (
+            "v5_capacity_preflight_failed: Worker local capacity rejected predicted v5 artifacts "
+            f"({_capacity_failure_fields(exc)})"
+        )
     if isinstance(exc, EmbeddingV5PermanentRequestError):
         fields = [f"kind={exc.kind}"]
         if exc.status_code is not None:
@@ -1903,6 +2225,9 @@ class WorkerPipeline:
     execution_plan: ExecutionPlan | None = None
     reuse_source: ReuseSource | None = None
     settings: WorkerSettings | None = None
+    _unsupported_count: int = 0
+    _unsupported_attachment_count: int = 0
+    _unsupported_attachments: tuple[Any, ...] = ()
 
     def __init__(
         self,
@@ -1916,7 +2241,7 @@ class WorkerPipeline:
         settings: WorkerSettings | None = None,
         maximum_attempts: int = 4,
         retry_cap_seconds: float = 30,
-        pdf_cache_refresh_hours: float = 168,
+        pdf_cache_refresh_hours: float = 2160,
         pdf_cache_force_revalidate: bool = False,
         collect_remote_garbage: bool = False,
         stable_publication_approved: bool = False,
@@ -1938,6 +2263,10 @@ class WorkerPipeline:
         lock_held: bool = False,
         execution_plan: ExecutionPlan | None = None,
         reuse_source: ReuseSource | None = None,
+        selected_issuers: Sequence[str] | None = None,
+        issuer_execution_mode: str = "all",
+        on_run_created: Callable[[str], None] | None = None,
+        automatic_resume: bool = False,
     ) -> None:
         if not adapters:
             raise ValueError("at least one issuer adapter must be enabled")
@@ -1955,6 +2284,8 @@ class WorkerPipeline:
         self.issuer_discovery_timeout_seconds = issuer_discovery_timeout_seconds
         self._issuer_outcomes: dict[str, IssuerCollectionOutcome] = {}
         self._unsupported_count = 0
+        self._unsupported_attachment_count = 0
+        self._unsupported_attachments = ()
         self._carried_ocr_failures: dict[str, GenerationOCRFailure] = {}
         self._carried_document_ids: set[str] = set()
         self._deferred_reprocess_ids: set[str] = set()
@@ -2016,6 +2347,17 @@ class WorkerPipeline:
         self.state_dir = state_dir
         self.pdf_cache = PDFCache(state_dir, state)
         self.adapters = tuple(adapters)
+        from .issuer_scope import IssuerScope
+
+        self.issuer_scope = IssuerScope(
+            tuple(a.spec.code for a in adapters),
+            tuple(selected_issuers) if selected_issuers is not None else tuple(a.spec.code for a in adapters),
+            issuer_execution_mode,
+        )
+        self.selected_issuers = self.issuer_scope.selected
+        self._preserved_source: ReuseSource | None = None
+        self.on_run_created = on_run_created
+        self.automatic_resume = automatic_resume
         self.ocr = ocr
         self.embeddings = embeddings
         self.v5_profile = v5_profile
@@ -2025,6 +2367,13 @@ class WorkerPipeline:
         self.retry_cap_seconds = retry_cap_seconds
         self.pdf_cache_refresh_interval = pdf_cache_refresh_interval
         self.pdf_cache_force_revalidate = pdf_cache_force_revalidate
+        from .origin_policy import OriginPolicy
+
+        self.origin_policy = OriginPolicy(
+            state,
+            interval=pdf_cache_refresh_interval,
+            visit_days=len(adapters) if issuer_execution_mode == "round_robin" else 0,
+        )
         self.collect_remote_garbage = collect_remote_garbage
         self.stable_publication_approved = stable_publication_approved
         self.ocr_cache_publication_approved = ocr_cache_publication_approved
@@ -2047,6 +2396,10 @@ class WorkerPipeline:
             adapter.spec.code: IssuerRateLimiter(adapter.spec.minimum_interval_seconds)
             for adapter in self.adapters
         }
+
+    @property
+    def work_adapters(self) -> tuple[IssuerAdapter, ...]:
+        return tuple(a for a in self.adapters if a.spec.code in self.selected_issuers)
 
     @property
     def contract_sha256(self) -> str:
@@ -2327,7 +2680,27 @@ class WorkerPipeline:
                     raise
                 retry_after = delay
             else:
-                self.state.stage_succeeded(run_id, document_id, name)
+                try:
+                    self.state.stage_succeeded(run_id, document_id, name)
+                except Exception:
+                    failure = WorkerUnexpectedFailureRecord(
+                        run_id=run_id,
+                        occurred_at=datetime.now(UTC),
+                        error_class_category="database",
+                        reason_code="stage_bookkeeping_failed",
+                        reason="Stage failure bookkeeping failed in state database.",
+                        document_id=document_id
+                        if re.fullmatch(r"(?:source|doc)_[0-9a-f]{64}", document_id)
+                        else None,
+                        stage=name,
+                    )
+                    report_path = self.state_dir / "runs" / run_id / "reports" / "worker-failure.json"
+                    _write_worker_failure_report(report_path, failure=failure)
+                    raise WorkerUnexpectedFailureError(
+                        run_id=run_id,
+                        report_path=report_path,
+                        failure=failure,
+                    ) from None
                 return result
             if retry_after is None:
                 raise RuntimeError("retrying stage lost its backoff delay")
@@ -2462,6 +2835,9 @@ class WorkerPipeline:
                 clear_prefetch()
             try:
                 report = self.performance.snapshot()
+                report["issuer_http"] = self.http_metrics.report() if hasattr(self, "http_metrics") else []
+                report["origin_audit"] = self.origin_policy.report(now=datetime.now(UTC))
+                report["issuer_scope"] = self.issuer_scope.payload
                 if callable(snapshot):
                     try:
                         report["webdav"] = {
@@ -2489,6 +2865,11 @@ class WorkerPipeline:
                 # run row or retention cleanup can mutate candidate state.
                 await self._validated_document_aggregation_head()
             run_id = resume_run_id or self.state.start_run()
+            if self.on_run_created is not None:
+                self.on_run_created(run_id)
+            from .issuer_scope import freeze_scope
+
+            freeze_scope(self.state_dir, run_id, self.issuer_scope)
             if self.execution_plan is not None:
                 plan_path = self.state_dir / "runs" / run_id / "execution-plan.json"
                 if (
@@ -2499,8 +2880,22 @@ class WorkerPipeline:
                 _atomic_write(plan_path, canonical_json_bytes(self.execution_plan.identity()))
             self.state.mark_stale_running_runs_interrupted(exclude_run_id=run_id)
             if resume_run_id:
-                self.state.assert_resumable(run_id)
+                if self.automatic_resume:
+                    # Automatic recovery preserves finite attempt counts and snapshots.
+                    self.state.connection.execute(
+                        "UPDATE run SET status='running',finished_at=NULL WHERE run_id=?", (run_id,)
+                    )
+                else:
+                    self.state.assert_resumable(run_id)
                 self._sweep_stale_paddle_input_symlinks(run_id)
+            from .issuer_metrics import IssuerHTTPMetrics
+
+            self.http_metrics = IssuerHTTPMetrics(
+                self.state,
+                run_id,
+                request_limit=getattr(self.settings, "issuer_request_budget", 10000),
+                byte_limit=getattr(self.settings, "issuer_byte_budget", 4 * 1024**3),
+            )
             self.performance.set("run_id", run_id)
             if isinstance(self.webdav, WebDAVClient):
                 self.webdav.begin_verification_run(run_id)
@@ -2513,7 +2908,34 @@ class WorkerPipeline:
                 self._carried_ocr_failures = {}
                 self._carried_document_ids = set()
                 self._deferred_reprocess_ids = set()
-                self._active_ocr_request = select_run_reprocess_request(self.state_dir, run_id)
+                from .ocr_requests import partition_reprocess_requests
+
+                issuer_by_document: dict[str, str] = {}
+                for prior_id in self.state.retained_publication_run_ids(limit=self.retained_generations):
+                    prior_path = self.state_dir / "runs" / prior_id / "sealed/publish.json"
+                    try:
+                        if prior_path.is_file() and not prior_path.is_symlink():
+                            from .partial_execution import read_json
+
+                            sealed = read_json(self.state_dir, prior_path, "scope")
+                            if isinstance(sealed, dict) and "manifest" in sealed:
+                                prior_manifest = GenerationManifest.model_validate_json(
+                                    canonical_json_bytes(sealed["manifest"])
+                                )
+                                for document in prior_manifest.documents:
+                                    issuer_by_document.setdefault(document.document_id, document.issuer)
+                    except Exception as exc:
+                        LOGGER.debug("Ignoring unreadable prior publish seal %s: %s", prior_path, exc)
+                        continue
+                partition_reprocess_requests(self.state_dir, issuer_by_document)
+                eligible = frozenset(
+                    doc_id for doc_id, issuer in issuer_by_document.items() if issuer in self.selected_issuers
+                )
+                self._active_ocr_request = (
+                    None
+                    if self.execution_plan is not None and self.execution_plan.phase == "collect"
+                    else select_run_reprocess_request(self.state_dir, run_id, eligible_document_ids=eligible)
+                )
                 if (
                     self.execution_plan is not None
                     and self.execution_plan.skips("ocr")
@@ -2521,11 +2943,13 @@ class WorkerPipeline:
                 ):
                     raise PartialExecutionError("skip_artifact_incompatible", "ocr")
                 freeze_content = getattr(self.ocr, "freeze_content_snapshot", None)
-                if callable(freeze_content):
+                if callable(freeze_content) and not (
+                    self.execution_plan and self.execution_plan.phase == "collect"
+                ):
                     await freeze_content(run_id)
                 result = await self._run_locked(
                     run_id,
-                    refresh_sources=resume_run_id is not None,
+                    refresh_sources=resume_run_id is not None and not self.automatic_resume,
                 )
             except asyncio.CancelledError:
                 reconciliation = asyncio.create_task(self._reconcile_cancelled_publication(run_id))
@@ -2582,6 +3006,31 @@ class WorkerPipeline:
             except WorkerUnexpectedFailureError as exc:
                 self.state.finish_run_if_running(run_id, "failed", error=exc.stored_error)
                 raise
+            except IssuerCollectionFailedError as exc:
+                failure = WorkerUnexpectedFailureRecord(
+                    run_id=run_id,
+                    occurred_at=datetime.now(UTC),
+                    error_class_category="issuer_origin",
+                    phase="collection",
+                    status_code=exc.status_code,
+                    reason_code=exc.reason_code,
+                    reason="Issuer origin collection failed after bounded retries.",
+                    document_id=exc.document_id,
+                    stage=exc.stage,
+                    mime_type=exc.mime_type,
+                )
+                report_path = self.state_dir / "runs" / run_id / "reports" / "worker-failure.json"
+                error = WorkerUnexpectedFailureError(
+                    run_id=run_id,
+                    report_path=report_path,
+                    failure=failure,
+                )
+                try:
+                    _write_worker_failure_report(report_path, failure=failure)
+                except Exception:
+                    LOGGER.error("Issuer collection failure report could not be written")
+                self.state.finish_run_if_running(run_id, "failed", error=error.stored_error)
+                raise error from None
             except Exception as exc:
                 LOGGER.exception("Worker pipeline failed unexpectedly during run %s: %s", run_id, exc)
                 category, status_code, error_number = _classify_worker_failure(exc)
@@ -2661,9 +3110,13 @@ class WorkerPipeline:
             result = replace(
                 result,
                 unsupported_document_count=self._unsupported_count,
-                collection_status="degraded"
-                if any(o.failed for o in self._issuer_outcomes.values())
-                else "complete",
+                unsupported_attachment_count=self._unsupported_attachment_count,
+                collection_status=(
+                    "degraded"
+                    if any(o.failed for o in self._issuer_outcomes.values())
+                    or self._unsupported_attachment_count > 0
+                    else "complete"
+                ),
                 failed_issuers=tuple(o.issuer for o in self._issuer_outcomes.values() if o.failed),
                 gc_status=gc_status,
                 gc_deleted=gc_deleted,
@@ -2672,6 +3125,9 @@ class WorkerPipeline:
                 retirement_candidate_count=self._corpus_gate_counts.get("candidates", 0),
             )
             if self.execution_plan is not None:
+                if self.execution_plan.phase == "collect":
+                    for stage in ("ocr", "structure", "embedding", "export", "webdav"):
+                        self.execution_plan.actions[stage] = {"action": "not_requested", "document_count": 0}
                 self.execution_plan.actions.setdefault(
                     "embedding",
                     {"action": "reused" if self.execution_plan.skips("embedding") else "executed"},
@@ -2721,6 +3177,8 @@ class WorkerPipeline:
                             **self.execution_plan.payload(),
                             "status": result.status,
                             "published": result.published,
+                            "unsupported_attachment_count": result.unsupported_attachment_count,
+                            "collection_status": result.collection_status,
                         }
                     ),
                 )
@@ -2815,6 +3273,9 @@ class WorkerPipeline:
         if not runs_root.exists() or runs_root.is_symlink() or not runs_root.is_dir():
             return
         retained = set(self.state.retained_publication_run_ids(limit=self.retained_generations))
+        from .acquisition import pending_acquisitions
+
+        retained.update(receipt["run_id"] for receipt in pending_acquisitions(self.state_dir, self.state))
         removable = set(self.state.completed_run_ids())
         removable.update(self.state.prunable_incomplete_run_ids(keep=self.retained_incomplete_runs))
         # Protect transitive source references while a retained/resumable run owns them.
@@ -3020,7 +3481,8 @@ class WorkerPipeline:
                 baseline_total=len(prior.entries),
                 ledger=ledger,
                 frozen_issuers=frozenset(
-                    code for code, result in self._issuer_outcomes.items() if result.failed
+                    {code for code, result in self._issuer_outcomes.items() if result.failed}
+                    | {a.spec.code for a in self.adapters if a.spec.code not in self.selected_issuers}
                 ),
                 absent=tuple(absent.values()),
                 durable_ok=durable,
@@ -3040,7 +3502,11 @@ class WorkerPipeline:
         return resolve
 
     def _commit_pending_retirement_ledger(self) -> None:
-        if self.execution_plan is not None and self.execution_plan.skips("pdf"):
+        if (
+            self.execution_plan is not None
+            and self.execution_plan.skips("pdf")
+            and self.execution_plan.phase != "process"
+        ):
             return
         pending = getattr(self, "_pending_retirement_ledger", None)
         if pending is not None:
@@ -3128,8 +3594,69 @@ class WorkerPipeline:
             for target in self._active_ocr_request.targets
         )
 
+    def _record_capacity_observation(
+        self,
+        *,
+        run_id: str,
+        prediction: V5ArtifactPrediction,
+        policy: V5CapacityPolicy,
+        snapshot: V5CapacitySnapshot,
+    ) -> None:
+        """Persist the latest gate-proven batch requirement for startup warnings.
+
+        The file is a single bounded observation used only to raise an early
+        operator warning before the cheap 2 GiB startup gate; it never acts as
+        a hard gate and a storage failure here never fails the run.
+        """
+
+        try:
+            _atomic_write(
+                self.state_dir / "capacity-observation.json",
+                canonical_json_bytes(
+                    {
+                        "schema_version": "cardrag.capacity-observation.v1",
+                        "run_id": run_id,
+                        "observed_at": datetime.now(UTC).isoformat(),
+                        "predicted_peak_growth_bytes": prediction.peak_growth_bytes,
+                        "reserved_free_bytes": policy.reserved_free_space_bytes,
+                        "required_free_bytes": (
+                            prediction.peak_growth_bytes + policy.reserved_free_space_bytes
+                        ),
+                        "filesystem_free_bytes": snapshot.filesystem_free_bytes,
+                        "state_usage_bytes": snapshot.state_usage_bytes,
+                    }
+                ),
+            )
+        except Exception:
+            LOGGER.warning("reason_code=capacity_observation_write_failed run_id=%s", run_id)
+
+    def _raise_all_issuer_collection_failed(self) -> None:
+        failed = next((outcome for outcome in self._issuer_outcomes.values() if outcome.failed), None)
+        if failed is None:
+            raise RuntimeError("all issuer collection attempts failed")
+        stage = "discovery" if failed.discovery_status == "failed" else "download"
+        raise IssuerCollectionFailedError(
+            reason_code=failed.reason_code or "issuer_origin_unavailable",
+            exception_class=failed.exception_class or "UnknownOriginError",
+            stage=stage,
+            document_id=failed.source_id,
+            status_code=failed.origin_status_code,
+            mime_type=failed.origin_mime_type,
+            service_signal=failed.origin_service_signal,
+        )
+
     def _write_issuer_collection(self, run_id: str) -> None:
         outcomes = tuple(self._issuer_outcomes.values())
+        for outcome in outcomes:
+            try:
+                outcome.consecutive_failed_runs = self.state.issuer_consecutive_failures(
+                    outcome.issuer,
+                    current_run_id=run_id,
+                )
+            except Exception:
+                # Freshness history is observability only; the collection record
+                # must still seal with null rather than fail the run.
+                outcome.consecutive_failed_runs = None
         failed = sum(item.failed for item in outcomes)
         successful = sum(item.download_status == "succeeded" for item in outcomes)
         status = "failed" if failed == len(outcomes) else "degraded" if failed else "complete"
@@ -3147,6 +3674,17 @@ class WorkerPipeline:
                         o.download_status in {"succeeded", "failed", "skipped"} for o in outcomes
                     ),
                     "issuers": [o.payload() for o in outcomes],
+                    "not_scheduled": [
+                        {
+                            "issuer": adapter.spec.code,
+                            "status": "not_scheduled",
+                            "last_successful_collection_at": self.state.last_successful_snapshot_observed_at(
+                                adapter.spec.code
+                            ),
+                        }
+                        for adapter in self.adapters
+                        if adapter.spec.code not in self.selected_issuers
+                    ],
                     "deferred_reprocess_document_ids": sorted(self._deferred_reprocess_ids),
                 }
             ),
@@ -3356,13 +3894,102 @@ class WorkerPipeline:
         if self.execution_plan is not None and self.execution_plan.skips("pdf"):
             retained_seal = self.state_dir / "runs" / run_id / "sealed/publish.json"
             if retained_seal.is_file():
+                from .acquisition import AcquisitionSource
+                from .issuer_scope import restore_preserved_adapters
                 from .partial_execution import read_json
 
                 sealed = read_json(self.state_dir, retained_seal, "export")
+                if isinstance(sealed, dict) and "manifest" in sealed:
+                    manifest_issuers = sealed["manifest"].get("issuer_codes")
+                    if manifest_issuers:
+                        restore_preserved_adapters(self, manifest_issuers)
                 if sealed.get("contract_sha256") != self.contract_sha256:
                     raise PartialExecutionError("skip_artifact_incompatible", "export")
+                if "unsupported_attachment_count" in sealed:
+                    self._unsupported_attachment_count = int(sealed["unsupported_attachment_count"])
+                elif isinstance(self.reuse_source, AcquisitionSource):
+                    self._unsupported_attachment_count = len(self.reuse_source.unsupported_attachments)
+                else:
+                    candidates = [self.state_dir / "runs" / run_id]
+                    plan_file = self.state_dir / "runs" / run_id / "execution-plan.json"
+                    if plan_file.is_file():
+                        try:
+                            plan_obj = read_json(self.state_dir, plan_file, "plan")
+                            source_run = plan_obj.get("source_run_id")
+                            if source_run:
+                                candidates.append(self.state_dir / "runs" / str(source_run))
+                        except Exception as exc:
+                            LOGGER.debug("Failed reading execution plan: %s", exc)
+                    elif getattr(self.execution_plan, "source_run_id", None):
+                        candidates.append(self.state_dir / "runs" / str(self.execution_plan.source_run_id))
+                    for check_dir in candidates:
+                        acq_path = check_dir / "acquisition.json"
+                        if acq_path.is_file():
+                            try:
+                                acq_data = read_json(self.state_dir, acq_path, "pdf")
+                                self._unsupported_attachment_count = int(
+                                    acq_data.get(
+                                        "unsupported_attachment_count",
+                                        len(acq_data.get("unsupported_attachments", [])),
+                                    )
+                                )
+                                break
+                            except Exception as exc:
+                                LOGGER.debug("Failed reading acquisition unsupported attachments: %s", exc)
+                        exec_path = check_dir / "execution-result.json"
+                        if exec_path.is_file():
+                            try:
+                                exec_data = read_json(self.state_dir, exec_path, "export")
+                                self._unsupported_attachment_count = int(
+                                    exec_data.get("unsupported_attachment_count", 0)
+                                )
+                                if self._unsupported_attachment_count > 0:
+                                    break
+                            except Exception as exc:
+                                LOGGER.debug(
+                                    "Failed reading execution result unsupported attachments: %s", exc
+                                )
                 return await self._publish_sealed(run_id, sealed)
+            from .issuer_scope import preservation_source, restore_preserved_adapters
+
+            self._preserved_source = await preservation_source(self)
+            if self._preserved_source is not None:
+                restore_preserved_adapters(self, self._preserved_source.manifest.issuer_codes)
+                if "v5_metrics" in self._preserved_source.seal:
+                    from .unresolved_remediation import validate_unresolved_ledger_in_seal
+
+                    try:
+                        validate_unresolved_ledger_in_seal(self._preserved_source.seal, state=self.state)
+                    except Exception as exc:
+                        raise PartialExecutionError("issuer_scope_baseline_incompatible", "scope") from exc
             return await replay_pdf_source(self, run_id)
+        from .detail_inventory import DetailInventory
+        from .issuer_scope import preservation_source, preserve_inputs, restore_preserved_adapters
+
+        inventory = DetailInventory(self.state)
+        for adapter in self.work_adapters:
+            if adapter.spec.code in {"woori", "hyundai"}:
+                cast(Any, adapter).detail_inventory = inventory
+            if adapter.spec.code == "lotte":
+                cast(Any, adapter).origin_policy = self.origin_policy
+        self._preserved_source = await preservation_source(self)
+        if self._preserved_source is not None:
+            # A scope receipt also pins transitive source artifacts during retention.
+            restore_preserved_adapters(self, self._preserved_source.manifest.issuer_codes)
+
+        baseline_pre_check = self._preserved_source
+        if baseline_pre_check is None:
+            from .issuer_scope import current_serving_baseline_source
+
+            baseline_pre_check = await current_serving_baseline_source(self)
+        if baseline_pre_check is not None and "v5_metrics" in baseline_pre_check.seal:
+            from .unresolved_remediation import validate_unresolved_ledger_in_seal
+
+            try:
+                validate_unresolved_ledger_in_seal(baseline_pre_check.seal, state=self.state)
+            except Exception as exc:
+                raise PartialExecutionError("issuer_scope_baseline_incompatible", "scope") from exc
+
         run_dir = self.state_dir / "runs" / run_id
         seal_path = run_dir / "sealed" / "publish.json"
         deferred_seal: Mapping[str, Any] | None = None
@@ -3379,7 +4006,7 @@ class WorkerPipeline:
                 a.spec.code,
                 last_successful_collection_at=self.state.last_successful_snapshot_observed_at(a.spec.code),
             )
-            for a in self.adapters
+            for a in self.work_adapters
         }
         collection_pointer = await _observed_pointer_bytes(self.webdav)
 
@@ -3387,8 +4014,14 @@ class WorkerPipeline:
             outcome = self._issuer_outcomes[adapter.spec.code]
             started = time.monotonic()
             # A client belongs to one issuer, including cookies and Hyundai's exact TLS exception.
-            async with create_issuer_client(hyundai_legacy_tls=adapter.spec.code == "hyundai") as client:
-                limited = RateLimitedClient(client, self.limiters[adapter.spec.code])
+            async with create_issuer_client(
+                hyundai_legacy_tls=adapter.spec.code == "hyundai",
+                proxy_url=getattr(self.settings, "issuer_proxy_url", None),
+                metrics=getattr(self, "http_metrics", None),
+            ) as client:
+                limited = RateLimitedClient(
+                    client, self.limiters[adapter.spec.code], issuer=adapter.spec.code
+                )
 
                 async def discover() -> SourceSnapshot:
                     try:
@@ -3432,6 +4065,16 @@ class WorkerPipeline:
                                 operation=discover,
                                 maximum_attempts=adapter.spec.maximum_retries,
                                 retry_base_seconds=adapter.spec.retry_base_seconds,
+                                non_retryable_predicate=lambda exc: (
+                                    isinstance(exc, IssuerCollectionError)
+                                    and exc.reason_code
+                                    in {
+                                        "issuer_origin_cooldown",
+                                        "issuer_origin_budget_deferred",
+                                        "issuer_source_invalid",
+                                    }
+                                ),
+                                non_retryable_error_formatter=lambda exc: str(exc),
                             )
                 except (IssuerCollectionError, TimeoutError) as exc:
                     if isinstance(exc, TimeoutError):
@@ -3443,6 +4086,9 @@ class WorkerPipeline:
                     outcome.download_status = "skipped"
                     outcome.reason_code = exc.reason_code
                     outcome.exception_class = exc.exception_class
+                    outcome.origin_status_code = exc.status_code
+                    outcome.origin_mime_type = exc.mime_type
+                    outcome.origin_service_signal = exc.service_signal
                     stage = self.state.get_stage(run_id, f"issuer-{adapter.spec.code}", "discovery")
                     outcome.attempts = 0 if stage is None else stage.attempt_count
                     outcome.elapsed_seconds = round(time.monotonic() - started, 3)
@@ -3490,7 +4136,7 @@ class WorkerPipeline:
             return snapshot
 
         discoveries = await bounded_ordered_map(
-            self.adapters,
+            self.work_adapters,
             collect_discovery,
             concurrency=self.issuer_discovery_concurrency,
             group_key=lambda adapter: adapter.spec.code,
@@ -3499,9 +4145,15 @@ class WorkerPipeline:
         snapshots = [snapshot for snapshot in discoveries if snapshot is not None]
         self._write_issuer_collection(run_id)
         if not snapshots:
-            raise RuntimeError("all issuer collection attempts failed")
+            self._raise_all_issuer_collection_failed()
         records = select_current([record for snapshot in snapshots for record in snapshot.records])
         contract_sha256 = self.contract_sha256
+        display_candidates: dict[str, list[SourceRecord]] = {}
+        for prior_source in _known_snapshot_sources(
+            self.state, self.work_adapters, records, seed_ledger=load_state_seed_ledger(self.state_dir)
+        ).values():
+            payload = {k: v for k, v in prior_source.discovery_payload.items() if k != "product_name"}
+            display_candidates.setdefault(canonical_sha256(payload), []).append(prior_source)
 
         # Current PDF bytes are part of corpus identity. Discovery-only hashes are
         # insufficient because issuer URLs are sometimes reused for changed files.
@@ -3521,6 +4173,10 @@ class WorkerPipeline:
             prune_error: str | None = None
             try:
                 protected_sha256s = {item.pdf.sha256 for item in acquired}
+                from .acquisition import pending_acquisitions
+
+                for receipt in pending_acquisitions(self.state_dir, self.state):
+                    protected_sha256s.update(row["pdf_sha256"] for row in receipt["documents"])
                 if self.v5_profile is not None:
                     protected_sha256s.update(load_v109_seed_pins(self.state_dir))
                 retained_run_ids = self.state.retained_publication_run_ids(limit=self.retained_generations)
@@ -3601,6 +4257,8 @@ class WorkerPipeline:
                 pdf_revisions=len(pdf_revisions),
                 pdf_cache_revalidations=len(pdf_cache_revalidations),
                 pdf_cache_not_modified=len(pdf_cache_not_modified),
+                pdf_succeeded_count=pdf_succeeded,
+                pdf_skipped_count=pdf_skipped,
                 pdf_cache_prune_status=prune_status,
                 pdf_cache_pruned_objects=pruned_objects,
                 pdf_cache_pruned_bytes=pruned_bytes,
@@ -3610,10 +4268,13 @@ class WorkerPipeline:
         def log_pdf_progress(completed: int) -> None:
             if completed % 25 == 0 or completed == len(records):
                 LOGGER.info(
-                    "PDF progress completed=%d total=%d cache_hits=%d cache_misses=%d "
-                    "downloads=%d revisions=%d revalidations=%d not_modified=%d unsupported=%d",
+                    "PDF progress completed=%d total=%d succeeded=%d skipped=%d cache_hits=%d "
+                    "cache_misses=%d downloads=%d revisions=%d revalidations=%d not_modified=%d "
+                    "unsupported=%d",
                     completed,
                     len(records),
+                    pdf_succeeded,
+                    pdf_skipped,
                     len(pdf_cache_hits),
                     len(pdf_cache_misses),
                     len(pdf_downloads),
@@ -3626,12 +4287,16 @@ class WorkerPipeline:
         if len({source.source_id for source in records}) != len(records):
             raise RuntimeError("PDF acquisition input contains duplicate source identities")
         completed = 0
+        pdf_succeeded = 0
+        pdf_skipped = 0
         host_limiter = HostConcurrencyLimiter(2)
         async with AsyncExitStack() as client_stack:
             clients = [
                 await client_stack.enter_async_context(
                     create_issuer_client(
-                        hyundai_legacy_tls=any(adapter.spec.code == "hyundai" for adapter in self.adapters)
+                        hyundai_legacy_tls=any(adapter.spec.code == "hyundai" for adapter in self.adapters),
+                        proxy_url=getattr(self.settings, "issuer_proxy_url", None),
+                        metrics=getattr(self, "http_metrics", None),
                     )
                 )
                 for _ in range(min(self.pdf_concurrency, len(records)))
@@ -3641,8 +4306,10 @@ class WorkerPipeline:
 
             async def acquire_source(
                 source: SourceRecord, slot: int
-            ) -> _AcquiredDocument | UnsupportedProductRecord | _IssuerSkippedDownload:
-                nonlocal completed
+            ) -> (
+                _AcquiredDocument | UnsupportedProductRecord | _UnsupportedAttachment | _IssuerSkippedDownload
+            ):
+                nonlocal completed, pdf_succeeded, pdf_skipped
                 issuer_outcome = self._issuer_outcomes[source.issuer]
                 if issuer_outcome.failed:
                     self.state.ensure_stage(run_id, source.source_id, "download", max_attempts=1)
@@ -3650,16 +4317,66 @@ class WorkerPipeline:
                         run_id, source.source_id, "download", "issuer_download_quarantined"
                     )
                     completed += 1
+                    pdf_skipped += 1
                     log_pdf_progress(completed)
                     return _IssuerSkippedDownload(source)
+                cache_identity = PDFSourceIdentity.from_source_record(source)
+                cached_pdf: PDFCacheHit | None = None
+                with self.performance.measure("pdf_cache_lookup_seconds"):
+                    cached_pdf = self.pdf_cache.lookup(cache_identity)
+                if _is_explicit_zip(source) and cached_pdf is None:
+                    checked_at = datetime.now(UTC)
+                    negative = self.origin_policy.negative(source.source_id, now=checked_at)
+                    has_prior = (
+                        self.state.connection.execute(
+                            "SELECT 1 FROM origin_negative WHERE source_id=?", (source.source_id,)
+                        ).fetchone()
+                        is not None
+                    )
+                    is_due = negative is None and has_prior
+                    if not self.pdf_cache_force_revalidate and not is_due:
+                        if negative is None:
+                            self.origin_policy.remember_negative(
+                                source.source_id,
+                                {
+                                    "format": "zip",
+                                    "reason": "explicit_zip_archive",
+                                    "sha256": None,
+                                    "size_bytes": 0,
+                                },
+                                now=checked_at,
+                                known=True,
+                            )
+                        self.state.ensure_stage(run_id, source.source_id, "download", max_attempts=1)
+                        self.state.stage_skipped(
+                            run_id,
+                            source.source_id,
+                            "download",
+                            f"unsupported_attachment {source.issuer}/{source.product_code}: explicit zip archive",
+                        )
+                        completed += 1
+                        pdf_skipped += 1
+                        log_pdf_progress(completed)
+                        return _UnsupportedAttachment(
+                            source=source,
+                            reason=negative.get("reason", "explicit_zip_archive")
+                            if negative
+                            else "explicit_zip_archive",
+                            format="zip",
+                        )
                 adapter = next(item for item in self.adapters if item.spec.code == source.issuer)
                 client = clients[slot]
                 # Each document's prepare/download handshake owns its cookie jar.
                 # Worker-local clients preserve pooled connections between documents.
                 client.cookies.clear()
-                limited = RateLimitedClient(client, self.limiters[adapter.spec.code], host_limiter)
+                limited = RateLimitedClient(
+                    client,
+                    self.limiters[adapter.spec.code],
+                    host_limiter,
+                    issuer=adapter.spec.code,
+                    purpose="pdf",
+                )
                 source_key = source.source_id
-                cache_identity = PDFSourceIdentity.from_source_record(source)
 
                 async def acquire(
                     adapter: IssuerAdapter = adapter,
@@ -3667,16 +4384,39 @@ class WorkerPipeline:
                     identity: PDFSourceIdentity = cache_identity,
                     current_client: RateLimitedClient = limited,
                 ) -> DownloadedPDF:
-                    with self.performance.measure("pdf_cache_lookup_seconds"):
-                        cached = self.pdf_cache.lookup(identity)
+                    if not self.pdf_cache_force_revalidate:
+                        negative = self.origin_policy.negative(identity.source_id, now=datetime.now(UTC))
+                        if negative is not None:
+                            if "magic" in negative:
+                                raise ProtectedDocumentError(**negative)
+                            if negative.get("format") == "zip":
+                                raise UnsupportedAttachmentError(
+                                    format="zip",
+                                    reason=negative.get("reason", "cached_unsupported_zip"),
+                                    sha256=negative.get("sha256"),
+                                    size_bytes=negative.get("size_bytes", 0),
+                                )
+                            raise IssuerCollectionError("issuer_source_invalid", "OriginNegative")
+                    cached = cached_pdf
+                    if cached is None:
+                        with self.performance.measure("pdf_cache_lookup_seconds"):
+                            cached = self.pdf_cache.lookup(identity)
+                        if cached is None:
+                            display_key = canonical_sha256(
+                                {k: v for k, v in source.discovery_payload.items() if k != "product_name"}
+                            )
+                            for prior_source in display_candidates.get(display_key, ()):
+                                if prior_source.source_id != source.source_id:
+                                    cached = self.pdf_cache.reuse_display_update(source, prior_source)
+                                    if cached is not None:
+                                        self.origin_policy.inherit(identity.source_id, prior_source.source_id)
+                                        break
                     self.performance.increment("pdf_cache_lookup_count")
                     checked_at = datetime.now(UTC)
-                    cache_age = None if cached is None else checked_at - cached.origin_checked_at
                     if (
                         not self.pdf_cache_force_revalidate
                         and cached is not None
-                        and cache_age is not None
-                        and timedelta(0) <= cache_age < self.pdf_cache_refresh_interval
+                        and not self.origin_policy.due(identity, cached, now=checked_at)
                     ):
                         pdf_cache_hits.add(source.source_id)
                         LOGGER.debug(
@@ -3727,7 +4467,7 @@ class WorkerPipeline:
                                         request,
                                         destination,
                                     )
-                                except (PDFNotModified, ProtectedDocumentError):
+                                except (PDFNotModified, ProtectedDocumentError, UnsupportedAttachmentError):
                                     raise
                                 except Exception as exc:
                                     raise origin_failure(exc) from None
@@ -3745,6 +4485,7 @@ class WorkerPipeline:
                                     observed_at=observed_at,
                                     verified_at=observed_at,
                                 )
+                            self.origin_policy.verified(source.source_id, observed_at, result="not_modified")
                             pdf_cache_not_modified.add(source.source_id)
                             LOGGER.debug(
                                 "PDF cache origin not modified issuer=%s product_code=%s "
@@ -3763,6 +4504,7 @@ class WorkerPipeline:
                                 observed_at=observed_at,
                                 verified_at=observed_at,
                             )
+                    self.origin_policy.verified(source.source_id, observed_at, result="body")
                     pdf_downloads.add(source.source_id)
                     if previous is not None and previous.pdf_sha256 != ingested.sha256:
                         pdf_revisions.add(source.source_id)
@@ -3822,7 +4564,29 @@ class WorkerPipeline:
                         operation=acquire,
                         maximum_attempts=adapter.spec.maximum_retries,
                         retry_base_seconds=adapter.spec.retry_base_seconds,
-                        non_retryable_predicate=lambda exc: isinstance(exc, ProtectedDocumentError),
+                        non_retryable_predicate=lambda exc: (
+                            isinstance(
+                                exc,
+                                (
+                                    ProtectedDocumentError,
+                                    UnsupportedAttachmentError,
+                                    IssuerCollectionError,
+                                ),
+                            )
+                            and (
+                                isinstance(
+                                    exc,
+                                    (ProtectedDocumentError, UnsupportedAttachmentError),
+                                )
+                                or exc.reason_code
+                                in {
+                                    "issuer_origin_cooldown",
+                                    "issuer_origin_budget_deferred",
+                                    "issuer_source_invalid",
+                                }
+                            )
+                        ),
+                        non_retryable_error_formatter=lambda exc: str(exc),
                     )
                 except asyncio.CancelledError as exc:
                     if exc.args != ("issuer_download_quarantined",) or not issuer_outcome.failed:
@@ -3831,6 +4595,7 @@ class WorkerPipeline:
                         run_id, source.source_id, "download", "issuer_download_quarantined"
                     )
                     completed += 1
+                    pdf_skipped += 1
                     task.uncancel()
                     log_pdf_progress(completed)
                     return _IssuerSkippedDownload(source)
@@ -3839,6 +4604,10 @@ class WorkerPipeline:
                         issuer_outcome.download_status = "failed"
                         issuer_outcome.reason_code = exc.reason_code
                         issuer_outcome.exception_class = exc.exception_class
+                        issuer_outcome.source_id = source.source_id
+                        issuer_outcome.origin_status_code = exc.status_code
+                        issuer_outcome.origin_mime_type = exc.mime_type
+                        issuer_outcome.origin_service_signal = exc.service_signal
                         issuer_outcome.origin_freshness_at = None
                         for sibling in tuple(download_tasks[source.issuer]):
                             if sibling is not task:
@@ -3852,9 +4621,18 @@ class WorkerPipeline:
                             exc.reason_code,
                         )
                     completed += 1
+                    pdf_skipped += 1
                     log_pdf_progress(completed)
                     return _IssuerSkippedDownload(source)
                 except ProtectedDocumentError as exc:
+                    # A negative hit must not slide its original expiry forward.
+                    if self.origin_policy.negative(source_key, now=datetime.now(UTC)) is None:
+                        self.origin_policy.remember_negative(
+                            source_key,
+                            {"magic": exc.magic, "sha256": exc.sha256, "size_bytes": exc.size_bytes},
+                            now=datetime.now(UTC),
+                            known=expected_protected(exc),
+                        )
                     if not expected_protected(exc):
                         LOGGER.warning(
                             "Unregistered protected document skipped "
@@ -3878,13 +4656,46 @@ class WorkerPipeline:
                         protected_magic=exc.magic,
                     )
                     unsupported.append(unsupported_result)
-                    outcome: _AcquiredDocument | UnsupportedProductRecord = unsupported_result
+                    outcome: _AcquiredDocument | UnsupportedProductRecord | _UnsupportedAttachment = (
+                        unsupported_result
+                    )
+                except UnsupportedAttachmentError as exc:
+                    if self.origin_policy.negative(source_key, now=datetime.now(UTC)) is None:
+                        self.origin_policy.remember_negative(
+                            source_key,
+                            {
+                                "format": exc.format,
+                                "reason": exc.reason,
+                                "sha256": exc.sha256,
+                                "size_bytes": exc.size_bytes,
+                            },
+                            now=datetime.now(UTC),
+                            known=False,
+                        )
+                    self.state.stage_skipped(
+                        run_id,
+                        source_key,
+                        "download",
+                        f"unsupported_attachment {source.issuer}/{source.product_code}: {exc}",
+                    )
+                    unsupported_att = _UnsupportedAttachment(
+                        source=source,
+                        reason=exc.reason,
+                        format=exc.format,
+                        sha256=exc.sha256,
+                        size_bytes=exc.size_bytes,
+                    )
+                    outcome = unsupported_att
                 else:
                     outcome = _AcquiredDocument(source, pdf)
                 finally:
                     download_tasks[source.issuer].discard(task)
                 issuer_outcome.acquired_count += 1
                 completed += 1
+                if isinstance(outcome, _AcquiredDocument):
+                    pdf_succeeded += 1
+                else:
+                    pdf_skipped += 1
                 log_pdf_progress(completed)
                 return outcome
 
@@ -3904,7 +4715,11 @@ class WorkerPipeline:
             if outcome.source.source_id != source.source_id:
                 raise RuntimeError("PDF acquisition result changed its source identity")
             stage = self.state.get_stage(run_id, source.source_id, "download")
-            expected_status = "skipped" if isinstance(outcome, UnsupportedProductRecord) else "succeeded"
+            expected_status = (
+                "skipped"
+                if isinstance(outcome, (UnsupportedProductRecord, _UnsupportedAttachment))
+                else "succeeded"
+            )
             if isinstance(outcome, _IssuerSkippedDownload):
                 if stage is None or stage.status not in {"failed", "skipped"}:
                     raise RuntimeError("quarantined PDF has no terminal stage")
@@ -3927,7 +4742,7 @@ class WorkerPipeline:
                 issuer_result.adopted_count = issuer_result.acquired_count
         self._write_issuer_collection(run_id)
         if not successful_issuers:
-            raise RuntimeError("all issuer collection attempts failed")
+            self._raise_all_issuer_collection_failed()
         acquired = tuple(
             outcome
             for outcome in acquisition_results
@@ -3938,8 +4753,16 @@ class WorkerPipeline:
             for outcome in acquisition_results
             if isinstance(outcome, UnsupportedProductRecord) and outcome.source.issuer in successful_issuers
         ]
+        unsupported_attachments = [
+            outcome
+            for outcome in acquisition_results
+            if isinstance(outcome, _UnsupportedAttachment) and outcome.source.issuer in successful_issuers
+        ]
+        self._unsupported_attachment_count = len(unsupported_attachments)
+        self._unsupported_attachments = tuple(unsupported_attachments)
         self.performance.set("pdf_acquired_count", len(acquired))
         self.performance.set("pdf_unsupported_count", len(unsupported))
+        self.performance.set("unsupported_attachment_count", len(unsupported_attachments))
 
         seed_ledger = load_state_seed_ledger(self.state_dir)
         unresolved_revision_entries: list[UnresolvedRevisionIdentityV5] = []
@@ -3953,6 +4776,100 @@ class WorkerPipeline:
                     tuple(item.source for item in current_acquired),
                     seed_ledger=seed_ledger,
                 )
+                from .issuer_scope import current_serving_baseline_source
+                from .unresolved_remediation import (
+                    apply_unresolved_remediation,
+                    plan_unresolved_remediation,
+                    validate_unresolved_ledger_in_seal,
+                    write_remediation_inventory_artifact,
+                )
+
+                baseline_source = self._preserved_source
+                if baseline_source is None:
+                    baseline_source = await current_serving_baseline_source(self)
+                if baseline_source is not None and "v5_metrics" in baseline_source.seal:
+                    discovery_map = {
+                        snapshot.issuer: {item.product_code for item in snapshot.records}
+                        for snapshot in snapshots
+                    }
+                    acquired_map: dict[str, set[str]] = {}
+                    for acquired_doc in acquired:
+                        acquired_map.setdefault(acquired_doc.source.issuer, set()).add(
+                            acquired_doc.source.product_code
+                        )
+                    failed_map: dict[str, set[str]] = {}
+                    for source, outcome in zip(records, acquisition_results, strict=True):
+                        if isinstance(outcome, _IssuerSkippedDownload):
+                            failed_map.setdefault(source.issuer, set()).add(source.product_code)
+
+                    unsupported_map: dict[str, set[str]] = {}
+                    for unsupported_doc in unsupported:
+                        unsupported_map.setdefault(unsupported_doc.source.issuer, set()).add(
+                            unsupported_doc.source.product_code
+                        )
+                    for attachment_doc in unsupported_attachments:
+                        unsupported_map.setdefault(attachment_doc.source.issuer, set()).add(
+                            attachment_doc.source.product_code
+                        )
+
+                    try:
+                        validate_unresolved_ledger_in_seal(baseline_source.seal, state=self.state)
+                    except Exception as exc:
+                        raise PartialExecutionError("issuer_scope_baseline_incompatible", "scope") from exc
+
+                    remediation_plan = plan_unresolved_remediation(
+                        self.state,
+                        baseline_source.seal,
+                        known_sources=known_sources,
+                        selected_issuers=set(self.selected_issuers),
+                        successful_issuers=successful_issuers,
+                        current_discovery=discovery_map,
+                        current_acquired_products=acquired_map,
+                        current_failed_products=failed_map,
+                        current_unsupported_products=unsupported_map,
+                        pdf_cache=self.pdf_cache,
+                        require_verified_run=True,
+                        phase="expansion",
+                    )
+                    # Before OCR / document processing, ONLY apply past_excluded!
+                    # Do NOT apply updated_to_latest yet, preventing premature confirmation.
+                    apply_unresolved_remediation(
+                        self.state,
+                        remediation_plan,
+                        only_dispositions=("past_excluded",),
+                    )
+                    write_remediation_inventory_artifact(
+                        run_dir,
+                        remediation_plan,
+                        phase="expansion",
+                        run_id=run_id,
+                    )
+
+                preserved_prior_documents: list[_AcquiredDocument] = []
+                for unsupp in unsupported_attachments:
+                    history = self.state.pdf_cache_lineage_history(
+                        issuer=unsupp.source.issuer,
+                        product_code=unsupp.source.product_code,
+                        document_type=unsupp.source.document_type,
+                    )
+                    if history:
+                        latest_row = history[0]
+                        retained_prior_source = known_sources.get(latest_row.source_id)
+                        if retained_prior_source is not None:
+                            cached = self.pdf_cache.lookup_revision(latest_row)
+                            if cached is not None:
+                                preserved_prior_documents.append(
+                                    _AcquiredDocument(
+                                        source=retained_prior_source,
+                                        pdf=cached.as_downloaded_pdf(),
+                                        temporal_status="current",
+                                        supersedes_document_id=None,
+                                        is_historical=False,
+                                    )
+                                )
+                if preserved_prior_documents:
+                    current_acquired = (*current_acquired, *preserved_prior_documents)
+                    acquired = (*acquired, *preserved_prior_documents)
                 materialized_by_document: dict[str, _AcquiredDocument] = {}
                 for current_document in current_acquired:
                     history = self.state.pdf_cache_lineage_history(
@@ -3966,7 +4883,14 @@ class WorkerPipeline:
                         rows=history,
                         known_sources=known_sources,
                     )
-                    unresolved_revision_entries.extend(history_plan.unresolved_revisions)
+                    for unres in history_plan.unresolved_revisions:
+                        if hasattr(
+                            self.state, "is_revision_remediated"
+                        ) and self.state.is_revision_remediated(
+                            unres.source_id, unres.pdf_sha256, unres.reason_code
+                        ):
+                            continue
+                        unresolved_revision_entries.append(unres)
                     for candidate in history_plan.candidates:
                         is_current = (
                             candidate.source.source_id == current_document.source.source_id
@@ -3979,13 +4903,21 @@ class WorkerPipeline:
                                 cached = self.pdf_cache.lookup_revision(candidate.revision)
                             self.performance.increment("pdf_cache_lookup_count")
                             if cached is None:
-                                unresolved_revision_entries.append(
-                                    UnresolvedRevisionIdentityV5(
-                                        source_id=candidate.source.source_id,
-                                        pdf_sha256=candidate.revision.pdf_sha256,
-                                        reason_code="pdf_cache_object_unavailable",
+                                if not (
+                                    hasattr(self.state, "is_revision_remediated")
+                                    and self.state.is_revision_remediated(
+                                        candidate.source.source_id,
+                                        candidate.revision.pdf_sha256,
+                                        "pdf_cache_object_unavailable",
                                     )
-                                )
+                                ):
+                                    unresolved_revision_entries.append(
+                                        UnresolvedRevisionIdentityV5(
+                                            source_id=candidate.source.source_id,
+                                            pdf_sha256=candidate.revision.pdf_sha256,
+                                            reason_code="pdf_cache_object_unavailable",
+                                        )
+                                    )
                                 continue
                             downloaded = cached.as_downloaded_pdf()
                             historical_pdf_cache_hits += 1
@@ -4019,13 +4951,21 @@ class WorkerPipeline:
                                     )
                                 continue
                             dropped = existing_document if planned.temporal_status == "current" else planned
-                            unresolved_revision_entries.append(
-                                UnresolvedRevisionIdentityV5(
-                                    source_id=dropped.source.source_id,
-                                    pdf_sha256=dropped.pdf.sha256,
-                                    reason_code="document_identity_collision",
+                            if not (
+                                hasattr(self.state, "is_revision_remediated")
+                                and self.state.is_revision_remediated(
+                                    dropped.source.source_id,
+                                    dropped.pdf.sha256,
+                                    "document_identity_collision",
                                 )
-                            )
+                            ):
+                                unresolved_revision_entries.append(
+                                    UnresolvedRevisionIdentityV5(
+                                        source_id=dropped.source.source_id,
+                                        pdf_sha256=dropped.pdf.sha256,
+                                        reason_code="document_identity_collision",
+                                    )
+                                )
                             if planned.temporal_status == "current":
                                 materialized_by_document[document_id] = planned
                             continue
@@ -4057,13 +4997,7 @@ class WorkerPipeline:
             acquired = tuple(
                 sorted(
                     (*acquired, *carried),
-                    key=lambda item: (
-                        item.source.issuer,
-                        item.source.product_code,
-                        item.source.effective_date,
-                        item.source.source_version,
-                        item.pdf.sha256,
-                    ),
+                    key=canonical_acquired_document_key,
                 )
             )
             unsupported.extend(carried_unsupported)
@@ -4073,6 +5007,16 @@ class WorkerPipeline:
                     t.document_id for t in self._active_ocr_request.targets
                 } & self._carried_document_ids
             self._write_issuer_collection(run_id)
+        preserved_acquired, preserved_processed, preserved_failed, preserved_unsupported = preserve_inputs(
+            self, self._preserved_source, run_id
+        )
+        acquired = tuple(
+            sorted(
+                (*acquired, *preserved_acquired),
+                key=canonical_acquired_document_key,
+            )
+        )
+        unsupported.extend(preserved_unsupported)
         self._unsupported_count = len(unsupported)
         LOGGER.info(
             "collection barrier completed successful_issuers=%s failed_issuers=%s carried_documents=%d",
@@ -4084,6 +5028,7 @@ class WorkerPipeline:
         if len(document_ids) != len(set(document_ids)):
             raise RuntimeError("PDF acquisition produced duplicate document identities")
 
+        unresolved_revision_entries.extend(getattr(self, "_preserved_unresolved", ()))
         unresolved_revision_ledger = canonical_unresolved_revision_ledger_v5(unresolved_revision_entries)
         unresolved_revision_sha256 = unresolved_revision_ledger_sha256_v5(unresolved_revision_ledger)
         # FIX_03 C1: persist the unresolved revision ledger before the corpus
@@ -4186,6 +5131,7 @@ class WorkerPipeline:
         self._corpus_gate_counts = {}
         self._pending_retirement_ledger = None
         with self.performance.measure("corpus_diff_seconds"):
+            all_discovered_lineages = frozenset((s.issuer, s.product_code, s.document_type) for s in records)
             corpus_report = generate_corpus_diff_report(
                 run_id=run_id,
                 acquired_documents=acquired,
@@ -4200,6 +5146,7 @@ class WorkerPipeline:
                 ),
                 output_path=run_dir / "reports" / "corpus-diff.json",
                 fail_on_missing=True,
+                discovered_lineages=all_discovered_lineages,
             )
         # The pending retirement ledger is kept in memory and committed to disk
         # only upon verified successful run completion (succeeded or no_change).
@@ -4218,10 +5165,14 @@ class WorkerPipeline:
                     "source_id": source.source_id,
                     "status": "unsupported_drm"
                     if isinstance(outcome, UnsupportedProductRecord)
+                    else "unsupported_attachment"
+                    if isinstance(outcome, _UnsupportedAttachment)
                     else "succeeded",
                     "pdf_sha256": (
                         outcome.protected_sha256
                         if isinstance(outcome, UnsupportedProductRecord)
+                        else outcome.sha256
+                        if isinstance(outcome, _UnsupportedAttachment)
                         else outcome.pdf.sha256
                     ),
                 }
@@ -4280,6 +5231,23 @@ class WorkerPipeline:
                 }
             ),
         )
+        if self.execution_plan is not None and self.execution_plan.phase == "collect":
+            from .acquisition import write_acquisition
+
+            baseline = await self.webdav.validated_current_generation()
+            return await finalize_pdf_activity(
+                write_acquisition(
+                    self,
+                    run_id,
+                    acquired,
+                    unsupported,
+                    corpus_sha256=corpus_sha256,
+                    unresolved_revision_ledger=unresolved_revision_ledger,
+                    unresolved_revision_sha256=unresolved_revision_sha256,
+                    baseline_generation_id=baseline.generation_id if baseline else None,
+                    unsupported_attachments=unsupported_attachments,
+                )
+            )
         if self._active_ocr_request is not None:
             acquired_identity = {
                 item.source.document_id(item.pdf.sha256): (
@@ -4330,6 +5298,8 @@ class WorkerPipeline:
             new_by_pdf: dict[tuple[str, int, int], bool] = {}
             for document in previous_manifest.documents:
                 if document.ocr is None:
+                    continue
+                if document.issuer not in self.selected_issuers:
                     continue
                 pdf_identity = (
                     document.pdf.sha256,
@@ -4502,6 +5472,8 @@ class WorkerPipeline:
                     current_remote.generation_id,
                     len(acquired),
                     0,
+                    unsupported_attachment_count=self._unsupported_attachment_count,
+                    collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
                 )
             )
         if current_remote is None and stable_body is not None:
@@ -4540,6 +5512,8 @@ class WorkerPipeline:
                     generation_id,
                     len(acquired),
                     0,
+                    unsupported_attachment_count=self._unsupported_attachment_count,
+                    collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
                     ocr_cache_publication_deferred=(validated_prior_seal.ocr_cache_publication_deferred),
                     v5_metrics=validated_prior_seal.v5_metrics,
                 )
@@ -4548,6 +5522,11 @@ class WorkerPipeline:
         # generation for this recurrence and chain it to that current head;
         # OCR/embeddings are reused through their content caches below.
 
+        publication_acquired = acquired
+        acquired = tuple(item for item in acquired if item.source.issuer in self.selected_issuers)
+        # No-change healing must not expand the selected work scope.
+        if preserved_acquired:
+            cache_healing_generation_id = None
         prior_local_native_sources: dict[str, PriorLocalNativeSource] = {}
         if cache_healing_generation_id is not None:
             if (
@@ -4693,8 +5672,20 @@ class WorkerPipeline:
                     """True when the document's own retained bytes disagree with a
                     candidate bind source and its own identity is already retained."""
                     own = run_dir / "documents" / candidate_doc_id / "ocr" / "ocr.md"
-                    if own.is_file():
+                    if own.is_symlink():
                         return True
+                    if own.exists():
+                        if not own.is_file():
+                            return True
+                        try:
+                            st = own.stat()
+                            if st.st_size <= 0:
+                                return True
+                            own_bytes = own.read_bytes()
+                            if hashlib.sha256(own_bytes).hexdigest() != partner_seal_sha:
+                                return True
+                        except Exception:
+                            return True
                     if seed_ledger is not None:
                         entry = seed_ledger.entries_by_doc_id.get(candidate_doc_id)
                         if entry is not None and entry.ocr_sha256 != partner_seal_sha:
@@ -4867,6 +5858,9 @@ class WorkerPipeline:
                         ),
                         pdf_path=pdf.path,
                         is_historical=acquired_document.is_historical,
+                        source=source,
+                        temporal_status=acquired_document.temporal_status,
+                        supersedes_document_id=acquired_document.supersedes_document_id,
                     )
                 )
                 ocr_failures.append(
@@ -5000,7 +5994,7 @@ class WorkerPipeline:
             ) -> str:
                 nonlocal systemic_error, systemic_source_exception
                 stage = self.state.get_stage(run_id, current_document_id, "ocr")
-                if stage is None or stage.status != "running" or stage.attempt_count < 1:
+                if stage is None or stage.attempt_count < 1 or stage.status not in {"running", "succeeded"}:
                     raise RuntimeError("OCR systemic failure lost its active attempt")
                 classified = _classify_ocr_systemic_failure(exc)
                 failure = OCRSystemicFailureRecord(
@@ -5023,6 +6017,13 @@ class WorkerPipeline:
                     exit_code=classified.exit_code,
                     stderr_size_bytes=classified.stderr_size_bytes,
                     stderr_sha256=classified.stderr_sha256,
+                    stdout_size_bytes=classified.stdout_size_bytes,
+                    stdout_sha256=classified.stdout_sha256,
+                    provider=classified.provider,
+                    classification_basis=classified.classification_basis,
+                    chunk_index=classified.chunk_index,
+                    page_start=classified.page_start,
+                    page_end=classified.page_end,
                 )
                 error = OCRSystemicFailureError(
                     run_id=run_id,
@@ -5072,24 +6073,92 @@ class WorkerPipeline:
                             ocr_stopped = True
                         raise
             except Exception as exc:
-                if isinstance(exc, PartialExecutionError):
+                if isinstance(exc, (PartialExecutionError, WorkerUnexpectedFailureError)):
                     raise
                 if not is_isolatable_document_ocr_failure(exc):
-                    if systemic_error is None or exc is not systemic_source_exception:
-                        raise OCRFailureBookkeepingError() from None
-                    # Even a typed exception is mutable: a caller can attach
-                    # unsafe notes, args, or context after construction. The
-                    # validated report fields above are the sole diagnostic
-                    # boundary, so never retain the source object in the
-                    # terminal exception chain.
-                    terminal_systemic_error = systemic_error
+                    if systemic_error is not None and (
+                        exc is systemic_source_exception or isinstance(exc, OCRSystemicFailureError)
+                    ):
+                        terminal_systemic_error = systemic_error
+                    else:
+                        cat, status_code, err_no = _classify_worker_failure(exc)
+                        if isinstance(
+                            exc,
+                            (ContentCacheValidationError, OCRCacheHealingIdentityError, OCRCacheMissError),
+                        ):
+                            r_code = "cache_validation_error"
+                            r_msg = "Cached OCR artifact failed validation."
+                            cat = "cache"
+                        elif isinstance(exc, (OCRValidationError, ValidationError)):
+                            r_code = "ocr_validation_error"
+                            r_msg = "OCR output failed validation."
+                            cat = "validation"
+                        else:
+                            r_code = "stage_revalidation_failed"
+                            r_msg = "Succeeded stage revalidation failed."
+                        failure = WorkerUnexpectedFailureRecord(
+                            run_id=run_id,
+                            occurred_at=datetime.now(UTC),
+                            error_class_category=cat,
+                            status_code=status_code,
+                            errno=err_no,
+                            reason_code=r_code,
+                            reason=r_msg,
+                            document_id=document_id,
+                            stage="ocr",
+                        )
+                        report_path = self.state_dir / "runs" / run_id / "reports" / "worker-failure.json"
+                        _write_worker_failure_report(report_path, failure=failure)
+                        raise WorkerUnexpectedFailureError(
+                            run_id=run_id,
+                            report_path=report_path,
+                            failure=failure,
+                        ) from None
                 else:
                     isolated_failure = exc
             if terminal_systemic_error is not None:
                 raise terminal_systemic_error
             if isolated_failure is not None:
+                stage = None
                 try:
                     stage = self.state.get_stage(run_id, document_id, "ocr")
+                except Exception:
+                    raise OCRFailureBookkeepingError() from None
+                if stage is not None and stage.status == "succeeded":
+                    cat, status_code, err_no = _classify_worker_failure(isolated_failure)
+                    if isinstance(
+                        isolated_failure,
+                        (ContentCacheValidationError, OCRCacheHealingIdentityError, OCRCacheMissError),
+                    ):
+                        r_code = "cache_validation_error"
+                        r_msg = "Cached OCR artifact failed validation."
+                        cat = "cache"
+                    elif isinstance(isolated_failure, (OCRValidationError, ValidationError)):
+                        r_code = "ocr_validation_error"
+                        r_msg = "OCR output failed validation."
+                        cat = "validation"
+                    else:
+                        r_code = "stage_revalidation_failed"
+                        r_msg = "Succeeded stage revalidation failed."
+                    failure = WorkerUnexpectedFailureRecord(
+                        run_id=run_id,
+                        occurred_at=datetime.now(UTC),
+                        error_class_category=cat,
+                        status_code=status_code,
+                        errno=err_no,
+                        reason_code=r_code,
+                        reason=r_msg,
+                        document_id=document_id,
+                        stage="ocr",
+                    )
+                    report_path = self.state_dir / "runs" / run_id / "reports" / "worker-failure.json"
+                    _write_worker_failure_report(report_path, failure=failure)
+                    raise WorkerUnexpectedFailureError(
+                        run_id=run_id,
+                        report_path=report_path,
+                        failure=failure,
+                    ) from None
+                try:
                     failure_reason = classify_ocr_failure(isolated_failure)
                     if (
                         stage is None
@@ -5137,6 +6206,9 @@ class WorkerPipeline:
                         ),
                         pdf_path=pdf.path,
                         is_historical=acquired_document.is_historical,
+                        source=source,
+                        temporal_status=acquired_document.temporal_status,
+                        supersedes_document_id=acquired_document.supersedes_document_id,
                     )
                 )
                 _write_ocr_failure_report(
@@ -5255,7 +6327,7 @@ class WorkerPipeline:
                         ),
                     )
                 except _StructureFallbackFailed as exc:
-                    failure = StructureFailureRecord(
+                    structure_failure = StructureFailureRecord(
                         issuer=source.issuer,
                         product_code=source.product_code,
                         document_id=document_id,
@@ -5266,7 +6338,7 @@ class WorkerPipeline:
                         page_count=len(pages),
                         failure_stage=exc.failure_stage,
                     )
-                    structure_failures.append(failure)
+                    structure_failures.append(structure_failure)
                     _write_structure_failure_report(
                         structure_failure_report,
                         run_id=run_id,
@@ -5357,7 +6429,7 @@ class WorkerPipeline:
                         ),
                     )
                 except _StructureFallbackFailed as exc:
-                    failure = StructureFailureRecord(
+                    structure_failure = StructureFailureRecord(
                         issuer=source.issuer,
                         product_code=source.product_code,
                         document_id=document_id,
@@ -5368,7 +6440,7 @@ class WorkerPipeline:
                         page_count=len(pages),
                         failure_stage=exc.failure_stage,
                     )
-                    structure_failures.append(failure)
+                    structure_failures.append(structure_failure)
                     _write_structure_failure_report(
                         structure_failure_report,
                         run_id=run_id,
@@ -5528,6 +6600,11 @@ class WorkerPipeline:
         if len(completed_ids) != len(set(completed_ids)) or set(completed_ids) != set(ocr_order):
             raise RuntimeError("OCR completion barrier found missing, duplicate, or unexpected documents")
 
+        processed.extend(preserved_processed)
+        failed_documents.extend(preserved_failed)
+        acquired = publication_acquired
+        processed.sort(key=lambda item: item.record.document_id)
+        failed_documents.sort(key=lambda item: item.record.document_id)
         raw_issuer_ocr_counts = tuple(
             (
                 adapter.spec.code,
@@ -5648,12 +6725,102 @@ class WorkerPipeline:
                     generation_id=cache_healing_generation_id,
                     document_count=len(acquired),
                     evidence_count=0,
+                    unsupported_attachment_count=self._unsupported_attachment_count,
+                    collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
                     ocr_cache_publication_deferred=ocr_cache_publication_deferred,
                     v5_metrics=cache_healing_validated_seal.v5_metrics,
                 )
             )
 
         if self.v5_profile is not None:
+            if hasattr(self.state, "is_revision_remediated"):
+                from .issuer_scope import current_serving_baseline_source
+                from .unresolved_remediation import (
+                    apply_unresolved_remediation,
+                    plan_unresolved_remediation,
+                    write_remediation_inventory_artifact,
+                )
+
+                baseline_source = self._preserved_source
+                if baseline_source is None:
+                    baseline_source = await current_serving_baseline_source(self)
+                if baseline_source is not None and "v5_metrics" in baseline_source.seal:
+                    processed_map: dict[str, set[str]] = {}
+                    for processed_doc in processed:
+                        processed_map.setdefault(processed_doc.record.issuer, set()).add(
+                            processed_doc.record.product_code
+                        )
+                    failed_map = {}
+                    for failed_doc in failed_documents:
+                        failed_map.setdefault(failed_doc.record.issuer, set()).add(
+                            failed_doc.record.product_code
+                        )
+                    unsupported_map = {}
+                    for final_unsupported in unsupported:
+                        unsupported_map.setdefault(final_unsupported.source.issuer, set()).add(
+                            final_unsupported.source.product_code
+                        )
+                    for doc in getattr(self, "_unsupported_attachments", ()):
+                        if hasattr(doc, "source"):
+                            unsupported_map.setdefault(doc.source.issuer, set()).add(doc.source.product_code)
+
+                    final_remediation_plan = plan_unresolved_remediation(
+                        self.state,
+                        baseline_source.seal,
+                        known_sources=known_sources if "known_sources" in locals() else None,
+                        selected_issuers=set(self.selected_issuers),
+                        successful_issuers=successful_issuers if "successful_issuers" in locals() else None,
+                        current_processed_products=processed_map,
+                        current_failed_products=failed_map,
+                        current_unsupported_products=unsupported_map,
+                        pdf_cache=self.pdf_cache,
+                        require_verified_run=True,
+                        phase="final",
+                    )
+                    apply_unresolved_remediation(self.state, final_remediation_plan)
+                    write_remediation_inventory_artifact(
+                        run_dir,
+                        final_remediation_plan,
+                        phase="final",
+                        run_id=run_id,
+                    )
+
+                    filtered_unresolved = [
+                        e
+                        for e in unresolved_revision_ledger
+                        if not self.state.is_revision_remediated(e["source_id"], e["pdf_sha256"])
+                    ]
+
+                    parsed_identities = [
+                        UnresolvedRevisionIdentityV5(
+                            e["source_id"], e["pdf_sha256"], cast(UnresolvedRevisionReasonV5, r)
+                        )
+                        for e in filtered_unresolved
+                        for r in e["reason_codes"]
+                    ]
+                    unresolved_revision_ledger = canonical_unresolved_revision_ledger_v5(parsed_identities)
+                    unresolved_revision_sha256 = unresolved_revision_ledger_sha256_v5(
+                        unresolved_revision_ledger
+                    )
+                    corpus_payload = _v5_corpus_identity_payload(
+                        acquired=acquired,
+                        unsupported_documents=unsupported_payload,
+                        unresolved_revisions=unresolved_revision_ledger,
+                        unresolved_revision_sha256=unresolved_revision_sha256,
+                    )
+                    corpus_sha256 = canonical_sha256(corpus_payload)
+                    self.performance.set("corpus_sha256", corpus_sha256)
+                    _atomic_write(
+                        run_dir / "reports" / "unresolved-revisions.json",
+                        canonical_json_bytes(
+                            {
+                                "entries": list(unresolved_revision_ledger),
+                                "run_id": run_id,
+                                "schema_version": "cardrag.unresolved-revisions.v1",
+                            }
+                        ),
+                    )
+
             published_result = await self._build_v5_generation(
                 run_id=run_id,
                 run_dir=run_dir,
@@ -6381,6 +7548,11 @@ class WorkerPipeline:
                     validate_norm=False,
                 )
                 if cached is None:
+                    if any(
+                        ordered_view_pairs[index][0].source.issuer not in self.selected_issuers
+                        for index in bound_indices
+                    ):
+                        raise PartialExecutionError("issuer_scope_vector_missing", "embedding")
                     unique_misses.append(representative)
                     for index in bound_indices:
                         embedding_cache_miss_counts[ordered_view_pairs[index][1].view_type] += 1
@@ -6396,7 +7568,8 @@ class WorkerPipeline:
                     wal_baseline = self.state.observe_embedding_cache_v5_wal()
                 except WorkerStateWALCapacityError as exc:
                     raise V5CapacityError(
-                        "Worker v5 embedding cache WAL baseline could not be sealed"
+                        "Worker v5 embedding cache WAL baseline could not be sealed",
+                        reason_code=CAPACITY_WAL_BASELINE_UNSEALED,
                     ) from exc
                 prediction = predict_v5_local_artifacts(
                     derived_view_count=len(ordered_view_pairs),
@@ -6417,14 +7590,21 @@ class WorkerPipeline:
                                 - prediction.embedding_cache_wal_baseline_bytes
                             ),
                         )
-                    except WorkerStateWALCapacityError as exc:
+                    except WorkerStateWALCapacityError:
                         LOGGER.error(
-                            "reason_code=v5_embedding_cache_wal_capacity_failed boundary=%s",
+                            "reason_code=v5_embedding_cache_wal_capacity_failed boundary=%s "
+                            "capacity_reason=%s",
                             boundary,
+                            CAPACITY_WAL_BOUND_EXCEEDED,
                         )
                         raise V5CapacityError(
-                            "Worker v5 embedding cache WAL exceeded its predicted capacity bound"
-                        ) from exc
+                            "Worker v5 embedding cache WAL exceeded its predicted capacity bound",
+                            reason_code=CAPACITY_WAL_BOUND_EXCEEDED,
+                            details={
+                                "wal_baseline_bytes": wal_baseline.size_bytes,
+                                "predicted_transaction_bytes": prediction.embedding_cache_transaction_bytes,
+                            },
+                        ) from None
                     LOGGER.info(
                         "V5 embedding cache WAL capacity boundary=%s baseline_bytes=%d "
                         "wal_size_bytes=%d wal_limit_bytes=%d",
@@ -6436,28 +7616,34 @@ class WorkerPipeline:
 
                 capacity_policy = self.capacity_policy_v5
                 if capacity_policy is None:
-                    raise V5CapacityError("v5 generation lost its local capacity policy")
+                    raise V5CapacityError(
+                        "v5 generation lost its local capacity policy",
+                        reason_code=CAPACITY_POLICY_LOST,
+                    )
                 capacity_snapshot = await to_thread_fenced(
                     preflight_v5_capacity,
                     self.state_dir,
                     prediction,
                     policy=capacity_policy,
                 )
-            except V5CapacityError:
+            except V5CapacityError as exc:
                 LOGGER.error(
                     "reason_code=v5_capacity_preflight_failed derived_views=%d "
-                    "unique_cache_misses=%d database_payload_bytes=%d database_rows=%d",
+                    "unique_cache_misses=%d database_payload_bytes=%d database_rows=%d %s "
+                    "probe_path=%s",
                     len(ordered_view_pairs),
                     len(unique_misses),
                     database_ledger.payload_bytes,
                     database_ledger.row_count,
+                    _capacity_failure_fields(exc),
+                    self.state_dir,
                 )
                 raise
             LOGGER.info(
                 "V5 capacity preflight passed derived_views=%d unique_cache_misses=%d "
                 "wal_baseline_bytes=%d sidecar_bytes=%d database_bytes=%d "
                 "logical_growth_bytes=%d peak_growth_bytes=%d "
-                "state_usage_bytes=%d filesystem_free_bytes=%d",
+                "state_usage_bytes=%d filesystem_free_bytes=%d %s probe_path=%s",
                 len(ordered_view_pairs),
                 len(unique_misses),
                 prediction.embedding_cache_wal_baseline_bytes,
@@ -6467,6 +7653,14 @@ class WorkerPipeline:
                 prediction.peak_growth_bytes,
                 capacity_snapshot.state_usage_bytes,
                 capacity_snapshot.filesystem_free_bytes,
+                _capacity_gate_fields(prediction, capacity_policy),
+                self.state_dir,
+            )
+            self._record_capacity_observation(
+                run_id=run_id,
+                prediction=prediction,
+                policy=capacity_policy,
+                snapshot=capacity_snapshot,
             )
             miss_batches = _embedding_miss_batches(
                 unique_misses,
@@ -6484,10 +7678,13 @@ class WorkerPipeline:
                         remaining_embedding_cache_miss_count=remaining_unique_misses,
                         policy=capacity_policy,
                     )
-                except V5CapacityError:
+                except V5CapacityError as exc:
                     LOGGER.error(
-                        "reason_code=v5_remaining_capacity_failed remaining_unique_cache_misses=%d",
+                        "reason_code=v5_remaining_capacity_failed "
+                        "remaining_unique_cache_misses=%d %s probe_path=%s",
                         remaining_unique_misses,
+                        _capacity_failure_fields(exc),
+                        self.state_dir,
                     )
                     raise
                 generated = await provider.embed_documents(
@@ -6541,7 +7738,10 @@ class WorkerPipeline:
         try:
             final_wal_baseline = self.state.observe_embedding_cache_v5_wal()
         except WorkerStateWALCapacityError as exc:
-            raise V5CapacityError("Worker v5 embedding cache WAL baseline could not be resealed") from exc
+            raise V5CapacityError(
+                "Worker v5 embedding cache WAL baseline could not be resealed",
+                reason_code=CAPACITY_WAL_RESEAL_FAILED,
+            ) from exc
         final_prediction = predict_v5_local_artifacts(
             derived_view_count=len(ordered_view_pairs),
             database_payload_bytes=database_ledger.payload_bytes,
@@ -6553,7 +7753,10 @@ class WorkerPipeline:
         )
         capacity_policy = self.capacity_policy_v5
         if capacity_policy is None:
-            raise V5CapacityError("v5 generation lost its local capacity policy")
+            raise V5CapacityError(
+                "v5 generation lost its local capacity policy",
+                reason_code=CAPACITY_POLICY_LOST,
+            )
         try:
             final_capacity_snapshot = await to_thread_fenced(
                 preflight_v5_capacity,
@@ -6561,19 +7764,33 @@ class WorkerPipeline:
                 final_prediction,
                 policy=capacity_policy,
             )
-        except V5CapacityError:
+        except V5CapacityError as exc:
             LOGGER.error(
-                "reason_code=v5_preexport_capacity_failed derived_views=%d",
+                "reason_code=v5_preexport_capacity_failed derived_views=%d %s probe_path=%s",
                 len(ordered_view_pairs),
+                _capacity_failure_fields(exc),
+                self.state_dir,
             )
             raise
         LOGGER.info(
             "V5 pre-export capacity recheck passed state_usage_bytes=%d "
-            "filesystem_free_bytes=%d peak_growth_bytes=%d",
+            "filesystem_free_bytes=%d peak_growth_bytes=%d %s probe_path=%s",
             final_capacity_snapshot.state_usage_bytes,
             final_capacity_snapshot.filesystem_free_bytes,
             final_prediction.peak_growth_bytes,
+            _capacity_gate_fields(final_prediction, capacity_policy),
+            self.state_dir,
         )
+        self._record_capacity_observation(
+            run_id=run_id,
+            prediction=final_prediction,
+            policy=capacity_policy,
+            snapshot=final_capacity_snapshot,
+        )
+
+        # Bounded memo only; the full corpus of 4,096D float32 vectors must
+        # never be materialized in Python memory (one entry is 16 KiB).
+        export_vector_fetch_cache = BoundedVectorFetchMemo()
 
         def lazy_cache_vector(
             *,
@@ -6581,50 +7798,14 @@ class WorkerPipeline:
             input_sha256: str,
             expected_vector_sha256: str,
         ) -> LazyEmbeddingVector:
-            def load() -> bytes:
-                self.performance.increment("export_cache_lookups")
-                cached = self.state.get_embedding_v5(
-                    cache_key,
-                    profile_id=profile.profile_id,
-                    input_sha256=input_sha256,
-                    dimension=profile.dimension,
-                    dtype=profile.dtype,
-                    normalization=profile.normalization,
-                    validate_norm=False,
-                )
-                if cached is None:
-                    raise RuntimeError("sealed v5 embedding cache row disappeared before export")
-                expected_identity = (
-                    cache_key,
-                    profile.profile_id,
-                    input_sha256,
-                    profile.dimension,
-                    profile.dtype,
-                    profile.normalization,
-                )
-                actual_identity = (
-                    cached.cache_key,
-                    cached.profile_id,
-                    cached.input_sha256,
-                    cached.dimension,
-                    cached.dtype,
-                    cached.normalization,
-                )
-                if actual_identity != expected_identity:
-                    raise RuntimeError("sealed v5 embedding cache row changed identity before export")
-                if hashlib.sha256(cached.embedding).hexdigest() != expected_vector_sha256:
-                    raise RuntimeError("sealed v5 embedding cache row changed bytes before export")
-                return cached.embedding
-
-            return LazyEmbeddingVector(
-                cache_identity=cache_key,
-                profile_id=profile.profile_id,
+            return make_lazy_cache_vector(
+                state=self.state,
+                performance=self.performance,
+                memo=export_vector_fetch_cache,
+                profile=profile,
+                cache_key=cache_key,
                 input_sha256=input_sha256,
                 expected_vector_sha256=expected_vector_sha256,
-                loader=load,
-                dimension=profile.dimension,
-                dtype=profile.dtype,
-                normalization=profile.normalization,
             )
 
         view_rows = tuple(
@@ -6676,6 +7857,7 @@ class WorkerPipeline:
             or os.path.lexists(publication_seal)
         ):
             raise RuntimeError("v5 incomplete-target replacement requires an unsealed running run")
+        export_internal_profile: dict[str, float] = {}
         with self.performance.measure("export"):
             export = self.exporter_v5.export(
                 database_path,
@@ -6717,7 +7899,12 @@ class WorkerPipeline:
                 reserved_free_space_bytes=capacity_policy.reserved_free_space_bytes,
                 replace_incomplete_owned_targets=True,
                 extra_metadata=extra_metadata,
+                profile=export_internal_profile,
             )
+        # Sub-boundary export durations are accumulated work seconds, not an
+        # additive partition of the wall clock.  The final serving bytes and
+        # every integrity check are unchanged by this instrumentation.
+        self.performance.set("export_internal_seconds", dict(export_internal_profile))
         await self._guard_partial_stable_source()
         previous_id: str | None
         if self.document_aggregation is not None:
@@ -6988,6 +8175,32 @@ class WorkerPipeline:
             "ocr_provider_called_count": ocr_provider_called_count,
         }
         _validated_v5_metrics(v5_metrics, manifest=manifest)
+        unsupported_att_list = [
+            {
+                "product_code": (
+                    getattr(item.source, "product_code", None)
+                    if hasattr(item, "source")
+                    else item.get("product_code")
+                ),
+                "source_id": (
+                    getattr(item.source, "source_id", None)
+                    if hasattr(item, "source")
+                    else item.get("source_id")
+                ),
+                "issuer": (
+                    getattr(item.source, "issuer", None) if hasattr(item, "source") else item.get("issuer")
+                ),
+                "format": getattr(item, "format", "zip")
+                if hasattr(item, "format")
+                else item.get("format", "zip"),
+                "reason": (
+                    getattr(item, "reason", "unsupported_attachment")
+                    if hasattr(item, "reason")
+                    else item.get("reason", "unsupported_attachment")
+                ),
+            }
+            for item in getattr(self, "_unsupported_attachments", ())
+        ]
         sealed = {
             "schema_version": "cardrag.worker-seal.v1",
             "run_id": run_id,
@@ -7001,6 +8214,9 @@ class WorkerPipeline:
             "vector_sha256": export.vector_sha256,
             "vector_size_bytes": export.vector_size_bytes,
             "ocr_cache_publication_deferred": ocr_cache_publication_deferred,
+            "unsupported_attachment_count": self._unsupported_attachment_count,
+            "collection_status": "degraded" if self._unsupported_attachment_count > 0 else "complete",
+            "unsupported_attachments": unsupported_att_list,
             "v5_metrics": v5_metrics,
             "manifest": manifest.model_dump(mode="json"),
             "objects": [
@@ -7606,6 +8822,8 @@ class WorkerPipeline:
     ) -> PipelineResult:
         if str(sealed.get("run_id") or "") != run_id:
             raise RuntimeError("sealed publication belongs to a different run")
+        if "unsupported_attachment_count" in sealed:
+            self._unsupported_attachment_count = int(sealed["unsupported_attachment_count"])
         if validated is None:
             validated = await self._validate_local_seal(sealed)
         elif canonical_sha256(sealed) != validated.seal_sha256:
@@ -7622,6 +8840,8 @@ class WorkerPipeline:
                 validated.manifest.generation_id,
                 validated.manifest.counts.documents,
                 validated.manifest.counts.chunks,
+                unsupported_attachment_count=self._unsupported_attachment_count,
+                collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
                 v5_metrics=validated.v5_metrics,
                 published=False,
                 local_artifacts=str(self.state_dir / "runs" / run_id / "sealed"),
@@ -7666,6 +8886,8 @@ class WorkerPipeline:
                     generation_id=current.generation_id,
                     document_count=sealed_manifest.counts.documents,
                     evidence_count=sealed_manifest.counts.chunks,
+                    unsupported_attachment_count=self._unsupported_attachment_count,
+                    collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
                     ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
                     v5_metrics=validated.v5_metrics,
                 )
@@ -7691,6 +8913,8 @@ class WorkerPipeline:
                     generation_id=current.generation_id,
                     document_count=sealed_manifest.counts.documents,
                     evidence_count=0,
+                    unsupported_attachment_count=self._unsupported_attachment_count,
+                    collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
                     ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
                     v5_metrics=validated.v5_metrics,
                 )
@@ -7757,6 +8981,8 @@ class WorkerPipeline:
             generation_id=published.generation_id,
             document_count=manifest.counts.documents,
             evidence_count=manifest.counts.chunks,
+            unsupported_attachment_count=self._unsupported_attachment_count,
+            collection_status="degraded" if self._unsupported_attachment_count > 0 else "complete",
             ocr_cache_publication_deferred=validated.ocr_cache_publication_deferred,
             v5_metrics=published_seal.v5_metrics,
         )
@@ -7786,6 +9012,8 @@ class SealedPublicationResumer(WorkerPipeline):
         self.webdav = webdav
         self.document_aggregation = document_aggregation
         self.stable_publication_approved = stable_publication_approved
+        self._unsupported_count = 0
+        self._unsupported_attachment_count = 0
 
     @staticmethod
     def _guard_publication_channel(
@@ -7944,6 +9172,52 @@ class SealedPublicationResumer(WorkerPipeline):
             except Exception as exc:
                 raise self._phase_failure("local_seal_validation", exc) from None
             try:
+                if "unsupported_attachment_count" in sealed:
+                    self._unsupported_attachment_count = int(sealed["unsupported_attachment_count"])
+                else:
+                    candidates = [self.state_dir / "runs" / run_id]
+                    plan_file = self.state_dir / "runs" / run_id / "execution-plan.json"
+                    if plan_file.is_file():
+                        try:
+                            from .partial_execution import read_json
+
+                            plan_obj = read_json(self.state_dir, plan_file, "plan")
+                            source_run = plan_obj.get("source_run_id")
+                            if source_run:
+                                candidates.append(self.state_dir / "runs" / str(source_run))
+                        except Exception as exc:
+                            LOGGER.debug("Failed reading execution plan: %s", exc)
+                    for check_dir in candidates:
+                        acq_path = check_dir / "acquisition.json"
+                        if acq_path.is_file():
+                            try:
+                                from .partial_execution import read_json
+
+                                acq_data = read_json(self.state_dir, acq_path, "pdf")
+                                self._unsupported_attachment_count = int(
+                                    acq_data.get(
+                                        "unsupported_attachment_count",
+                                        len(acq_data.get("unsupported_attachments", [])),
+                                    )
+                                )
+                                break
+                            except Exception as exc:
+                                LOGGER.debug("Failed reading acquisition unsupported attachments: %s", exc)
+                        exec_path = check_dir / "execution-result.json"
+                        if exec_path.is_file():
+                            try:
+                                from .partial_execution import read_json
+
+                                exec_data = read_json(self.state_dir, exec_path, "export")
+                                self._unsupported_attachment_count = int(
+                                    exec_data.get("unsupported_attachment_count", 0)
+                                )
+                                if self._unsupported_attachment_count > 0:
+                                    break
+                            except Exception as exc:
+                                LOGGER.debug(
+                                    "Failed reading execution result unsupported attachments: %s", exc
+                                )
                 return await self._publish_sealed(run_id, sealed, validated=validated)
             except asyncio.CancelledError:
                 raise

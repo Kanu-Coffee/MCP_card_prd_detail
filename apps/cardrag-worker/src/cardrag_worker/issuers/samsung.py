@@ -136,9 +136,9 @@ def _semantic_guide_identity(file_name: str) -> tuple[str, str]:
     """
 
     normalized_file_name = unicodedata.normalize("NFKC", clean_text(file_name))
-    if not normalized_file_name.casefold().endswith(".pdf"):
+    if not normalized_file_name.casefold().endswith((".pdf", ".zip")):
         raise IssuerMarkupChanged("Samsung guide filename is invalid")
-    stem = normalized_file_name[:-4].strip()
+    stem = normalized_file_name.rsplit(".", 1)[0].strip()
     raw_semantic_name = _GENERIC_GUIDE_SUFFIX.sub("", stem).strip(" ._/-")
     if not raw_semantic_name:
         raise IssuerMarkupChanged("Samsung guide semantic name is empty")
@@ -169,7 +169,7 @@ def _selected_pdf_attachments(raw: dict[str, Any], *, post_id: str) -> list[dict
         if not isinstance(file_name, str):
             raise IssuerMarkupChanged(f"Samsung announcement {post_id} has an invalid attachment name")
         cleaned_name = clean_text(file_name)
-        if cleaned_name.casefold().endswith(".pdf"):
+        if cleaned_name.casefold().endswith((".pdf", ".zip")):
             pdfs.append({**attachment, "apnFileNm": cleaned_name})
 
     guides = [attachment for attachment in pdfs if "안내장" in str(attachment["apnFileNm"])]
@@ -203,7 +203,7 @@ def _parse_attachment(
     if (
         PurePosixPath(file_name).name != file_name
         or "\\" in file_name
-        or not file_name.casefold().endswith(".pdf")
+        or not file_name.casefold().endswith((".pdf", ".zip"))
         or not _ATTACHMENT_GROUP.fullmatch(attachment_group)
         or not _ATTACHMENT_GROUP_TOKEN.fullmatch(attachment_group_token)
         or not _POSITIVE_INTEGER.fullmatch(attachment_sequence)
@@ -353,6 +353,7 @@ def _source_records(
             RAW_SEMANTIC_GUIDE_NAME_METADATA_KEY: attachment.raw_semantic_guide_name,
             SEMANTIC_GUIDE_NAME_METADATA_KEY: attachment.semantic_guide_name,
             LOGICAL_GUIDE_KEY_VERSION_METADATA_KEY: LOGICAL_GUIDE_KEY_VERSION,
+            **({"attachment_type": "zip"} if attachment.file_name.casefold().endswith(".zip") else {}),
         }
         records.append(
             SourceRecord(
