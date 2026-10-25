@@ -225,6 +225,11 @@ jobs:
               docker compose -f compose.yaml config --services; \
           } | sort)"
           test "$services" = $'mcp\nworker'
+          # The unit deliberately calls an installed, host-private helper.
+          # Provide its executable path on the empty CI host for unit parsing;
+          # this fixture does not run the Worker or replace deployment's
+          # actual cardrag-account config check.
+          sudo install -D -m 0755 /usr/bin/true /opt/cardrag/current/operations/worker-compose.sh
           systemd-analyze verify \
             deploy/worker/cardrag-worker.service \
             deploy/worker/cardrag-worker.timer
