@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .partial_execution import (
     ExecutionPlan,
@@ -13,7 +13,28 @@ from .partial_execution import (
 )
 
 
+def resolve_partial_execution_mode(
+    selected: tuple[str, ...] | None,
+    saved_scope: dict[str, Any] | None,
+) -> str:
+    """Pick the issuer execution mode for a partial (collect/process) run.
+
+    A manual scoped partial run is ``selected``.  Resuming an already frozen
+    run restores the historical frozen scope — runs created before the
+    mode-propagation fix stored ``all`` — so the display correction never
+    blocks recovery of those runs.
+    """
+
+    if saved_scope is not None:
+        mode = saved_scope.get("mode")
+        if mode in {"all", "selected", "round_robin"}:
+            return str(mode)
+        raise PartialExecutionError("issuer_scope_changed", "scope")
+    return "selected" if selected else "all"
+
+
 async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]:
+
     from .aggregation_profile_v5 import load_verified_aggregation_profile_v5
     from .capacity_v5 import V5CapacityPolicy, preflight_worker_start_capacity
     from .cli import _ocr_resolver, _pipeline_result_payload, _qwen_embedding_provider
@@ -29,22 +50,49 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
 
     settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
     with worker_lock(settings.lock_file):
+        from .acquisition import AcquisitionSource
+        from .issuers.registry import enabled_issuer_codes
+
+        pool = enabled_issuer_codes()
+        if plan.selected_issuers is not None and (
+            not plan.selected_issuers or not set(plan.selected_issuers) <= set(pool)
+        ):
+            raise ValueError("phase issuer scope must be inside the configured pool")
+        source_type = AcquisitionSource if plan.phase == "process" else ReuseSource
+        source = (
+            source_type(settings.state_dir, plan.source_run_id, settings.state_database)
+            if plan.source_run_id
+            else None
+        )
+        if isinstance(source, AcquisitionSource):
+            requested = plan.selected_issuers or source.selected
+            if tuple(requested) != source.selected:
+                raise PartialExecutionError("acquisition_scope_changed", "scope")
+            plan.selected_issuers = requested
         if resume:
             import json
 
             path = settings.state_dir / "runs" / resume / "execution-plan.json"
-            if not path.is_file() or json.loads(path.read_bytes()) != plan.identity():
+            if not path.is_file():
                 raise PartialExecutionError("skip_artifact_incompatible", "plan")
-        source = (
-            ReuseSource(settings.state_dir, plan.source_run_id, settings.state_database)
-            if plan.source_run_id
-            else None
-        )
+            saved_plan = json.loads(path.read_bytes())
+            if plan.selected_issuers is None and saved_plan.get("selected_issuers"):
+                plan.selected_issuers = tuple(saved_plan["selected_issuers"])
+            if saved_plan != plan.identity():
+                raise PartialExecutionError("skip_artifact_incompatible", "plan")
+        saved_scope = None
+        if resume:
+            from .partial_execution import read_json
+
+            frozen_path = settings.state_dir / "runs" / resume / "issuer-scope.json"
+            if frozen_path.is_file():
+                saved_scope = read_json(settings.state_dir, frozen_path, "scope")
+        partial_execution_mode = resolve_partial_execution_mode(plan.selected_issuers, saved_scope)
         preflight = source.preflight(plan) if source is not None else plan.payload()
         if plan.skips("ocr") and load_next_reprocess_request(settings.state_dir) is not None:
             raise PartialExecutionError("skip_artifact_incompatible", "ocr")
         if (
-            source is not None
+            isinstance(source, ReuseSource)
             and plan.skips("embedding")
             and (
                 source.profile["provider_id"],
@@ -94,7 +142,12 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
         try:
             if document_aggregation is not None and not plan.skips("webdav"):
                 await validate_document_aggregation_head(webdav, document_aggregation)
-            if plan.channel == "stable" and source is not None and not plan.skips("webdav"):
+            if (
+                plan.channel == "stable"
+                and source is not None
+                and not isinstance(source, AcquisitionSource)
+                and not plan.skips("webdav")
+            ):
                 current = await webdav.validated_current_generation()
                 if current is None or current.generation_id != source.manifest.generation_id:
                     from .partial_execution import read_json
@@ -118,7 +171,48 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
                 sqlite_mmap_mib=settings.sqlite_mmap_mib,
             ) as state:
                 embeddings: OpenRouterQwenEmbeddingProviderV5
-                if source is not None:
+                if plan.phase == "collect":
+                    from types import SimpleNamespace
+
+                    from .embedding_v5 import OpenRouterEndpointMetadata
+                    from .tokenizer_v5 import QWEN_TOKENIZER_REVISION, QWEN_TOKENIZER_SHA256
+
+                    # Acquisition neither verifies nor uses provider semantics.
+                    # Prefer the served profile only to validate preservation.
+                    profile = QwenEmbeddingProfileV5.from_endpoint(
+                        OpenRouterEndpointMetadata(
+                            model=settings.embedding_model,
+                            provider_id=settings.embedding_provider_id,
+                            provider_name="collection-only",
+                            endpoint_name="collection-only",
+                            quantization="BF16",
+                            maximum_tokens=settings.embedding_maximum_tokens,
+                            supported_parameters=("encoding_format",),
+                            metadata_sha256="0" * 64,
+                        )
+                    )
+                    for prior_id in state.retained_publication_run_ids(limit=settings.retain_generations):
+                        prior = ReuseSource(settings.state_dir, prior_id, settings.state_database)
+                        profile = QwenEmbeddingProfileV5(
+                            **prior.profile,
+                            endpoint_name=prior.metadata["embedding_endpoint_name"],
+                            endpoint_metadata_sha256=prior.metadata["embedding_endpoint_metadata_sha256"],
+                        )
+                        break
+
+                    class UnusedTokenizer:
+                        asset_sha256 = QWEN_TOKENIZER_SHA256
+                        revision = QWEN_TOKENIZER_REVISION
+
+                        def __call__(self, text: str) -> int:
+                            raise PartialExecutionError("collection_provider_forbidden", "embedding")
+
+                    embeddings = OpenRouterQwenEmbeddingProviderV5(
+                        api_key="unused-collection", profile=profile, token_counter=UnusedTokenizer()
+                    )
+                elif isinstance(source, AcquisitionSource):
+                    embeddings = await _qwen_embedding_provider(settings)
+                elif source is not None:
                     profile = QwenEmbeddingProfileV5(
                         **source.profile,
                         endpoint_name=source.metadata["embedding_endpoint_name"],
@@ -161,22 +255,32 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
                         embeddings = await _qwen_embedding_provider(settings)
                 else:
                     embeddings = await _qwen_embedding_provider(settings)
-                ocr = _ocr_resolver(
-                    settings, state, None if plan.skips("webdav") else webdav, skip=plan.skips("ocr")
-                )
-                if not plan.skips("webdav"):
+                ocr: Any
+                if plan.phase == "collect":
+                    ocr = SimpleNamespace(
+                        contract=SimpleNamespace(cache_epoch=settings.ocr_cache_epoch),
+                        cache_epoch=settings.ocr_cache_epoch,
+                        cache_mode=settings.ocr_cache_mode,
+                    )
+                else:
+                    ocr = _ocr_resolver(
+                        settings, state, None if plan.skips("webdav") else webdav, skip=plan.skips("ocr")
+                    )
+                if not plan.skips("webdav") and hasattr(webdav, "configure_verification"):
                     webdav.configure_verification(state, settings.webdav_verification)
                 pipeline = WorkerPipeline(
                     state=state,
                     state_dir=settings.state_dir,
                     adapters=enabled_adapters(),
-                    ocr=ocr,  # type: ignore[arg-type]
+                    selected_issuers=plan.selected_issuers,
+                    issuer_execution_mode=partial_execution_mode,
+                    ocr=ocr,
                     embeddings=embeddings,
                     webdav=webdav,
                     settings=settings,
                     lock_held=True,
                     execution_plan=plan,
-                    reuse_source=source,
+                    reuse_source=cast(ReuseSource | None, source),
                     stable_publication_approved=settings.stable_publication_approved,
                     ocr_cache_publication_approved=settings.ocr_cache_publication_approved
                     or plan.skips("webdav"),
@@ -205,6 +309,75 @@ async def run_partial(plan: ExecutionPlan, resume: str | None) -> dict[str, Any]
                     ),
                 )
                 result = await pipeline.run(resume_run_id=resume)
-                return _pipeline_result_payload(result)
+                if (
+                    isinstance(source, AcquisitionSource)
+                    and result.status == "succeeded"
+                    and result.published
+                ):
+                    from .contracts import canonical_json_bytes
+                    from .pipeline import _atomic_write
+
+                    _atomic_write(
+                        source.directory / "acquisition-consumed.json",
+                        canonical_json_bytes(
+                            {"process_run_id": result.run_id, "generation_id": result.generation_id}
+                        ),
+                    )
+                payload = _pipeline_result_payload(result)
+                if (
+                    plan.phase == "process"
+                    and result.published
+                    and result.status == "succeeded"
+                    and getattr(settings, "backup_mode", "disabled") != "disabled"
+                ):
+                    from .backup import BackupLedger, canonical_remote_root, scoped_backup_result_fields
+
+                    payload.update(
+                        {
+                            **scoped_backup_result_fields({}),
+                            "backup_defer_reasons": None,
+                            "backup_diagnostics_mode": None,
+                            "backup_scope_run_id": None,
+                        }
+                    )
+                    try:
+                        ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+                        selected = tuple(pipeline.selected_issuers)
+                        ledger.record_run_success(
+                            result.run_id, settings.state_dir, settings, selected_issuers=selected
+                        )
+                        status = ledger.get_status(settings)
+                        if status["should_trigger"]:
+                            allowed, expected = ledger.scoped_backup_scope(
+                                result.run_id,
+                                settings.state_dir,
+                                selected,
+                                remote_root=canonical_remote_root(settings),
+                            )
+                            flushed = await ledger.flush(
+                                settings,
+                                timeout_seconds=getattr(settings, "backup_inline_budget_seconds", 300.0),
+                                allowed_remote_paths=allowed,
+                                expected_artifacts=expected,
+                            )
+                            payload["backup_status"] = flushed.get("status", "failed")
+                            payload.update(scoped_backup_result_fields(flushed))
+                        else:
+                            payload["backup_status"] = "deferred"
+                            payload["backup_defer_reasons"] = status.get("trigger_reasons")
+                            payload["backup_diagnostics_mode"] = None
+                            payload["backup_scope_run_id"] = None
+                            if selected:
+                                # Threshold deferral keeps the read-only scope
+                                # view visible without forcing any transport.
+                                payload.update(
+                                    ledger.scoped_pending_diagnostics(settings, result.run_id, selected)
+                                )
+                    except Exception:
+                        # Publication truth remains committed. Retry backup through
+                        # the existing ledger API, never by repeating OCR.
+                        payload["backup_status"] = "error"
+                return payload
         finally:
-            await webdav.close()
+            if hasattr(webdav, "close"):
+                await webdav.close()

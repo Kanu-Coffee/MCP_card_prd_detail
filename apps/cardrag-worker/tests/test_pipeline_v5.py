@@ -399,6 +399,33 @@ class _FakeCandidateWebDAV:
         )
         self.current = current
         self.objects[str(self.pointer_path)] = b'{"generation_id":"g-other-candidate-head"}'
+        # A validated head exposes its canonical inventory, as the real transport
+        # does. Scoped preservation now inspects it before selecting work.
+        manifests = [
+            body
+            for path, body in self.objects.items()
+            if path.startswith("v1/generations/") and path.endswith("/manifest.json")
+        ]
+        if manifests:
+            prior = GenerationManifest.model_validate_json(manifests[-1])
+            inventory = prior.model_copy(
+                update={
+                    "generation_id": current.generation_id,
+                    "corpus_sha256": current.corpus_sha256,
+                    "contract_sha256": current.contract_sha256,
+                    "serving_database": prior.serving_database.model_copy(
+                        update={"path": generation_database_path(current.generation_id).as_posix()}
+                    ),
+                    "vector_sidecar": prior.vector_sidecar.model_copy(
+                        update={
+                            "artifact": prior.vector_sidecar.artifact.model_copy(
+                                update={"path": generation_vectors_path(current.generation_id).as_posix()}
+                            )
+                        }
+                    ),
+                }
+            )
+            self.objects[str(generation_manifest_path(current.generation_id))] = inventory.canonical_bytes()
         return current
 
 

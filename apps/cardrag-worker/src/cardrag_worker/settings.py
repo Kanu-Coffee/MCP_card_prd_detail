@@ -322,9 +322,15 @@ class WorkerSettings:
     backup_max_pending_age_hours: int = 168
     backup_inline_budget_seconds: float = 300.0
     backup_derived_snapshot_enabled: bool = False
+    issuer_proxy_url: str | None = None
+    issuer_request_budget: int = 10000
+    issuer_byte_budget: int = 4 * 1024**3
 
     @classmethod
     def from_env(cls, *, require_providers: bool = False, require_webdav: bool = False) -> WorkerSettings:
+        from .issuer_http import validate_issuer_proxy_url
+
+        issuer_proxy_url = validate_issuer_proxy_url(os.environ.get("CARDRAG_ISSUER_PROXY_URL"))
         dimension = _positive_int("CARDRAG_EMBEDDING_DIMENSION", QWEN3_EMBEDDING_DIMENSION)
         if dimension != QWEN3_EMBEDDING_DIMENSION:
             raise ValueError(f"CARDRAG_EMBEDDING_DIMENSION must be {QWEN3_EMBEDDING_DIMENSION}")
@@ -719,7 +725,10 @@ class WorkerSettings:
             ),
             stage_max_attempts=_positive_int("CARDRAG_STAGE_MAX_ATTEMPTS", 4),
             retry_cap_seconds=_positive_float("CARDRAG_RETRY_CAP_SECONDS", 30),
-            pdf_cache_refresh_hours=_positive_float("CARDRAG_PDF_CACHE_REFRESH_HOURS", 168),
+            pdf_cache_refresh_hours=_positive_float("CARDRAG_PDF_CACHE_REFRESH_HOURS", 2160),
+            issuer_proxy_url=issuer_proxy_url,
+            issuer_request_budget=_positive_int("CARDRAG_ISSUER_REQUEST_BUDGET", 10000),
+            issuer_byte_budget=_positive_int("CARDRAG_ISSUER_BYTE_BUDGET", 4 * 1024**3),
             retain_generations=_bounded_int("CARDRAG_RETAIN_GENERATIONS", 2, minimum=2, maximum=20),
             retained_incomplete_runs=_bounded_int("CARDRAG_RETAIN_INCOMPLETE_RUNS", 2, minimum=1, maximum=20),
             retirement_grace_runs=_bounded_int("CARDRAG_RETIREMENT_GRACE_RUNS", 2, minimum=2, maximum=20),

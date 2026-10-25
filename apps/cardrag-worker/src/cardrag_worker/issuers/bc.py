@@ -140,7 +140,7 @@ def parse_listing(page_html: str, *, discovered_at: datetime) -> _ParsedListing:
             file_name = unquote(PurePosixPath(path).name)
             if (
                 not path.startswith("/down/individual/customer/")
-                or not file_name.casefold().endswith(".pdf")
+                or not file_name.casefold().endswith((".pdf", ".zip"))
                 or PurePosixPath(file_name).name != file_name
                 or "\\" in file_name
                 or any(ord(character) < 32 for character in file_name)
@@ -170,6 +170,7 @@ def parse_listing(page_html: str, *, discovered_at: datetime) -> _ParsedListing:
                         "issuance_end_status": end_status,
                         "issuance_end_date": end_date,
                         "issuance_ended": bool(end_date) if end_status else None,
+                        **({"attachment_type": "zip"} if file_name.casefold().endswith(".zip") else {}),
                     },
                 )
             )

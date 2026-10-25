@@ -82,8 +82,8 @@ _PAGE_CALL = re.compile(
 )
 
 
-def _pdf_date(url: str) -> str:
-    match = re.search(r"(20\d{6}|19\d{6})(?=\.pdf(?:$|\?))", url, flags=re.I)
+def _attachment_date(url: str) -> str:
+    match = re.search(r"(20\d{6}|19\d{6})(?=\.(?:pdf|zip)(?:$|\?))", url, flags=re.I)
     return match.group(1) if match else ""
 
 
@@ -91,9 +91,11 @@ def parse_listing(page_html: str, *, category_code: str, discovered_at: datetime
     soup = BeautifulSoup(page_html, "lxml")
     records: list[SourceRecord] = []
     for row in soup.select("tr"):
-        pdf = row.select_one('a[href*="/obj/card/download/"][href$=".pdf"]')
+        attachment = row.select_one(
+            'a[href*="/obj/card/download/"][href$=".pdf"], a[href*="/obj/card/download/"][href$=".zip"]'
+        )
         detail = row.select_one("[onclick*='goDetail'], a[href*='goDetail']")
-        if pdf is None or detail is None:
+        if attachment is None or detail is None:
             continue
         onclick = detail.get("onclick")
         href = detail.get("href")
@@ -110,10 +112,15 @@ def parse_listing(page_html: str, *, category_code: str, discovered_at: datetime
             continue
         code = unquote(match.group(1)).strip()
         name = clean_text(cells[0].get_text(" ", strip=True)) or unquote(match.group(2)).strip()
-        url = absolute_https_url(BASE_URL, str(pdf.get("href")), SPEC.allowed_hosts)
-        date_text = _pdf_date(url)
+        url = absolute_https_url(BASE_URL, str(attachment.get("href")), SPEC.allowed_hosts)
+        date_text = _attachment_date(url)
         if not date_text:
             continue
+        file_name = PurePosixPath(urlparse(url).path).name
+        metadata: dict[str, object] = {
+            "category_code": category_code,
+            **({"attachment_type": "zip"} if file_name.casefold().endswith(".zip") else {}),
+        }
         records.append(
             SourceRecord(
                 issuer=SPEC.code,
@@ -123,10 +130,10 @@ def parse_listing(page_html: str, *, category_code: str, discovered_at: datetime
                 source_version=date_text,
                 source_url=url,
                 source_post_id=PurePosixPath(urlparse(url).path).stem,
-                file_name=PurePosixPath(urlparse(url).path).name,
+                file_name=file_name,
                 category=KB_CATEGORIES[category_code],
                 discovered_at=discovered_at,
-                metadata={"category_code": category_code},
+                metadata=metadata,
             )
         )
     return records

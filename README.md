@@ -2,7 +2,7 @@
 
 카드사 상품안내장 PDF를 수집하고, 조항·표·주석의 연결 관계를 보존해 검색하는 MCP 서버입니다.
 카드 상품 탐색, 출시 상품 조사, 혜택 비교에 필요한 원문 근거와 출처를 AI 클라이언트에 제공합니다.
-현재 소스 버전은 **1.0.36**입니다. [변경 사항](docs/RELEASE_NOTES_v1.0.36.md)을 참고하십시오.
+현재 소스 버전은 **1.0.37**입니다. [변경 사항](docs/RELEASE_NOTES_v1.0.37.md)을 참고하십시오.
 
 ```text
 카드사 공식 PDF → Worker: 수집 · OCR · 임베딩
@@ -97,3 +97,5 @@ search_contracts(query="연회비와 적립 제외 조건", response_mode="compa
 프로젝트 소스는 [Apache License 2.0](LICENSE)입니다. 외부 구성요소는
 [제3자 고지](THIRD_PARTY_NOTICES.md)를 따릅니다. 카드사 PDF와 외부 제공자의 데이터·서비스
 이용 권한은 소스 코드 라이선스와 별개입니다.
+
+운영테스트 인수 및 handoff 종료 상태는 [v1.0.37 종료 인덱스](.handoff/STATUS_v1.0.37.md)를 참고하십시오.

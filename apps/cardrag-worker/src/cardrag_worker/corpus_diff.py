@@ -160,6 +160,7 @@ def generate_corpus_diff_report(
     output_path: Path | None = None,
     fail_on_missing: bool = True,
     prior_observed_at: str = "",
+    discovered_lineages: frozenset[LineageKey] | None = None,
 ) -> CorpusDiffReport:
     """Compare acquired documents against the rolling baseline or seed ledger.
 
@@ -302,8 +303,12 @@ def generate_corpus_diff_report(
     candidate_records: tuple[dict[str, Any], ...] = ()
     unjustified: tuple[str, ...] = tuple(missing)
     if retirement_resolver is not None:
-        discovered_lineages = frozenset(
-            (d.source.issuer, d.source.product_code, d.source.document_type) for d in current_docs
+        active_lineages = (
+            discovered_lineages
+            if discovered_lineages is not None
+            else frozenset(
+                (d.source.issuer, d.source.product_code, d.source.document_type) for d in current_docs
+            )
         )
         requests = tuple(
             RetirementRequest(
@@ -317,7 +322,7 @@ def generate_corpus_diff_report(
             )
             for doc_id in missing
         )
-        outcome = retirement_resolver(requests, discovered_lineages)
+        outcome = retirement_resolver(requests, active_lineages)
         if outcome is not None:
             missing_set = set(missing)
             unjustified = tuple(sorted(doc_id for doc_id in outcome.unjustified if doc_id in missing_set))

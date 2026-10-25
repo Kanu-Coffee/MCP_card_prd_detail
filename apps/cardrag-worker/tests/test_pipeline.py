@@ -307,7 +307,7 @@ def install_http(
 
 
 def expire_pdf_cache_binding(state: WorkerState, source_id: str) -> str:
-    expired = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    expired = (datetime.now(UTC) - timedelta(days=91)).isoformat()
     state.connection.execute(
         "UPDATE pdf_cache_source SET last_observed_at=? WHERE source_id=?",
         (expired, source_id),
@@ -3413,7 +3413,9 @@ async def test_run_marks_preexisting_running_state_interrupted_under_worker_lock
         current = next(value for run_id, value in rows.items() if run_id != "stale-run")
         assert current[0] == "failed"
         assert current[2] == captured.value.stored_error
-        assert captured.value.failure.error_class_category == "runtime"
+        assert captured.value.failure.error_class_category == "issuer_origin"
+        assert captured.value.failure.reason_code == "issuer_source_invalid"
+        assert captured.value.failure.stage == "discovery"
 
 
 @pytest.mark.asyncio
@@ -3478,7 +3480,9 @@ async def test_discovery_drop_fails_before_download_and_pointer_update(tmp_path:
         )
         with pytest.raises(WorkerUnexpectedFailureError) as captured:
             await pipeline.run()
-        assert captured.value.failure.error_class_category == "runtime"
+        assert captured.value.failure.error_class_category == "issuer_origin"
+        assert captured.value.failure.reason_code == "issuer_source_invalid"
+        assert captured.value.failure.stage == "discovery"
         assert captured.value.report_path.is_file()
     assert adapter.prepare_calls == 0
 

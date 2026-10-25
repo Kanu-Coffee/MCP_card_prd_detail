@@ -81,6 +81,39 @@ MCP의 `/health/live`는 프로세스 생존만 나타냅니다. 대용량 gener
 계속 진행 중인 Worker state 위에 과거 DB를 덮어쓰지 않습니다. 정상 generation을 참조하는
 pointer를 복원하더라도 그 generation의 CAS·DB·vector·manifest·READY가 모두 남아 있어야 합니다.
 
+### 현재 복구점과 rollback release
+
+각 release의 `operations/deployment.json`에 있는 `snapshot_directory`는 그 배포 당시의
+역사값입니다. snapshot retention 이후 경로가 삭제됐을 수 있으므로, 현재 사용 가능한
+protected snapshot은 `operations/recovery-point.json`과
+`operations/snapshot-retention.json`을 기준으로 확인합니다. active release와 보존된
+rollback release에는 같은 guidance를 배치하며, `recovery_guidance`의
+`historical_snapshot_status`가 `pruned`이면 그 역사 경로를 현재 복구점으로 선택하지 않습니다.
+
+```bash
+REL=$(readlink -f /opt/cardrag/current)
+IMG=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["image"])' \
+  "$REL/operations/deployment.json")
+docker run --rm --network none --read-only \
+  -v cardrag-worker-state:/state:ro \
+  -v "$REL/operations:/ops:ro" \
+  --entrypoint /opt/cardrag/bin/python "$IMG" \
+  /ops/verify-recovery-point.py /state /ops/recovery-point.json
+```
+
+검증기는 protected snapshot 하나의 존재, `snapshot.json` hash, 두 DB의 크기·SHA-256,
+SQLite `quick_check`, 최신 run과 stable generation을 읽기 전용으로 확인합니다. 각 DB의
+nonempty `-wal` 또는 `-journal` sidecar가 있으면 immutable 검사 전에 fail closed하며,
+검증 중 파일 identity가 바뀌어도 실패합니다. 출력의 `verified=true`와
+`state_written=false`를 확인하십시오.
+
+- **code/image rollback**과 **DB snapshot restore**는 별개입니다. rollback image/release가
+  존재한다는 사실만으로 현재 snapshot DB를 그 이미지에 복원해도 안전하다고 판정하지 않습니다.
+  DB restore는 snapshot을 만든 code/schema와 대상 image의 호환성을 별도로 검증한 뒤
+  사용자가 명시 승인해야 하며, 이 도구는 복원·덮어쓰기를 수행하지 않습니다.
+- 삭제된 snapshot/release 경로는 역사 기록으로만 남기고 현재 복구 안내에 사용하지 않습니다.
+- 통과한 검증을 위해 snapshot을 다시 복제하거나 다중 보존으로 되돌리지 않습니다.
+
 ## MCP 용량 정책과 남은 예약
 
 MCP state의 quota 정책은 디스크에 봉인되며 재시작과 여러 프로세스 사이에서 공유됩니다.

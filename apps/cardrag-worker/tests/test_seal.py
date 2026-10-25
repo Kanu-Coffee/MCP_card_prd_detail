@@ -281,7 +281,9 @@ async def test_explicit_resume_refreshes_discovery_before_using_a_seal(tmp_path:
         worker = pipeline(tmp_path, state, webdav)
         with pytest.raises(WorkerUnexpectedFailureError) as captured:
             await worker.run(resume_run_id="run-sealed")
-        assert captured.value.failure.error_class_category == "runtime"
+        assert captured.value.failure.error_class_category == "issuer_origin"
+        assert captured.value.failure.reason_code == "issuer_source_invalid"
+        assert captured.value.failure.stage == "discovery"
         assert captured.value.report_path.is_file()
     assert webdav.put_calls == 0
 

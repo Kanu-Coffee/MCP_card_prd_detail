@@ -127,10 +127,18 @@ class SourceRecord:
     def __post_init__(self) -> None:
         if not all((self.issuer, self.product_code, self.product_name, self.source_version, self.source_url)):
             raise ValueError("source record contains an empty identity field")
-        if not self.file_name.casefold().endswith(".pdf"):
-            raise ValueError("source record file_name must end in .pdf")
+        if not self.file_name.casefold().endswith((".pdf", ".zip")):
+            raise ValueError("source record file_name must end in .pdf or .zip")
         if self.discovered_at.tzinfo is None:
             raise ValueError("discovered_at must be timezone-aware")
+
+    @property
+    def is_pdf(self) -> bool:
+        return self.file_name.casefold().endswith(".pdf")
+
+    @property
+    def is_zip(self) -> bool:
+        return self.file_name.casefold().endswith(".zip")
 
     @property
     def discovery_payload(self) -> dict[str, Any]:

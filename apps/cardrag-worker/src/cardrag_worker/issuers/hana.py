@@ -94,7 +94,9 @@ def parse_listing(payload: object, *, discovered_at: datetime) -> ListingPage:
         product_code = _required_text(raw, "ADD_VAR3")
         name = _required_text(raw, "APN_FILE_NM")
         path = _required_text(raw, "APN_FILE_PH_NM")
-        if not name.casefold().endswith(".pdf") or any(char in name for char in ("/", "\\", "\x00")):
+        if not name.casefold().endswith((".pdf", ".zip")) or any(
+            char in name for char in ("/", "\\", "\x00")
+        ):
             raise IssuerMarkupChanged("Hana PDF filename is invalid")
         try:
             effective = parse_source_date(_required_text(raw, "AN_SDT"))
@@ -105,7 +107,10 @@ def parse_listing(payload: object, *, discovered_at: datetime) -> ListingPage:
         issuance_flag = raw.get("ADD_VAR5")
         if issuance_flag not in (None, "Y", "N"):
             raise IssuerMarkupChanged("Hana issuance status is invalid")
-        metadata: dict[str, object] = {"classification_basis": "official_shared_listing"}
+        metadata: dict[str, object] = {
+            "classification_basis": "official_shared_listing",
+            **({"attachment_type": "zip"} if name.casefold().endswith(".zip") else {}),
+        }
         if issuance_flag is not None:
             metadata["issuance_discontinued"] = issuance_flag == "Y"
         records.append(

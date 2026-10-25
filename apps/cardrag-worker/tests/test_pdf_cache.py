@@ -472,7 +472,7 @@ def test_pdf_cache_refresh_setting_defaults_and_rejects_nonpositive_or_nonfinite
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("CARDRAG_PDF_CACHE_REFRESH_HOURS", raising=False)
-    assert WorkerSettings.from_env().pdf_cache_refresh_hours == 168
+    assert WorkerSettings.from_env().pdf_cache_refresh_hours == 2160
 
     monkeypatch.setenv("CARDRAG_PDF_CACHE_REFRESH_HOURS", "12.5")
     assert WorkerSettings.from_env().pdf_cache_refresh_hours == 12.5

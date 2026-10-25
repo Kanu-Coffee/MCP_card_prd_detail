@@ -228,7 +228,7 @@ jobs:
           systemd-analyze verify \
             deploy/worker/cardrag-worker.service \
             deploy/worker/cardrag-worker.timer
-          systemd-analyze calendar '*-*-* 03:00:00 Asia/Seoul' >/dev/null
+          systemd-analyze calendar '*-*-* 14:30:00 Asia/Seoul' >/dev/null
 
       - name: Build exactly the Worker and MCP images
         run: |

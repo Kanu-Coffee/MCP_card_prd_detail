@@ -17,6 +17,11 @@ import httpx
 import pypdfium2 as pdfium  # type: ignore[import-untyped]
 
 from .contracts import DownloadRequest
+from .issuer_collection import (
+    OriginServiceError,
+    classify_html_service_error,
+    safe_mime_type,
+)
 
 
 class DownloadSecurityError(RuntimeError):
@@ -39,6 +44,24 @@ class ProtectedDocumentError(PDFValidationError):
     ) -> None:
         super().__init__("response is a recognized protected document container")
         self.magic = magic
+        self.sha256 = sha256
+        self.size_bytes = size_bytes
+
+
+class UnsupportedAttachmentError(PDFValidationError):
+    """The issuer served an unsupported attachment format (such as ZIP)."""
+
+    def __init__(
+        self,
+        *,
+        format: str,
+        reason: str,
+        sha256: str | None = None,
+        size_bytes: int = 0,
+    ) -> None:
+        super().__init__(reason)
+        self.format = format
+        self.reason = reason
         self.sha256 = sha256
         self.size_bytes = size_bytes
 
@@ -158,6 +181,13 @@ def validate_pdf(path: Path, *, expected_sha256: str | None = None) -> tuple[str
             sha256=sha256,
             size_bytes=size,
         )
+    if signature[:4] in {b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"}:
+        raise UnsupportedAttachmentError(
+            format="zip",
+            reason="response is a zip archive",
+            sha256=sha256,
+            size_bytes=size,
+        )
     if not signature.startswith(b"%PDF-"):
         raise PDFValidationError("response does not start with a PDF signature")
     if expected_sha256 is not None and sha256 != expected_sha256:
@@ -262,6 +292,36 @@ class SecurePDFDownloader:
                         media_type = (
                             response.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
                         )
+                        if media_type in {"text/html", "application/xhtml+xml"}:
+                            prefix = bytearray()
+                            async for block in response.aiter_bytes():
+                                prefix.extend(block[: 65536 - len(prefix)])
+                                if len(prefix) >= 65536:
+                                    break
+                            signal = classify_html_service_error(bytes(prefix), media_type)
+                            if signal is not None:
+                                raise OriginServiceError(
+                                    status_code=response.status_code,
+                                    mime_type=safe_mime_type(media_type),
+                                    service_signal=signal,
+                                )
+                            raise PDFValidationError("response MIME type is not PDF-compatible")
+                        if media_type in {"application/zip", "application/x-zip-compressed"}:
+                            written = 0
+                            zip_digest = hashlib.sha256()
+                            async for block in response.aiter_bytes():
+                                written += len(block)
+                                if written > self.policy.maximum_bytes:
+                                    raise PDFValidationError(
+                                        "streamed attachment exceeds configured maximum size"
+                                    )
+                                zip_digest.update(block)
+                            raise UnsupportedAttachmentError(
+                                format="zip",
+                                reason="response MIME type is application/zip",
+                                sha256=zip_digest.hexdigest(),
+                                size_bytes=written,
+                            )
                         # Shinhan's official mobile PDF endpoint currently misspells
                         # application/octet-stream as "application/octect-stream".
                         # Bytes still pass the strict PDF signature and structure checks below.

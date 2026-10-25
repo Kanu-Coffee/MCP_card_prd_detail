@@ -40,7 +40,7 @@ from .adoption import (
     write_reports,
 )
 from .aggregation_profile_v5 import load_verified_aggregation_profile_v5
-from .backup import BackupLedger
+from .backup import BackupLedger, canonical_remote_root
 from .cache_seed import (
     CacheSeedError,
     apply_cache_seed,
@@ -451,6 +451,18 @@ def _echo_ocr_systemic_failure(exc: OCRSystemicFailureError) -> None:
     if failure.stderr_size_bytes is not None:
         payload["stderr_size_bytes"] = failure.stderr_size_bytes
         payload["stderr_sha256"] = failure.stderr_sha256
+    if failure.stdout_size_bytes is not None:
+        payload["stdout_size_bytes"] = failure.stdout_size_bytes
+        payload["stdout_sha256"] = failure.stdout_sha256
+    if failure.provider is not None:
+        payload["provider"] = failure.provider
+    if failure.classification_basis is not None:
+        payload["classification_basis"] = failure.classification_basis
+    if failure.chunk_index is not None:
+        payload["chunk_index"] = failure.chunk_index
+    if failure.page_start is not None:
+        payload["page_start"] = failure.page_start
+        payload["page_end"] = failure.page_end
     _echo(payload)
 
 
@@ -804,10 +816,20 @@ def _echo_worker_unexpected_failure(
                 "run_id": exc.run_id,
             }
         )
+        if exc.failure.reason_code != "worker_unexpected_failure":
+            payload["reason_code"] = exc.failure.reason_code
+            payload["failure_reason_code"] = exc.failure.reason_code
+            payload["reason"] = exc.failure.reason
         if exc.failure.phase is not None:
             payload["phase"] = exc.failure.phase
+        if exc.failure.stage is not None:
+            payload["stage"] = exc.failure.stage
+        if exc.failure.document_id is not None:
+            payload["document_id"] = exc.failure.document_id
         if exc.failure.status_code is not None:
             payload["status_code"] = exc.failure.status_code
+        if exc.failure.mime_type is not None:
+            payload["mime_type"] = exc.failure.mime_type
         if exc.failure.errno is not None:
             payload["errno"] = exc.failure.errno
     elif isinstance(exc, Exception):
@@ -938,6 +960,7 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "contract_sha256": result.contract_sha256,
         "documents": result.document_count,
         "unsupported_documents": result.unsupported_document_count,
+        "unsupported_attachment_count": result.unsupported_attachment_count,
         "evidence": result.evidence_count,
         "gc_status": result.gc_status,
         "gc_deleted": result.gc_deleted,
@@ -954,6 +977,8 @@ def _pipeline_result_payload(result: PipelineResult) -> dict[str, Any]:
         "pdf_cache_revalidations": result.pdf_cache_revalidations,
         "pdf_downloads": result.pdf_downloads,
         "pdf_revisions": result.pdf_revisions,
+        "pdf_succeeded_count": result.pdf_succeeded_count,
+        "pdf_skipped_count": result.pdf_skipped_count,
         "ocr_cache_publication_deferred": result.ocr_cache_publication_deferred,
         "retired_count": result.retired_count,
         "retirement_candidate_count": result.retirement_candidate_count,
@@ -1424,7 +1449,13 @@ def _ocr_resolver(
     return resolver
 
 
-async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, Any]:
+async def _run(
+    resume: str | None,
+    *,
+    startup_only: bool = False,
+    selected_issuers: tuple[str, ...] | None = None,
+    issuer_mode: str = "all",
+) -> dict[str, Any]:
     started = time.monotonic()
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
@@ -1541,6 +1572,10 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
             ) as state:
                 if isinstance(transport, WebDAVClient):
                     transport.configure_verification(state, settings.webdav_verification)
+                if issuer_mode == "round_robin" and resume is None and not startup_only:
+                    from .rotation import Rotation
+
+                    Rotation(state, channel=settings.channel).check_limit()
                 stage = "ocr_resolver"
                 t_stage = time.monotonic()
                 logging.getLogger("cardrag_worker.cli").info(
@@ -1612,100 +1647,163 @@ async def _run(resume: str | None, *, startup_only: bool = False) -> dict[str, A
                 logging.getLogger("cardrag_worker.cli").info(
                     "Startup stage passed stage=%s elapsed_seconds=%.3f", stage, time.monotonic() - t_stage
                 )
-                result = await WorkerPipeline(
-                    state=state,
-                    state_dir=settings.state_dir,
-                    adapters=enabled_adapters(),
-                    ocr=resolver,  # type: ignore[arg-type]
-                    embeddings=embeddings,
-                    webdav=transport,
-                    settings=settings,
-                    issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
-                    issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
-                    pdf_concurrency=settings.pdf_concurrency,
-                    pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
-                    local_processing_workers=settings.local_processing_workers,
-                    maximum_attempts=settings.stage_max_attempts,
-                    retry_cap_seconds=settings.retry_cap_seconds,
-                    collect_remote_garbage=settings.collect_remote_garbage,
+                from .issuers.registry import DEFAULT_ENABLED_ISSUERS, enabled_issuer_codes
+                from .rotation import scope_session
+
+                pool = enabled_issuer_codes()
+                async with scope_session(
+                    state,
+                    settings.state_dir,
+                    pool,
+                    selected=selected_issuers,
+                    mode=issuer_mode,
+                    channel=settings.channel,
+                    resume=resume,
+                    transport=transport,
                     stable_publication_approved=settings.stable_publication_approved,
-                    ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
-                    remote_gc_approved=settings.remote_gc_approved,
-                    retained_generations=settings.retain_generations,
-                    retained_incomplete_runs=settings.retained_incomplete_runs,
-                    retirement_grace_runs=settings.retirement_grace_runs,
-                    retirement_grace_days=settings.retirement_grace_days,
-                    retirement_max_per_run=settings.retirement_max_per_run,
-                    garbage_grace_days=settings.garbage_grace_days,
-                    pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
-                    pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
-                    document_aggregation=document_aggregation,
-                    capacity_policy_v5=V5CapacityPolicy(
-                        maximum_state_bytes=settings.maximum_state_bytes,
-                        reserved_free_space_bytes=settings.reserved_free_space_bytes,
-                        maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
-                        maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
-                    ),
-                    lock_held=True,
-                ).run(resume_run_id=resume)
-
-                backup_info: dict[str, Any] = {
-                    "backup_status": "disabled",
-                    "backup_bytes_uploaded": 0,
-                    "backup_requests": 0,
-                    "pending_ocr_count": 0,
-                    "pending_bytes": 0,
-                    "oldest_pending_at": None,
-                    "last_backup_at": None,
-                    "runs_since_last_backup": 0,
-                }
-                backup_mode = getattr(settings, "backup_mode", "disabled")
-                if backup_mode != "disabled":
-                    try:
-                        backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
-                        if result.status in {"succeeded", "no_change"}:
-                            backup_ledger.record_run_success(result.run_id, settings.state_dir, settings)
-                            status_before = backup_ledger.get_status(settings)
-                            if status_before["should_trigger"]:
-                                flush_res = await backup_ledger.flush(
-                                    settings,
-                                    timeout_seconds=getattr(settings, "backup_inline_budget_seconds", 300.0),
-                                )
-                                backup_info["backup_status"] = flush_res.get("status", "failed")
-                                backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
-                                backup_info["backup_requests"] = flush_res.get("requests", 0)
-                            else:
-                                backup_info["backup_status"] = "deferred"
-                        status_dict = backup_ledger.get_status(settings)
-                        backup_info.update(
-                            {
-                                "pending_ocr_count": status_dict.get(
-                                    "pending_ocr_count", status_dict["pending_count"]
-                                ),
-                                "pending_bytes": status_dict["pending_bytes"],
-                                "oldest_pending_at": status_dict["oldest_pending_at"],
-                                "last_backup_at": status_dict["last_backup_at"],
-                                "runs_since_last_backup": status_dict["runs_since_last_backup"],
-                            }
-                        )
-                    except Exception as backup_exc:
-                        logging.getLogger("cardrag_worker.cli").warning(
-                            "Backup ledger operation failed (isolated from run success): %s", backup_exc
-                        )
-                        backup_info["backup_status"] = "error"
-
-                payload = _pipeline_result_payload(result)
-                payload.update(
-                    {
-                        "publication_transport": publication_transport,
-                        "local_generation_published": (
-                            result.published if publication_transport == "local" else False
+                ) as (assignment, bind):
+                    if assignment.result is not None:
+                        return assignment.result
+                    result = await WorkerPipeline(
+                        state=state,
+                        state_dir=settings.state_dir,
+                        adapters=enabled_adapters(),
+                        selected_issuers=assignment.scope.selected,
+                        issuer_execution_mode=assignment.scope.mode,
+                        on_run_created=bind,
+                        ocr=resolver,  # type: ignore[arg-type]
+                        embeddings=embeddings,
+                        webdav=transport,
+                        settings=settings,
+                        issuer_discovery_concurrency=settings.issuer_discovery_concurrency,
+                        issuer_discovery_timeout_seconds=settings.issuer_discovery_timeout_seconds,
+                        pdf_concurrency=settings.pdf_concurrency,
+                        pdf_concurrency_per_issuer=settings.pdf_concurrency_per_issuer,
+                        local_processing_workers=settings.local_processing_workers,
+                        maximum_attempts=settings.stage_max_attempts,
+                        retry_cap_seconds=settings.retry_cap_seconds,
+                        collect_remote_garbage=settings.collect_remote_garbage,
+                        stable_publication_approved=settings.stable_publication_approved,
+                        ocr_cache_publication_approved=settings.ocr_cache_publication_approved,
+                        remote_gc_approved=settings.remote_gc_approved,
+                        retained_generations=settings.retain_generations,
+                        retained_incomplete_runs=settings.retained_incomplete_runs,
+                        retirement_grace_runs=settings.retirement_grace_runs,
+                        retirement_grace_days=settings.retirement_grace_days,
+                        retirement_max_per_run=settings.retirement_max_per_run,
+                        garbage_grace_days=settings.garbage_grace_days,
+                        pdf_cache_refresh_hours=settings.pdf_cache_refresh_hours,
+                        pdf_cache_force_revalidate=settings.pdf_cache_force_revalidate,
+                        document_aggregation=document_aggregation,
+                        capacity_policy_v5=V5CapacityPolicy(
+                            maximum_state_bytes=settings.maximum_state_bytes,
+                            reserved_free_space_bytes=settings.reserved_free_space_bytes,
+                            maximum_vector_sidecar_bytes=settings.maximum_vector_sidecar_bytes,
+                            maximum_serving_database_bytes=settings.maximum_serving_database_bytes,
                         ),
-                        **backup_info,
-                        **_project_embedding_quality_payload(embeddings),
+                        lock_held=True,
+                    ).run(resume_run_id=resume or assignment.run_id)
+
+                    backup_info: dict[str, Any] = {
+                        "backup_status": "disabled",
+                        "backup_bytes_uploaded": 0,
+                        "backup_requests": 0,
+                        "pending_ocr_count": 0,
+                        "pending_bytes": 0,
+                        "oldest_pending_at": None,
+                        "last_backup_at": None,
+                        "runs_since_last_backup": 0,
+                        "backup_in_scope_remaining": None,
+                        "backup_in_scope_lost_source": None,
+                        "backup_in_scope_conflicts": None,
+                        "backup_in_scope_missing": None,
+                        "backup_in_scope_unbound": None,
+                        "backup_pending_out_of_scope": None,
+                        "backup_pending_out_of_scope_bytes": None,
+                        "backup_excluded_shared_cache": None,
+                        "backup_scope_complete": None,
+                        "backup_defer_reasons": None,
+                        "backup_diagnostics_mode": None,
+                        "backup_scope_run_id": None,
                     }
-                )
-                return payload
+                    backup_mode = getattr(settings, "backup_mode", "disabled")
+                    if backup_mode != "disabled":
+                        try:
+                            backup_ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+                            if result.status in {"succeeded", "no_change"}:
+                                scoped_backup = set(assignment.scope.selected) != set(DEFAULT_ENABLED_ISSUERS)
+                                backup_ledger.record_run_success(
+                                    result.run_id,
+                                    settings.state_dir,
+                                    settings,
+                                    selected_issuers=assignment.scope.selected,
+                                )
+                                status_before = backup_ledger.get_status(settings)
+                                if status_before["should_trigger"]:
+                                    allowed = expected = None
+                                    if scoped_backup:
+                                        allowed, expected = backup_ledger.scoped_backup_scope(
+                                            result.run_id,
+                                            settings.state_dir,
+                                            assignment.scope.selected,
+                                            remote_root=canonical_remote_root(settings),
+                                        )
+                                    flush_res = await backup_ledger.flush(
+                                        settings,
+                                        timeout_seconds=getattr(
+                                            settings, "backup_inline_budget_seconds", 300.0
+                                        ),
+                                        allowed_remote_paths=allowed,
+                                        expected_artifacts=expected,
+                                    )
+                                    backup_info["backup_status"] = flush_res.get("status", "failed")
+                                    backup_info["backup_bytes_uploaded"] = flush_res.get("uploaded_bytes", 0)
+                                    backup_info["backup_requests"] = flush_res.get("requests", 0)
+                                    from .backup import scoped_backup_result_fields
+
+                                    backup_info.update(scoped_backup_result_fields(flush_res))
+                                else:
+                                    backup_info["backup_status"] = "deferred"
+                                    backup_info["backup_defer_reasons"] = status_before.get("trigger_reasons")
+                                    if scoped_backup:
+                                        # Threshold deferral still reports the
+                                        # read-only scope view; completion is
+                                        # left unknown, never assumed.
+                                        backup_info.update(
+                                            backup_ledger.scoped_pending_diagnostics(
+                                                settings, result.run_id, assignment.scope.selected
+                                            )
+                                        )
+                            status_dict = backup_ledger.get_status(settings)
+                            backup_info.update(
+                                {
+                                    "pending_ocr_count": status_dict.get(
+                                        "pending_ocr_count", status_dict["pending_count"]
+                                    ),
+                                    "pending_bytes": status_dict["pending_bytes"],
+                                    "oldest_pending_at": status_dict["oldest_pending_at"],
+                                    "last_backup_at": status_dict["last_backup_at"],
+                                    "runs_since_last_backup": status_dict["runs_since_last_backup"],
+                                }
+                            )
+                        except Exception as backup_exc:
+                            logging.getLogger("cardrag_worker.cli").warning(
+                                "Backup ledger operation failed (isolated from run success): %s", backup_exc
+                            )
+                            backup_info["backup_status"] = "error"
+
+                    payload = _pipeline_result_payload(result)
+                    payload.update(
+                        {
+                            "publication_transport": publication_transport,
+                            "local_generation_published": (
+                                result.published if publication_transport == "local" else False
+                            ),
+                            **backup_info,
+                            **_project_embedding_quality_payload(embeddings),
+                        }
+                    )
+                    return payload
     finally:
         await transport.close()
         logging.getLogger("cardrag_worker.cli").info(
@@ -1785,9 +1883,9 @@ async def _operation_with_signal_shutdown(
     return result
 
 
-async def _run_with_signal_shutdown(resume: str | None) -> dict[str, Any]:
+async def _run_with_signal_shutdown(resume: str | None, **scope_options: Any) -> dict[str, Any]:
     return await _operation_with_signal_shutdown(
-        lambda: _run(resume),
+        lambda: _run(resume, **scope_options),
         task_name="cardrag-worker-pipeline",
     )
 
@@ -1834,11 +1932,38 @@ def run_command(
     reuse_from_run: str | None = typer.Option(None, "--reuse-from-run"),
     dry_run: bool = typer.Option(False, "--dry-run"),
     publish_channel: str = typer.Option("candidate-009", "--publish-channel"),
+    issuer: list[str] | None = typer.Option(None, "--issuer", help="Repeat to select configured issuers."),
+    round_robin: bool = typer.Option(False, "--round-robin"),
+    all_issuers: bool = typer.Option(False, "--all"),
+    phase: str = typer.Option("all", "--phase", help="all, collect, or process (with --reuse-from-run)."),
 ) -> None:
     from .partial_cli import run_partial
     from .partial_execution import ExecutionPlan, PartialExecutionError
 
     try:
+        from .issuers.registry import enabled_issuer_codes
+
+        phase = phase if isinstance(phase, str) else "all"
+        if phase not in {"all", "collect", "process"}:
+            raise ValueError("--phase must be all, collect or process")
+        selected = tuple(issuer) if isinstance(issuer, list) else None
+        rotate = round_robin is True
+        explicit_all = all_issuers is True
+        if sum((bool(selected), rotate, explicit_all)) > 1:
+            raise ValueError("--issuer, --round-robin and --all are mutually exclusive")
+        pool = enabled_issuer_codes()
+        if selected is not None and (
+            not selected or len(set(selected)) != len(selected) or not set(selected) <= set(pool)
+        ):
+            raise ValueError("--issuer must select unique configured issuer codes")
+        if selected is not None:
+            selected = tuple(code for code in pool if code in selected)
+        default_mode = os.environ.get("CARDRAG_ISSUER_EXECUTION_MODE", "").strip() or "all"
+        if default_mode not in {"all", "round_robin"}:
+            raise ValueError("CARDRAG_ISSUER_EXECUTION_MODE must be all or round_robin")
+        mode = (
+            "selected" if selected else "all" if explicit_all else "round_robin" if rotate else default_mode
+        )
         skipped = set(skip_stage or [])
         skipped.update(
             s
@@ -1850,6 +1975,15 @@ def run_command(
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", resume):
                 raise ValueError("invalid resume run ID")
             resume_settings = WorkerSettings.from_env()
+            scope_path = resume_settings.state_dir / "runs" / resume / "issuer-scope.json"
+            if scope_path.exists() and (explicit_all or rotate):
+                from .partial_execution import read_json
+
+                scope = read_json(resume_settings.state_dir, scope_path, "scope")
+                if (explicit_all and set(scope["selected"]) != set(scope["pool"])) or (
+                    rotate and scope["mode"] != "round_robin"
+                ):
+                    raise ValueError("resume options conflict with the frozen issuer scope")
             resume_plan_path = resume_settings.state_dir / "runs" / resume / "execution-plan.json"
             if resume_plan_path.is_file():
                 persisted = json.loads(resume_plan_path.read_bytes())
@@ -1857,14 +1991,54 @@ def run_command(
                     skipped = set(persisted["skipped_stages"])
                     reuse_from_run = persisted["source_run_id"]
                     publish_channel = persisted.get("channel", "candidate-009")
-        if skipped or reuse_from_run or dry_run or persisted:
+        if persisted:
+            persisted_phase = persisted.get("phase", "all")
+            if phase == "all" and not (
+                rotate or (mode == "round_robin" and not selected and not explicit_all)
+            ):
+                phase = persisted_phase
+            elif phase != persisted_phase:
+                raise ValueError("resume phase conflicts with persisted execution plan")
+            if selected is None and persisted.get("selected_issuers"):
+                selected = tuple(persisted["selected_issuers"])
+            elif (
+                selected is not None
+                and persisted.get("selected_issuers")
+                and selected != tuple(persisted["selected_issuers"])
+            ):
+                raise ValueError("resume issuer selection conflicts with persisted execution plan")
+        if phase != "all":
+            if rotate or (mode == "round_robin" and not selected and not explicit_all):
+                raise ValueError("round-robin requires --phase all")
+            if skipped and not (persisted and phase == "process" and skipped == {"pdf"}):
+                raise ValueError("--phase cannot be combined with stage skips")
+            if phase == "collect" and reuse_from_run:
+                raise ValueError("collect does not accept a reuse source")
+            if phase == "process" and reuse_from_run is None:
+                raise ValueError("process requires --reuse-from-run collection ID")
+            if phase == "process":
+                skipped = {"pdf"}
+        if skipped or reuse_from_run or dry_run or persisted or phase != "all":
+            if phase == "all" and (selected or rotate or (mode == "round_robin" and not explicit_all)):
+                raise ValueError(
+                    "stage reuse/dry-run requires --all; scoped phases use their own source contract"
+                )
             if resume and reuse_from_run and resume != reuse_from_run:
                 # A resumed partial run uses its persisted original source below.
                 settings = WorkerSettings.from_env()
                 path = settings.state_dir / "runs" / resume / "execution-plan.json"
                 if not path.is_file() or json.loads(path.read_bytes()).get("source_run_id") != reuse_from_run:
                     raise ValueError("resume source differs from the persisted execution plan")
-            plan = ExecutionPlan(frozenset(skipped), reuse_from_run or resume, dry_run, publish_channel)
+            plan = ExecutionPlan(
+                frozenset(skipped),
+                reuse_from_run or (resume if phase == "all" else None),
+                dry_run,
+                publish_channel,
+                phase=phase,
+                selected_issuers=selected,
+            )
+            if phase != "all" and publish_channel == "candidate-009":
+                plan.channel = WorkerSettings.from_env().channel
             _echo(
                 asyncio.run(
                     _operation_with_signal_shutdown(
@@ -1873,7 +2047,17 @@ def run_command(
                 )
             )
         else:
-            _echo(asyncio.run(_run_with_signal_shutdown(resume)))
+            scope_options = (
+                {}
+                if selected is None and mode == "all"
+                else {"selected_issuers": selected, "issuer_mode": mode}
+            )
+            payload = asyncio.run(_run_with_signal_shutdown(resume, **scope_options))
+            _echo(payload)
+            if payload.get("status") in {"failed", "interrupted", "blocked"}:
+                raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
     except PartialExecutionError as exc:
         _echo(
             {
@@ -2761,21 +2945,291 @@ def gc_command(
         raise typer.Exit(code=1) from None
 
 
+@app.command("remediate-unresolved-history")
+def remediate_unresolved_history_command(
+    apply: bool = typer.Option(False, "--apply", help="Apply remediation to state database."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Run remediation planning without modifying database (default)."
+    ),
+    seal_path: Path | None = typer.Option(
+        None, "--seal-path", help="Path to publish.json seal file to remediate."
+    ),
+) -> None:
+    """Analyze and remediate baseline unresolved revision history for batch reliability."""
+    from .pdf_cache import PDFCache
+    from .settings import WorkerSettings
+    from .state import WorkerState, worker_lock
+    from .unresolved_remediation import (
+        apply_unresolved_remediation,
+        plan_unresolved_remediation,
+    )
+
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    with worker_lock(settings.lock_file):
+        state = WorkerState(settings.state_database)
+        try:
+            is_apply = apply and not dry_run
+            current_serving_generation_id: str | None = None
+            if is_apply:
+                publication_transport = getattr(settings, "publication_transport", None)
+                if publication_transport is None:
+                    publication_transport = os.environ.get("CARDRAG_PUBLICATION_TRANSPORT", "webdav")
+                channel = getattr(settings, "channel", "stable")
+                serving_dir = getattr(settings, "serving_dir", Path("/var/lib/cardrag-serving"))
+                try:
+                    transport: LocalServingTransport | WebDAVClient
+                    if publication_transport == "local":
+                        transport = LocalServingTransport(serving_dir, channel=channel)
+                    else:
+                        configured = WebDAVClient.from_env(
+                            stable_publication_approved=settings.stable_publication_approved
+                        )
+                        transport = WebDAVClient(
+                            configured.core,
+                            channel=channel,
+                            stable_publication_approved=settings.stable_publication_approved,
+                            upload_chunk_size_bytes=settings.webdav_upload_chunk_mib * 1024 * 1024,
+                        )
+                    try:
+                        import asyncio
+
+                        cur_gen = asyncio.run(transport.validated_current_generation())
+                        if cur_gen is None:
+                            _echo(
+                                {
+                                    "status": "failed",
+                                    "error": f"No verified current serving generation found on channel '{channel}'",
+                                }
+                            )
+                            raise typer.Exit(code=1)
+                        current_serving_generation_id = cur_gen.generation_id
+                    finally:
+                        with suppress(Exception):
+                            import asyncio
+
+                            asyncio.run(transport.close())
+                except typer.Exit:
+                    raise
+                except Exception as exc:
+                    _echo(
+                        {
+                            "status": "failed",
+                            "error": f"Failed querying current serving generation from transport: {exc}",
+                        }
+                    )
+                    raise typer.Exit(code=1) from None
+
+            target_seal_path: Path | None = seal_path
+            if target_seal_path is None:
+                if is_apply and current_serving_generation_id:
+                    row = state.connection.execute(
+                        "SELECT run_id FROM publish WHERE generation_id=? AND status='ready'",
+                        (current_serving_generation_id,),
+                    ).fetchone()
+                    if row is not None:
+                        candidate = settings.state_dir / "runs" / str(row[0]) / "sealed" / "publish.json"
+                        if candidate.is_file():
+                            target_seal_path = candidate
+                if target_seal_path is None:
+                    retained_ids = state.retained_publication_run_ids(limit=5)
+                    for run_id in retained_ids:
+                        candidate = settings.state_dir / "runs" / run_id / "sealed" / "publish.json"
+                        if candidate.is_file():
+                            target_seal_path = candidate
+                            break
+            if target_seal_path is None or not target_seal_path.is_file():
+                _echo({"status": "failed", "error": "No baseline seal file found to remediate"})
+                raise typer.Exit(code=1)
+
+            try:
+                seal_data = json.loads(target_seal_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                _echo({"status": "failed", "error": f"Failed reading seal file: {exc}"})
+                raise typer.Exit(code=1) from None
+
+            pdf_cache = PDFCache(settings.state_dir, state)
+            try:
+                plan = plan_unresolved_remediation(
+                    state,
+                    seal_data,
+                    pdf_cache=pdf_cache,
+                    require_verified_run=True,
+                    require_verified_serving=is_apply,
+                    current_serving_generation_id=current_serving_generation_id,
+                )
+            except Exception as exc:
+                _echo({"status": "failed", "error": f"Baseline seal validation failed: {exc}"})
+                raise typer.Exit(code=1) from None
+
+            applied_count = 0
+            if is_apply:
+                applied_count = apply_unresolved_remediation(state, plan)
+            result = {
+                "status": "succeeded",
+                "mode": "apply" if is_apply else "dry_run",
+                "seal_path": str(target_seal_path),
+                "applied_count": applied_count,
+                "plan": plan.to_dict(),
+            }
+            _echo(result)
+        finally:
+            state.close()
+
+
 @backup_app.command("status")
-def backup_status_command() -> None:
+def backup_status_command(
+    run_id: str | None = typer.Option(
+        None, "--run", help="Add the read-only selected-scope view of one retained run"
+    ),
+    issuer: list[str] | None = typer.Option(None, "--issuer", help="Issuer code(s) for --run scope"),
+) -> None:
     settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
-    _echo(ledger.get_status(settings))
+    status = ledger.get_status(settings)
+    if run_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+            raise typer.BadParameter("invalid run ID")
+        selected = tuple(dict.fromkeys(issuer)) if issuer else None
+        if selected is None:
+            scope_path = settings.state_dir / "runs" / run_id / "issuer-scope.json"
+            if not scope_path.is_file():
+                raise typer.BadParameter("--issuer is required when the run has no frozen issuer scope")
+            selected = tuple(json.loads(scope_path.read_text()).get("selected", ()))
+        if not selected:
+            raise typer.BadParameter("scoped status requires at least one issuer")
+        status.update(ledger.scoped_pending_diagnostics(settings, run_id, selected))
+    _echo(status)
 
 
 @backup_app.command("flush")
 def backup_flush_command(
     force: bool = typer.Option(False, "--force", help="Force flush ignoring threshold conditions"),
+    run_id: str | None = typer.Option(
+        None,
+        "--run",
+        help="Scoped formal retry: flush only the verified selected-issuer artifacts of a retained run",
+    ),
+    issuer: list[str] | None = typer.Option(
+        None, "--issuer", help="Issuer code to scope with --run; repeat. Defaults to the run's frozen scope"
+    ),
 ) -> None:
     settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
-    res = asyncio.run(ledger.flush(settings, force=force))
+    allowed = None
+    expected = None
+    scoped_run_id: str | None = None
+    scoped_issuers: tuple[str, ...] | None = None
+    if run_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+            raise typer.BadParameter("invalid run ID")
+        selected = tuple(dict.fromkeys(issuer)) if issuer else None
+        if selected is None:
+            scope_path = settings.state_dir / "runs" / run_id / "issuer-scope.json"
+            if not scope_path.is_file():
+                _echo(
+                    {
+                        "status": "config_error",
+                        "error": "--issuer is required when the run has no frozen issuer scope",
+                    }
+                )
+                raise typer.Exit(code=2)
+            selected = tuple(json.loads(scope_path.read_text()).get("selected", ()))
+        if not selected:
+            raise typer.BadParameter("scoped retry requires at least one issuer")
+        # Formal provider-free retry: re-register the retained run's current
+        # verified bundles from seal/run evidence before planning the scope, so
+        # an already-recorded run whose variant metadata never reached the
+        # ledger (pending 0) is transported by this command itself instead of
+        # requiring a manual recorder call.  Registration is idempotent; rows
+        # already pending or receipted at the canonical root are untouched.
+        if getattr(settings, "backup_mode", "disabled") != "disabled":
+            ledger.record_run_success(
+                run_id,
+                settings.state_dir,
+                settings,
+                selected_issuers=selected,
+            )
+        allowed, expected = ledger.scoped_backup_scope(
+            run_id, settings.state_dir, selected, remote_root=canonical_remote_root(settings)
+        )
+        if not allowed:
+            _echo(
+                {
+                    "status": "config_error",
+                    "error": "run seal is unavailable or selects no allowed artifacts; retention may have pruned it",
+                    "in_scope_remaining": None,
+                    "pending_out_of_scope": None,
+                }
+            )
+            raise typer.Exit(code=2)
+        force = True  # an explicit operator retry is always forced, never threshold-deferred
+        scoped_run_id = run_id
+        scoped_issuers = selected
+    res = asyncio.run(
+        ledger.flush(settings, force=force, allowed_remote_paths=allowed, expected_artifacts=expected)
+    )
+    if scoped_run_id is not None:
+        res["scoped_run_id"] = scoped_run_id
+        res["scoped_issuers"] = list(scoped_issuers or ())
     _echo(res)
+
+
+@backup_app.command("recover-metadata")
+def backup_recover_metadata_command(
+    run_id: str = typer.Option(
+        ...,
+        "--run",
+        help="Retained run whose sealed native OCR metadata pairs must be verified",
+    ),
+    issuer: list[str] | None = typer.Option(
+        None,
+        "--issuer",
+        help="Issuer code(s) for --run scope; defaults to the run's frozen scope",
+    ),
+    key: list[str] | None = typer.Option(
+        None,
+        "--key",
+        help="Restrict recovery to specific 64-hex OCR reuse key(s); repeat",
+    ),
+) -> None:
+    """Verify remote native manifest/READY pairs and restore local cache evidence.
+
+    Remote access is GET-only and root-receipt-bound: no receipt, seal, pending
+    row, or remote object is modified, and matching bodies are never re-uploaded.
+    A missing/corrupt/mismatched pair stays unverified and blocks completion.
+    """
+    settings = WorkerSettings.from_env(require_providers=False, require_webdav=False)
+    ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+        raise typer.BadParameter("invalid run ID")
+    selected = tuple(dict.fromkeys(issuer)) if issuer else None
+    if selected is None:
+        scope_path = settings.state_dir / "runs" / run_id / "issuer-scope.json"
+        if not scope_path.is_file():
+            _echo(
+                {
+                    "status": "config_error",
+                    "error": "--issuer is required when the run has no frozen issuer scope",
+                }
+            )
+            raise typer.Exit(code=2)
+        selected = tuple(json.loads(scope_path.read_text()).get("selected", ()))
+    if not selected:
+        raise typer.BadParameter("metadata recovery requires at least one issuer")
+    keys = None
+    if key:
+        keys = tuple(dict.fromkeys(key))
+        for candidate_key in keys:
+            if not re.fullmatch(r"[0-9a-f]{64}", candidate_key):
+                raise typer.BadParameter("--key must be a lowercase 64-character hex reuse key")
+    res = asyncio.run(ledger.recover_verified_ocr_metadata(settings, run_id, selected, keys=keys))
+    res["scoped_run_id"] = run_id
+    res["scoped_issuers"] = list(selected)
+    _echo(res)
+    if res.get("status") == "config_error":
+        raise typer.Exit(code=2)
+    if res.get("status") in {"partial", "locked"}:
+        raise typer.Exit(code=1)
 
 
 @backup_app.command("audit")
@@ -2801,6 +3255,8 @@ def backup_restore_command(
     ledger = BackupLedger(settings.state_dir / "backup-ledger.sqlite3")
     res = asyncio.run(ledger.restore(settings, target_dir=dest))
     _echo(res)
+    if res.get("status") in {"failed", "locked"}:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

@@ -2779,6 +2779,12 @@ async def test_codex_nonzero_exit_is_classified_and_fingerprints_stderr_without_
     assert error.exit_code == 17
     assert error.stderr_size_bytes == len(stderr)
     assert error.stderr_sha256 == hashlib.sha256(stderr).hexdigest()
+    assert error.stdout_size_bytes == 0
+    assert error.stdout_sha256 == hashlib.sha256(b"").hexdigest()
+    assert error.provider == "codex-exec"
+    assert error.classification_basis == (
+        "stderr_allowlist_no_match" if reason_code == "provider_process_exit_unknown" else "stderr_allowlist"
+    )
     rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
     assert raw_sentinel not in str(error)
     assert raw_sentinel not in rendered

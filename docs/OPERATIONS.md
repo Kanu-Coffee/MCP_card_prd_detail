@@ -19,16 +19,17 @@ WebDAV 게시 모드에서는 MCP에 읽기 전용 계정을 사용합니다. Wo
 
 ## 관리 운영 호스트의 배포 식별자
 
-현재 Worker 초기화 구현 검증은 [014 인수](../.handoff/014_worker-startup-failure-codex-validation/ACCEPTANCE_FIX_01.md)를 기준으로 확인합니다. 로컬 서빙·백업 기준은 [013 인수 마감](../.handoff/013_local-serving-incremental-webdav-backup/CLOSEOUT_v1.0.35.md)에 보존합니다. v1.0.34 공개 이미지 발행·과거 MCP 전환 이력은 [012 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)에 보존합니다.
+과거 Worker 초기화 구현 검증은 [014 인수](../.handoff/014_worker-startup-failure-codex-validation/ACCEPTANCE_FIX_01.md)를 기준으로 확인합니다. 로컬 서빙·백업 기준은 [013 인수 마감](../.handoff/013_local-serving-incremental-webdav-backup/CLOSEOUT_v1.0.35.md)에 보존합니다. v1.0.34 공개 이미지 발행·과거 MCP 전환 이력은 [012 보고서](../.handoff/012_v1034-release-cutover/REPORT.md)에 보존합니다.
 
-- 설치 진입점: `/opt/cardrag/current -> /opt/cardrag/013-50a0129`.
-- v1.0.36 운영 적용 대상: Worker `cardrag-worker:014-v1.0.36`, MCP `cardrag-mcp:013-50a0129`. Worker는 Codex CLI 0.162.1과 초기화 진단·공통 검사 경로를 포함합니다. 정확한 소스 commit과 로컬 image ID는 배포 기록으로 확인합니다. v1.0.36은 GitHub 소스 릴리스이며 새 Docker Hub 이미지 발행을 뜻하지 않습니다.
+- 설치 진입점: `/opt/cardrag/current -> /opt/cardrag/019-fix33-7d2e39edbf59`.
+- 운영 Worker: `cardrag-worker:019-fix33-7d2e39edbf59`, image ID `sha256:71eb18e6538de2e0b00fd3c5173045263980322c623b17e3debee7d782d51450`. FIX_34 배포 계정 접근 검증과 매일14:30 예약을 반영했습니다. v1.0.37은 이 운영테스트를 인수하는 GitHub 소스 릴리스이며, 버전 발행 자체가 운영 이미지를 교체하거나 새 registry 이미지를 발행하지 않습니다.
+- 운영테스트는 2026-10-25 사용자 승인으로 종료했습니다. 최신 근거는 [019 종료](../.handoff/019_selected-issuer-unresolved-history-preservation/CLOSURE.md), 전체 계획 상태는 [종료 인덱스](../.handoff/STATUS_v1.0.37.md)를 참조하십시오. 이후 예약은 실제 운영으로 계속됩니다.
 - MCP 컨테이너/Compose project: `cardrag-mcp`, 네트워크: `cardrag-mcp_default`.
 - 운영 볼륨: `cardrag-mcp-state`, `cardrag-worker-state`, `cardrag-worker-auth`, `cardrag-worker-paddleocr-models`, `cardrag-serving`.
 - Worker는 로컬 서빙 볼륨에 게시하고 MCP는 이를 read-only로 읽습니다. WebDAV 장애는 MCP 게시 성공을 취소하지 않습니다.
 - WebDAV 백업은 `immediate`, Worker 성공 후 대기분이 있을 때 최대 300초 처리합니다. 대기가 없으면 네트워크 백업을 생략합니다. `hybrid` 선택 시 7회/대기 OCR 항목 30건/1 GiB/7일 중 하나를 충족하면 처리합니다.
 - 초기 관리대장 구축은 2026-10-10 00:01에 전량 완료했습니다. 보조 `cardrag-backup`은 정지 상태이며 상시 반복 백업이 가동 중인 것은 아닙니다. 수동 bootstrap 컨테이너도 exit 0으로 완료됐습니다.
-- Worker 예약은 매일 03:00 Asia/Seoul입니다. 10월 10일 03시 시도는 경로 권한 오류로 시작 전에 실패했고 권한 수정 및 수동 재실행을 완료했습니다. 다음 실제 systemd 기동 결과는 확인 대상입니다.
+- Worker 예약은 매일 14:30 Asia/Seoul입니다(2026-10-22 변경). 과거 10월 10일 03시 시도는 경로 권한 오류로 시작 전에 실패했고 권한 수정 및 수동 재실행을 완료했습니다. 실제 배치 결과는 별도로 확인합니다.
 - host-local `compose.secrets.yaml`의 이미지·secret 경로·external 볼륨을 보존하십시오.
 - systemd `cardrag` 사용자(UID 10001)가 설치 root와 deploy 하위 디렉터리를 탐색하고 Compose/env를 읽을 수 있어야 합니다. 공개 코드 디렉터리는 0755, 비밀 파일은 별도 제한 권한을 유지합니다. 수동 lee 계정의 성공만으로 systemd 접근을 판정하지 않습니다.
 
@@ -78,6 +79,12 @@ Compose 설정의 `*_SECRET_FILE`은 **호스트 파일 경로**입니다. 비�
 설정을 생략한 OCR 기본값은 `local-paddleocr` / `PaddleOCR-VL-1.6`입니다.
 `simple.env.example`은 Codex 예시 값을 명시하므로 사용할 provider에 맞춰 수정하십시오.
 현재 관리 운영 환경은 `codex-exec` / `gpt-6.1-sol` / reasoning `medium`을 사용하며, fallback은 `local-paddleocr` / `PaddleOCR-VL-1.6`입니다.
+Codex가 `provider_process_rate_limited`로 사용한도/요청 제한을 보고하면 설정된 로컬
+Paddle fallback으로 문서 전체를 처리합니다. Codex 부분 chunk는 보존하며 두 provider의
+본문을 섞지 않습니다. 이 예외는 `codex-exec` → `local-paddleocr` 조합에만 적용합니다.
+인증·설정·자격증명 검출·계약/무결성 및 기타 systemic 오류는 계속 배치를 중단합니다.
+nonzero provider 종료의 systemic failure report에는 provider·요청 phase·chunk/page 범위,
+stdout/stderr 길이와 SHA-256, allowlist 분류 근거만 남기며 원문 출력은 저장하지 않습니다.
 Qwen 임베딩의 모델·4,096차원·tokenizer와 provider profile은 generation identity에 묶이므로 기존 vector와
 다른 모델을 섞지 않습니다. API의 제공 모델·권한은 해당 계정에서 확인합니다.
 
@@ -203,7 +210,53 @@ MCP 외부 주소는 TLS 프록시를 통해 연결하고 `/mcp`에 Bearer token
 
 systemd 템플릿은 선택 사항입니다. 설치 경로, 실행 계정, env 소유권을 확인한 뒤
 `deploy/worker/cardrag-worker.service`와 `.timer`를 설치합니다. 기본 예약은 한국 시간
-03:00이며 필요에 맞게 변경하십시오. 기존 실행의 전환 중에는 예약을 즉시 활성화하지 않습니다.
+14:30입니다. 기존 실행의 전환 중에는 예약을 즉시 활성화하지 않습니다.
+
+서비스는 compose 파일을 직접 호출하지 않고 활성 release의
+`operations/worker-compose.sh`를 사용합니다. 이 helper가 private runtime overlay와 실제
+image·state/auth/model volume을 고정하므로 예약 실행이 candidate image나 다른 state
+volume으로 우회하지 않습니다. timer는 `Persistent=false`이므로 재부팅 후 놓친 예약을
+자동 catch-up하지 않습니다. 누락된 배치가 필요하면 검증된 수동 명령으로 별도 실행합니다.
+
+```bash
+# service/timer 설치, daemon-reload, 그리고 timer의 영속 disable까지 수행한다.
+# 이 script는 Worker를 시작하거나 timer를 enable하지 않는다.
+sudo deploy/worker/install-systemd.sh
+systemctl is-enabled cardrag-worker.timer   # disabled
+systemctl is-active cardrag-worker.timer    # inactive
+```
+
+release를 복제할 때 `operations`의 그룹은 `cardrag`, 디렉터리는 2750,
+실행 helper는 0750, private overlay는 0640을 유지합니다. 복사 도구가 그룹을
+`lee`로 바꾸지 않았는지 확인합니다. 비밀 파일을 공개 권한으로 바꾸지 않습니다.
+후보 활성화·timer 중지·설치 이전에 아래 검증을 반드시 통과해야 합니다.
+
+```bash
+# RELEASE에는 활성화할 후보의 절대 경로를 지정합니다.
+sudo /path/to/release/deploy/worker/verify-service-access.sh /path/to/release
+```
+
+이 검증은 실제 서비스 계정 `cardrag`와 `docker` 그룹으로 후보 helper의
+`config --quiet`를 실행하여 경로 탐색·실행·private overlay/env 읽기를 확인합니다.
+원본·OCR·배치를 호출하지 않습니다. root/lee의 config 성공만으로 대체하지 않습니다.
+새 release의 `activate.sh`도 이 검증을 포인터 전환 전에 실행해야 합니다.
+서비스 `203/EXEC`는 Worker 시작 전 오류로 회차를 소비하지 않으며,
+`ExecMainStatus=0`만으로 성공을 판단하지 말고 `Result`와 journal을 함께 확인합니다.
+
+수동으로 같은 작업을 하려면 다음 순서를 사용합니다.
+
+```bash
+sudo deploy/worker/verify-service-access.sh /opt/cardrag/current
+sudo install -m 0644 deploy/worker/cardrag-worker.service /etc/systemd/system/cardrag-worker.service
+sudo install -m 0644 deploy/worker/cardrag-worker.timer /etc/systemd/system/cardrag-worker.timer
+sudo systemctl daemon-reload
+sudo systemctl disable --now cardrag-worker.timer
+```
+
+검증·설정 교정이 끝나고 사용자가 예약 자동운영 전환을 승인한 뒤에만
+`sudo systemctl enable --now cardrag-worker.timer`로 재활성화합니다. 재활성화 직후
+`systemctl list-timers cardrag-worker.timer`로 다음 실행 시각을 확인하고, 과거 slot을
+자동 catch-up하지 않는지 확인합니다.
 
 ```bash
 systemctl status cardrag-worker.service cardrag-worker.timer
@@ -253,7 +306,11 @@ SIGTERM 이후 Worker는 진행 중인 변경을 정리하고 게시 정합성�
 | `MCP_MAX_RESIDENT_VECTOR_BYTES` | 1 GiB |
 | `PDF_CONCURRENCY` / `PDF_CONCURRENCY_PER_ISSUER` | 전체 8 / 카드사별 2 |
 | `LOCAL_PROCESSING_WORKERS` | 4 |
-| `PDF_CACHE_REFRESH_HOURS` | 168시간 |
+| `PDF_CACHE_REFRESH_HOURS` | 2160시간(90일), source별 분산 원본 감사 |
+| `ISSUER_EXECUTION_MODE` | `all` (기본값: 전체 8사 실행, `round_robin`: 일일 1사 순회) |
+| `ISSUER_REQUEST_BUDGET` | 10000 (카드사/host/run별 일일 최대 요청 수) |
+| `ISSUER_BYTE_BUDGET` | 4294967296 (4 GiB, 카드사/host/run별 일일 최대 수신 body bytes) |
+| `ISSUER_PROXY_URL` | 빈 값 (직접 연결, 설정 시 신한·롯데 3개 approved HTTPS origin 우회) |
 
 표의 설정명에는 `CARDRAG_` 접두사가 붙습니다.
 운영 Worker의 시작 하한은 기본 **2 GiB**(`WORKER_MINIMUM_START_FREE_BYTES=2147483648`)이며,
@@ -366,6 +423,18 @@ PDF 다운로드는 기존 전역 8개/카드사별 2개 제한과 요청 간격
 `runs/<run_id>/reports/issuer-collection.json`에서 issuer별 단계, 실패 reason,
 시도 수, 건수, carry 기준 generation을 확인합니다. 수집 중 보고서는
 `terminal=false`이며, 수집 종료 뒤 `terminal=true`입니다.
+origin이 HTTP 200 HTML 서비스 오류를 반환하면 PDF로 인정하지 않고
+`issuer_origin_service_error`로 분류해 공통 stage retry budget 안에서 재시도합니다.
+collection 보고서에는 `origin_status_code`, `origin_mime_type`,
+`origin_service_signal`이 제한적으로 남고, credential·cookie·원문 body는 저장하지 않습니다.
+로그인·challenge·알 수 없는 HTML과 서명/구조 손상은 transient로 승격하지 않습니다.
+정상 control PDF가 성공하고 실패가 특정 source/URL의 공식 등록 오류로 확인된 경우에만
+DRM/ZIP과 같은 개별 unsupported/degraded 격리를 적용할 수 있습니다. 같은 endpoint의
+여러 source가 함께 실패하는 동안에는 단일 문서 오류로 간주해 pass 처리하지 않습니다.
+403/429와 Retry-After가 있는 503은 기존 host/issuer cooldown을 사용하며,
+run 결과의 `pdf_succeeded_count`/`pdf_skipped_count`와 progress 로그의
+`succeeded`/`skipped`를 구분해 확인합니다. `completed`/`total`에는 격리·미지원으로
+건너뛴 문서가 포함될 수 있으므로 전체 다운로드 성공 수로 해석하지 않습니다.
 일부 실패 + 나머지 정상 작업 완료는 `collection_status=degraded`와 경고를 남기고
 run은 `succeeded` 또는 `no_change`, 종료 코드 0을 반환합니다.
 이 결과는 실패 카드사의 최신화 성공을 의미하지 않습니다.
@@ -394,14 +463,44 @@ WebDAV 게시 모드의 게시 오류도 실패하지만, 로컬 게시 모드�
    - 다른 프로젝트의 데이터베이스 볼륨(PostgreSQL, MongoDB 등) 및 시스템에 등록된 중지 VM(예: libvirt 등록 HAOS VM `antigravity-haos-vm-*`, 약 21 GB) 역시 꺼져 있다는 이유로 임의 삭제해서는 안 됩니다.
 
 2. **안전한 BuildKit 빌드 캐시 정리**:
-   - 실행 중인 Docker 빌드가 없는 것을 확인한 후 `docker builder prune --all --force`를 통해 미사용 빌드 캐시를 회수합니다.
-   - 2026-10-16 Reviewer 정리 결과: Docker 집계 36.99 GB 회수, 파일시스템 실제 여유 공간 약 33.97 GB(84.4 GB → 118.4 GB) 확보, 디스크 사용률 79% → 71%로 개선.
-   - 컨테이너, 볼륨, 이미지 및 MCP 서비스 무중단 유지.
+   - BuildKit cache는 호스트의 다른 프로젝트와 공유됩니다. 기본은 `docker buildx du`와 `docker builder prune --filter until=168h`처럼 기간·크기를 좁힌 표적 정리이며, 정리 전후 `docker system df`와 실제 파일시스템 여유를 기록합니다.
+   - `docker builder prune --all --force`는 다른 프로젝트 cache까지 제거할 수 있으므로 사용자 명시 승인과 전체 영향 확인이 있는 일회성 작업으로만 취급합니다. timer·자동 정리 정책에 넣지 않습니다.
+   - 실행 중인 Docker 빌드가 없는 것을 확인한 뒤 수행하고, 컨테이너·볼륨·이미지·MCP 서비스는 중단하지 않습니다.
    - CardRAG 전용 빌드 시 캐시 상한 및 retention 정책을 준수하며, 타 프로젝트 데몬 설정은 건드리지 않습니다.
 
 3. **중복 run 및 publication 정리**:
    - 로컬 상태 디렉터리의 대형 run 정리는 pipeline의 native retention(`retained_generations`, `retained_incomplete_runs`)과 publication closure 검증을 거쳐 안전하게 수행합니다.
    - 검증된 publication seal 및 참조 체인(`execution-plan.json` source run)이 있는 디렉터리는 수동 삭제하지 않습니다.
+
+4. **배포 복구본(`deployment-backups`) 보존·의존성 및 안전 정리 기준**:
+   - **용도별 용량 조회 및 진단 명령**:
+     - 루트 파일시스템 및 주요 디렉터리 사용량: `df -h /`
+     - Worker state 영구 볼륨 세부 분석:
+       ```bash
+       docker run --rm --network none --read-only --entrypoint /bin/sh \
+         -v cardrag-worker-state:/state:ro cardrag-worker:019-e7fb8a0ba60c \
+         -c 'du -sk /state/* /state/deployment-backups/* | sort -nr'
+       ```
+   - **복구 단위 목록 및 외부 디렉터리 의존성 체인**:
+     - `deployment-backups/{release_tag}/` 복구본은 배포 롤백을 위해 `worker-state.sqlite3` (~7GB) 및 `backup-ledger.sqlite3` (~25MB)을 보존합니다.
+     - **의존성 체인 보호**: 특정 복구점(예: `019-e7fb8a0ba60c`)은 불필요한 7GB 중복 복제를 피하기 위해 직전 복구점(`019-ba273106158e`)의 `worker-state.sqlite3`를 참조하도록 구성될 수 있습니다.
+     - **단순 '최신 2개 유지' 식의 일괄 삭제 금지**: 최신 복구점이 이전 디렉터리의 불변 DB를 참조하고 있을 경우, 이전 디렉터리가 삭제되면 최신 복구점의 롤백 능력이 상실됩니다.
+   - **불변 DB 복구본 재사용 기준 (다음 배포 시 중복 복제 방지)**:
+     - 코드 패치 배포라는 이유만으로 과거 DB를 현재 복구점에 재사용하지 않습니다. timer/service를 비활성으로 유지하고 수동 Worker까지 중지한 뒤, 기존 Worker와 backup lock을 모두 비차단 획득하여 snapshot/전환 동안 유지합니다. 실행 중이면 기다려 끼어들지 말고 중단합니다.
+     - SQLite online backup API로 worker DB와 backup ledger의 일관된 snapshot을 같은 정지 구간에 보존합니다. WAL이 있으면 main 파일 복사만으로 대체하지 않습니다. 각 snapshot의 `PRAGMA quick_check`, SHA-256, 크기와 마지막 run, serving generation, lock/시점을 함께 기록합니다.
+     - 같은 정지 구간의 현재 snapshot과 기존 검증된 복구본의 **내용 동일성**을 입증한 경우에만 이전 파일을 참조합니다. 크기·mtime·같은 Git HEAD는 동일성 증명이 아닙니다. 동일성이 불명하거나 배치로 DB가 변했으면 새 snapshot을 보호합니다. backup ledger도 별도로 일관성을 확인하며 임의 시점의 두 DB를 현재 복구점으로 표시하지 않습니다.
+     - 현재 snapshot을 비교하기 위한 임시 사본의 공간도 필요합니다. 약 7GB 절약은 동일 내용일 때만 적용하는 최적화이며, 최신 상태의 복구 가능성보다 우선하지 않습니다.
+   - **정리 후보의 안전한 Dry-run 및 복구 보호 집합(Protected Set)**:
+     - **단일 최신 복구본 유지 정책 (1-Backup Retention Policy)**:
+       - 사용자의 명시적 지침("복구용으로 유지할것은 1개면 충분하다")에 따라, `/state/deployment-backups/`에는 현재 활성 배포 기준의 단일 독립 복구본 1개만 유지합니다.
+       - 유지 대상은 활성 release의 `operations/deployment.json`에 기록된 독립 `snapshot_directory`입니다. 새 복구본의 두 DB 무결성·SHA와 독립성을 검증한 뒤에만 이전 복구본을 정리합니다.
+       - 현재 사용 가능한 복구점은 각 release의 `operations/recovery-point.json`으로 안내합니다. `deployment.json.snapshot_directory`는 배포 당시 역사값이며, `historical_snapshot_status=pruned`인 경로를 현재 복구점으로 사용하지 않습니다. active/rollback 양쪽에서 동일한 guidance와 `verify-recovery-point.py`로 존재·SHA·quick_check를 확인합니다.
+       - 코드/image rollback과 DB snapshot restore는 별개입니다. snapshot DB를 rollback image에 복원하는 것은 schema/contract 호환성 검증과 사용자 승인 전 수행하지 않습니다.
+       - 이전 복구본(`019-ba273106158e`, `019-e7fb8a0ba60c` 등)은 정리 완료되어 약 6.84 GiB가 추가 회수되었습니다.
+     - **보호 집합**:
+       1. 현재 활성 릴리스(`active release`) 및 위 metadata가 가리키는 단일 독립 복구본
+       2. 활성 Serving 및 MCP 세대
+     - 과거 누적된 다중 복구본은 위 단일 복구본 정책에 따라 정리하며, `docker volume prune` 및 전역 `docker system prune`은 여전히 절대 금지합니다.
 
 ## Qwen 임베딩 재현성 게이트 정책 (일일 운영 smoke와 자격평가 분리)
 
@@ -423,13 +522,184 @@ WebDAV 게시 모드의 게시 오류도 실패하지만, 로컬 게시 모드�
 
 ## 롯데카드 공시실 장애 대응 및 Degraded 수집
 
-1. **장애 원인 및 격리**:
-   - `www.lottecard.co.kr` (공식 landing 및 `/app/LPSCHAA_V100.lc` 목록 POST)는 호스트 네트워크 egress 또는 원본 방화벽/가용성 경계로 인해 TCP 연결 타임아웃(exit 28, `httpx.ConnectTimeout`)이 발생합니다.
-   - 반면 공식 PDF 다운로드 CDN(`image.lottecard.co.kr/UploadFiles/cardProvisionPath/`)은 HTTP 200으로 안정 접근 가능합니다.
-   - 연결 타임아웃은 파싱 오류(`IssuerMarkupChanged`)가 아닌 `issuer_origin_timeout`으로 정확히 분류됩니다.
+1. **연결 장애 이력과 검증 범위**:
+   - 과거에는 공식 landing·목록 POST 직접 연결에서 timeout이 발생했습니다. 별도 구성된 카드사별 프록시 경유로 목록 HTTP 200과 정상 PDF 단건 취득을 확인했습니다. 이를 신규 이미지의 운영 배치 성공으로 확대하지 않습니다.
+   - 실제 연결 장애가 발생하면 기존 issuer-level cooldown/carry를 적용하며, 불완전한 목록을 단종·삭제로 해석하지 않습니다.
 
-2. **파이프라인 Carry 및 Degraded 보호**:
-   - 목록 조회 단계 TCP 타임아웃은 호스트/네트워크 egress 장애로 미복구 상태입니다.
-   - 목록 조회 실패 시 파이프라인의 `_carry_failed_issuers` 메커니즘을 통해 직전 검증된 generation(`ec1255d9`)의 롯데카드 647개 문서를 그대로 승계(carryover)합니다.
-   - 목록 장애 상태에서는 해당 카드사의 단종(retirement) 처리를 전면 동결하여 기존 유효 상품이 누락되지 않도록 보호합니다.
-   - 네트워크/egress 문제가 해결되어 `www.lottecard.co.kr` TCP 연결이 복원되면 자동으로 전체 목록 수집이 재개됩니다.
+2. **ZIP 첨부는 문서 단위 unsupported 오류**:
+   - 현재 017은 ZIP을 열거나 내부 PDF를 선택·OCR·게시하지 않습니다. 특정 DOCID·파일명 예외 없이 카드사 공통 정책을 적용합니다.
+   - 목록에 명시된 ZIP은 일반 배치에서 본문을 다운로드하지 않고 해당 source를 오류로 기록하며 다른 정상 상품을 처리합니다. ZIP 한 건 때문에 카드사 전체를 실패 처리하지 않습니다.
+   - 기존 검증된 상품문서가 있으면 보존합니다. 신규 source에 이전 자료가 없으면 미수집으로 표시하고 정상 PDF를 취득한 것으로 기록하지 않습니다. 관측된 ZIP 상품을 단종·삭제 후보로 만들지 않습니다.
+   - `unsupported_attachment_count`와 `collection_status=degraded`를 확인합니다. 정상 문서 게시 성공과 모든 첨부의 정상 취득을 구분하며, ZIP 오류는 seal과 재개 결과에도 유지합니다.
+   - 첨부 metadata가 정상 PDF로 바뀌면 재취득하고, 같은 URL의 내용만 바뀐 경우도 만료되는 원본 재확인으로 탐지합니다. 원본이 ZIP이면 오류를 유지하며 압축을 해제하지 않습니다. 확인하지 않은 원본을 fresh로 기록하지 않습니다.
+   - 2026-10-19 확인 사례는 toss place 카드 DOCID 1893의 ZIP 한 건입니다. 잘못 업로드됐다는 해석은 추정이며 이 고유값을 처리 조건으로 사용하지 않습니다.
+
+ZIP 해제 기능은 운영 재개의 선행 조건이 아닙니다. 신규 이미지의 운영 인수는 카드사별 실제 실행·자료 보존·오류 가시화·백업을 따로 검증해 판정합니다.
+
+
+## 017 카드사 선택·순회·증분 수집
+
+기본 `run`은 기존 configured pool 전체를 처리합니다. `CARDRAG_ENABLED_ISSUERS`는
+허용 pool이며 실행 선택은 별도입니다. 새 설정 `CARDRAG_ISSUER_EXECUTION_MODE`는
+빈 값/`all`이 기본이고 `round_robin`으로 일일 한 카드사 배정을 켭니다. 배포 시 기존
+private env의 `CARDRAG_PDF_CACHE_REFRESH_HOURS=168`을 유지하면 7일 정책이 우선하므로,
+90일 정책을 사용할 때는 비공개 설정도 2160으로 이행해야 합니다.
+
+```bash
+uv run --package cardrag-worker cardrag-worker run --issuer shinhan
+uv run --package cardrag-worker cardrag-worker run --issuer shinhan --issuer lotte
+uv run --package cardrag-worker cardrag-worker run --round-robin
+uv run --package cardrag-worker cardrag-worker run --all
+uv run --package cardrag-worker cardrag-worker run --issuer shinhan --phase collect
+uv run --package cardrag-worker cardrag-worker run --phase process --reuse-from-run COLLECTION_RUN_ID
+```
+
+명시 선택/순회/전체 옵션은 서로 배타적입니다. 선택은 목록·PDF뿐 아니라 OCR·구조·뷰·벡터
+생성에 적용합니다. 비선택 자료는 검증된 현재 serving의 행·산출물을 보존합니다. 이전
+산출물이나 embedding cache가 없거나 처리 계약이 맞지 않으면 게시를 중단합니다.
+전체 기준선 없는 부분 설치에서 선택 게시를 시작하지 마십시오. `reports/issuer-collection.json`
+의 `not_scheduled`는 장애가 아니며, 기존 원본 확인일·수집 성공일·단종 관측을 갱신하지 않습니다.
+
+개발·운영 인수에서 8사를 같은 날 검증하려면 위 `run --issuer CODE`를 카드사별로 한 번씩
+순차 실행합니다. 순서는 `woori → kb → shinhan → samsung → hyundai → hana → lotte → bc`입니다.
+같은 날 `--round-robin`을 여덟 번 호출해도 여덟 카드사로 진행하지 않습니다. 명시 수동 실행은
+자동 순회 cursor를 소비하지 않으므로 이후 예약 순회는 기존 slot/cursor부터 시작합니다.
+수동 실행 전 자동 timer를 `systemctl disable --now cardrag-worker.timer`로 영속 중지하고
+마지막 Worker 종료 후 사용자 승인 아래 예약을 복구합니다. `Persistent=false` timer는 중지 중
+놓친 예약을 복구 직후 자동 실행하지 않습니다. 누락 배치가 필요하면 같은 검증 release의
+수동 `run` 경로로 명시 실행합니다.
+
+순회는 기존 worker lock 안에서 KST 실제 날짜·channel별 한 slot을 SQLite에 저장합니다.
+cursor는 배정 시 한 번 전진하며 실패해도 다음 날짜에는 다음 카드사를 배정합니다.
+같은 날 자동 순회는 같은 카드사로 최대3회 실행할 수 있습니다. 완료/실패 뒤2·3회차는 새 run을
+만들고 이전 결과는 `issuer_rotation_attempt`에 보존합니다.4번째는 `rotation_daily_attempt_limit`으로
+차단하며 provider startup 전에 종료합니다. 다음날에만 다음 카드사로 전진합니다. 중단된 미완료
+run의 재개는 같은 시도이며, 명시적인 수동 `--issuer` 실행은 이 자동 순회 회수를 소비하지 않습니다.
+기존 단일 day 기록은 실제 배치1회로 이행합니다. 오늘12시처럼 저장 결과만 반환한 과거 호출은
+추가 실배치로 세지 않습니다. 일시 오류가 지속되면 원인을 확인하고 제한 안에서 재실행합니다.
+cursor/day/result 행을 SQL로 지우거나 성공으로 수정하지 않습니다. 미완료 작업은 같은 run과 HTTP 예산을
+사용합니다. 게시 seal이 있으면 provider 없이 게시 증거를 대조하거나 같은 날 게시만
+재개합니다. 최신 수동 게시를 덮는 전환은 기존 predecessor fence가 거부합니다.
+전날 미완료 작업의 origin/OCR은 자동 재개하지 않습니다. 수동 실행/수집/처리는 slot을
+소비하지 않으며 missed 날짜 수만큼 몰아서 배정하지 않습니다. pool 추가는 다음 cycle,
+제거는 남은 배정에서 제외하고 migration 이력을 남기며 serving 데이터는 보존합니다.
+
+`--phase collect`는 provider 초기화 없이 `runs/<id>/acquisition.json`을 남깁니다.
+`--phase process`는 해당 receipt의 고정된 카드사 범위를 사용하고 원본 HTTP를 하지 않습니다.
+수집 이후 serving 기준선이 바뀌면 충돌로 중단합니다. 이때 새 수집으로 기준선을 다시
+고정해야 합니다. 초기 버전은 receipt 일부 카드사만 따로 처리하거나 phase와 기존
+stage skip을 조합하지 않습니다. 순회에는 phase=all만 허용합니다. 기존 stage skip/reuse는
+별도 전체 실행 경로로 유지합니다. 미처리 receipt와 참조 PDF는 retention/prune에서
+보호하므로 공간 확보 목적으로 수동 삭제하지 마십시오.
+
+정상 캐시·동일 내용 metadata·감사 기한 전에는 PDF prepare/GET/HEAD를 생략합니다.
+상품명만 바뀌고 첨부 identity의 나머지 필드가 모두 같으면 원본 확인 시각을 유지해
+재사용합니다. 신규/다른 URL·버전/손상은 strict PDF 검증을 거칩니다. 기존 캐시 감사일은
+초기 이행 시 분산되며 이미 90일을 넘긴 자료는 overdue로 드러낸 채 한 번의 이행 창을
+사용합니다. 일반 재확인 기한은 실제 원본 확인에서 81–90일이고 순회에서는 다음 방문
+전에 만료될 대상을 최대 pool 방문 간격만큼 앞당깁니다. 목록/로컬 검사는 원본 확인으로
+계산하지 않습니다. 알려진 DRM·정확히 확인한 롯데 404는 bounded negative cache를
+사용하고 알려지지 않은 DRM은 1일 후 재확인합니다.
+
+우리·현대는 매번 전체 상위 목록을 확인하되 저장 상세를 합성해 complete inventory를
+만듭니다. 신규/상위 metadata 변경은 즉시 상세 조회하며 기존 상세는 상품별 15–30일
+순환 확인합니다. 상위 목록에 표시되지 않은 개정 탐지는 그만큼 늦을 수 있습니다.
+우리 목록이 고정 요청 한도 1,000건에 도달하면 성공으로 자르지 않고 중단합니다.
+다른 카드사의 경량 전체 목록 조회는 유지합니다. 신한의 `+` 포함 이름 검색이 정확히
+빈 결과일 때만 짧은 literal prefix로 재검색하고 최종 선택은 전체 stable identity를
+검사합니다. 세션 token 전역 공유/영구 캐시는 도입하지 않습니다.
+
+`CARDRAG_ISSUER_REQUEST_BUDGET` 기본 10000회와 `CARDRAG_ISSUER_BYTE_BUDGET` 기본
+4294967296 bytes는 issuer/host/run 누적 상한입니다. 초기 실측용 보수적 상한이며
+운영 계측 후 낮추십시오. 예산 소진은 deferred 원인으로 격리·이전 데이터 보존합니다.
+403/429·Retry-After와 연결 장애 cooldown은 run 간 유지합니다. 원본 HTTP 지표는
+`reports/performance.json`의 `issuer_http`, 감사 기한은 `origin_audit`에 기록합니다.
+body bytes는 앱이 읽은 response stream 기준이며 TCP overhead/읽기 전 버퍼를 포함하는
+패킷 계측값이 아닙니다. 선택 실행의 증분 백업은 선택 artifact만 등록·flush하며 관련 없는
+전역 OCR cache/pending을 자동 소진하지 않습니다.
+
+### 선택 실행 백업 완결 semantics (019 FIX_06/07)
+
+- 선택 문서의 OCR 본문·manifest·READY는 하나의 검증 가능한 backup 단위입니다. 허용 경로는
+  run 문서의 `native-manifest.json`이 sealed PDF/OCR identity(pdf sha/size/page, ocr sha/size,
+  body hash)와 암호학적으로 연결될 때만 본문·`manifest.json`·`READY.json`을 포함합니다.
+  seal의 optional `ocr_reuse_key`가 없는 generation-only 결과도 같은 linkage로 백업됩니다.
+  prefix·파일명·doc_map 문자열 하나만으로 귀속을 판단하지 않습니다.
+- flush 결과의 `in_scope_remaining`은 선택 run 고유의 남은 artifact(미전송 pending와
+  in-scope `lost_source` 포함), `pending_out_of_scope`는 범위 밖 전역 backlog,
+  `in_scope_conflicts`는 검증 번들과 SHA/크기가 어긋난 경로·receipt·local bytes 충돌이다.
+  선택 완료는 `backup_scope_complete=true`(전송·원격 검증·index commit 후 판정)로만 확인하고,
+  `in_scope_remaining=0`이나 전역 status 문자열 하나만으로 완료를 판정하지 않는다. 전역 상태
+  문자열과 `remaining_pending` 의미는 하위 호환을 유지하며, 비선택 backlog가 남으면 선택
+  범위가 완료돼도 전역 status는 `degraded`일 수 있다. 미선택 flush는 이 필드들이 `null`이다.
+- 같은 경로의 기존 pending/receipt가 검증된 번들과 다르면 전송 대상이 아니라 충돌이다.
+  등록 시 검증 근거로 ledger 행은 정식 수복되지만, receipt·원격 내용은 덮어쓰지 않고
+  차단·보고한다(운영자 검토 필요). 선택 허용 경로는 항상 검증 근거(run-local manifest 또는
+  로컬 cache 디렉터리 + seal 대조)에 바인딩되며, 근거가 없는 경로는 무바인딩 상태로
+  `in_scope_unbound`로 보류되어 완료를 막는다(경로를 조용히 제외한 뒤 완료로 처리하지 않는다).
+- `backup_scope_complete`는 선택 필수 artifact 전체가 canonical root에서 일치하는
+  receipt + 커밋된 원격 `v1/backup/index.json` 항목으로 확인할 때만 true다. pending이
+  없는 receipt SHA/size 충돌과 필수 항목 누락(`in_scope_missing`)도 완료 판정을 막는다.
+  다른 root의 receipt은 현 root 완료 근거가 아니다.
+- backup index는 corpus 증가에 맞춘 **전용 유한 한도(현재 64MiB)**로 읽는다. 공통
+  control object 기본 8MiB 한도는 올리지 않으며 무제한 읽기도 허용하지 않는다. 부재(404)와
+  한도 초과/인증/연결/JSON 손상을 구분해 `index_read_error`/`backup_index_read_error`로
+  보고하고, 읽을 수 없는 index를 완료 근거로 쓰지 않는다(완료 `null`). commit merge가
+  기존 index를 읽지 못하면 빈 index로 간주해 local receipt만 재게시하지 않고 **게시를
+  중단**하여 원격 전용 항목/다른 세대 항목을 보존한다. 부재는 명시적 HTTP404/None만
+  의미하며, HTTP200 zero-byte body는 손상된 index로 취급해 새 index로 덮어쓰지 않는다.
+- receipt 없는 새 호스트의 `backup restore`가 index를 읽지 못하면(403/인증/연결/한도/손상)
+  `status=failed`와 `index_read_error`를 반환하고 CLI는 비정상 종료(1)한다. 정상 empty는
+  HTTP404 또는 유효한 `items=[]`뿐이며, 실패를 empty로 숨기지 않는다.
+- 선택 run만 정식 재시도: `cardrag-worker backup flush --run <RUN_ID> [--issuer <code>...]`.
+  --run 지정 시 force되며, 그 run의 고정 seal과 run-local manifest로 검증된 artifact만
+  allowed+expected로 재시도한다(provider·OCR·수집 재실행 없음). image entrypoint가 이미
+  `cardrag-worker`이므로 compose 일회성 실행에서는 CLI 이름을 반복하지 않는다:
+  `operations/worker-compose.sh run --rm --no-deps worker backup flush --run <RUN_ID> --issuer <code>`.
+  run 산출물·spool이 retention으로 정리됐으면 그 경로는 full-batch flush 또는 재수집으로
+  회수한다. 전역 수치는 맞기기 위해 pending을 일괄 전송·삭제하지 않는다.
+- native metadata pair 원격 검증 회수(019 FIX_18): 로컬 cache 근거가 사라졌지만 현 root의
+  원격 canonical manifest/READY와 receipt가 남아 있으면, GET-only 정식 CLI로 pair를 검증해
+  로컬 cache 증거를 복원한다:
+  `operations/worker-compose.sh run --rm --no-deps worker backup recover-metadata --run <RUN_ID> --issuer <code> [--key <64-hex>...]`.
+  manifest/READY canonical bytes, root-bound receipt SHA/size, 현재 seal의 PDF/OCR identity가
+  모두 일치할 때만 복원하며 receipt·seal·pending·원격 객체를 수정하지 않고 이미 일치하는
+  본문을 재업로드하지 않는다. 후보는 manifest/READY/receipt/현재 identity/scope 라우팅을
+  묶은 **전체 pair 단위**로 평가하므로 불완전한 variant가 정상 canonical 복구를 막지 않는다.
+  쓰기는 cache root부터 O_NOFOLLOW로 경계를 검사하고 no-replace 원자 게시·최종 바이트
+  재검증을 사용하며, 동시 cache 쓰기는 `ocr-cache-recovery.lock`으로 직렬화한다. symlink/
+  기존 상이 바이트/쓰기 실패는 덮어쓰지 않고 오류로 보고한다. pair가 없거나 손상/불일치면
+  unbound로 남아 완료를 막는다.
+- 검증된 run 소유 native bundle의 필수 metadata 경로는 원장의 run별 ownership 기록으로도 보존합니다. 이 기록은 업로드 권한이나 SHA/size 검증 근거가 아니라 누락 가시성만 제공합니다. pending/lost_source/receipt-only/대기 행 소실에서도 독립 검증 근거가 없으면 required/unbound로 남습니다. 과거 원장에 ownership 기록이 없을 때는 기존 native seal과 pending/lost_source를 보수적으로 보존하며, content/adopted의 과거 shared-cache 태그를 현재 소유 증거로 추정하지 않습니다. 정상 제외 경로 수는 `backup_excluded_shared_cache`로 표시하고 현재 PDF/OCR CAS는 제외 수에 세지 않습니다. 과거 revision의 OCR CAS(`v1/objects/...`)는 현재 seal/다른 현재 문서/검증된 bundle·ownership이 요구하지 않으면 필수 scope에서 제외하며, receipt·doc_map·원격 객체는 이력으로 보존합니다.
+- 필수 artifact 판정은 경로 단위·pending 독립이다. 선택 문서의 native reuse-key 경로에
+  검증 가능한 로컬 근거(run manifest 또는 로컬 cache 재바인딩)가 없으면 행/receipt 유무와
+  관계없이 `in_scope_unbound`(경로 수)에 남고 완료를 금지한다. receipt만 있거나 행이 전부
+  없는 경우도 같다. 중복 행이 판정을 바꾸지 않는다. adopted/content cache 정체성은
+  공용 cache 산물이므로 선택 백업이 주장·전송하지 않고 필수 카운트에도 포함하지 않는다.
+- run payload(`run`/`--phase process` 결과 JSON)에도 위 구분(`backup_in_scope_remaining`,
+  `backup_in_scope_conflicts`, `backup_in_scope_missing`, `backup_in_scope_unbound`,
+  `backup_pending_out_of_scope(_bytes)`, `backup_scope_complete`, `backup_defer_reasons` 등)이
+  포함된다. hybrid/manual 임계값 미달로 전송하지 않는 정상 보류에서도 force flush 없이
+  읽기 전용 스코프 진단(`backup_diagnostics_mode: read_only`, 완료 여부는 `null`)이 채워진다.
+- 현재 상태 확인: `cardrag-worker backup status`(전역) 및
+  `cardrag-worker backup status --run <RUN_ID> [--issuer <code>]`(읽기 전용 선택 스코프;
+  네트워크·원격 호출 없음). run 종료 시점의 cached 결과(JSON·rotation result)는 snapshot임을 명확히 하고, 이후 백업
+  재시도 확인은 `cardrag-worker backup status`로 원장을 별도로 읽는다.
+- 호스트 operations 도구는 release 준비 때마다 다음 수정이 유지되는지 확인합니다:
+  `run-issuer.sh` 등 helper의 물리 경로 해석(`pwd -P`, current symlink 경유 비교 금지)과
+  group 실행 bit 상속(mode 2750/group cardrag), status/summary의 `backup_status`·pending 표시.
+  비공개 overlay·proxy/auth 값은 저장소에 넣지 않습니다.
+- 수동 `--issuer` 실행의 frozen scope는 이제 실제 mode(`selected`)로 기록되며 rotation
+  reclaim은 `round_robin`을 보존합니다. 과거에 mode=all로 고정된 run의 resume은 기존 고정
+  값을 복원해 차단하지 않습니다. 수동 실행이 날짜 cursor를 소비하지 않는 계약은 불변입니다.
+
+## 017 선택 프록시
+
+`CARDRAG_ISSUER_PROXY_URL`이 비어 있으면 직접 연결합니다. 설정하면 HTTPS/443의 정확한
+`www.shinhancard.com`, `www.lottecard.co.kr`, `image.lottecard.co.kr`만 HTTP 프록시를
+사용합니다. 모바일 롯데 host, 다른 port/카드사/OCR/embedding/백업은 대상이 아닙니다.
+프록시 장애 시 직접 연결로 fallback하지 않으며 ambient HTTP(S)_PROXY도 사용하지 않습니다.
+기존 현대 전용 TLS 예외와 downloader의 origin/DNS/TLS/redirect 검증은 유지합니다.
+실제 endpoint는 호스트/컨테이너 접근성을 구분하여 서버 비공개 env에만 두십시오.
+저장소 예시는 빈 값이며 SSH 키·VPN·터널 인자는 넣지 않습니다. 페이지 HTTP 200은
+전체 목록 schema·pagination·PDF 검증 성공을 뜻하지 않습니다.

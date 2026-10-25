@@ -631,6 +631,30 @@ class PDFCache:
             return None
         return self._hit(cached.path, binding)
 
+    def reuse_display_update(self, source: SourceRecord, prior: SourceRecord) -> PDFCacheHit | None:
+        """Only a display-name change may reuse an earlier origin binding.
+
+        All attachment, version, date and adapter metadata remain exact. This
+        does not generalize expiring tokens or guess equivalent download URLs.
+        """
+        current_payload = {k: v for k, v in source.discovery_payload.items() if k != "product_name"}
+        previous_payload = {k: v for k, v in prior.discovery_payload.items() if k != "product_name"}
+        if current_payload != previous_payload:
+            return None
+        cached = self.lookup(PDFSourceIdentity.from_source_record(prior))
+        if cached is None:
+            return None
+        identity = PDFSourceIdentity.from_source_record(source)
+        hit = self.bind(
+            identity,
+            CachedPDFObject(cached.path, cached.sha256, cached.size_bytes, cached.page_count),
+            final_url=cached.final_url,
+            etag=cached.etag,
+            last_modified=cached.last_modified,
+            observed_at=cached.origin_checked_at,
+        )
+        return hit
+
     def lookup_revision(self, revision: PDFSourceRevisionRow) -> PDFCacheHit | None:
         """Revalidate one immutable historical revision without rebinding history."""
 

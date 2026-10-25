@@ -235,7 +235,7 @@ async def test_backup_ledger_triggers_and_flush(tmp_path: Path) -> None:
             self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
 
         async def get(self, path: str) -> bytes:
-            return self.storage.get(path, b"")
+            return self.storage.get(path)
 
         async def close(self) -> None:
             pass
@@ -547,10 +547,10 @@ def test_backup_cli_restore_default_target_dir_resolves_cache_hit(
             self.storage[path] = content if isinstance(content, bytes) else str(content).encode()
 
         async def get(self, path: str, *args: Any, **kwargs: Any) -> bytes:
-            return self.storage.get(path, b"")
+            return self.storage.get(path)
 
         async def get_bytes(self, path: str, *args: Any, **kwargs: Any) -> bytes:
-            return self.storage.get(path, b"")
+            return self.storage.get(path)
 
         async def close(self) -> None:
             pass
