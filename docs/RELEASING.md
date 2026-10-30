@@ -1,8 +1,12 @@
 # 릴리스와 stable 전환
 
-## v1.0.37 GitHub 소스 릴리스
+## v1.0.38 GitHub 소스 릴리스
 
-v1.0.37은 카드사 선택·증분 수집, 일일 순회, 범위별 백업, OCR 재개·fallback 및 운영 배포 검증 개선을 포함합니다. [릴리스 노트](RELEASE_NOTES_v1.0.37.md)와 [handoff 종료 인덱스](../.handoff/STATUS_v1.0.37.md)를 참고하십시오. 패키지 3종·Worker 표시 버전·lockfile을 동기화하고 전체 CI가 통과한 main commit에 annotated tag를 생성한 뒤 GitHub 소스 릴리스를 발행합니다. 아래의 v1.0.34 전용 공개 이미지 workflow는 이 릴리스에 실행하지 않습니다. 새 registry 이미지·서명 발행이나 운영 이미지 교체는 이번 소스 발행에 포함되지 않습니다. 검증된 운영 이미지와 데이터·인증 볼륨, 매일14:30 KST 예약을 유지합니다.
+v1.0.38은 우리카드 RAONK 세션 인증 및 다운로드 복구(022), PaddleOCR 임시 심볼릭 링크 격리 및 상태 복구(020), OCR 프로바이더 호출 구조화 진단 로깅(021), 단일 복구 스냅샷 운영 정책 정비를 포함합니다. [릴리스 노트](RELEASE_NOTES_v1.0.38.md)와 [handoff 릴리스 인덱스](../.handoff/STATUS_v1.0.38.md)를 참고하십시오. 패키지 3종·Worker 표시 버전·lockfile을 1.0.38로 동기화하고 전체 CI가 통과한 main commit에 annotated `v1.0.38` tag를 생성한 뒤 GitHub 소스 릴리스를 발행합니다. 아래의 v1.0.34 전용 공개 이미지 workflow는 이 릴리스에 실행하지 않습니다. 새 registry 이미지·서명 발행은 이번 소스 발행에 포함되지 않으며, 검증된 운영 Worker 이미지와 데이터·인증 볼륨, 매일 10:00 Asia/Seoul 예약을 유지합니다.
+
+## v1.0.37 GitHub 소스 릴리스 (역사 기록)
+
+v1.0.37은 카드사 선택·증분 수집, 일일 순회, 범위별 백업, OCR 재개·fallback 및 운영 배포 검증 개선을 포함합니다. 당시 운영 예약은 14:30이었으며(이후 10:00으로 조정됨), [릴리스 노트](RELEASE_NOTES_v1.0.37.md)와 [handoff 종료 인덱스](../.handoff/STATUS_v1.0.37.md)를 참고하십시오.
 
 ## v1.0.36 GitHub 소스 릴리스
 

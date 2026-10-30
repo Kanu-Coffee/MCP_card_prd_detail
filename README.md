@@ -2,7 +2,7 @@
 
 카드사 상품안내장 PDF를 수집하고, 조항·표·주석의 연결 관계를 보존해 검색하는 MCP 서버입니다.
 카드 상품 탐색, 출시 상품 조사, 혜택 비교에 필요한 원문 근거와 출처를 AI 클라이언트에 제공합니다.
-현재 소스 버전은 **1.0.37**입니다. [변경 사항](docs/RELEASE_NOTES_v1.0.37.md)을 참고하십시오.
+현재 소스 버전은 **1.0.38**입니다. [변경 사항](docs/RELEASE_NOTES_v1.0.38.md)을 참고하십시오.
 
 ```text
 카드사 공식 PDF → Worker: 수집 · OCR · 임베딩
@@ -57,7 +57,7 @@ uv run --all-packages pytest
 
 실제 데이터 처리에는 선택한 OCR provider의 실행 환경·인증과 OpenRouter 임베딩 API 키가
 필요합니다. OCR은 `local-paddleocr`, `opencode`, `codex-exec`, `openrouter`를 지원합니다.
-설정을 생략하면 `local-paddleocr`를 선택하고, 현재 관리 운영 환경은 OpenCode OCR을 사용합니다.
+설정을 생략하면 `local-paddleocr`를 선택하고, 현재 관리 운영 환경은 Codex OCR(`gpt-6.1-terra` high, `local-paddleocr` 폴백)을 사용합니다.
 임베딩은 Qwen3 8B 4,096차원입니다. 모델·provider별 설치와 인증은 [운영 안내](docs/OPERATIONS.md)를 따르십시오.
 
 WebDAV는 선택적인 PDF·OCR 백업용이며 로컬 게시·MCP 서빙의 필수 조건이 아닙니다.
@@ -98,4 +98,4 @@ search_contracts(query="연회비와 적립 제외 조건", response_mode="compa
 [제3자 고지](THIRD_PARTY_NOTICES.md)를 따릅니다. 카드사 PDF와 외부 제공자의 데이터·서비스
 이용 권한은 소스 코드 라이선스와 별개입니다.
 
-운영테스트 인수 및 handoff 종료 상태는 [v1.0.37 종료 인덱스](.handoff/STATUS_v1.0.37.md)를 참고하십시오.
+운영 및 릴리스 상태는 [v1.0.38 릴리스 인덱스](.handoff/STATUS_v1.0.38.md)를 참고하십시오.

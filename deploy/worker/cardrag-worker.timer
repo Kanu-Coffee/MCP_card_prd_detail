@@ -1,9 +1,9 @@
 [Unit]
-Description=Run CardRAG Worker daily at 14:30 Asia/Seoul
+Description=Run CardRAG Worker daily at 10:00 Asia/Seoul
 Documentation=file:/opt/cardrag/current/docs/SIMPLE_RUNTIME.md
 
 [Timer]
-OnCalendar=*-*-* 14:30:00 Asia/Seoul
+OnCalendar=*-*-* 10:00:00 Asia/Seoul
 # A missed daily slot is not replayed automatically after reboot. The previous
 # Persistent=true behavior re-ran a stale catch-up against the wrong service
 # runtime. Operators can run a deliberate manual batch when needed.

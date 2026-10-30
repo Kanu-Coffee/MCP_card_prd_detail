@@ -29,7 +29,7 @@ WebDAV 게시 모드에서는 MCP에 읽기 전용 계정을 사용합니다. Wo
 - Worker는 로컬 서빙 볼륨에 게시하고 MCP는 이를 read-only로 읽습니다. WebDAV 장애는 MCP 게시 성공을 취소하지 않습니다.
 - WebDAV 백업은 `immediate`, Worker 성공 후 대기분이 있을 때 최대 300초 처리합니다. 대기가 없으면 네트워크 백업을 생략합니다. `hybrid` 선택 시 7회/대기 OCR 항목 30건/1 GiB/7일 중 하나를 충족하면 처리합니다.
 - 초기 관리대장 구축은 2026-10-10 00:01에 전량 완료했습니다. 보조 `cardrag-backup`은 정지 상태이며 상시 반복 백업이 가동 중인 것은 아닙니다. 수동 bootstrap 컨테이너도 exit 0으로 완료됐습니다.
-- Worker 예약은 매일 14:30 Asia/Seoul입니다(2026-10-22 변경). 과거 10월 10일 03시 시도는 경로 권한 오류로 시작 전에 실패했고 권한 수정 및 수동 재실행을 완료했습니다. 실제 배치 결과는 별도로 확인합니다.
+- Worker 예약은 매일 10:00 Asia/Seoul입니다(2026-10-27 09:09 KST 호스트 반영 확인). 운영 OCR은 `codex-exec` / `gpt-6.1-terra` / `high`, 폴백은 `local-paddleocr` / `PaddleOCR-VL-1.6`입니다. 실제 우선 설정은 `/opt/cardrag/current/operations/compose.runtime.private.yaml`이며, 순회 DB·운영 볼륨은 유지합니다. 과거 10월 10일 03시 시도는 경로 권한 오류로 시작 전에 실패했고 권한 수정 및 수동 재실행을 완료했습니다. 실제 배치 결과는 별도로 확인합니다.
 - host-local `compose.secrets.yaml`의 이미지·secret 경로·external 볼륨을 보존하십시오.
 - systemd `cardrag` 사용자(UID 10001)가 설치 root와 deploy 하위 디렉터리를 탐색하고 Compose/env를 읽을 수 있어야 합니다. 공개 코드 디렉터리는 0755, 비밀 파일은 별도 제한 권한을 유지합니다. 수동 lee 계정의 성공만으로 systemd 접근을 판정하지 않습니다.
 
@@ -208,9 +208,12 @@ MCP 외부 주소는 TLS 프록시를 통해 연결하고 `/mcp`에 Bearer token
 
 ## 예약과 상태 확인
 
+자주 바꾸는 OCR 모델·폴백과 예약 시간의 설정 우선순위, 복붙 명령, 검증·복구는
+[운영 옵션 변경 절차](WORKER_RUNTIME_OPTIONS.md)를 따릅니다.
+
 systemd 템플릿은 선택 사항입니다. 설치 경로, 실행 계정, env 소유권을 확인한 뒤
 `deploy/worker/cardrag-worker.service`와 `.timer`를 설치합니다. 기본 예약은 한국 시간
-14:30입니다. 기존 실행의 전환 중에는 예약을 즉시 활성화하지 않습니다.
+10:00입니다. 기존 실행의 전환 중에는 예약을 즉시 활성화하지 않습니다.
 
 서비스는 compose 파일을 직접 호출하지 않고 활성 release의
 `operations/worker-compose.sh`를 사용합니다. 이 helper가 private runtime overlay와 실제
@@ -703,3 +706,59 @@ body bytes는 앱이 읽은 response stream 기준이며 TCP overhead/읽기 전
 실제 endpoint는 호스트/컨테이너 접근성을 구분하여 서버 비공개 env에만 두십시오.
 저장소 예시는 빈 값이며 SSH 키·VPN·터널 인자는 넣지 않습니다. 페이지 HTTP 200은
 전체 목록 schema·pagination·PDF 검증 성공을 뜻하지 않습니다.
+
+### Paddle 임시 입력 링크 복구
+
+과거 Worker의 강제 종료로 state 트리에 `.paddle-input-<pid>.pdf` 링크가 남으면
+용량 검사는 `capacity_path_invalid`로 실패합니다. 새 Worker는 임시 입력 링크를
+컨테이너 `/tmp`에 만들고 child 종료 후 정리합니다. 기존 링크는 자동 삭제하지 않으며,
+수정 이미지 배포 후 원인과 대상 run을 확인하고 `paddle-alias-recovery`로 명시 복구합니다.
+
+```bash
+OPS=/opt/cardrag/current/operations
+RUN_ID=9fa3b10def034fa8b65029e6df2d29ae
+"$OPS/worker-compose.sh" run --rm --no-deps worker paddle-alias-recovery "$RUN_ID"
+# 출력의 대상과 운영 정지 구간을 확인한 뒤에만 적용합니다.
+"$OPS/worker-compose.sh" run --rm --no-deps worker paddle-alias-recovery "$RUN_ID" --apply
+"$OPS/worker-compose.sh" run --rm --no-deps worker startup-check
+```
+
+이 명령은 해당 run의 legacy/primary/fallback checkpoint 아래 이름이 정확히 일치하는
+심볼릭 링크만 검사합니다. 기본값은 dry-run이며 두 모드 모두 기존 `worker.lock`을
+비차단 획득합니다. lock이 없거나 다른 Worker가 사용 중이면 실패합니다. 링크 대상과
+일반 파일은 삭제하지 않습니다. 경로 검증·삭제 오류가 발생하면 일부 항목이 이미
+정리됐을 수 있으므로 출력을 다시 조회하고 원인을 해결하십시오. 일반 `run`,
+`startup-check`, `resume`은 잔존 링크를 자동 정리하지 않습니다. 복구 후 startup
+통과는 실제 배치·게시 성공의 증거가 아닙니다. 운영 전환·수동 재개 및 예약 복구는
+별도 운영 절차와 현재 승인 범위에 따릅니다.
+
+### OCR provider 호출 진단 로그
+
+Worker는 stderr/journal에 `OCR_EVENT`와 한 줄 JSON(`cardrag.ocr-event.v1`)을 남깁니다.
+예약 실행은 `journalctl -u cardrag-worker.service --since today --no-pager | rg 'OCR_EVENT'`,
+수동 컨테이너는 `docker logs <container> 2>&1 | rg 'OCR_EVENT'`로 확인합니다. 기존 journal 및
+컨테이너 로그 보존 기간이 지나거나 SIGKILL/전원 차단이 발생하면 기록이 일부 없을 수 있습니다.
+
+`run_id`, `invocation_id`, `document_id`, `issuer`, `product_code`, 가능한 `product_name`,
+PDF hash/크기/페이지, `stage_attempt`, `phase`, `call_kind`, 0-based `chunk_index`, 1-based
+목표 페이지 범위가 호출과 연결됩니다. 안전하지 않거나 없는 값은 null입니다. `call_id`로
+`ocr_provider_call_started`와 `returned`/`failed`/`cancelled`를 연결합니다. `returned`는
+provider가 응답했다는 뜻이며 이후 `ocr_output_validation_failed`, 캐시 게시 실패 또는
+fallback이 발생할 수 있습니다. `ocr_fallback_started`의 `reason_code`와 관련 call_id,
+`ocr_fallback_resolved`의 최종 provider/model과 `provider_called`를 확인합니다.
+`ocr_stage_retry`는 실제 stage retry 결정, `ocr_document_resolved`는 호출이 있었던 문서의
+검증된 결과를 나타냅니다. `ocr_invocation_summary`의 `partial`은 Worker가 정상 완료되지
+않은 중간 집계인지 나타냅니다.
+
+`call_ordinal`과 `provider_attempts_total`은 이번 프로세스 실행에서 provider method를
+시도한 횟수로, 청크·corrective·fallback을 각각 세며 resume 실행에서는 1부터 다시 시작합니다.
+`provider_documents_total`은 해당 실행에서 호출한 고유 문서 수입니다. 이는 기존 최종
+`ocr_provider_called_count`나 실제 HTTP/과금 건수와 다릅니다. OpenRouter 내부 요청은
+`ocr_wire_*`의 `parent_call_id`, `wire_ordinal`, `requested_model`로 구분하며 실제 upstream
+모델을 모르면 `actual_model=null`입니다. 원문 오류·OCR 본문·자격증명은 기록하지 않습니다.
+`ocr_document_resolved` 및 `ocr_fallback_resolved`의 `model_source=artifact_contract`는
+결과 계약의 모델 값이며 OpenRouter가 내부에서 실제 선택한 모델의 증거는 아닙니다.
+알 수 없는 원인은 `unknown`입니다. 예를 들어 `ocr_provider_call_failed`의
+`reason_code=provider_process_rate_limited`는 사용량 제한 분류, `provider_timeout`은 시간
+초과 분류이고, `ocr_output_validation_failed`의 `reason_code=page_marker_mismatch`는
+반환된 OCR 페이지 마커가 요청과 맞지 않았다는 뜻입니다.

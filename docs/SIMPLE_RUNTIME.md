@@ -2,6 +2,7 @@
 
 systemd Worker 서비스가 참조하는 운영 문서 진입점입니다.
 
+- [OCR 모델·폴백 및 예약 시간 변경](WORKER_RUNTIME_OPTIONS.md)
 - [설치·환경 설정·예약 운영](OPERATIONS.md)
 - [릴리스와 운영 전환](RELEASING.md)
 - [WebDAV 자료 복구](RECOVERY.md)
