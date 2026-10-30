@@ -69,6 +69,7 @@ from cardrag_core import (
 )
 from pydantic import ValidationError
 
+from . import ocr_logging
 from .aggregation_profile_v5 import VerifiedAggregationProfileV5
 from .async_utils import to_thread_fenced
 from .bounded import bounded_ordered_map
@@ -1701,42 +1702,6 @@ class _WorkerPhaseFailure(RuntimeError):
         super().__init__("Worker pipeline phase failed.")
 
 
-def sweep_stale_paddle_input_symlinks(state_dir: Path, run_id: str) -> None:
-    """Remove orphaned private Paddle input aliases from an interrupted run.
-
-    ``_paddle_input_path`` creates a per-process symlink next to the OCR
-    checkpoint directory; a force-cancelled child can leave it behind, and
-    the capacity preflight (correctly) refuses any symlink in the state
-    tree.  Only exact ``.paddle-input-*`` symlinks under the resuming run's
-    document checkpoint directories are unlinked.  Runs before the
-    preflight on the CLI resume path so an interrupted run stays resumable.
-    """
-
-    if not re.fullmatch(r"[0-9a-f]{32}", run_id):
-        return
-    documents_root = state_dir / "runs" / run_id / "documents"
-    try:
-        if not documents_root.is_dir() or documents_root.is_symlink():
-            return
-        for child in documents_root.iterdir():
-            checkpoints = child / "ocr" / "checkpoints"
-            try:
-                if not checkpoints.is_dir() or checkpoints.is_symlink():
-                    continue
-                for stale in checkpoints.glob(".paddle-input-*"):
-                    try:
-                        if stale.lstat().st_mode & 0o170000 == 0o120000:
-                            stale.unlink(missing_ok=True)
-                    except FileNotFoundError:
-                        continue
-            except OSError:
-                continue
-    except OSError:
-        logging.getLogger("cardrag_worker.pipeline").error(
-            "reason_code=paddle_input_sweep_failed; continuing"
-        )
-
-
 async def _observed_pointer_bytes(webdav: Any) -> bytes | None:
     """Pointer bytes with reclaimed-binding normalization when the client supports it."""
 
@@ -1837,6 +1802,9 @@ def _capacity_failure_fields(exc: V5CapacityError) -> str:
     """Render only the gate's bounded integers/nulls; never raw exception text."""
 
     parts = [f"capacity_reason={exc.reason_code}"]
+    safe_path = getattr(exc, "safe_relative_path", None)
+    if safe_path is not None:
+        parts.append(f"capacity_relative_path={safe_path}")
     for key in sorted(exc.details):
         value = exc.details[key]
         parts.append(f"{key}={'null' if value is None else value}")
@@ -2628,6 +2596,8 @@ class WorkerPipeline:
         self.state.ensure_stage(run_id, document_id, name, max_attempts=maximum)
         row = self.state.get_stage(run_id, document_id, name)
         if row is not None and row.status == "succeeded":
+            if name == "ocr":
+                ocr_logging.set_stage_attempt(row.attempt_count)
             if name == "download":
                 return await self._revalidate_download(
                     run_id=run_id,
@@ -2641,6 +2611,8 @@ class WorkerPipeline:
                 return await operation()
         while True:
             attempt = self.state.stage_started(run_id, document_id, name)
+            if name == "ocr":
+                ocr_logging.set_stage_attempt(attempt)
             retry_after: float | None = None
             try:
                 with self.performance.measure(f"stage.{name}"):
@@ -2678,6 +2650,14 @@ class WorkerPipeline:
                     raise RuntimeError("stage failure bookkeeping failed") from None
                 if status == "failed":
                     raise
+                if name == "ocr":
+                    ocr_logging.emit(
+                        "ocr_stage_retry",
+                        level=logging.WARNING,
+                        attempt=attempt,
+                        max_attempts=maximum,
+                        **ocr_logging.diagnostic(exc),
+                    )
                 retry_after = delay
             else:
                 try:
@@ -2819,8 +2799,11 @@ class WorkerPipeline:
             snapshot = None
             network_before = {}
             LOGGER.warning("Worker network performance snapshot is unavailable")
+        ocr_invocation_token = ocr_logging.begin_invocation()
+        ocr_partial = True
         try:
             result = await self._run_measured(resume_run_id=resume_run_id)
+            ocr_partial = result.status not in {"succeeded", "no_change"}
             self.performance.set("status", result.status)
             return result
         except asyncio.CancelledError:
@@ -2830,6 +2813,7 @@ class WorkerPipeline:
             self.performance.set("status", "failed")
             raise
         finally:
+            ocr_logging.end_invocation(ocr_invocation_token, partial=ocr_partial)
             self._token_memo = None
             if callable(clear_prefetch):
                 clear_prefetch()
@@ -2865,6 +2849,7 @@ class WorkerPipeline:
                 # run row or retention cleanup can mutate candidate state.
                 await self._validated_document_aggregation_head()
             run_id = resume_run_id or self.state.start_run()
+            ocr_logging.set_run_id(run_id)
             if self.on_run_created is not None:
                 self.on_run_created(run_id)
             from .issuer_scope import freeze_scope
@@ -2887,7 +2872,6 @@ class WorkerPipeline:
                     )
                 else:
                     self.state.assert_resumable(run_id)
-                self._sweep_stale_paddle_input_symlinks(run_id)
             from .issuer_metrics import IssuerHTTPMetrics
 
             self.http_metrics = IssuerHTTPMetrics(
@@ -3309,9 +3293,6 @@ class WorkerPipeline:
         keep = max(3, self.retained_generations + 1)
         prune_corpus_baselines(self.state_dir, keep=keep)
         prune_retirement_ledgers(self.state_dir, keep=keep)
-
-    def _sweep_stale_paddle_input_symlinks(self, run_id: str) -> None:
-        sweep_stale_paddle_input_symlinks(self.state_dir, run_id)
 
     def _record_corpus_baseline(self, result: PipelineResult) -> None:
         """Advance the rolling corpus baseline immediately after a sealed success.
@@ -4467,11 +4448,17 @@ class WorkerPipeline:
                                         request,
                                         destination,
                                     )
+                                    if hasattr(adapter, "sync_session"):
+                                        adapter.sync_session(current_client)
                                 except (PDFNotModified, ProtectedDocumentError, UnsupportedAttachmentError):
                                     raise
                                 except Exception as exc:
+                                    if hasattr(adapter, "invalidate_session"):
+                                        adapter.invalidate_session(current_client)
                                     raise origin_failure(exc) from None
                         except PDFNotModified as not_modified:
+                            if hasattr(adapter, "sync_session"):
+                                adapter.sync_session(current_client)
                             if cached is None:  # pragma: no cover - downloader guards this too
                                 raise RuntimeError("origin returned not-modified for a cache miss") from None
                             observed_at = datetime.now(UTC)
@@ -5976,6 +5963,7 @@ class WorkerPipeline:
                     # such variants upstream and keeps the retained seal, so this
                     # check remains only as a last-resort integrity tripwire.
                     raise OCRCacheHealingIdentityError() from None
+                ocr_logging.document_resolved(result)
                 return result
 
             ocr_result: OCRResult | None = None
@@ -6057,15 +6045,26 @@ class WorkerPipeline:
                     if ocr_stopped:
                         raise asyncio.CancelledError()
                     try:
-                        ocr_result = await self._finite_stage(
+                        with ocr_logging.document_scope(
                             run_id=run_id,
                             document_id=document_id,
-                            name="ocr",
-                            operation=recognize,
-                            non_retryable_predicate=stop_ocr_stage_retry,
-                            non_retryable_error_formatter=record_systemic_failure,
-                            error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
-                        )
+                            issuer=source.issuer,
+                            product_code=source.product_code,
+                            product_name=source.product_name,
+                            source_id=source.source_id,
+                            pdf_sha256=pdf.sha256,
+                            pdf_size_bytes=pdf.size_bytes,
+                            page_count=pdf.page_count,
+                        ):
+                            ocr_result = await self._finite_stage(
+                                run_id=run_id,
+                                document_id=document_id,
+                                name="ocr",
+                                operation=recognize,
+                                non_retryable_predicate=stop_ocr_stage_retry,
+                                non_retryable_error_formatter=record_systemic_failure,
+                                error_formatter=lambda exc: classify_ocr_failure(exc).stored_error,
+                            )
                     except BaseException as exc:
                         # Set the gate before releasing the lock. TaskGroup
                         # cancellation is delivered later than lock wakeups.

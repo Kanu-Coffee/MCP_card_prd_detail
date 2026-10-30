@@ -21,6 +21,8 @@ from cardrag_core import (
     EMBEDDING_DIMENSION,
 )
 
+from . import ocr_logging
+
 MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
@@ -137,7 +139,8 @@ class ProviderDocumentError(ProviderError):
     error_kind = "document"
     retryable = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, exit_code: int | None = None) -> None:
+        self.exit_code = exit_code
         super().__init__(f"{self.reason_code}: {self.reason}")
 
 
@@ -809,12 +812,19 @@ class OpenRouterOCRProvider:
         models_list = [self.model, self.fallback_model] if self.fallback_model else None
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             try:
-                text = await self._post_chat_completion(client, self.model, content, models=models_list)
+                text = await ocr_logging.wire_call(
+                    self.model,
+                    1,
+                    lambda: self._post_chat_completion(client, self.model, content, models=models_list),
+                )
             except (httpx.HTTPStatusError, httpx.TimeoutException, ProviderSystemicError) as exc:
                 if self.fallback_model and self.fallback_model != self.model:
+                    fallback_model = self.fallback_model
                     try:
-                        text = await self._post_chat_completion(
-                            client, self.fallback_model, content, models=None
+                        text = await ocr_logging.wire_call(
+                            fallback_model,
+                            2,
+                            lambda: self._post_chat_completion(client, fallback_model, content, models=None),
                         )
                     except Exception:
                         raise exc from None
@@ -1372,47 +1382,71 @@ class PaddleOCRVLProvider:
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.unlink(missing_ok=True)
         environment = self._child_environment()
-        arguments = (
-            self.executable,
-            "-m",
-            "cardrag_worker.paddleocr_runner",
-            "--input",
-            str(pdf_path.resolve()),
-            "--output",
-            str(result_path.resolve()),
-            "--expected-pages",
-            str(expected_page_count),
-            "--pipeline-version",
-            self.pipeline_version,
-            "--cpu-threads",
-            str(self.cpu_threads),
-        )
+        # The parent owns the alias and keeps it alive until the child is
+        # reaped; the child receives the .pdf path without resolving it.
+        from .paddleocr_runner import _paddle_input_path
+
         async with self._semaphore:
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *arguments,
-                    cwd=output_dir,
-                    env=environment,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+            with _paddle_input_path(pdf_path, output_path=result_path) as input_path:
+                arguments = (
+                    self.executable,
+                    "-m",
+                    "cardrag_worker.paddleocr_runner",
+                    "--input",
+                    str(input_path.absolute()),
+                    "--output",
+                    str(result_path.resolve()),
+                    "--expected-pages",
+                    str(expected_page_count),
+                    "--pipeline-version",
+                    self.pipeline_version,
+                    "--cpu-threads",
+                    str(self.cpu_threads),
                 )
-            except OSError:
-                raise ProviderSystemicError(
-                    "provider_process_spawn_failed",
-                    provider=self.provider,
-                ) from None
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
-            except (TimeoutError, asyncio.CancelledError):
-                process.kill()
-                await process.wait()
-                result_path.unlink(missing_ok=True)
-                raise
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *arguments,
+                        cwd=output_dir,
+                        env=environment,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except OSError:
+                    raise ProviderSystemicError(
+                        "provider_process_spawn_failed",
+                        provider=self.provider,
+                    ) from None
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(), timeout=self.timeout_seconds
+                    )
+                except (TimeoutError, asyncio.CancelledError) as exc:
+                    cancelled_during_drain = False
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    # Repeated cancellation cannot release the alias before the
+                    # process exits. Preserve cancellation after the reap.
+                    reap = asyncio.create_task(process.wait())
+                    while not reap.done():
+                        try:
+                            await asyncio.shield(reap)
+                        except asyncio.CancelledError:
+                            cancelled_during_drain = True
+                    reap.result()
+                    result_path.unlink(missing_ok=True)
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    current_task = asyncio.current_task()
+                    if cancelled_during_drain or (
+                        current_task is not None and getattr(current_task, "cancelling", lambda: 0)() > 0
+                    ):
+                        raise asyncio.CancelledError() from None
+                    raise
         try:
             if process.returncode:
                 if process.returncode == 65:
-                    raise ProviderDocumentError() from None
+                    raise ProviderDocumentError(exit_code=65) from None
                 raise ProviderSystemicError(
                     "provider_process_configuration_failed",
                     exit_code=process.returncode,

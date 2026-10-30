@@ -51,7 +51,14 @@ class WooriClient:
         self.fail_header = fail_header
 
     async def get(self, url: str, **kwargs: Any) -> Response:
-        return Response(text="landing")
+        return Response(
+            text=(
+                "<html><head><title>우리카드</title></head><body>"
+                '<input type="hidden" id="raonkAuthKey" value="SYNTHETIC_AUTH_KEY_FIXTURE_001" />'
+                '<input type="hidden" id="raonkAuthPageId" value="H1CCT211S09" />'
+                "</body></html>"
+            )
+        )
 
     async def post(self, url: str, **kwargs: Any) -> Response:
         if self.fail_header:
@@ -387,6 +394,8 @@ async def test_woori_discovery_uses_natural_version_and_post_download_contract()
     request = await adapter.prepare_download(WooriClient(), snapshot.records[0])  # type: ignore[arg-type]
     assert request.method == "POST"
     assert request.form is not None and request.form["k01"]
+    assert request.headers.get("RAONK_AUTH_PAGE_ID") == "H1CCT211S09"
+    assert request.headers.get("RAONK_AUTH_KEY") == "SYNTHETIC_AUTH_KEY_FIXTURE_001"
 
 
 @pytest.mark.asyncio

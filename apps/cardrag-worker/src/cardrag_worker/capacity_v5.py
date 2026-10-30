@@ -128,6 +128,7 @@ class V5CapacityError(RuntimeError):
                 if value is None or (type(value) is int and -MAX_SAFE_BYTES <= value <= MAX_SAFE_BYTES):
                     safe[key] = value
         self.details: dict[str, int | None] = safe
+        self.safe_relative_path: str | None = None
         super().__init__(message)
 
 
@@ -1081,7 +1082,25 @@ def _same_observed_entry(before: os.stat_result, after: os.stat_result) -> bool:
     )
 
 
-def _tree_usage_fd(descriptor: int, *, filesystem_device: int) -> int:
+def _safe_tree_path(parts: tuple[str, ...]) -> str | None:
+    # Only the known internal alias grammar is safe to include in logs.
+    path = "/".join(parts)
+    if re.fullmatch(
+        r"runs/[0-9a-f]{32}/documents/doc_[0-9a-f]{64}/ocr/"
+        r"(?:(?:primary|fallback)/)?checkpoints/\.paddle-input-[0-9]{1,20}\.pdf",
+        path,
+    ):
+        return path
+    return None
+
+
+def _tree_path_error(message: str, kind: int, parts: tuple[str, ...]) -> V5CapacityError:
+    error = V5CapacityError(message, reason_code=CAPACITY_PATH_INVALID, details={"path_kind": kind})
+    error.safe_relative_path = _safe_tree_path(parts)
+    return error
+
+
+def _tree_usage_fd(descriptor: int, *, filesystem_device: int, relative_parts: tuple[str, ...] = ()) -> int:
     try:
         directory_before = os.fstat(descriptor)
     except OSError:
@@ -1112,14 +1131,12 @@ def _tree_usage_fd(descriptor: int, *, filesystem_device: int) -> int:
             ) from None
         mode = before.st_mode
         if before.st_dev != filesystem_device:
-            raise V5CapacityError(
-                "Worker state capacity tree crosses a filesystem boundary",
-                reason_code=CAPACITY_PATH_INVALID,
+            raise _tree_path_error(
+                "Worker state capacity tree crosses a filesystem boundary", 3, (*relative_parts, name)
             )
         if stat.S_ISLNK(mode):
-            raise V5CapacityError(
-                "Worker state capacity tree contains a symlink",
-                reason_code=CAPACITY_PATH_INVALID,
+            raise _tree_path_error(
+                "Worker state capacity tree contains a symlink", 1, (*relative_parts, name)
             )
         if stat.S_ISDIR(mode):
             try:
@@ -1136,7 +1153,9 @@ def _tree_usage_fd(descriptor: int, *, filesystem_device: int) -> int:
                         "Worker state capacity tree changed during traversal",
                         reason_code=CAPACITY_STATE_ROOT_CHANGED,
                     )
-                amount = _tree_usage_fd(child, filesystem_device=filesystem_device)
+                amount = _tree_usage_fd(
+                    child, filesystem_device=filesystem_device, relative_parts=(*relative_parts, name)
+                )
                 child_after = os.fstat(child)
                 if not _same_observed_entry(opened, child_after):
                     raise V5CapacityError(
@@ -1176,9 +1195,8 @@ def _tree_usage_fd(descriptor: int, *, filesystem_device: int) -> int:
             finally:
                 os.close(child)
         else:
-            raise V5CapacityError(
-                "Worker state capacity tree contains a non-regular entry",
-                reason_code=CAPACITY_PATH_INVALID,
+            raise _tree_path_error(
+                "Worker state capacity tree contains a non-regular entry", 2, (*relative_parts, name)
             )
         try:
             entry_after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)

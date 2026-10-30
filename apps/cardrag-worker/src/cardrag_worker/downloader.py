@@ -281,7 +281,14 @@ class SecurePDFDownloader:
                             location = response.headers.get("location")
                             if not location:
                                 raise DownloadSecurityError("redirect response has no location")
-                            current_url = urljoin(str(response.url), location)
+                            next_url = urljoin(str(response.url), location)
+                            if urlparse(next_url).hostname != urlparse(current_url).hostname:
+                                headers = {
+                                    k: v
+                                    for k, v in headers.items()
+                                    if k.casefold() not in {"raonk_auth_page_id", "raonk_auth_key"}
+                                }
+                            current_url = next_url
                             if response.status_code == 303 or (
                                 response.status_code in {301, 302} and current_method == "POST"
                             ):

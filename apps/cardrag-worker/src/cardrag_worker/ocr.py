@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 
@@ -50,6 +51,7 @@ from cardrag_core.ocr import (
 )
 from cardrag_core.paths import ocr_manifest_path, ocr_ready_path, validate_identifier
 
+from . import ocr_logging
 from .content_cache import ContentOCRVariantStore
 from .contracts import PageRecord
 from .providers import (
@@ -120,7 +122,9 @@ _OCR_CACHE_PUBLICATION_REASONS: dict[OCRCachePublicationErrorKind, str] = {
 
 
 class OCRValidationError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, diagnostic_code: str = "generic_validation_error") -> None:
+        super().__init__(message)
+        self.ocr_diagnostic_code = diagnostic_code
 
 
 class OCRCacheMissError(RuntimeError):
@@ -423,17 +427,22 @@ def _page_body(page_with_marker: str) -> str:
 def split_ocr_pages(text: str, *, expected_count: int, first_page: int = 1) -> tuple[str, ...]:
     matches = list(PAGE_MARKER.finditer(text))
     if matches and matches[0].start() != 0:
-        raise OCRValidationError("OCR provider output must begin with the first Page marker")
+        raise OCRValidationError(
+            "OCR provider output must begin with the first Page marker",
+            diagnostic_code="output_not_marker_first",
+        )
     numbers = [int(match.group(1)) for match in matches]
     expected = list(range(first_page, first_page + expected_count))
     if numbers != expected:
-        raise OCRValidationError(f"OCR page markers {numbers} do not match {expected}")
+        raise OCRValidationError(
+            f"OCR page markers {numbers} do not match {expected}", diagnostic_code="page_marker_mismatch"
+        )
     pages = tuple(
         text[match.end() : matches[index + 1].start() if index + 1 < len(matches) else len(text)].strip()
         for index, match in enumerate(matches)
     )
     if any(len(page) < 1 for page in pages):
-        raise OCRValidationError("OCR contains an empty page")
+        raise OCRValidationError("OCR contains an empty page", diagnostic_code="empty_page")
     return pages
 
 
@@ -471,22 +480,28 @@ def _validate_and_normalize_target_page_values(
     """Apply minimum-page invariants and canonicalize sparse-page whitespace."""
 
     if len(page_numbers) != len(values):
-        raise OCRValidationError("OCR page/value count differs")
+        raise OCRValidationError("OCR page/value count differs", diagnostic_code="page_count_mismatch")
     normalized: list[str] = []
     for page_number, value in zip(page_numbers, values, strict=True):
         if OCR_SPARSE_PAGE_PREFIX in value:
             lines = value.splitlines()
             visible_lines = tuple(line.strip() for line in lines[1:] if line.strip())
             if lines[:1] != [OCR_SPARSE_PAGE_PREFIX]:
-                raise OCRValidationError("OCR sparse-page wrapper is invalid")
+                raise OCRValidationError(
+                    "OCR sparse-page wrapper is invalid", diagnostic_code="sparse_page_wrapper_invalid"
+                )
             if any(
                 PAGE_MARKER.fullmatch(line) or line in {OCR_BLANK_PAGE_SENTINEL, OCR_SPARSE_PAGE_PREFIX}
                 for line in visible_lines
             ):
-                raise OCRValidationError("OCR sparse-page wrapper is invalid")
+                raise OCRValidationError(
+                    "OCR sparse-page wrapper is invalid", diagnostic_code="sparse_page_wrapper_invalid"
+                )
             visible_character_count = sum(len("".join(line.split())) for line in visible_lines)
             if visible_character_count > OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS:
-                raise OCRValidationError("OCR sparse-page wrapper is invalid")
+                raise OCRValidationError(
+                    "OCR sparse-page wrapper is invalid", diagnostic_code="sparse_page_wrapper_invalid"
+                )
             # Markdown generators commonly insert one blank line after the
             # wrapper or between disconnected logo elements. A logo/pictogram-
             # only page can also contain zero source characters. Blank-only
@@ -497,9 +512,13 @@ def _validate_and_normalize_target_page_values(
             if visible_lines:
                 value += f"\n{'\n'.join(visible_lines)}"
         elif value.startswith(OCR_BLANK_PAGE_SENTINEL) and value != OCR_BLANK_PAGE_SENTINEL:
-            raise OCRValidationError("OCR blank-page sentinel must be exact")
+            raise OCRValidationError(
+                "OCR blank-page sentinel must be exact", diagnostic_code="blank_sentinel_invalid"
+            )
         if len(f"## Page {page_number}\n\n{value}") < 20:
-            raise OCRValidationError("OCR provider returned an implausibly short page")
+            raise OCRValidationError(
+                "OCR provider returned an implausibly short page", diagnostic_code="implausibly_short"
+            )
         normalized.append(value)
     return tuple(normalized)
 
@@ -518,7 +537,7 @@ def _validated_provider_target_values(
         first_page=target_page_numbers[0],
     )
     if any(not value for value in values):
-        raise OCRValidationError("OCR provider returned an empty page")
+        raise OCRValidationError("OCR provider returned an empty page", diagnostic_code="empty_page")
     return _validate_and_normalize_target_page_values(target_page_numbers, values)
 
 
@@ -2745,11 +2764,21 @@ class OCRResolver:
                 "failing closed to prevent mass OCR re-processing."
             )
         if isinstance(self.provider, DocumentOCRProvider):
+            document_provider = self.provider
             try:
-                raw_pages = await self.provider.recognize_document(
-                    pdf_path,
-                    expected_page_count=page_count,
-                    output_dir=output_dir,
+                raw_pages = await ocr_logging.provider_call(
+                    self.provider,
+                    partial(
+                        document_provider.recognize_document,
+                        pdf_path,
+                        expected_page_count=page_count,
+                        output_dir=output_dir,
+                    ),
+                    call_kind="whole_document",
+                    chunk_index=None,
+                    page_start=1,
+                    page_end=page_count,
+                    input_page_count=page_count,
                 )
             except ProviderSystemicError as exc:
                 exc.with_request_context(
@@ -2768,15 +2797,23 @@ class OCRResolver:
                 elif visible_characters <= OCR_SPARSE_PAGE_MAX_VISIBLE_CHARACTERS:
                     normalized = f"{OCR_SPARSE_PAGE_PREFIX}\n{normalized}"
                 normalized_values.append(normalized)
-            pages = _validate_and_normalize_target_page_values(
-                tuple(range(1, page_count + 1)),
-                tuple(normalized_values),
-            )
+            try:
+                pages = _validate_and_normalize_target_page_values(
+                    tuple(range(1, page_count + 1)),
+                    tuple(normalized_values),
+                )
+            except OCRValidationError as exc:
+                ocr_logging.validation_failed(exc)
+                raise
             body = (
                 "\n\n".join(f"## Page {index}\n\n{value}" for index, value in enumerate(pages, 1)) + "\n"
             ).encode()
-            reject_credential_bearing_ocr(body)
-            verified = verify_ocr_bytes(body, expected_page_count=page_count)
+            try:
+                reject_credential_bearing_ocr(body)
+                verified = verify_ocr_bytes(body, expected_page_count=page_count)
+            except Exception as exc:
+                ocr_logging.validation_failed(exc, validation_phase="final_whole_document")
+                raise
             result = OCRResult(
                 pages=tuple(_page_body(page) for page in verified.pages),
                 ocr_bytes=body,
@@ -2895,12 +2932,21 @@ class OCRResolver:
                         continue
             provider_called = True
             try:
-                raw = await self.provider.recognize(
-                    selected,
-                    page_numbers=call.input_page_numbers,
-                    target_page_numbers=call.target_page_numbers,
-                    total_pages=page_count,
-                    prompt=self.prompt,
+                raw = await ocr_logging.provider_call(
+                    self.provider,
+                    partial(
+                        self.provider.recognize,
+                        selected,
+                        page_numbers=call.input_page_numbers,
+                        target_page_numbers=call.target_page_numbers,
+                        total_pages=page_count,
+                        prompt=self.prompt,
+                    ),
+                    call_kind="chunk",
+                    chunk_index=chunk_index,
+                    page_start=min(call.target_page_numbers),
+                    page_end=max(call.target_page_numbers),
+                    input_page_count=len(call.input_page_numbers),
                 )
             except ProviderSystemicError as exc:
                 exc.with_request_context(
@@ -2920,9 +2966,13 @@ class OCRResolver:
                     target_page_numbers=call.target_page_numbers,
                 )
             except OCRValidationError as exc:
+                ocr_logging.validation_failed(exc)
                 if str(exc) != "OCR sparse-page wrapper is invalid":
                     raise
                 sparse_wrapper_correction_required = True
+            except ProviderSystemicError as exc:
+                ocr_logging.validation_failed(exc)
+                raise
             if sparse_wrapper_correction_required:
                 # The rejected body is neither logged nor echoed into the
                 # correction prompt. One fresh call for this exact chunk is
@@ -2930,12 +2980,21 @@ class OCRResolver:
                 # the unchanged validator below or propagates immediately.
                 raw = ""
                 try:
-                    corrected_raw = await self.provider.recognize(
-                        selected,
-                        page_numbers=call.input_page_numbers,
-                        target_page_numbers=call.target_page_numbers,
-                        total_pages=page_count,
-                        prompt=self.prompt + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
+                    corrected_raw = await ocr_logging.provider_call(
+                        self.provider,
+                        partial(
+                            self.provider.recognize,
+                            selected,
+                            page_numbers=call.input_page_numbers,
+                            target_page_numbers=call.target_page_numbers,
+                            total_pages=page_count,
+                            prompt=self.prompt + "\n\n" + OCR_SPARSE_PAGE_CORRECTIVE_INSTRUCTION,
+                        ),
+                        call_kind="corrective",
+                        chunk_index=chunk_index,
+                        page_start=min(call.target_page_numbers),
+                        page_end=max(call.target_page_numbers),
+                        input_page_count=len(call.input_page_numbers),
                     )
                 except ProviderSystemicError as exc:
                     exc.with_request_context(
@@ -2946,10 +3005,14 @@ class OCRResolver:
                         page_end=max(call.target_page_numbers),
                     )
                     raise
-                values = _validated_provider_target_values(
-                    corrected_raw,
-                    target_page_numbers=call.target_page_numbers,
-                )
+                try:
+                    values = _validated_provider_target_values(
+                        corrected_raw,
+                        target_page_numbers=call.target_page_numbers,
+                    )
+                except (OCRValidationError, ProviderSystemicError) as exc:
+                    ocr_logging.validation_failed(exc)
+                    raise
             normalized = (
                 "\n\n".join(
                     f"## Page {page_number}\n\n{value}"
@@ -2973,9 +3036,18 @@ class OCRResolver:
         pages = tuple(page_text[index] for index in range(1, page_count + 1))
         combined = "\n\n".join(f"## Page {index}\n\n{value}" for index, value in enumerate(pages, 1)) + "\n"
         body = combined.encode()
-        reject_credential_bearing_ocr(body)
-        # Verify exactly the bytes that will be cached and referenced by generations.
-        verified = verify_ocr_bytes(body, expected_page_count=page_count)
+        try:
+            reject_credential_bearing_ocr(body)
+            # Verify exactly the bytes that will be cached and referenced by generations.
+            verified = verify_ocr_bytes(body, expected_page_count=page_count)
+        except Exception as exc:
+            ocr_logging.validation_failed(
+                exc,
+                validation_phase="final_chunk_combine",
+                validation_scope="document",
+                page_count=page_count,
+            )
+            raise
         result = OCRResult(
             pages=tuple(_page_body(page) for page in verified.pages),
             ocr_bytes=body,
@@ -3265,6 +3337,7 @@ class FailoverOCRResolver:
                 primary_prior = None
                 fallback_prior = None
 
+        fallback_info: dict[str, Any] = {}
         try:
             return await self.primary.resolve(
                 **kwargs,
@@ -3286,30 +3359,48 @@ class FailoverOCRResolver:
                 and getattr(getattr(self.fallback, "provider", None), "provider", None) == "local-paddleocr"
             ):
                 raise
+            fallback_info = ocr_logging.diagnostic(exc)
         except (
             ProviderDocumentError,
             OCRValidationError,
             httpx.TimeoutException,
             TimeoutError,
-        ):
-            pass
+        ) as exc:
+            fallback_info = ocr_logging.diagnostic(exc)
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             if status_code not in {408, 413, 422, 425, 429} and not 500 <= status_code <= 599:
                 raise
+            fallback_info = ocr_logging.diagnostic(exc)
         # Warning emission and fallback execution stay outside the primary
         # exception handler so cancellation cannot retain provider stderr as
         # implicit exception context.
+        ocr_logging.fallback_started(
+            fallback_info, getattr(self.primary, "provider", None), getattr(self.fallback, "provider", None)
+        )
+        fallback_count = ocr_logging.attempt_count()
         warnings.warn(
             "primary OCR failed; starting fresh whole-document fallback",
             RuntimeWarning,
             stacklevel=2,
         )
         try:
-            result = await self.fallback.resolve(
-                **kwargs,
-                output_dir=output_dir / "fallback",
-                prior_local_native=fallback_prior,
+            with ocr_logging.phase_scope("fallback"):
+                result = await self.fallback.resolve(
+                    **kwargs,
+                    output_dir=output_dir / "fallback",
+                    prior_local_native=fallback_prior,
+                )
+            fallback_after = ocr_logging.attempt_count()
+            ocr_logging.emit(
+                "ocr_fallback_resolved",
+                provider=getattr(result, "provider", None),
+                model=getattr(result, "model", None),
+                model_source="artifact_contract",
+                provider_called=(fallback_after > fallback_count)
+                if fallback_after is not None and fallback_count is not None
+                else getattr(result, "provider_called", None),
+                provenance=getattr(result, "provenance", None),
             )
         except ProviderSystemicError as exc:
             exc.with_request_context(

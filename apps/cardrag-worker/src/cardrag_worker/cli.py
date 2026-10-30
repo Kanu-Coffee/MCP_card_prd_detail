@@ -87,6 +87,7 @@ from .local_publisher import LocalServingTransport
 from .ocr import FailoverOCRResolver, OCRResolver, discover_compatible_contracts
 from .ocr_recovery import OCRRecoveryError, restore_ocr_seed_from_generation
 from .ocr_requests import OCRReprocessRequest, plan_reprocess_requests, queue_reprocess_requests
+from .paddle_cleanup import PaddleCleanupError, recover_paddle_aliases
 from .pdf_cache import PDFCache
 from .pipeline import (
     OCRDocumentFailuresError,
@@ -96,12 +97,11 @@ from .pipeline import (
     WorkerUnexpectedFailureError,
     _classify_worker_failure,
     resume_sealed_publication,
-    sweep_stale_paddle_input_symlinks,
     validate_document_aggregation_head,
 )
 from .providers import OCRProvider, PaddleOCRVLProvider, make_ocr_provider
 from .retirement import RetirementError
-from .settings import PublicationResumeSettings, WorkerSettings
+from .settings import PublicationResumeSettings, WorkerSettings, _worker_state_dir_from_env
 from .state import AlreadyRunning, WorkerState, worker_lock
 from .state_seed_v122 import (
     StateSeedError,
@@ -737,6 +737,9 @@ def _classify_startup_exception(exc: Exception) -> dict[str, Any]:
         }
         if exc.details:
             classified_capacity["capacity_details"] = dict(exc.details)
+        safe_path = getattr(exc, "safe_relative_path", None)
+        if safe_path is not None:
+            classified_capacity["capacity_relative_path"] = safe_path
         return classified_capacity
     category, status_code, errno = _classify_worker_failure(exc)
     classified: dict[str, Any] = {"error_class_category": category}
@@ -761,6 +764,9 @@ def _classified_failure_fields(classified: dict[str, Any]) -> str:
     provider_id = classified.get("provider_id")
     if isinstance(provider_id, str):
         parts.append(f"provider_id={provider_id}")
+    safe_path = classified.get("capacity_relative_path")
+    if isinstance(safe_path, str):
+        parts.append(f"capacity_relative_path={safe_path}")
     for group in ("capacity_details", "quality_details"):
         details = classified.get(group)
         if isinstance(details, dict):
@@ -1460,11 +1466,6 @@ async def _run(
     _configure_worker_logging()
     settings = WorkerSettings.from_env(require_providers=True, require_webdav=True)
     _guard_v114_publication_channel(settings)
-    if resume:
-        # An orphaned private Paddle input symlink from a force-cancelled run
-        # must not permanently block resuming it through the capacity
-        # preflight's symlink refusal.
-        sweep_stale_paddle_input_symlinks(settings.state_dir, resume)
     startup_capacity: WorkerStartCapacitySnapshot
     correlation_id = os.urandom(16).hex()
     startup_recorder = StartupAttemptRecorder(settings.state_dir, correlation_id)
@@ -2102,6 +2103,22 @@ def run_command(
         raise typer.Exit(code=1) from None
     except Exception as exc:
         _echo_worker_unexpected_failure(exc)
+        raise typer.Exit(code=1) from None
+
+
+@app.command("paddle-alias-recovery")
+def paddle_alias_recovery_command(
+    run_id: str = typer.Argument(..., help="Exact affected 32-character run ID."),
+    apply: bool = typer.Option(False, "--apply", help="Unlink verified aliases under the Worker lock."),
+) -> None:
+    """Inspect legacy Paddle aliases; explicitly apply to remove them."""
+    try:
+        _echo(recover_paddle_aliases(_worker_state_dir_from_env(), run_id, apply=apply))
+    except AlreadyRunning:
+        _echo({"status": "failed", "reason_code": "worker_busy"})
+        raise typer.Exit(code=1) from None
+    except PaddleCleanupError as exc:
+        _echo({"status": "failed", "reason_code": str(exc)})
         raise typer.Exit(code=1) from None
 
 

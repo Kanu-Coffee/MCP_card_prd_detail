@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import import_module
@@ -77,23 +78,13 @@ def _paddle_input_path(input_path: Path, *, output_path: Path) -> Iterator[Path]
     if input_path.suffix.casefold() in _PADDLE_INPUT_SUFFIXES:
         yield input_path
         return
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    # A cancelled child process can orphan its private input alias; any
-    # surviving .paddle-input-* symlink is stale by construction because only
-    # this context manager creates that name in this directory.
-    for stale in output_path.parent.glob(".paddle-input-*"):
-        try:
-            if stale.lstat().st_mode & 0o170000 == 0o120000:
-                stale.unlink(missing_ok=True)
-        except FileNotFoundError:
-            continue
-    link = output_path.parent / f".paddle-input-{os.getpid()}.pdf"
-    link.unlink(missing_ok=True)
-    try:
+    # Keep aliases outside the persistent Worker state, even for direct runner
+    # invocations. A killed child can leave this private directory behind, but
+    # it cannot poison the state-tree capacity scan.
+    with tempfile.TemporaryDirectory(prefix="cardrag-paddle-input-", dir="/tmp") as temp_dir:
+        link = Path(temp_dir) / "input.pdf"
         link.symlink_to(input_path.resolve(strict=True))
         yield link
-    finally:
-        link.unlink(missing_ok=True)
 
 
 def _parser() -> argparse.ArgumentParser:

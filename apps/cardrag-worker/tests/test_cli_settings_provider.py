@@ -2132,7 +2132,7 @@ def test_paddleocr_runner_gives_extensionless_cache_object_a_private_pdf_link(
     output_path = tmp_path / "run" / "checkpoints" / "paddle-result.json"
 
     with _paddle_input_path(cache_object, output_path=output_path) as paddle_input:
-        assert paddle_input.parent == output_path.parent
+        assert not paddle_input.is_relative_to(tmp_path)
         assert paddle_input.suffix == ".pdf"
         assert paddle_input.is_symlink()
         assert paddle_input.resolve() == cache_object
