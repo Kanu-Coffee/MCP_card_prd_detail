@@ -625,7 +625,13 @@ async def test_woori_1000_limit_raises_markup_changed():
     def handler(request):
         if "main" in str(request.url) or request.method == "POST":
             return httpx.Response(200, json={"mainDataList": {"cct11PrdntcAgrmMainVo": thousand_products}})
-        return httpx.Response(200, text="<html>landing</html>")
+        return httpx.Response(
+            200,
+            text=(
+                '<html><input type="hidden" id="raonkAuthKey" value="SYNTHETIC_AUTH_KEY_FIXTURE_017" />'
+                '<input type="hidden" id="raonkAuthPageId" value="H1CCT211S09" /></html>'
+            ),
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(IssuerMarkupChanged, match="Woori main listing requires pagination"):
@@ -2077,8 +2083,11 @@ async def test_recovered_pdf_does_not_revert_to_zip_error(corpus, monkeypatch):
 
 async def test_woori_zip_recheck_download_preparation():
     import pytest
+    from test_issuers import WooriClient
 
     from cardrag_worker.issuers.woori import WooriAdapter, parse_detail_records, raonk_plaintext
+
+    client = WooriClient()
 
     # 1. .zip URL generates valid POST DownloadRequest
     zip_rec = parse_detail_records(
@@ -2092,7 +2101,7 @@ async def test_woori_zip_recheck_download_preparation():
         product_name="Card",
         discovered_at=datetime.now(UTC),
     )[0]
-    zip_req = await WooriAdapter().prepare_download(None, zip_rec)
+    zip_req = await WooriAdapter().prepare_download(client, zip_rec)
     assert zip_req.method == "POST"
 
     # 2. Normal sibling .pdf is unaffected and valid
@@ -2107,7 +2116,7 @@ async def test_woori_zip_recheck_download_preparation():
         product_name="Card2",
         discovered_at=datetime.now(UTC),
     )[0]
-    pdf_req = await WooriAdapter().prepare_download(None, pdf_rec)
+    pdf_req = await WooriAdapter().prepare_download(client, pdf_rec)
     assert pdf_req.method == "POST"
 
     # 3. Disallowed extension (e.g. .exe) is rejected by raonk_plaintext guard
